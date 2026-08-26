@@ -218,22 +218,21 @@ async fn members_now(asking: &izlek_core::store::User) -> Result<Vec<Member>, Se
         .collect())
 }
 
-/// Sends the same person another first-sign-in link, and hands the admin the
-/// address to pass on. Admin-only, checked here.
-///
-/// The link is returned exactly once, at the moment it is minted: the store
-/// keeps only its hash, so no later call — not this one, not a page reload —
-/// can produce it again.
+/// Sends the same person another first-sign-in link by mail. Admin-only,
+/// checked here.
 #[server]
 pub async fn resend_link(user_id: String) -> Result<Result<String, Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_admin};
+    use crate::server::{accounts, mail, require_admin};
 
     let admin = match require_admin().await {
         Ok(admin) => admin,
         Err(refusal) => return Ok(Err(refusal)),
     };
     match accounts().resend_invitation(&admin, &user_id).await {
-        Ok(invitation) => Ok(Ok(format!("/join/{}", invitation.token.expose()))),
+        Ok(invitation) => {
+            mail().after_invite();
+            Ok(Ok(invitation.user.email.clone()))
+        }
         Err(error) => Ok(Err(error.into())),
     }
 }
@@ -509,12 +508,10 @@ pub async fn save_profile(display_name: String) -> Result<Option<Refusal>, Serve
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let settings = Resource::new(|| (), |_| async move { current_settings().await });
-    // The link a call hands back, and the word for a call that was refused.
+    // The address a call mails to, and the word for a call that was refused.
     // They live here, above the Transition, because a successful call refetches
-    // the snapshot: signals owned by the members panel would be dropped with it
-    // and the link — which the store keeps only as a hash — would be gone for
-    // good before anyone could read it.
-    let link = RwSignal::new(None::<String>);
+    // the snapshot: signals owned by the members panel would be dropped with it.
+    let mailed = RwSignal::new(None::<String>);
     let link_refusal = RwSignal::new(None::<String>);
 
     view! {
@@ -526,7 +523,7 @@ pub fn SettingsPage() -> impl IntoView {
                             <SettingsScreen
                                 snapshot=snapshot
                                 on_change=Callback::new(move |()| settings.refetch())
-                                link=link
+                                mailed=mailed
                                 link_refusal=link_refusal
                             />
                         }
@@ -561,7 +558,7 @@ pub fn SettingsPage() -> impl IntoView {
 fn SettingsScreen(
     snapshot: SettingsSnapshot,
     on_change: Callback<()>,
-    link: RwSignal<Option<String>>,
+    mailed: RwSignal<Option<String>>,
     link_refusal: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let me = snapshot.me.clone();
@@ -614,7 +611,7 @@ fn SettingsScreen(
                             <MembersPanel
                                 members=members
                                 on_change=on_change
-                                link=link
+                                mailed=mailed
                                 refusal=link_refusal
                             />
                         }
@@ -980,10 +977,9 @@ mod file_type_tests {
 fn MembersPanel(
     members: Vec<Member>,
     on_change: Callback<()>,
-    /// The link a call handed back, kept only until the next call. It is shown
-    /// once because it exists once: what the store holds is its hash. Owned by
-    /// the page, not by this panel, so a refetch does not take it away.
-    link: RwSignal<Option<String>>,
+    /// The address a call mailed the invite to. Owned by the page, not by
+    /// this panel, so a refetch does not take it away.
+    mailed: RwSignal<Option<String>>,
     refusal: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let invite = ServerAction::<crate::auth::InviteMember>::new();
@@ -991,17 +987,17 @@ fn MembersPanel(
 
     let carry = move |value: Option<Result<Result<String, Refusal>, ServerFnError>>| {
         match value {
-            Some(Ok(Ok(path))) => {
-                link.set(Some(path));
+            Some(Ok(Ok(address))) => {
+                mailed.set(Some(address));
                 refusal.set(None);
                 on_change.run(());
             }
             Some(Ok(Err(problem))) => {
-                link.set(None);
+                mailed.set(None);
                 refusal.set(Some(problem.message()));
             }
             Some(Err(_)) => {
-                link.set(None);
+                mailed.set(None);
                 refusal.set(Some(Refusal::Unavailable.message()));
             }
             None => {}
@@ -1056,7 +1052,7 @@ fn MembersPanel(
                                     <ActionForm action=resend attr:class="member-resend">
                                         <input type="hidden" name="user_id" value=id.clone()/>
                                         <button class="quiet" type="submit">
-                                            "Resend link"
+                                            "Resend mail"
                                         </button>
                                     </ActionForm>
                                 }
@@ -1120,18 +1116,9 @@ fn MembersPanel(
                         .map(|message| view! { <p class="field-error">{message}</p> })
                 }}
                 {move || {
-                    link.get()
-                        .map(|path| {
-                            view! {
-                                <div class="member-link">
-                                    <span class="field-label">"SIGN-IN LINK"</span>
-                                    <code class="member-link-value">{path}</code>
-                                    <span class="field-note">
-                                        "Shown once. Expires in 7 days."
-                                    </span>
-                                </div>
-                            }
-                        })
+                    mailed
+                        .get()
+                        .map(|address| view! { <p class="field-note">{format!("Mailed to {address}")}</p> })
                 }}
 
                 <div class="role-note">
