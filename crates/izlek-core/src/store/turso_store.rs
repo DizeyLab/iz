@@ -16,8 +16,8 @@ use uuid::Uuid;
 use super::secret;
 use super::{
     ActivityLine, Attachment, Audience, Deletion, Event, Freeing, MailDecision, MailOutcome,
-    MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendState,
-    SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
+    MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind,
+    SendState, SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -47,6 +47,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         11,
         include_str!("../../migrations/0011_what_the_mail_decided.sql"),
+    ),
+    (
+        12,
+        include_str!("../../migrations/0012_a_mail_that_owes_no_rule.sql"),
     ),
 ];
 
@@ -257,7 +261,7 @@ const RULE_COLUMNS: &str =
     "id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at";
 
 const SEND_COLUMNS: &str = "id, rule_id, event_id, task_id, recipient, state, attempts, \
-     last_error, next_attempt_at, sent_at";
+     last_error, next_attempt_at, sent_at, kind, subject, body";
 
 fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
     match trigger {
@@ -305,17 +309,23 @@ fn send_from(row: &Row) -> Result<MailSend> {
         "abandoned" => SendState::Abandoned,
         other => return Err(StoreError::Corrupt(format!("send state {other:?}"))),
     };
+    let kind_raw = text(row, 10)?;
+    let kind = SendKind::parse(&kind_raw)
+        .ok_or_else(|| StoreError::Corrupt(format!("send kind {kind_raw:?}")))?;
     Ok(MailSend {
         id: text(row, 0)?,
-        rule_id: text(row, 1)?,
-        event_id: text(row, 2)?,
-        task_id: text(row, 3)?,
+        rule_id: opt_text(row, 1)?,
+        event_id: opt_text(row, 2)?,
+        task_id: opt_text(row, 3)?,
         recipient: text(row, 4)?,
         state,
         attempts: row.get::<i64>(6).map_err(backend)?.max(0) as u32,
         last_error: opt_text(row, 7)?,
         next_attempt_at: opt_stamp(row, 8)?,
         sent_at: opt_stamp(row, 9)?,
+        kind,
+        subject: opt_text(row, 11)?,
+        body: opt_text(row, 12)?,
     })
 }
 
@@ -2185,6 +2195,31 @@ impl Store for TursoStore {
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row).map(Some),
+            None => Err(StoreError::NotFound),
+        }
+    }
+
+    async fn queue_invite(
+        &self,
+        recipient: &str,
+        subject: &str,
+        body: &str,
+        at: OffsetDateTime,
+    ) -> Result<MailSend> {
+        let id = Uuid::new_v4().to_string();
+        self.conn
+            .execute(
+                "INSERT INTO mail_send \
+                 (id, recipient, state, attempts, claimed_at, next_attempt_at, kind, subject, \
+                  body) \
+                 VALUES (?1, ?2, 'pending', 0, ?3, ?3, 'invite', ?4, ?5)",
+                params![id.clone(), recipient, stamp(at)?, subject, body],
+            )
+            .await
+            .map_err(backend)?;
+        let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
+        match self.one_row(&sql, params![id]).await? {
+            Some(row) => send_from(&row),
             None => Err(StoreError::NotFound),
         }
     }

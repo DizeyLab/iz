@@ -252,20 +252,51 @@ pub enum SendState {
     Abandoned,
 }
 
-/// One mail a rule owes one person, and what happened to it.
+/// Which shape a [`MailSend`] row is: a rule's mail about a task, or an
+/// invite that owes no rule, no event and no task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SendKind {
+    Rule,
+    Invite,
+}
+
+impl SendKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SendKind::Rule => "rule",
+            SendKind::Invite => "invite",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "rule" => Some(SendKind::Rule),
+            "invite" => Some(SendKind::Invite),
+            _ => None,
+        }
+    }
+}
+
+/// One mail a rule owes one person, or an invite that owes nobody, and what
+/// happened to it. `rule_id`/`event_id`/`task_id` are `None` on an invite
+/// send; `subject`/`body` are `None` on a rule send, which composes its own
+/// from the rule and the event instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailSend {
     pub id: String,
-    pub rule_id: String,
+    pub rule_id: Option<String>,
     /// The transition that caused it.
-    pub event_id: String,
-    pub task_id: String,
+    pub event_id: Option<String>,
+    pub task_id: Option<String>,
     pub recipient: String,
     pub state: SendState,
     pub attempts: u32,
     pub last_error: Option<String>,
     pub next_attempt_at: Option<OffsetDateTime>,
     pub sent_at: Option<OffsetDateTime>,
+    pub kind: SendKind,
+    pub subject: Option<String>,
+    pub body: Option<String>,
 }
 
 /// What a rule decided about one event, win or not. Written for every rule an
@@ -740,6 +771,15 @@ pub trait Store: BoardReads + DetailReads + 'static {
         recipient: &str,
         at: OffsetDateTime,
     ) -> Result<Option<MailSend>>;
+
+    /// Holds an invite mail: pending, no rule, no event, no task.
+    async fn queue_invite(
+        &self,
+        recipient: &str,
+        subject: &str,
+        body: &str,
+        at: OffsetDateTime,
+    ) -> Result<MailSend>;
 
     /// The server took it.
     async fn record_send_accepted(&self, send_id: &str, at: OffsetDateTime) -> Result<()>;

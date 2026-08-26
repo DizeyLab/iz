@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use izlek_core::Role;
 use izlek_core::auth::{Token, hash_password};
 use izlek_core::store::{
-    Audience, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendState, Store,
+    Audience, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendKind, SendState, Store,
     StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
@@ -101,14 +101,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 11);
+    assert_eq!(first.schema_version().await.unwrap(), 12);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 11);
+    assert_eq!(second.schema_version().await.unwrap(), 12);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -3953,6 +3953,28 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     assert!(ids.contains(&failed.id.as_str()));
     assert!(!ids.contains(&sent.id.as_str()));
     assert!(!ids.contains(&abandoned.id.as_str()));
+}
+
+#[tokio::test]
+async fn an_invite_mail_is_owed_without_a_rule() {
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let invite = store
+        .queue_invite("newcomer@izlek.sh", "Join Izlek", "Come aboard.", now)
+        .await
+        .unwrap();
+    assert_eq!(invite.rule_id, None);
+    assert_eq!(invite.kind, SendKind::Invite);
+
+    let owed = store.sends_owed(now, 10).await.unwrap();
+    let found = owed.iter().find(|s| s.id == invite.id).unwrap();
+    assert_eq!(found.rule_id, None);
+
+    let queue = store.mail_queue(10).await.unwrap();
+    let found = queue.iter().find(|s| s.id == invite.id).unwrap();
+    assert_eq!(found.rule_id, None);
 }
 
 #[tokio::test]

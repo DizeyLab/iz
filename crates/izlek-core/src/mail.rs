@@ -445,10 +445,19 @@ impl Engine {
     ) -> crate::store::Result<Report> {
         let mut report = Report::default();
         for send in self.store.sends_owed(now, limit).await? {
-            let Some(rule) = self.store.mail_rule(&send.rule_id).await? else {
+            // An invite owes no rule and no event; delivering it is a later
+            // slice, so it is skipped here rather than treated as a rule send
+            // with holes in it.
+            let Some(rule_id) = send.rule_id.as_deref() else {
                 continue;
             };
-            let Some(event) = self.store.event(&send.event_id).await? else {
+            let Some(event_id) = send.event_id.as_deref() else {
+                continue;
+            };
+            let Some(rule) = self.store.mail_rule(rule_id).await? else {
+                continue;
+            };
+            let Some(event) = self.store.event(event_id).await? else {
                 continue;
             };
             self.attempt(&send, &rule, &event, &mut report).await?;
@@ -508,7 +517,10 @@ impl Engine {
         rule: &MailRule,
         event: &Event,
     ) -> crate::store::Result<Option<Outgoing>> {
-        let Some(facts) = self.store.task(&send.task_id).await? else {
+        let Some(task_id) = send.task_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(facts) = self.store.task(task_id).await? else {
             return Ok(None);
         };
         let actor = self
