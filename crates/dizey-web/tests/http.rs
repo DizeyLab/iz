@@ -32,6 +32,22 @@ struct App {
 
 impl App {
     async fn open() -> Self {
+        Self::open_with(None).await
+    }
+
+    /// The same app, started the way a deployment with a sender configured
+    /// starts it. The password is not among what the router is given.
+    async fn with_sender() -> Self {
+        Self::open_with(Some(dizey_web::settings::Sender {
+            host: "smtp.fastmail.com".to_string(),
+            port: 465,
+            username: "dizey".to_string(),
+            from: "dizey@dizey.sh".to_string(),
+        }))
+        .await
+    }
+
+    async fn open_with(sender: Option<dizey_web::settings::Sender>) -> Self {
         let dir = std::env::temp_dir().join(format!("dizey-http-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
@@ -41,6 +57,7 @@ impl App {
         let router = dizey_web::server::router(
             Accounts::new(Arc::new(store)),
             dizey_web::server::Mail::silent(),
+            sender,
             options,
         );
         Self { dir, router }
@@ -814,4 +831,141 @@ async fn a_card_cannot_be_moved_into_another_boards_column() {
         )
         .await;
     assert_eq!(answer.body, "\"Forbidden\"");
+}
+
+// --- settings ---------------------------------------------------------------
+
+#[tokio::test]
+async fn a_signed_out_browser_is_told_nothing_by_the_settings_call() {
+    let app = App::with_sender().await;
+    let _ = admin(&app).await;
+
+    let answer = app
+        .post(path::<dizey_web::settings::CurrentSettings>(), None, &[])
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(answer.body, "{\"Err\":\"SignInFirst\"}");
+    assert!(!answer.body.contains("fastmail"), "{}", answer.body);
+}
+
+/// The sender panel is admin-only, and "only" is decided on the server: a
+/// Member asking the same call gets an answer with no sender in it at all,
+/// rather than a hidden panel whose contents rode along in the body.
+#[tokio::test]
+async fn a_member_is_told_nothing_about_the_sender() {
+    let app = App::with_sender().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(
+        &app,
+        &admin_cookie,
+        "emre@dizey.sh",
+        "Emre",
+        Role::Member,
+    )
+    .await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&member),
+            &[],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("\"administers\":false"), "{}", answer.body);
+    assert!(answer.body.contains("\"sender\":null"), "{}", answer.body);
+    assert!(!answer.body.contains("fastmail"), "{}", answer.body);
+}
+
+/// The admin sees what the process is configured with — and the password is
+/// not part of "what": it is never held anywhere this call can reach.
+#[tokio::test]
+async fn an_admin_sees_the_sender_and_never_a_password() {
+    let app = App::with_sender().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("smtp.fastmail.com"), "{}", answer.body);
+    assert!(answer.body.contains("465"), "{}", answer.body);
+    assert!(
+        !answer.body.to_lowercase().contains("password"),
+        "the answer carries a password field: {}",
+        answer.body
+    );
+}
+
+/// The form carries a name and nothing else. Who is renamed comes from the
+/// session, so there is no id to tamper with.
+#[tokio::test]
+async fn saving_a_profile_renames_the_person_asking_and_nobody_else() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveProfile>(),
+            Some(&member),
+            &[("display_name", "Emre Y")],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let mine = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&member),
+            &[],
+        )
+        .await;
+    assert!(mine.body.contains("Emre Y"), "{}", mine.body);
+
+    let theirs = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(theirs.body.contains("Ada Lovelace"), "{}", theirs.body);
+}
+
+#[tokio::test]
+async fn a_profile_cannot_be_saved_without_a_name() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveProfile>(),
+            Some(&admin_cookie),
+            &[("display_name", "   ")],
+        )
+        .await;
+    assert_eq!(answer.body, "\"EmptyName\"", "{}", answer.body);
+}
+
+#[tokio::test]
+async fn a_signed_out_browser_cannot_rename_anybody() {
+    let app = App::open().await;
+    let _ = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveProfile>(),
+            None,
+            &[("display_name", "Whoever")],
+        )
+        .await;
+    assert_eq!(answer.body, "\"SignInFirst\"", "{}", answer.body);
 }

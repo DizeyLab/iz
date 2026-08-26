@@ -7,6 +7,7 @@ pub mod auth;
 pub mod board;
 pub mod detail;
 pub mod pages;
+pub mod settings;
 #[cfg(feature = "ssr")]
 pub mod server;
 #[cfg(feature = "ssr")]

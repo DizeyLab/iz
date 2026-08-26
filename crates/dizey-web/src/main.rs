@@ -57,7 +57,15 @@ async fn main() {
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
 
-    let app = dizey_web::server::router(accounts, mail, leptos_options);
+    // What the settings screen may show of the sender: host, port, username
+    // and from-address, and nothing else. The password stays in `config.mail`
+    // where the mailer reads it.
+    let sender = config
+        .mail
+        .as_ref()
+        .map(dizey_web::settings::Sender::of);
+
+    let app = dizey_web::server::router(accounts, mail, sender, leptos_options);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

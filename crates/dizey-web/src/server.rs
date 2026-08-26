@@ -226,7 +226,12 @@ impl From<AccountError> for Refusal {
 /// It lives here rather than in `main` so a test can drive the real handlers —
 /// the guards above are only worth anything if something calls them the way a
 /// browser does.
-pub fn router(accounts: Accounts, mail: Mail, leptos_options: LeptosOptions) -> axum::Router {
+pub fn router(
+    accounts: Accounts,
+    mail: Mail,
+    sender: Option<crate::settings::Sender>,
+    leptos_options: LeptosOptions,
+) -> axum::Router {
     use axum::Router;
     use leptos_axum::{LeptosRoutes, generate_route_list};
 
@@ -241,9 +246,13 @@ pub fn router(accounts: Accounts, mail: Mail, leptos_options: LeptosOptions) -> 
                 // `leptos_routes_with_context` registers with the same closure.
                 let accounts = accounts.clone();
                 let mail = mail.clone();
+                let sender = sender.clone();
                 move || {
                     provide_context(accounts.clone());
                     provide_context(mail.clone());
+                    // What a settings screen may say about the sender. The
+                    // password is not in it and has no field to be in.
+                    provide_context(sender.clone());
                 }
             },
             {

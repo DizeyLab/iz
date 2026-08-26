@@ -1452,3 +1452,211 @@ a {
   background: #a04a24;
   color: #fffefb;
 }
+
+// --- Settings (Settings and MemberSettings artboards) ----------------------
+
+.settings-shell {
+  display: flex;
+  min-height: calc(100vh - var(--topbar-height));
+}
+
+.sidenav {
+  width: 220px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidenav-item {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  color: #3d3a35;
+  text-decoration: none;
+
+  &:hover { background: #f1efe8; color: var(--ink); }
+
+  &-on {
+    background: var(--accent-tint);
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+}
+
+.settings-stage {
+  flex-grow: 1;
+  min-width: 0;
+  padding: 24px 32px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 900px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.settings-note {
+  flex-basis: 100%;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.chip-role,
+.chip-admin,
+.chip-connected,
+.chip-off {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.chip-role { background: var(--accent-tint); border: 1px solid #d6dbe8; color: var(--accent-ink); }
+.chip-admin { background: #f2f0ea; border: 1px solid var(--border-strong); color: var(--muted); }
+.chip-connected { background: #eef3e9; border: 1px solid #d3e0c6; color: #4a6636; }
+.chip-off { background: #f7f0dd; border: 1px solid #e6d7ae; color: #7a5c1e; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.panel-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel-lede {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.panel-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.field-row {
+  display: flex;
+  gap: 16px;
+}
+
+.field-narrow { flex-grow: 0; width: 120px; }
+
+.field-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--muted-soft);
+}
+
+.field-input {
+  height: 40px;
+  padding: 0 12px;
+  background: #faf9f6;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--ink);
+
+  &:focus {
+    outline: none;
+    background: var(--surface);
+    border-color: var(--accent);
+  }
+
+  &:disabled {
+    background: #f2f0ea;
+    color: var(--muted);
+  }
+}
+
+// A row that states a fact instead of pretending to be an editable field. An
+// empty box that silently does nothing is worse than a sentence.
+.field-stated {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+  background: #f2f0ea;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.field-error {
+  font-size: 12px;
+  color: #a04a24;
+}
+
+.primary {
+  height: 36px;
+  padding: 0 16px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--surface);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+}

@@ -33,6 +33,8 @@ pub enum Refusal {
     LinkNotUsable,
     /// A card with no title is not a card.
     EmptyTitle,
+    /// A person with no name is not a person the board can show.
+    EmptyName,
     /// A comment with nothing in it.
     EmptyComment,
     /// The date field did not hold a date.
@@ -64,6 +66,7 @@ impl Refusal {
                 "This link no longer works. Ask the admin to send another.".to_string()
             }
             Refusal::EmptyTitle => "Give the task a title.".to_string(),
+            Refusal::EmptyName => "Give yourself a name.".to_string(),
             Refusal::EmptyComment => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -102,6 +105,7 @@ impl Refusal {
             Refusal::AddressTaken => "address-taken",
             Refusal::LinkNotUsable => "link-not-usable",
             Refusal::EmptyTitle => "empty-title",
+            Refusal::EmptyName => "empty-name",
             Refusal::EmptyComment => "empty-comment",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
