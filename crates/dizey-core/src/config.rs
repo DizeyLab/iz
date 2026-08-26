@@ -1,30 +1,53 @@
-//! Every environment variable Dizey reads, in one place.
+//! Everything Dizey reads from `dizey.toml`, in one place.
 //!
-//! Nothing here has a silent default. A missing variable stops the boot and
-//! says which name is missing, because the alternative is worse than not
-//! starting: a wrong `DIZEY_DATABASE` does not mean "no data", it means a
-//! second Dizey quietly writing a different file while everyone believes they
-//! are looking at the same board — and Turso is single-writer, so the two are
-//! not even reconcilable afterwards. A wrong `DIZEY_BASE_URL` mails people a
-//! sign-in link pointing at a host that is not us.
+//! Nothing here has a silent default once the file exists. A key that is
+//! missing, empty or unusable stops the boot and says which key and which
+//! file, because the alternative is worse than not starting: a wrong
+//! `database` does not mean "no data", it means a second Dizey quietly
+//! writing a different file while everyone believes they are looking at the
+//! same board — and Turso is single-writer, so the two are not even
+//! reconcilable afterwards. A wrong `base_url` mails people a sign-in link
+//! pointing at a host that is not us.
 //!
-//! Development still needs to be one command, so `DIZEY_DEV=1` is the opt-in
-//! that turns the defaults back on. It is opt-in on purpose: a deployment that
-//! forgets it fails loudly, and a deployment that sets it did so deliberately.
+//! Development still needs to be one command, so the *absence* of
+//! `dizey.toml` is the opt-in that takes the development defaults: the app
+//! writes the file itself, with those defaults in it and comments saying
+//! what each key does, and starts. That is opt-in on purpose too — it only
+//! ever happens once, because the second boot finds the file it wrote the
+//! first time and reads it like any other. A real deployment is handed the
+//! same file and edits it; it never writes itself over a deployment's
+//! choices, because it only writes when the file is not there at all.
 //!
-//! Whatever is finally resolved is printed once at startup — the database path
-//! absolute, the base URL as it will appear in mail — so "which file are we
-//! on" is answered by the log rather than by someone's memory.
+//! Whatever is finally resolved is printed once at startup — the database
+//! path absolute, the base URL as it will appear in mail — so "which file
+//! are we on" is answered by the log rather than by someone's memory.
 //!
-//! The sender is not here. Host, port, username, password and from-address are
-//! workspace settings an admin writes on the Settings screen, so that changing
-//! where mail goes out through does not need a shell on the box and a restart.
+//! The sender is not here. Host, port, username, password and from-address
+//! are workspace settings an admin writes on the Settings screen, so that
+//! changing where mail goes out through does not need a shell on the box and
+//! a restart.
 
+use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Every variable the app reads, in the order the report prints them.
-pub const VARIABLES: &[&str] = &["DIZEY_DEV", "DIZEY_DATABASE", "DIZEY_BASE_URL"];
+/// The name of the file `Config::load` reads and, failing that, writes.
+const FILE_NAME: &str = "dizey.toml";
+
+/// What a freshly written `dizey.toml` says, comments included. Development
+/// defaults, so that a plain `dizey` in an empty directory is one command.
+const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One process holds it.
+database = "dizey.db"
+# The origin sign-in links in mail point at.
+base_url = "http://127.0.0.1:3000"
+"#;
+
+/// The shape of `dizey.toml`, before the values are checked.
+#[derive(Deserialize)]
+struct Toml {
+    database: Option<String>,
+    base_url: Option<String>,
+}
 
 /// What the process needs to know before it opens a socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,42 +56,44 @@ pub struct Config {
     pub database: PathBuf,
     /// The origin links in mail point at, with no trailing slash.
     pub base_url: String,
-    /// Whether the development defaults were taken.
-    pub dev: bool,
+    /// Whether `dizey.toml` did not exist and was just written with the
+    /// development defaults this boot.
+    pub defaulted: bool,
 }
 
 /// Why the process is not starting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
-    /// Named variables are unset and have no default outside development.
-    Missing(Vec<&'static str>),
-    /// A variable is set to something the app cannot use.
-    Invalid { variable: &'static str, why: String },
+    /// The file exists but is not valid TOML.
+    Unparseable { why: String },
+    /// A key is missing or set to an empty value.
+    Missing(&'static str),
+    /// A key is set to something the app cannot use.
+    Invalid { key: &'static str, why: String },
+    /// The file could not be read for a reason other than "it is not there"
+    /// (permissions, for instance), or the default could not be written.
+    Io(String),
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConfigError::Missing(names) => {
-                write!(f, "not starting: ")?;
-                let them = if names.len() == 1 {
-                    write!(f, "{} is not set", names[0])?;
-                    "it"
-                } else {
-                    write!(f, "{} are not set", names.join(", "))?;
-                    "them"
-                };
+            ConfigError::Unparseable { why } => {
+                write!(f, "not starting: {FILE_NAME} is not valid TOML — {why}")
+            }
+            ConfigError::Missing(key) => {
                 write!(
                     f,
-                    ". Set {them}, or set DIZEY_DEV=1 to take the development defaults."
+                    "not starting: {FILE_NAME} has no {key}. Add it, or delete {FILE_NAME} to take the development defaults."
                 )
             }
-            ConfigError::Invalid { variable, why } => {
+            ConfigError::Invalid { key, why } => {
                 write!(
                     f,
-                    "not starting: {variable} is set to something unusable — {why}"
+                    "not starting: {FILE_NAME}'s {key} is set to something unusable — {why}"
                 )
             }
+            ConfigError::Io(why) => write!(f, "not starting: {why}"),
         }
     }
 }
@@ -76,49 +101,58 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
-    /// Reads the environment. Every failure names the variable behind it.
-    pub fn from_env() -> Result<Config, ConfigError> {
-        Config::read(|name| std::env::var(name).ok())
+    /// Reads `dizey.toml` from the current directory, writing it with the
+    /// development defaults first if it is not there.
+    pub fn load() -> Result<Config, ConfigError> {
+        Config::load_from(Path::new("."))
     }
 
-    /// The same reading, against any source — which is how it is tested
-    /// without a test being able to disturb another test's environment.
-    pub fn read(source: impl Fn(&str) -> Option<String>) -> Result<Config, ConfigError> {
-        let value = |name: &str| {
-            source(name).and_then(|raw| {
-                let trimmed = raw.trim().to_string();
-                (!trimmed.is_empty()).then_some(trimmed)
-            })
-        };
-        let dev = matches!(value("DIZEY_DEV").as_deref(), Some("1" | "true" | "yes"));
+    /// The same reading, against any directory — which is how it is tested
+    /// without a test being able to disturb another test's working
+    /// directory, or another test's `dizey.toml`.
+    pub fn load_from(dir: &Path) -> Result<Config, ConfigError> {
+        let path = dir.join(FILE_NAME);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Config::parse(&text, dir, false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::write(&path, DEVELOPMENT_DEFAULTS).map_err(|err| {
+                    ConfigError::Io(format!("could not write {}: {err}", path.display()))
+                })?;
+                println!(
+                    "dizey    wrote {FILE_NAME} with development defaults — edit it for a real deployment"
+                );
+                Config::parse(DEVELOPMENT_DEFAULTS, dir, true)
+            }
+            Err(err) => Err(ConfigError::Io(format!(
+                "could not read {}: {err}",
+                path.display()
+            ))),
+        }
+    }
 
-        let mut missing = Vec::new();
-        let database = value("DIZEY_DATABASE").or_else(|| dev.then(|| "dizey.db".to_string()));
-        if database.is_none() {
-            missing.push("DIZEY_DATABASE");
-        }
-        let base_url =
-            value("DIZEY_BASE_URL").or_else(|| dev.then(|| "http://127.0.0.1:3000".to_string()));
-        if base_url.is_none() {
-            missing.push("DIZEY_BASE_URL");
-        }
-        if !missing.is_empty() {
-            return Err(ConfigError::Missing(missing));
-        }
+    /// The reading itself, against a string — which is how it is tested
+    /// without a test being able to disturb another test's filesystem.
+    pub fn parse(text: &str, dir: &Path, defaulted: bool) -> Result<Config, ConfigError> {
+        let toml: Toml =
+            toml::from_str(text).map_err(|err| ConfigError::Unparseable { why: err.to_string() })?;
 
-        let base_url = base_url.expect("checked above");
+        let value = |raw: Option<String>| raw.filter(|value| !value.trim().is_empty());
+
+        let database = value(toml.database).ok_or(ConfigError::Missing("database"))?;
+        let base_url = value(toml.base_url).ok_or(ConfigError::Missing("base_url"))?;
+
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             return Err(ConfigError::Invalid {
-                variable: "DIZEY_BASE_URL",
+                key: "base_url",
                 why: format!("{base_url:?} is not an http:// or https:// origin"),
             });
         }
         let base_url = base_url.trim_end_matches('/').to_string();
 
         Ok(Config {
-            database: absolute(Path::new(&database.expect("checked above"))),
+            database: absolute(dir, Path::new(&database)),
             base_url,
-            dev,
+            defaulted,
         })
     }
 
@@ -129,22 +163,26 @@ impl Config {
             format!("base url  {}", self.base_url),
         ];
         lines.push("mail      the sender is in Settings, not here".to_string());
-        if self.dev {
-            lines.push("dev       DIZEY_DEV=1, development defaults taken".to_string());
+        if self.defaulted {
+            lines.push(format!(
+                "dev       {FILE_NAME} did not exist, development defaults written and taken"
+            ));
         }
         lines
     }
 }
 
-
 /// An absolute path for a file that may not exist yet: the directory is
-/// resolved, the file name is kept as written.
-fn absolute(path: &Path) -> PathBuf {
+/// resolved against `base` (the directory `dizey.toml` was read from), the
+/// file name is kept as written.
+fn absolute(base: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let joined = cwd.join(path);
+    let base = base
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let joined = base.join(path);
     match (joined.parent(), joined.file_name()) {
         (Some(parent), Some(name)) => match parent.canonicalize() {
             Ok(parent) => parent.join(name),
@@ -157,54 +195,83 @@ fn absolute(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    /// An environment, without touching the process's own.
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect();
-        move |name: &str| map.get(name).cloned()
+    /// A scratch directory, cleaned up when the test ends, so `load_from` can
+    /// be exercised without touching the process's own working directory.
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dizey-config-test-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Good enough uniqueness for a scratch directory name; no need for a
+    /// real UUID dependency just for this.
+    fn uuid_like() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            ^ (std::process::id() as u128) << 64
     }
 
     #[test]
-    fn an_empty_environment_names_what_is_missing_rather_than_guessing() {
-        let problem = Config::read(env(&[])).unwrap_err();
-        let ConfigError::Missing(names) = &problem else {
-            panic!("expected the missing names, got {problem:?}");
-        };
-        assert_eq!(names, &["DIZEY_DATABASE", "DIZEY_BASE_URL"]);
-        let said = problem.to_string();
-        assert!(said.contains("DIZEY_DATABASE"), "{said}");
-        assert!(said.contains("DIZEY_DEV=1"), "{said}");
-    }
-
-    #[test]
-    fn a_blank_value_is_not_a_value() {
-        let problem = Config::read(env(&[
-            ("DIZEY_DATABASE", "   "),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-        ]))
-        .unwrap_err();
-        assert_eq!(problem, ConfigError::Missing(vec!["DIZEY_DATABASE"]));
-    }
-
-    #[test]
-    fn the_dev_flag_is_the_only_thing_that_brings_defaults_back() {
-        let config = Config::read(env(&[("DIZEY_DEV", "1")])).unwrap();
-        assert!(config.dev);
+    fn an_absent_file_is_written_with_development_defaults_and_taken() {
+        let dir = scratch();
+        let config = Config::load_from(&dir).unwrap();
+        assert!(config.defaulted);
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("dizey.db"));
         assert_eq!(config.base_url, "http://127.0.0.1:3000");
+
+        let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        assert_eq!(written, DEVELOPMENT_DEFAULTS);
+
+        // A second load reads the file it just wrote, identically.
+        let again = Config::load_from(&dir).unwrap();
+        assert!(!again.defaulted);
+        assert_eq!(again, Config { defaulted: false, ..config });
+    }
+
+    #[test]
+    fn an_empty_string_is_not_a_value() {
+        let problem = Config::parse(
+            "database = \"   \"\nbase_url = \"https://dizey.sh\"\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(problem, ConfigError::Missing("database"));
+    }
+
+    #[test]
+    fn a_missing_key_names_itself_rather_than_guessing() {
+        let problem = Config::parse("base_url = \"https://dizey.sh\"\n", Path::new("."), false)
+            .unwrap_err();
+        assert_eq!(problem, ConfigError::Missing("database"));
+        let said = problem.to_string();
+        assert!(said.contains("database"), "{said}");
+        assert!(said.contains("dizey.toml"), "{said}");
+    }
+
+    #[test]
+    fn unparseable_toml_names_the_file_not_a_stack_trace() {
+        let problem = Config::parse("this is not toml at all {{{", Path::new("."), false)
+            .unwrap_err();
+        assert!(
+            matches!(problem, ConfigError::Unparseable { .. }),
+            "{problem:?}"
+        );
+        assert!(problem.to_string().contains("dizey.toml"));
     }
 
     #[test]
     fn a_relative_database_is_reported_absolute() {
-        let config = Config::read(env(&[
-            ("DIZEY_DATABASE", "state/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-        ]))
+        let dir = scratch();
+        let config = Config::parse(
+            "database = \"state/dizey.db\"\nbase_url = \"https://dizey.sh\"\n",
+            &dir,
+            false,
+        )
         .unwrap();
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("dizey.db"));
@@ -217,16 +284,17 @@ mod tests {
 
     #[test]
     fn a_base_url_that_is_not_an_origin_stops_the_boot() {
-        let problem = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "dizey.sh"),
-        ]))
+        let problem = Config::parse(
+            "database = \"/srv/dizey.db\"\nbase_url = \"dizey.sh\"\n",
+            Path::new("."),
+            false,
+        )
         .unwrap_err();
         assert!(
             matches!(
                 problem,
                 ConfigError::Invalid {
-                    variable: "DIZEY_BASE_URL",
+                    key: "base_url",
                     ..
                 }
             ),
@@ -236,48 +304,37 @@ mod tests {
 
     #[test]
     fn the_base_url_keeps_no_trailing_slash_so_links_are_built_once() {
-        let config = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh/"),
-        ]))
+        let config = Config::parse(
+            "database = \"/srv/dizey.db\"\nbase_url = \"https://dizey.sh/\"\n",
+            Path::new("."),
+            false,
+        )
         .unwrap();
         assert_eq!(config.base_url, "https://dizey.sh");
     }
 
-    /// The sender used to be five environment variables. It is workspace
-    /// settings now, so a stale `DIZEY_SMTP_PASSWORD` left in a unit file or a
-    /// shell must do nothing at all — not half-configure a sender, not stop the
-    /// boot, and above all not quietly send through an account the Settings
-    /// screen does not show.
+    /// The sender used to be environment variables read directly. It is
+    /// workspace settings now, so unrelated keys left in the file must do
+    /// nothing at all — not half-configure a sender, not stop the boot, and
+    /// above all not quietly send through an account the Settings screen
+    /// does not show.
     #[test]
-    fn leftover_sender_variables_are_ignored_entirely() {
-        let config = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-            ("DIZEY_SMTP_HOST", "smtp.example.net"),
-            ("DIZEY_SMTP_PORT", "587"),
-            ("DIZEY_SMTP_USERNAME", "dizey"),
-            ("DIZEY_SMTP_PASSWORD", "hunter2-and-then-some"),
-            ("DIZEY_MAIL_FROM", "board@dizey.sh"),
-        ]))
-        .expect("a stale sender in the environment is not an error");
+    fn unrelated_keys_are_ignored_entirely() {
+        let config = Config::parse(
+            "database = \"/srv/dizey.db\"\nbase_url = \"https://dizey.sh\"\nsmtp_password = \"hunter2-and-then-some\"\n",
+            Path::new("."),
+            false,
+        )
+        .expect("an unrelated key in the file is not an error");
 
         let report = config.report().join("\n");
         assert!(
-            !report.contains("hunter2-and-then-some") && !report.contains("smtp.example.net"),
-            "the report read a variable it no longer honours: {report}"
+            !report.contains("hunter2-and-then-some"),
+            "the report read a key it no longer honours: {report}"
         );
         assert!(
             report.contains("the sender is in Settings"),
             "the report should say where the sender lives: {report}"
         );
-    }
-
-    #[test]
-    fn every_variable_the_app_reads_is_named_in_one_list() {
-        assert_eq!(VARIABLES.len(), 3, "a variable was added without a line here");
-        assert!(VARIABLES.contains(&"DIZEY_DEV"));
-        assert!(VARIABLES.contains(&"DIZEY_DATABASE"));
-        assert!(VARIABLES.contains(&"DIZEY_BASE_URL"));
     }
 }

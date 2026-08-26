@@ -6,11 +6,12 @@ async fn main() {
     use leptos::prelude::*;
     use std::sync::Arc;
 
-    // Every variable the app reads is resolved here, before anything is
-    // opened. A missing one stops the boot with its name in the message: the
-    // failure this prevents is not an empty database, it is a second Dizey
-    // writing a different file while everyone believes they share a board.
-    let config = match dizey_core::Config::from_env() {
+    // dizey.toml is read here, before anything is opened, and written with
+    // development defaults if it is not there yet. A broken key stops the
+    // boot with its name in the message: the failure this prevents is not an
+    // empty database, it is a second Dizey writing a different file while
+    // everyone believes they share a board.
+    let config = match dizey_core::Config::load() {
         Ok(config) => config,
         Err(problem) => {
             eprintln!("dizey: {problem}");
