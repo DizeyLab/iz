@@ -969,3 +969,117 @@ async fn a_signed_out_browser_cannot_rename_anybody() {
         .await;
     assert_eq!(answer.body, "\"SignInFirst\"", "{}", answer.body);
 }
+
+/// The limits are workspace content and the panel is admin-only. "Only" is
+/// this handler, not the missing panel.
+#[tokio::test]
+async fn a_member_who_posts_new_limits_anyway_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveLimits>(),
+            Some(&member),
+            &[
+                ("attachment_limit_mb", "400"),
+                ("photo_limit_mb", "19"),
+                ("allowed_file_types", "png"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "\"Forbidden\"", "{}", answer.body);
+
+    // And the refusal is not cosmetic: the limits are where they were.
+    let after = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(
+        after.body.contains("\"attachment_limit_mb\":25"),
+        "{}",
+        after.body
+    );
+}
+
+#[tokio::test]
+async fn an_admin_changes_the_limits_and_they_stay_changed() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveLimits>(),
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "10"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", ".PNG, png, pdf"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let after = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(
+        after.body.contains("\"attachment_limit_mb\":10"),
+        "{}",
+        after.body
+    );
+    assert!(after.body.contains("[\"png\",\"pdf\"]"), "{}", after.body);
+}
+
+/// A limit typed with an extra zero is a promise the disk cannot keep, and a
+/// zero limit is an upload feature that refuses every file. Both are refused
+/// by the handler rather than by the number input's max attribute.
+#[tokio::test]
+async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    for (attachment, photo) in [("5000", "2"), ("0", "2"), ("25", "0"), ("25", "200")] {
+        let answer = app
+            .post(
+                path::<dizey_web::settings::SaveLimits>(),
+                Some(&admin_cookie),
+                &[
+                    ("attachment_limit_mb", attachment),
+                    ("photo_limit_mb", photo),
+                    ("allowed_file_types", ""),
+                ],
+            )
+            .await;
+        assert_eq!(answer.body, "\"BadLimit\"", "{attachment}/{photo}");
+    }
+}
+
+/// The allowed list is what an upload is checked against later, so a pattern
+/// or a path cannot be stored in it as though it were an extension.
+#[tokio::test]
+async fn a_file_type_that_is_not_an_extension_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveLimits>(),
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "25"),
+                ("photo_limit_mb", "2"),
+                ("allowed_file_types", "../etc/passwd"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "\"BadFileType\"", "{}", answer.body);
+}

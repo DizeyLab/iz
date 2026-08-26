@@ -35,6 +35,10 @@ pub enum Refusal {
     EmptyTitle,
     /// A person with no name is not a person the board can show.
     EmptyName,
+    /// A limit of nothing, or a limit wider than the disk should promise.
+    BadLimit,
+    /// Something in the allowed-types list is not a file extension.
+    BadFileType,
     /// A comment with nothing in it.
     EmptyComment,
     /// The date field did not hold a date.
@@ -67,6 +71,13 @@ impl Refusal {
             }
             Refusal::EmptyTitle => "Give the task a title.".to_string(),
             Refusal::EmptyName => "Give yourself a name.".to_string(),
+            Refusal::BadLimit => {
+                "A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."
+                    .to_string()
+            }
+            Refusal::BadFileType => {
+                "File types are extensions — png, pdf, zip — separated by commas.".to_string()
+            }
             Refusal::EmptyComment => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -106,6 +117,8 @@ impl Refusal {
             Refusal::LinkNotUsable => "link-not-usable",
             Refusal::EmptyTitle => "empty-title",
             Refusal::EmptyName => "empty-name",
+            Refusal::BadLimit => "bad-limit",
+            Refusal::BadFileType => "bad-file-type",
             Refusal::EmptyComment => "empty-comment",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
