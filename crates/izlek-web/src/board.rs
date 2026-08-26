@@ -266,7 +266,15 @@ fn BoardScreen(
     let moving = ServerAction::<MoveCard>::new();
     let moved = moving.value();
     Effect::new(move |_| {
-        if matches!(moved.get(), Some(Ok(_))) {
+        // `Ok(Some(refusal))` is a *refused* move — nothing on the board
+        // changed. Refetching on a refusal anyway means a stale-cookie or
+        // stale-column refusal (a session that lapsed while this tab sat
+        // open, a card someone else already moved) immediately re-runs
+        // `current_board`, which is refused the same way and replaces the
+        // whole board with a dead-end refusal screen that only a manual
+        // reload escapes. Only a move that actually went through earns a
+        // refetch.
+        if matches!(moved.get(), Some(Ok(None))) {
             on_change();
         }
     });
