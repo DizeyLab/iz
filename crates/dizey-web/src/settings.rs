@@ -688,10 +688,10 @@ fn MembersPanel(
     // next click on Add member would try to create the same person again.
     let invite_form: NodeRef<leptos::html::Form> = NodeRef::new();
     Effect::new(move |_| {
-        if matches!(invited.get(), Some(Ok(Ok(_)))) {
-            if let Some(form) = invite_form.get() {
-                form.reset();
-            }
+        if matches!(invited.get(), Some(Ok(Ok(_)))) &&
+            let Some(form) = invite_form.get()
+        {
+            form.reset();
         }
     });
 
