@@ -60,6 +60,19 @@ impl DependencyEdge {
     }
 }
 
+/// What deleting a task would take with it. The confirmation step says this
+/// out loud before the button fires.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletionCost {
+    pub task_key: String,
+    pub title: String,
+    pub comment_count: u32,
+    /// Links in either direction that stop applying.
+    pub link_count: u32,
+    /// Keys of the tasks that would have nothing in front of them afterwards.
+    pub frees: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Comment {
     pub id: String,

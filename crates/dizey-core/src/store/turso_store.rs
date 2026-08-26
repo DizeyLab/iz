@@ -12,12 +12,12 @@ use turso::transaction::TransactionBehavior;
 use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
-use super::{
-    DeletePolicy, NewTask, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace,
-};
+use super::{NewTask, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace};
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Person, TaskRow};
-use crate::detail::{ActivityEntry, ActivityKind, Comment, DependencyEdge, DetailReads, TaskFacts};
+use crate::detail::{
+    ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, TaskFacts,
+};
 use time::Date;
 use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
@@ -216,13 +216,12 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         attachment_limit_bytes: row.get::<i64>(8).map_err(backend)?.max(0) as u64,
         allowed_file_types,
         photo_limit_bytes: row.get::<i64>(10).map_err(backend)?.max(0) as u64,
-        who_can_delete_tasks: DeletePolicy::parse(&text(row, 11)?)?,
     })
 }
 
 const WORKSPACE_COLUMNS: &str = "id, name, created_at, smtp_host, smtp_port, smtp_username, \
      smtp_from_name, smtp_from_address, attachment_limit_bytes, allowed_file_types, \
-     photo_limit_bytes, who_can_delete_tasks";
+     photo_limit_bytes";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -439,19 +438,17 @@ impl Store for TursoStore {
         attachment_limit_bytes: u64,
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
-        who_can_delete_tasks: DeletePolicy,
     ) -> Result<()> {
         let types = serde_json::to_string(allowed_file_types)
             .map_err(|e| StoreError::Corrupt(format!("allowed_file_types: {e}")))?;
         self.conn
             .execute(
                 "UPDATE workspace SET attachment_limit_bytes = ?1, photo_limit_bytes = ?2, \
-                 allowed_file_types = ?3, who_can_delete_tasks = ?4 WHERE id = ?5",
+                 allowed_file_types = ?3 WHERE id = ?4",
                 params![
                     attachment_limit_bytes as i64,
                     photo_limit_bytes as i64,
                     types,
-                    who_can_delete_tasks.as_str(),
                     workspace_id
                 ],
             )
@@ -1208,12 +1205,9 @@ impl Store for TursoStore {
             }
             drop(rows);
 
-            tx.execute(
-                "DELETE FROM task_dependency \
-                 WHERE blocked_task_id = ?1 OR blocking_task_id = ?1",
-                params![task_id],
-            )
-            .await?;
+            // The edges and the comments stay in the table: the delete is a
+            // soft one, and every read filters on the task's deleted_at, so a
+            // deleted task's links stop applying without being destroyed.
             tx.execute(
                 "UPDATE task SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1",
                 params![task_id, stamp.clone()],
@@ -1284,6 +1278,78 @@ impl Store for TursoStore {
                 Err(backend(e))
             }
         }
+    }
+
+    async fn deletion_cost(&self, task_id: &str) -> Result<Option<DeletionCost>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT task_key, title FROM task WHERE id = ?1 AND deleted_at IS NULL",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let Some(row) = rows.next().await.map_err(backend)? else {
+            return Ok(None);
+        };
+        let task_key = text(&row, 0)?;
+        let title = text(&row, 1)?;
+        drop(rows);
+
+        // Both counts in one sweep: the confirmation says what goes, and it
+        // should not cost three round trips to say it.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM comment WHERE task_id = ?1), \
+                 (SELECT COUNT(*) FROM task_dependency d JOIN task t \
+                  ON t.id = CASE WHEN d.blocked_task_id = ?1 \
+                                 THEN d.blocking_task_id ELSE d.blocked_task_id END \
+                  WHERE (d.blocked_task_id = ?1 OR d.blocking_task_id = ?1) \
+                  AND d.cleared_at IS NULL AND t.deleted_at IS NULL)",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let (comment_count, link_count) = match rows.next().await.map_err(backend)? {
+            Some(row) => (
+                row.get::<i64>(0).map_err(backend)?.max(0) as u32,
+                row.get::<i64>(1).map_err(backend)?.max(0) as u32,
+            ),
+            None => (0, 0),
+        };
+        drop(rows);
+
+        // Who would be left with nothing in front of them. The same reading the
+        // delete itself uses: an uncleared edge to a live task is what counts.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT t.task_key FROM task_dependency d \
+                 JOIN task t ON t.id = d.blocked_task_id \
+                 WHERE d.blocking_task_id = ?1 AND d.cleared_at IS NULL \
+                 AND t.deleted_at IS NULL \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM task_dependency o \
+                   JOIN task b ON b.id = o.blocking_task_id \
+                   WHERE o.blocked_task_id = t.id AND o.blocking_task_id <> ?1 \
+                   AND o.cleared_at IS NULL AND b.deleted_at IS NULL)",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut frees = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            frees.push(text(&row, 0)?);
+        }
+
+        Ok(Some(DeletionCost {
+            task_key,
+            title,
+            comment_count,
+            link_count,
+            frees,
+        }))
     }
 
     async fn record_activity(

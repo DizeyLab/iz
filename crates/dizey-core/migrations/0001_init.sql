@@ -20,9 +20,7 @@ CREATE TABLE workspace (
     attachment_limit_bytes INTEGER NOT NULL DEFAULT 26214400,
     photo_limit_bytes      INTEGER NOT NULL DEFAULT 2097152,
     -- JSON array of allowed extensions. An empty array means every type.
-    allowed_file_types     TEXT NOT NULL DEFAULT '[]',
-    -- 'anyone' | 'admin'
-    who_can_delete_tasks   TEXT NOT NULL DEFAULT 'anyone'
+    allowed_file_types     TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE user (

@@ -28,23 +28,18 @@ use uuid::Uuid;
 struct App {
     dir: PathBuf,
     router: Router,
-    /// The same store the router talks to, so a test can set a workspace
-    /// setting that has no screen yet.
-    store: Arc<TursoStore>,
 }
 
 impl App {
     async fn open() -> Self {
         let dir = std::env::temp_dir().join(format!("dizey-http-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = Arc::new(
-            TursoStore::open(dir.join("dizey.db").to_str().unwrap())
-                .await
-                .unwrap(),
-        );
+        let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
+            .await
+            .unwrap();
         let options = LeptosOptions::builder().output_name("dizey").build();
-        let router = dizey_web::server::router(Accounts::new(store.clone()), options);
-        Self { dir, router, store }
+        let router = dizey_web::server::router(Accounts::new(Arc::new(store)), options);
+        Self { dir, router }
     }
 
     /// Posts a form to a server function, as the browser does, and returns the
@@ -472,28 +467,33 @@ async fn a_viewer_who_posts_a_delete_anyway_is_refused() {
 }
 
 #[tokio::test]
-async fn a_member_cannot_delete_when_the_workspace_says_admins_only() {
-    use dizey_core::store::{DeletePolicy, Store};
-
+async fn a_member_may_delete_and_the_delete_is_soft() {
     let app = App::open().await;
     let admin = admin(&app).await;
     let member = invited(&app, &admin, "rae@dizey.sh", "Rae Okonkwo", Role::Member).await;
     let column = first_column(&app, &admin).await;
-    let task = a_task(&app, &admin, &column, "Not yours to remove").await;
+    let task = a_task(&app, &admin, &column, "Mistyped in a hurry").await;
 
-    // The workspace ships as 'anyone'; the settings screen that flips this is a
-    // later slice, so the test sets it the way that screen will.
-    let workspace = app.store.workspace().await.unwrap().unwrap();
-    app.store
-        .set_limits(
-            &workspace.id,
-            workspace.attachment_limit_bytes,
-            workspace.photo_limit_bytes,
-            &workspace.allowed_file_types,
-            DeletePolicy::Admin,
+    // What it would cost is a read: it says so and writes nothing.
+    let answer = app
+        .post(
+            path::<dizey_web::detail::WhatDeleteCosts>(),
+            Some(&member),
+            &[("task_id", &task)],
         )
-        .await
-        .unwrap();
+        .await;
+    assert!(
+        answer.body.contains("Mistyped in a hurry"),
+        "{}",
+        answer.body
+    );
+    let answer = app
+        .post(path::<dizey_web::board::CurrentBoard>(), Some(&admin), &[])
+        .await;
+    assert!(
+        answer.body.contains("Mistyped in a hurry"),
+        "asking cost deleted it"
+    );
 
     let answer = app
         .post(
@@ -502,14 +502,23 @@ async fn a_member_cannot_delete_when_the_workspace_says_admins_only() {
             &[("task_id", &task)],
         )
         .await;
-    assert_eq!(answer.body, "\"Forbidden\"");
+    assert_eq!(answer.body, "null", "a member was refused: {}", answer.body);
 
+    // Gone from the board, and gone from the detail: soft is not visible.
     let answer = app
         .post(path::<dizey_web::board::CurrentBoard>(), Some(&admin), &[])
         .await;
     assert!(
-        answer.body.contains("Not yours to remove"),
-        "the refused delete happened anyway: {}",
+        !answer.body.contains("Mistyped in a hurry"),
+        "{}",
         answer.body
     );
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert_eq!(answer.body, "{\"Err\":\"NotFound\"}");
 }

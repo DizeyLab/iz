@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 use crate::Role;
 use crate::board::{BoardReads, TaskRow};
-use crate::detail::{ActivityKind, DetailReads};
+use crate::detail::{ActivityKind, DeletionCost, DetailReads};
 
 pub mod turso_store;
 
@@ -51,33 +51,6 @@ pub struct Workspace {
     pub attachment_limit_bytes: u64,
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
-    pub who_can_delete_tasks: DeletePolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeletePolicy {
-    /// Anyone who can write tasks may delete one.
-    Anyone,
-    /// Only the admin.
-    Admin,
-}
-
-impl DeletePolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DeletePolicy::Anyone => "anyone",
-            DeletePolicy::Admin => "admin",
-        }
-    }
-
-    pub fn parse(raw: &str) -> Result<Self> {
-        match raw {
-            "anyone" => Ok(DeletePolicy::Anyone),
-            "admin" => Ok(DeletePolicy::Admin),
-            other => Err(StoreError::Corrupt(format!("delete policy {other:?}"))),
-        }
-    }
 }
 
 /// An account. `password_hash` is `None` for an invited member who has not
@@ -202,7 +175,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
         attachment_limit_bytes: u64,
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
-        who_can_delete_tasks: DeletePolicy,
     ) -> Result<()>;
 
     // -- users -------------------------------------------------------------
@@ -371,6 +343,10 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Appends one line to a task's activity trail. `actor_id` is `None` when
     /// the system did it rather than a person.
+    /// What a delete would take with it, for the confirmation step. Reads
+    /// only; nothing here writes.
+    async fn deletion_cost(&self, task_id: &str) -> Result<Option<DeletionCost>>;
+
     async fn record_activity(
         &self,
         task_id: &str,

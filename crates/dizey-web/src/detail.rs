@@ -7,7 +7,7 @@
 //! authorization question, not a validation one.
 
 use dizey_core::board::Person;
-use dizey_core::detail::{Comment, DependencyEdge, TaskDetail};
+use dizey_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail};
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use time::Date;
@@ -34,7 +34,7 @@ pub struct DetailSnapshot {
     pub linkable: Vec<LinkTarget>,
     pub may_write: bool,
     pub may_comment: bool,
-    /// The workspace's delete policy, already applied to this person.
+    /// Whether this person may delete the task. A writer may.
     pub may_delete: bool,
 }
 
@@ -83,7 +83,6 @@ mod guard {
 pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusal>, ServerFnError> {
     use crate::server::{accounts, require_user};
     use dizey_core::detail::load;
-    use dizey_core::store::DeletePolicy;
     use time::OffsetDateTime;
 
     let user = match require_user().await {
@@ -123,25 +122,16 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
         linkable.sort_by(|a, b| a.task_key.cmp(&b.task_key));
     }
 
+    // A writer may delete. The delete is soft and the confirmation says what
+    // goes with it, which is what makes that safe — not a role.
     let may_write = user.role.can_write_tasks();
-    let policy = store
-        .workspace()
-        .await
-        .map_err(fail)?
-        .map(|workspace| workspace.who_can_delete_tasks)
-        .unwrap_or(DeletePolicy::Admin);
-    let may_delete = may_write
-        && match policy {
-            DeletePolicy::Anyone => true,
-            DeletePolicy::Admin => user.role.can_administer(),
-        };
 
     Ok(Ok(DetailSnapshot {
         detail,
         linkable,
         may_write,
         may_comment: user.role.can_comment(),
-        may_delete,
+        may_delete: may_write,
         me: Me {
             id: user.id,
             display_name: user.display_name,
@@ -398,34 +388,45 @@ pub async fn post_comment(task_id: String, body: String) -> Result<Option<Refusa
     Ok(None)
 }
 
-/// Deletes a task, subject to the workspace's policy. Whatever was waiting only
-/// on it becomes unblocked, and the store records that.
+/// What a delete would take with it, for the confirmation step. Reads only.
+#[server]
+pub async fn what_delete_costs(
+    task_id: String,
+) -> Result<Result<DeletionCost, Refusal>, ServerFnError> {
+    use crate::server::accounts;
+
+    if let Err(refusal) = guard::writer_and_task(&task_id).await {
+        return Ok(Err(refusal));
+    }
+    match accounts()
+        .store()
+        .deletion_cost(&task_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+    {
+        Some(cost) => Ok(Ok(cost)),
+        None => Ok(Err(Refusal::NotFound)),
+    }
+}
+
+/// Deletes a task. A writer may: the delete is soft — the row keeps a
+/// `deleted_at`, its comments and its edges stay in the table — so a mistake is
+/// recoverable by hand. Whatever was waiting only on it becomes unblocked, and
+/// the store records that.
 #[server]
 pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnError> {
     use crate::server::accounts;
-    use dizey_core::store::DeletePolicy;
     use time::OffsetDateTime;
 
     let (user, _) = match guard::writer_and_task(&task_id).await {
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let fail = |e: dizey_core::store::StoreError| ServerFnError::new(e.to_string());
-    let policy = store
-        .workspace()
-        .await
-        .map_err(fail)?
-        .map(|workspace| workspace.who_can_delete_tasks)
-        .unwrap_or(DeletePolicy::Admin);
-    if matches!(policy, DeletePolicy::Admin) && !user.role.can_administer() {
-        return Ok(Some(Refusal::Forbidden));
-    }
-
-    store
+    accounts()
+        .store()
         .delete_task(&task_id, &user.id, OffsetDateTime::now_utc())
         .await
-        .map_err(fail)?;
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(None)
 }
 
@@ -536,6 +537,10 @@ fn DetailScreen(
     let comment = ServerAction::<PostComment>::new();
     let link = ServerAction::<LinkTasks>::new();
     let remove = ServerAction::<DeleteTask>::new();
+    // Deleting is two steps: ask what it would cost, then say it out loud and
+    // let the person decide. The artboard's red button had no confirmation and
+    // this action reaches other people's tasks.
+    let ask = ServerAction::<WhatDeleteCosts>::new();
     // Every action that lands re-reads the task and the board behind it.
     for value in [save.value(), comment.value(), link.value()] {
         Effect::new(move |_| {
@@ -793,16 +798,85 @@ fn DetailScreen(
 
         {problem}
 
+        {move || {
+            ask.value()
+                .get()
+                .and_then(|answer| answer.ok().and_then(|inner| inner.ok()))
+                .map(|cost| {
+                    let DeletionCost { task_key, title, comment_count, link_count, frees } = cost;
+                    let freed = frees.join(", ");
+                    view! {
+                        <div class="confirm">
+                            <div class="confirm-title">
+                                {format!("Delete {task_key} — {title}?")}
+                            </div>
+                            <ul class="confirm-list">
+                                {(comment_count > 0)
+                                    .then(|| {
+                                        view! {
+                                            <li>
+                                                {if comment_count == 1 {
+                                                    "1 comment goes with it".to_string()
+                                                } else {
+                                                    format!("{comment_count} comments go with it")
+                                                }}
+                                            </li>
+                                        }
+                                    })}
+                                {(link_count > 0)
+                                    .then(|| {
+                                        view! {
+                                            <li>
+                                                {if link_count == 1 {
+                                                    "1 dependency stops applying".to_string()
+                                                } else {
+                                                    format!("{link_count} dependencies stop applying")
+                                                }}
+                                            </li>
+                                        }
+                                    })}
+                                {(!freed.is_empty())
+                                    .then(|| {
+                                        view! { <li>{format!("{freed} stops being blocked")}</li> }
+                                    })}
+                            </ul>
+                            <div class="confirm-note">
+                                "The task keeps its record in the database, but nothing in Dizey brings it back."
+                            </div>
+                            <div class="confirm-row">
+                                <button
+                                    class="detail-cancel"
+                                    type="button"
+                                    on:click=move |_| ask.value().set(None)
+                                >
+                                    "Keep it"
+                                </button>
+                                <ActionForm action=remove attr:class="detail-delete-form">
+                                    <input type="hidden" name="task_id" value=move || id.get_value()/>
+                                    <button
+                                        class="detail-delete detail-delete-sure"
+                                        type="submit"
+                                        disabled=move || remove.pending().get()
+                                    >
+                                        {format!("Delete {task_key}")}
+                                    </button>
+                                </ActionForm>
+                            </div>
+                        </div>
+                    }
+                })
+        }}
+
         <footer class="detail-foot">
             {may_delete
                 .then(|| {
                     view! {
-                        <ActionForm action=remove attr:class="detail-delete-form">
+                        <ActionForm action=ask attr:class="detail-delete-form">
                             <input type="hidden" name="task_id" value=move || id.get_value()/>
                             <button
                                 class="detail-delete"
                                 type="submit"
-                                disabled=move || remove.pending().get()
+                                disabled=move || ask.pending().get()
                             >
                                 "Delete task"
                             </button>

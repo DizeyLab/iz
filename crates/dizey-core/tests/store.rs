@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use dizey_core::Role;
 use dizey_core::auth::{Token, hash_password};
-use dizey_core::store::{DeletePolicy, NewUser, Store, StoreError, TursoStore, User};
+use dizey_core::store::{NewUser, Store, StoreError, TursoStore, User};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -213,7 +213,6 @@ async fn workspace_defaults_match_the_settings_screen() {
         ws.allowed_file_types.is_empty(),
         "every type until narrowed"
     );
-    assert_eq!(ws.who_can_delete_tasks, DeletePolicy::Anyone);
     assert!(ws.smtp_host.is_none());
 }
 
@@ -258,20 +257,13 @@ async fn limits_round_trip_including_the_file_type_list() {
     let types = vec!["png".to_string(), "pdf".to_string()];
     scratch
         .store
-        .set_limits(
-            &ws_id,
-            10 * 1024 * 1024,
-            512 * 1024,
-            &types,
-            DeletePolicy::Admin,
-        )
+        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types)
         .await
         .unwrap();
     let ws = scratch.store.workspace().await.unwrap().unwrap();
     assert_eq!(ws.attachment_limit_bytes, 10 * 1024 * 1024);
     assert_eq!(ws.photo_limit_bytes, 512 * 1024);
     assert_eq!(ws.allowed_file_types, types);
-    assert_eq!(ws.who_can_delete_tasks, DeletePolicy::Admin);
 }
 
 #[tokio::test]
@@ -2117,4 +2109,63 @@ async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
         7,
         "the round trips a detail costs must not follow what it carries"
     );
+}
+
+#[tokio::test]
+async fn a_delete_says_what_it_would_take_with_it() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let doomed = add_task(store, &workspace, "Backlog", "doomed", None, &admin).await;
+    let other = add_task(store, &workspace, "Backlog", "other", None, &admin).await;
+    let freed = add_task(store, &workspace, "Backlog", "freed", None, &admin).await;
+    let still_stuck = add_task(store, &workspace, "Backlog", "stuck", None, &admin).await;
+    store.add_dependency(&freed, &doomed, now).await.unwrap();
+    store
+        .add_dependency(&still_stuck, &doomed, now)
+        .await
+        .unwrap();
+    store
+        .add_dependency(&still_stuck, &other, now)
+        .await
+        .unwrap();
+    store
+        .add_comment(&doomed, &admin, "one", now)
+        .await
+        .unwrap();
+    store
+        .add_comment(&doomed, &admin, "two", now)
+        .await
+        .unwrap();
+
+    let cost = store.deletion_cost(&doomed).await.unwrap().unwrap();
+    assert_eq!(cost.title, "doomed");
+    assert_eq!(cost.comment_count, 2);
+    assert_eq!(cost.link_count, 2, "both tasks waiting on this one");
+
+    // The same reading the delete itself takes: only the task with nothing
+    // else in front of it is named.
+    let freed_key = key_of(store, &workspace, "freed").await;
+    assert_eq!(cost.frees, vec![freed_key]);
+
+    // And it is a preview: nothing was written.
+    assert_eq!(
+        store.delete_task(&doomed, &admin, now).await.unwrap(),
+        vec![freed.clone()]
+    );
+    assert!(store.deletion_cost(&doomed).await.unwrap().is_none());
+}
+
+/// The key the board shows for a task with this title.
+async fn key_of(store: &TursoStore, workspace: &str, title: &str) -> String {
+    let board = board_of(store, workspace).await;
+    board
+        .columns
+        .iter()
+        .flat_map(|column| column.cards.iter())
+        .find(|card| card.title == title)
+        .expect("no such card")
+        .task_key
+        .clone()
 }
