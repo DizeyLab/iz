@@ -505,22 +505,25 @@ pub async fn change_password(
     }
 }
 
-/// Admin creates an account with a name and an address and no password, and
-/// gets the first-sign-in link back exactly once.
+/// Admin creates an account with a name and an address and no password. The
+/// first-sign-in link goes to that address by mail, never to the browser.
 #[server]
 pub async fn invite_member(
     email: String,
     display_name: String,
     role: izlek_core::Role,
 ) -> Result<Result<String, Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_admin};
+    use crate::server::{accounts, mail, require_admin};
 
     let admin = match require_admin().await {
         Ok(admin) => admin,
         Err(refusal) => return Ok(Err(refusal)),
     };
     match accounts().invite(&admin, &email, &display_name, role).await {
-        Ok(invitation) => Ok(Ok(format!("/join/{}", invitation.token.expose()))),
+        Ok(invitation) => {
+            mail().after_invite();
+            Ok(Ok(invitation.user.email.clone()))
+        }
         Err(error) => Ok(Err(error.into())),
     }
 }

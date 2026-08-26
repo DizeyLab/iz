@@ -31,7 +31,7 @@ async fn main() {
         .await
         .expect("failed to open the database");
     let store: Arc<dyn izlek_core::store::Store> = Arc::new(store);
-    let accounts = Accounts::new(store.clone());
+    let accounts = Accounts::new(store.clone(), config.base_url.clone());
 
     // The engine is always built, because a sender can appear at any moment:
     // an admin fills the panel in and the next sweep sends what was held. It

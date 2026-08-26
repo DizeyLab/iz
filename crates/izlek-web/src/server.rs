@@ -58,6 +58,24 @@ impl Mail {
         });
     }
 
+    /// Kicks the engine to send an invite mail now rather than on the next
+    /// sweep, off the request the same way `after` is.
+    ///
+    /// The invite is already on the ledger by the time this is called — this
+    /// only makes the wait before it leaves as short as the request itself,
+    /// so the admin does not sit wondering whether the mail is coming.
+    pub fn after_invite(&self) {
+        let Some(engine) = self.0.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let report = engine
+                .deliver_owed(time::OffsetDateTime::now_utc(), 8)
+                .await;
+            Self::log(report);
+        });
+    }
+
     /// Hands a committed delete to the engine, off the request, the same way.
     ///
     /// A blocker being deleted frees the tasks that were waiting on it just as

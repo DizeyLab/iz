@@ -2093,6 +2093,54 @@ select.field-input {
   border-color: var(--border-strong);
 }
 
+// A rule's verdict that queued a mail — the one outcome worth a look — reads
+// as the positive tint the rest of the app already uses for "connected".
+.rule-term-queued {
+  background: #eef3e9;
+  border-color: #d3e0c6;
+  color: #4a6636;
+}
+
+// One event and every rule's verdict on it, so the task and moment are said
+// once instead of once per rule.
+.decision-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.decision-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.decision-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #3d3a34;
+}
+
+.decision-verdicts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.decision-verdict {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+  color: #3d3a34;
+}
+
 .rule-stamp {
   flex-shrink: 0;
   font-family: var(--font-mono);

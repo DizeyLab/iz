@@ -39,7 +39,7 @@ impl App {
             .unwrap();
         let options = LeptosOptions::builder().output_name("izlek").build();
         let router = izlek_web::server::router(
-            Accounts::new(Arc::new(store)),
+            Accounts::new(Arc::new(store), "http://127.0.0.1:3000"),
             izlek_web::server::Mail::silent(),
             options,
         );
@@ -64,7 +64,7 @@ impl App {
         ));
         let options = LeptosOptions::builder().output_name("izlek").build();
         let router = izlek_web::server::router(
-            Accounts::new(store),
+            Accounts::new(store, "https://izlek.sh"),
             izlek_web::server::Mail::sending(engine),
             options,
         );

@@ -20,13 +20,26 @@ pub struct QueueLine {
     pub next_attempt: Option<String>,
 }
 
-/// One rule decision, as the decisions panel reads it.
+/// One rule's verdict inside a decision block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecisionLine {
-    pub at: String,
-    pub task: String,
+pub struct RuleVerdict {
+    pub rule: String,
     pub outcome: String,
     pub detail: String,
+}
+
+/// Every rule's verdict on one event, so the task and moment are said once
+/// rather than repeated per rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionGroup {
+    pub event_id: String,
+    pub task: String,
+    /// What the event did — "moved to Review" — when the event and its
+    /// destination column are both still there; absent rather than guessed
+    /// at otherwise.
+    pub happened: Option<String>,
+    pub at: String,
+    pub verdicts: Vec<RuleVerdict>,
 }
 
 /// One line of the workspace activity feed.
@@ -43,7 +56,7 @@ pub struct ActivityRow {
 pub struct LogsSnapshot {
     pub me: Me,
     pub queue: Vec<QueueLine>,
-    pub decisions: Vec<DecisionLine>,
+    pub decisions: Vec<DecisionGroup>,
     pub activity: Vec<ActivityRow>,
 }
 
@@ -91,6 +104,34 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str) -> S
     }
 }
 
+/// What an event did, in the decisions panel's own words — "moved to
+/// Review" — or nothing when the event or its destination column is gone:
+/// the panel names what it can still read, never a guess.
+#[cfg(feature = "ssr")]
+async fn event_happened(
+    store: &std::sync::Arc<dyn izlek_core::store::Store>,
+    event_id: &str,
+) -> Result<Option<String>, izlek_core::store::StoreError> {
+    use izlek_core::store::Event;
+
+    let Some(event) = store.event(event_id).await? else {
+        return Ok(None);
+    };
+    match event {
+        Event::Moved(transition) => {
+            let Some(board_id) = store.board_of_task(&transition.task_id).await? else {
+                return Ok(None);
+            };
+            let columns = store.columns_for_board(&board_id).await?;
+            Ok(columns
+                .into_iter()
+                .find(|column| column.id == transition.to_column)
+                .map(|column| format!("moved to {}", column.name)))
+        }
+        Event::Freed(_) => Ok(Some("unblocked".to_string())),
+    }
+}
+
 /// The queue, the decisions, and the activity, admin only.
 #[server]
 pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnError> {
@@ -107,12 +148,18 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
     let sends = store.mail_queue(LIMIT).await.map_err(fail)?;
     let mut queue = Vec::with_capacity(sends.len());
     for send in sends {
-        let subject = store
-            .mail_rule(&send.rule_id)
-            .await
-            .map_err(fail)?
-            .map(|rule| rule.subject)
-            .unwrap_or_else(|| "a rule that is gone".to_string());
+        let subject = match &send.subject {
+            Some(subject) => subject.clone(),
+            None => match &send.rule_id {
+                Some(id) => store
+                    .mail_rule(id)
+                    .await
+                    .map_err(fail)?
+                    .map(|rule| rule.subject)
+                    .unwrap_or_else(|| "a rule that is gone".to_string()),
+                None => "a rule that is gone".to_string(),
+            },
+        };
         queue.push(QueueLine {
             recipient: send.recipient,
             subject,
@@ -132,19 +179,36 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
     }
 
     let raw_decisions = store.recent_mail_decisions(LIMIT).await.map_err(fail)?;
-    let mut decisions = Vec::with_capacity(raw_decisions.len());
+    let mut decisions: Vec<DecisionGroup> = Vec::new();
     for decision in raw_decisions {
+        let rule = store
+            .mail_rule(&decision.rule_id)
+            .await
+            .map_err(fail)?
+            .map(|rule| rule.subject)
+            .unwrap_or_else(|| "a rule that is gone".to_string());
+        let verdict = RuleVerdict {
+            rule,
+            outcome: outcome_word(decision.outcome).to_string(),
+            detail: decision.detail,
+        };
+        if let Some(group) = decisions.iter_mut().find(|g| g.event_id == decision.event_id) {
+            group.verdicts.push(verdict);
+            continue;
+        }
         let task = store
             .task(&decision.task_id)
             .await
             .map_err(fail)?
             .map(|facts| format!("{} {}", facts.row.task_key, facts.row.title))
             .unwrap_or_else(|| "a task that is gone".to_string());
-        decisions.push(DecisionLine {
-            at: izlek_core::detail::moment_label(decision.at),
+        let happened = event_happened(&store, &decision.event_id).await.map_err(fail)?;
+        decisions.push(DecisionGroup {
+            event_id: decision.event_id,
             task,
-            outcome: outcome_word(decision.outcome).to_string(),
-            detail: decision.detail,
+            happened,
+            at: izlek_core::detail::moment_label(decision.at),
+            verdicts: vec![verdict],
         });
     }
 
@@ -242,15 +306,36 @@ fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
     let decision_rows = snapshot
         .decisions
         .into_iter()
-        .map(|line| {
+        .map(|group| {
+            let header = match group.happened {
+                Some(happened) => format!("{} · {}", group.task, happened),
+                None => group.task,
+            };
+            let verdict_rows = group
+                .verdicts
+                .into_iter()
+                .map(|verdict| {
+                    let chip_class = if verdict.outcome == "queued" {
+                        "rule-term rule-term-queued"
+                    } else {
+                        "rule-term"
+                    };
+                    view! {
+                        <div class="decision-verdict">
+                            <span class="rule-term">{verdict.rule}</span>
+                            <span class=chip_class>{verdict.outcome}</span>
+                            <span>{verdict.detail}</span>
+                        </div>
+                    }
+                })
+                .collect_view();
             view! {
-                <div class="rule-row">
-                    <div class="rule-sentence">
-                        <span>{line.task}</span>
-                        <span class="rule-term">{line.outcome}</span>
-                        <span>{line.detail}</span>
+                <div class="decision-block">
+                    <div class="decision-head">
+                        <span class="decision-title">{header}</span>
+                        <span class="rule-stamp">{group.at}</span>
                     </div>
-                    <span class="rule-stamp">{line.at}</span>
+                    <div class="decision-verdicts">{verdict_rows}</div>
                 </div>
             }
         })
