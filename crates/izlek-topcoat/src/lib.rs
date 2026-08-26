@@ -3,6 +3,8 @@
 // first overflow.
 #![recursion_limit = "256"]
 
+pub mod auth;
 pub mod layout;
+pub mod pages;
 pub mod server;
 pub mod smtp;

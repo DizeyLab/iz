@@ -5,17 +5,12 @@ use topcoat::{
     Result,
     asset::{Asset, asset},
     router::{
-        StatusCode, layout, page,
+        StatusCode, page,
+        layout,
         error::{NotFoundError, not_found},
     },
     view::view,
 };
-
-/// Placeholder landing page — the real board view lands in a later slice.
-#[page("/")]
-async fn landing() -> Result {
-    view! { <main class="scaffold-note"><p>"Izlek"</p></main> }
-}
 
 /// Every path that matches no page raises a `NotFoundError`, so it renders
 /// through `root_layout`'s catch below rather than the router's bare default.

@@ -338,6 +338,73 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// The refusal in words, ported verbatim from `izlek-web/src/auth.rs`.
+    pub fn message(&self) -> String {
+        match self {
+            Refusal::Rejected => "That did not work.".to_string(),
+            Refusal::RateLimited => {
+                "Too many attempts — wait a few minutes and try again.".to_string()
+            }
+            Refusal::Password(problem) => problem.clone(),
+            Refusal::Forbidden => "Not permitted.".to_string(),
+            Refusal::SignInFirst => "Sign in first.".to_string(),
+            Refusal::AlreadyClaimed => "This workspace already has an owner.".to_string(),
+            Refusal::AddressTaken => "That address already has an account.".to_string(),
+            Refusal::LinkNotUsable => "This link no longer works.".to_string(),
+            Refusal::EmptyTitle => "Give the task a title.".to_string(),
+            Refusal::EmptyName => "Give yourself a name.".to_string(),
+            Refusal::BadLimit => {
+                "A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."
+                    .to_string()
+            }
+            Refusal::BadFileType => {
+                "File types are extensions — png, pdf, zip — separated by commas.".to_string()
+            }
+            Refusal::BadSender(problem) => problem.clone(),
+            Refusal::EmptyComment => "Write something first.".to_string(),
+            Refusal::NoFile => "Choose a file first.".to_string(),
+            Refusal::FileTooBig => "Too big for this workspace.".to_string(),
+            Refusal::FileTypeNotAllowed => {
+                "That kind of file is not on this workspace's allowed list.".to_string()
+            }
+            Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
+            Refusal::BadDeadline => "That is not a date.".to_string(),
+            Refusal::Cycle => "That link would put this task behind itself.".to_string(),
+            Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
+            Refusal::NotFound => "No such task.".to_string(),
+            Refusal::Unavailable => "Something went wrong.".to_string(),
+        }
+    }
+
+    /// The refusal a `code` names, or nothing. Nothing for an unknown word: the
+    /// query is whatever the address bar holds, so a code that is not one of
+    /// ours says nothing at all rather than something invented.
+    pub fn from_code(code: &str) -> Option<Refusal> {
+        Some(match code {
+            "rejected" => Refusal::Rejected,
+            "rate-limited" => Refusal::RateLimited,
+            "password-short" => Refusal::Password("at least 10 characters".to_string()),
+            "password-you" => Refusal::Password("not your address or your name".to_string()),
+            "forbidden" => Refusal::Forbidden,
+            "sign-in-first" => Refusal::SignInFirst,
+            "already-claimed" => Refusal::AlreadyClaimed,
+            "address-taken" => Refusal::AddressTaken,
+            "link-not-usable" => Refusal::LinkNotUsable,
+            "empty-title" => Refusal::EmptyTitle,
+            "empty-comment" => Refusal::EmptyComment,
+            "no-file" => Refusal::NoFile,
+            "file-too-big" => Refusal::FileTooBig,
+            "file-type" => Refusal::FileTypeNotAllowed,
+            "empty-subject" => Refusal::EmptySubject,
+            "bad-deadline" => Refusal::BadDeadline,
+            "cycle" => Refusal::Cycle,
+            "moved-already" => Refusal::MovedAlready,
+            "not-found" => Refusal::NotFound,
+            "unavailable" => Refusal::Unavailable,
+            _ => return None,
+        })
+    }
+
     /// The refusal as a short word, for the address bar.
     ///
     /// A browser without script never sees a call's return value: it posts the
@@ -394,6 +461,32 @@ pub fn call_id(path: &str) -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
         .collect()
+}
+
+/// What a call refused with, however the browser without script carried it
+/// back — read straight off the query, since there is no client-side action
+/// value to check first the way a hydrated leptos page had.
+///
+/// Ported from `izlek-web/src/auth.rs`'s `refusal_of`/`refusal_from_query`,
+/// collapsed into one function: every topcoat page is rendered server-side on
+/// every request, so there is only ever the query to read.
+pub fn refusal_of(cx: &Cx, call: &str) -> Option<Refusal> {
+    let query = topcoat::router::request::uri(cx).query()?;
+    let mut code = None;
+    let mut on = None;
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            match key {
+                "refusal" => code = Some(value),
+                "on" => on = Some(value),
+                _ => {}
+            }
+        }
+    }
+    if on? != call {
+        return None;
+    }
+    Refusal::from_code(code?)
 }
 
 /// Puts a refusal on the redirect a browser without script follows.
@@ -577,6 +670,79 @@ mod refusal_redirect_tests {
     #[test]
     fn a_call_with_no_name_carries_nothing() {
         assert_eq!(carrying("http://izlek.sh/", "cycle", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod refusal_message_tests {
+    use super::Refusal;
+
+    #[test]
+    fn every_refusal_survives_the_address_bar() {
+        let all = [
+            Refusal::Rejected,
+            Refusal::RateLimited,
+            Refusal::Password("at least 10 characters".to_string()),
+            Refusal::Password("not your address or your name".to_string()),
+            Refusal::Forbidden,
+            Refusal::SignInFirst,
+            Refusal::AlreadyClaimed,
+            Refusal::AddressTaken,
+            Refusal::LinkNotUsable,
+            Refusal::EmptyTitle,
+            Refusal::EmptyComment,
+            Refusal::NoFile,
+            Refusal::FileTooBig,
+            Refusal::FileTypeNotAllowed,
+            Refusal::BadDeadline,
+            Refusal::Cycle,
+            Refusal::MovedAlready,
+            Refusal::NotFound,
+            Refusal::Unavailable,
+        ];
+        for refusal in all {
+            assert_eq!(
+                Refusal::from_code(refusal.code()).as_ref(),
+                Some(&refusal),
+                "{} did not come back as itself",
+                refusal.code()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_code_says_nothing() {
+        assert_eq!(Refusal::from_code("not-a-refusal"), None);
+        assert_eq!(Refusal::from_code(""), None);
+    }
+}
+
+#[cfg(test)]
+mod refusal_of_tests {
+    use super::{Cx, Refusal, refusal_of};
+    use topcoat::context::CxTestBuilder;
+
+    fn cx_at(uri: &str) -> Cx {
+        let (parts, ()) = http::Request::builder().uri(uri).body(()).unwrap().into_parts();
+        CxTestBuilder::new().request_context(parts).build()
+    }
+
+    #[test]
+    fn reads_a_matching_refusal_off_the_query() {
+        let cx = cx_at("/?refusal=cycle&on=sign_in");
+        assert_eq!(refusal_of(&cx, "sign_in"), Some(Refusal::Cycle));
+    }
+
+    #[test]
+    fn a_refusal_for_another_call_is_not_this_one() {
+        let cx = cx_at("/?refusal=cycle&on=link_tasks");
+        assert_eq!(refusal_of(&cx, "sign_in"), None);
+    }
+
+    #[test]
+    fn no_query_carries_nothing() {
+        let cx = cx_at("/");
+        assert_eq!(refusal_of(&cx, "sign_in"), None);
     }
 }
 
