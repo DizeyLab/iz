@@ -1697,6 +1697,35 @@ impl Store for TursoStore {
         Ok(out)
     }
 
+    async fn mail_rule(&self, rule_id: &str) -> Result<Option<MailRule>> {
+        let sql = format!("SELECT {RULE_COLUMNS} FROM mail_rule WHERE id = ?1");
+        match self.one_row(&sql, params![rule_id]).await? {
+            Some(row) => rule_from(&row).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn transition(&self, transition_id: &str) -> Result<Option<Transition>> {
+        match self
+            .one_row(
+                "SELECT id, task_id, from_column, to_column, actor_id, created_at \
+                 FROM transition WHERE id = ?1",
+                params![transition_id],
+            )
+            .await?
+        {
+            Some(row) => Ok(Some(Transition {
+                id: text(&row, 0)?,
+                task_id: text(&row, 1)?,
+                from_column: text(&row, 2)?,
+                to_column: text(&row, 3)?,
+                actor_id: text(&row, 4)?,
+                at: parse_stamp(&text(&row, 5)?)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
     async fn set_mail_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()> {
         let n = self
             .conn

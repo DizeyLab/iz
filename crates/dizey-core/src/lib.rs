@@ -19,6 +19,8 @@ pub mod auth;
 #[cfg(feature = "server")]
 pub mod config;
 #[cfg(feature = "server")]
+pub mod mail;
+#[cfg(feature = "server")]
 pub mod store;
 
 #[cfg(feature = "server")]
@@ -29,5 +31,7 @@ pub use board::{BoardReads, load as load_board};
 pub use config::{Config, ConfigError};
 #[cfg(feature = "server")]
 pub use detail::{DetailReads, load as load_detail};
+#[cfg(feature = "server")]
+pub use mail::{Engine as MailEngine, MailError, Mailer, Outgoing};
 #[cfg(feature = "server")]
 pub use store::{Store, StoreError, TursoStore};

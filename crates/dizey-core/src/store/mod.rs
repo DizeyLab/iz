@@ -469,6 +469,14 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// lists what exists, not what is live.
     async fn mail_rules(&self, board_id: &str) -> Result<Vec<MailRule>>;
 
+    /// One rule, for a retry that has only the send row to go on.
+    async fn mail_rule(&self, rule_id: &str) -> Result<Option<MailRule>>;
+
+    /// One crossing, by id. A retry rebuilds its mail from the facts as they
+    /// were committed, and the crossing's own clock is one of them: a send
+    /// retried on Thursday still says the card moved on Tuesday.
+    async fn transition(&self, transition_id: &str) -> Result<Option<crate::board::Transition>>;
+
     async fn set_mail_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()>;
 
     async fn delete_mail_rule(&self, rule_id: &str) -> Result<()>;

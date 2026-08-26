@@ -2877,3 +2877,317 @@ async fn deleting_a_rule_takes_its_ledger_with_it() {
         Err(StoreError::NotFound)
     ));
 }
+
+// -- the engine ------------------------------------------------------------
+
+use dizey_core::mail::{Engine, MailError, Mailer, Outgoing, backoff};
+use std::sync::Mutex;
+
+/// A mail server that remembers instead of sending, and refuses when told to.
+struct Remembering {
+    sent: Mutex<Vec<Outgoing>>,
+    refusals: Mutex<Vec<MailError>>,
+}
+
+impl Remembering {
+    fn taking_everything() -> Arc<Self> {
+        Arc::new(Self {
+            sent: Mutex::new(Vec::new()),
+            refusals: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Refuses the next `refusals.len()` attempts, in order, then accepts.
+    fn refusing(refusals: Vec<MailError>) -> Arc<Self> {
+        Arc::new(Self {
+            sent: Mutex::new(Vec::new()),
+            refusals: Mutex::new(refusals.into_iter().rev().collect()),
+        })
+    }
+
+    fn sent(&self) -> Vec<Outgoing> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Mailer for Remembering {
+    async fn send(&self, mail: &Outgoing) -> Result<(), MailError> {
+        if let Some(refusal) = self.refusals.lock().unwrap().pop() {
+            return Err(refusal);
+        }
+        self.sent.lock().unwrap().push(mail.clone());
+        Ok(())
+    }
+}
+
+/// A store shared between the tests and an engine.
+async fn shared() -> (PathBuf, Arc<TursoStore>, String, String) {
+    let dir = std::env::temp_dir().join(format!("dizey-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = Arc::new(
+        TursoStore::open(dir.join("dizey.db").to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let (workspace, admin) = claim(&store).await;
+    (dir, store, workspace, admin)
+}
+
+#[tokio::test]
+async fn a_crossing_mails_the_people_on_the_card_once() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(
+        &store,
+        &workspace,
+        "Backlog",
+        "CLI install script",
+        None,
+        &admin,
+    )
+    .await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+
+    let first = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(first.sent, 1);
+    // The engine running again over the same crossing — a restart, a second
+    // worker — owns nothing and sends nothing. The index decided, not a read.
+    let second = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(second.sent, 0);
+    assert_eq!(second.already_owned, 1);
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@dizey.sh");
+    assert_eq!(sent[0].subject, "Task completed");
+    assert!(sent[0].body.contains("CLI install script"));
+    assert!(
+        sent[0].body.contains("https://dizey.sh/?task="),
+        "the mail links back to the task: {}",
+        sent[0].body
+    );
+    assert_eq!(store.sends_for_rule(&rule.id, 10).await.unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_edited_rule_does_not_remail_a_crossing_it_already_covered() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&transition).await.unwrap();
+
+    // Switching a rule off and on again — the shape an edit takes — does not
+    // change what it has already covered: the ledger is keyed by the rule and
+    // the crossing, so a re-run mails nobody about a crossing from last week.
+    store.set_mail_rule_enabled(&rule.id, false).await.unwrap();
+    store.set_mail_rule_enabled(&rule.id, true).await.unwrap();
+    let again = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(again.sent, 0);
+    assert_eq!(mailer.sent().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rule_that_is_off_sends_nothing() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+    store.set_mail_rule_enabled(&rule.id, false).await.unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    assert_eq!(
+        engine.on_transition(&transition).await.unwrap(),
+        Default::default()
+    );
+    assert!(mailer.sent().is_empty());
+    // Nothing was claimed either: an off rule owes nobody anything, and the
+    // ledger must not fill up with rows a later run would skip.
+    assert!(store.sends_for_rule(&rule.id, 10).await.unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_mail_says_when_the_card_moved_not_when_it_was_sent() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    // The server is down when the card moves and comes back later. The mail
+    // that finally goes out has to say Tuesday, not Thursday.
+    let mailer = Remembering::refusing(vec![MailError::retryable("connection refused")]);
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let refused = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(refused.failed, 1);
+    assert!(mailer.sent().is_empty());
+
+    let later = OffsetDateTime::now_utc() + Duration::hours(2);
+    let delivered = engine.deliver_owed(later, 10).await.unwrap();
+    assert_eq!(delivered.sent, 1);
+    let body = mailer.sent()[0].body.clone();
+    let moved_day = transition.at.day();
+    assert!(
+        body.contains(&format!("{moved_day} at")),
+        "the mail says when the card moved: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_failing_send_is_retried_a_bounded_number_of_times_and_then_written_off() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::refusing(
+        (0..dizey_core::mail::MAX_ATTEMPTS)
+            .map(|_| MailError::retryable("connection timed out"))
+            .collect(),
+    );
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&transition).await.unwrap();
+
+    let mut when = OffsetDateTime::now_utc();
+    for _ in 1..dizey_core::mail::MAX_ATTEMPTS {
+        when += backoff(dizey_core::mail::MAX_ATTEMPTS) + Duration::minutes(1);
+        engine.deliver_owed(when, 10).await.unwrap();
+    }
+
+    let ledger = &store.sends_for_rule(&rule.id, 10).await.unwrap()[0];
+    assert_eq!(ledger.attempts, dizey_core::mail::MAX_ATTEMPTS);
+    assert_eq!(ledger.state, SendState::Abandoned);
+    assert_eq!(ledger.last_error.as_deref(), Some("connection timed out"));
+    assert!(
+        store
+            .sends_owed(when + Duration::days(7), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a written-off send is not owed again"
+    );
+    assert!(mailer.sent().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_refused_address_is_written_off_at_the_first_answer() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::refusing(vec![MailError::permanent("550 no such mailbox")]);
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let report = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(report.abandoned, 1);
+
+    let ledger = &store.sends_for_rule(&rule.id, 10).await.unwrap()[0];
+    assert_eq!(ledger.state, SendState::Abandoned);
+    assert_eq!(ledger.attempts, 1, "a refused address is asked once");
+    assert_eq!(ledger.last_error.as_deref(), Some("550 no such mailbox"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn you_can_start_now_waits_for_the_last_blocker() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let waiting = add_task(
+        &store,
+        &workspace,
+        "Backlog",
+        "Onboarding mails",
+        None,
+        &admin,
+    )
+    .await;
+    let first = add_task(&store, &workspace, "Backlog", "Signing keys", None, &admin).await;
+    let second = add_task(
+        &store,
+        &workspace,
+        "Backlog",
+        "Install script",
+        None,
+        &admin,
+    )
+    .await;
+    store.assign_task(&waiting, &mate).await.unwrap();
+    let now = OffsetDateTime::now_utc();
+    store.add_dependency(&waiting, &first, now).await.unwrap();
+    store.add_dependency(&waiting, &second, now).await.unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Unblocked,
+            "You can start now",
+            Audience::Assignees,
+            now,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+
+    // One blocker finished is not unblocked: the other one is still in the way,
+    // and telling Emre to start would be a lie.
+    let one = moved_to(&store, &workspace, &first, "Backlog", "Done", &admin).await;
+    assert_eq!(engine.on_transition(&one).await.unwrap().sent, 0);
+    assert!(mailer.sent().is_empty());
+
+    let two = moved_to(&store, &workspace, &second, "Backlog", "Done", &admin).await;
+    assert_eq!(engine.on_transition(&two).await.unwrap().sent, 1);
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@dizey.sh");
+    assert!(
+        sent[0].body.contains("Onboarding mails"),
+        "the mail is about the freed task, not the blocker: {}",
+        sent[0].body
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_card_that_did_not_move_owes_nobody_a_mail() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    // Dropped back where it came from. There is no transition to hand the
+    // engine, and that is the point: nothing recomputed from the card's column
+    // could tell the difference.
+    let backlog = column_named(&store, &workspace, "Backlog").await;
+    let outcome = store
+        .move_task(&task, &backlog, &backlog, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert_eq!(outcome, Moved::Unchanged);
+    let _ = std::fs::remove_dir_all(&dir);
+}
