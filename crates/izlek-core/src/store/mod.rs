@@ -215,6 +215,16 @@ pub enum Trigger {
     StatusBecomes(String),
     /// A task whose last blocker just finished, so the people on it can start.
     Unblocked,
+    Created,
+    Assigned,
+    Unassigned,
+    Commented,
+    DeadlineSet,
+    DeadlineCleared,
+    Retitled,
+    Linked,
+    Unlinked,
+    Deleted,
 }
 
 /// Who a rule mails. A Viewer appears in neither list — a Viewer cannot be
@@ -224,6 +234,8 @@ pub enum Trigger {
 pub enum Audience {
     Assignees,
     Board,
+    /// Whoever opened the card.
+    Creator,
 }
 
 /// One sentence: when this happens, send this subject to these people.
@@ -731,6 +743,17 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// lists what exists, not what is live.
     async fn mail_rules(&self, board_id: &str) -> Result<Vec<MailRule>>;
 
+    /// Rewrites a rule's sentence — its trigger, subject and audience — in
+    /// place. `enabled` and `created_at` are untouched, so an edit does not
+    /// silently turn a rule back on or reset when it was made.
+    async fn update_mail_rule(
+        &self,
+        rule_id: &str,
+        trigger: &Trigger,
+        subject: &str,
+        audience: Audience,
+    ) -> Result<()>;
+
     /// The board a task belongs to, reading through the soft delete —
     /// `None` only if the task id never existed. A crossing whose task was
     /// deleted before the engine ran still owes its rules a `task_gone` row,
@@ -855,4 +878,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Everyone who may write on the board. Viewers are left out here, in the
     /// store, so no caller can mail one by forgetting to filter.
     async fn recipients_for_board(&self, board_id: &str) -> Result<Vec<Recipient>>;
+
+    /// Whoever opened the task, unless they are a Viewer.
+    async fn recipients_for_task_creator(&self, task_id: &str) -> Result<Vec<Recipient>>;
 }

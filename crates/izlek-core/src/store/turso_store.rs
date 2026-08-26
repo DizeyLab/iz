@@ -271,6 +271,19 @@ fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
     match trigger {
         Trigger::StatusBecomes(column) => ("status", Some(column.clone())),
         Trigger::Unblocked => ("unblocked", None),
+        Trigger::Created => ("created", None),
+        Trigger::Assigned => ("assigned", None),
+        Trigger::Unassigned => ("unassigned", None),
+        // No ActivityKind::Commented exists in `detail.rs` — a comment never
+        // writes an activity line — so this word is chosen to match the
+        // shape of the rest rather than lifted from `ActivityKind::as_str`.
+        Trigger::Commented => ("commented", None),
+        Trigger::DeadlineSet => ("deadline_set", None),
+        Trigger::DeadlineCleared => ("deadline_cleared", None),
+        Trigger::Retitled => ("retitled", None),
+        Trigger::Linked => ("linked", None),
+        Trigger::Unlinked => ("unlinked", None),
+        Trigger::Deleted => ("deleted", None),
     }
 }
 
@@ -278,6 +291,7 @@ fn audience_text(audience: Audience) -> &'static str {
     match audience {
         Audience::Assignees => "assignees",
         Audience::Board => "board",
+        Audience::Creator => "creator",
     }
 }
 
@@ -287,11 +301,22 @@ fn rule_from(row: &Row) -> Result<MailRule> {
     let trigger = match (kind.as_str(), column) {
         ("status", Some(column)) => Trigger::StatusBecomes(column),
         ("unblocked", None) => Trigger::Unblocked,
+        ("created", None) => Trigger::Created,
+        ("assigned", None) => Trigger::Assigned,
+        ("unassigned", None) => Trigger::Unassigned,
+        ("commented", None) => Trigger::Commented,
+        ("deadline_set", None) => Trigger::DeadlineSet,
+        ("deadline_cleared", None) => Trigger::DeadlineCleared,
+        ("retitled", None) => Trigger::Retitled,
+        ("linked", None) => Trigger::Linked,
+        ("unlinked", None) => Trigger::Unlinked,
+        ("deleted", None) => Trigger::Deleted,
         (kind, _) => return Err(StoreError::Corrupt(format!("mail rule trigger {kind:?}"))),
     };
     let audience = match text(row, 5)?.as_str() {
         "assignees" => Audience::Assignees,
         "board" => Audience::Board,
+        "creator" => Audience::Creator,
         other => return Err(StoreError::Corrupt(format!("mail rule audience {other:?}"))),
     };
     Ok(MailRule {
@@ -2056,6 +2081,29 @@ impl Store for TursoStore {
         Ok(out)
     }
 
+    async fn update_mail_rule(
+        &self,
+        rule_id: &str,
+        trigger: &Trigger,
+        subject: &str,
+        audience: Audience,
+    ) -> Result<()> {
+        let (kind, column) = trigger_parts(trigger);
+        let n = self
+            .conn
+            .execute(
+                "UPDATE mail_rule SET trigger_kind = ?1, trigger_column = ?2, subject = ?3, \
+                 audience = ?4 WHERE id = ?5",
+                params![kind, column, subject, audience_text(audience), rule_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn mail_rule(&self, rule_id: &str) -> Result<Option<MailRule>> {
         let sql = format!("SELECT {RULE_COLUMNS} FROM mail_rule WHERE id = ?1");
         match self.one_row(&sql, params![rule_id]).await? {
@@ -2487,6 +2535,20 @@ impl Store for TursoStore {
                  JOIN board b ON b.workspace_id = u.workspace_id \
                  WHERE b.id = ?1 AND u.role <> ?2 ORDER BY u.display_name",
                 params![board_id, Role::Viewer.as_str()],
+            )
+            .await
+            .map_err(backend)?;
+        recipients_from(&mut rows).await
+    }
+
+    async fn recipients_for_task_creator(&self, task_id: &str) -> Result<Vec<Recipient>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT u.id, u.email, u.display_name FROM task t \
+                 JOIN user u ON u.id = t.created_by \
+                 WHERE t.id = ?1 AND u.role <> ?2",
+                params![task_id, Role::Viewer.as_str()],
             )
             .await
             .map_err(backend)?;

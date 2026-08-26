@@ -246,6 +246,29 @@ impl Engine {
                         )
                         .await?;
                 }
+                // A crossing does not fire any trigger below — the engine for
+                // these is S4's work.
+                Trigger::Created
+                | Trigger::Assigned
+                | Trigger::Unassigned
+                | Trigger::Commented
+                | Trigger::DeadlineSet
+                | Trigger::DeadlineCleared
+                | Trigger::Retitled
+                | Trigger::Linked
+                | Trigger::Unlinked
+                | Trigger::Deleted => {
+                    self.store
+                        .record_mail_decision(
+                            &rule.id,
+                            event.id(),
+                            &transition.task_id,
+                            MailOutcome::NotMatched,
+                            "not a status crossing",
+                            event.at(),
+                        )
+                        .await?;
+                }
             }
         }
         Ok(report)
@@ -307,6 +330,28 @@ impl Engine {
                                 task_id,
                                 MailOutcome::NotMatched,
                                 &detail,
+                                event.at(),
+                            )
+                            .await?;
+                    }
+                    // A freeing does not fire any trigger below — S4's work.
+                    Trigger::Created
+                    | Trigger::Assigned
+                    | Trigger::Unassigned
+                    | Trigger::Commented
+                    | Trigger::DeadlineSet
+                    | Trigger::DeadlineCleared
+                    | Trigger::Retitled
+                    | Trigger::Linked
+                    | Trigger::Unlinked
+                    | Trigger::Deleted => {
+                        self.store
+                            .record_mail_decision(
+                                &rule.id,
+                                event.id(),
+                                task_id,
+                                MailOutcome::NotMatched,
+                                "not an unblocked event",
                                 event.at(),
                             )
                             .await?;
@@ -376,6 +421,7 @@ impl Engine {
         let recipients = match rule.audience {
             Audience::Assignees => self.store.recipients_for_task(task_id).await?,
             Audience::Board => self.store.recipients_for_board(&rule.board_id).await?,
+            Audience::Creator => self.store.recipients_for_task_creator(task_id).await?,
         };
         let resolved_nobody = recipients.is_empty();
         let now = OffsetDateTime::now_utc();
@@ -558,6 +604,9 @@ impl Engine {
             (Event::Moved(_), Trigger::Unblocked) => {
                 format!("{} finished the last task it was waiting on.", actor)
             }
+            // A crossing composing one of these is not a wired path yet —
+            // S4's work — so this only needs to be exhaustive, not right.
+            (Event::Moved(_), _) => format!("{} touched it.", actor),
             (Event::Freed(freeing), _) => format!(
                 "{} deleted {} — {}, the last task it was waiting on.",
                 actor, freeing.cause_key, freeing.cause_title

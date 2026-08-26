@@ -3944,6 +3944,162 @@ async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn a_rule_round_trips_every_word_the_board_speaks() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let board = scratch.store.board(&workspace).await.unwrap().unwrap();
+
+    let triggers = [
+        Trigger::Created,
+        Trigger::Assigned,
+        Trigger::Unassigned,
+        Trigger::Commented,
+        Trigger::DeadlineSet,
+        Trigger::DeadlineCleared,
+        Trigger::Retitled,
+        Trigger::Linked,
+        Trigger::Unlinked,
+        Trigger::Deleted,
+    ];
+    for trigger in triggers {
+        let rule = scratch
+            .store
+            .create_mail_rule(
+                &board.id,
+                &trigger,
+                "A word the board speaks",
+                Audience::Assignees,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let reread = scratch
+            .store
+            .mail_rules(&board.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == rule.id)
+            .expect("the rule survived a reread");
+        assert_eq!(reread.trigger, trigger, "trigger did not round-trip");
+    }
+}
+
+#[tokio::test]
+async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+    scratch
+        .store
+        .record_mail_decision(
+            &rule.id,
+            &transition.id,
+            &task,
+            MailOutcome::Owed,
+            "",
+            now,
+        )
+        .await
+        .unwrap();
+
+    scratch
+        .store
+        .update_mail_rule(&rule.id, &Trigger::Unblocked, "New subject", Audience::Board)
+        .await
+        .unwrap();
+
+    let updated = scratch.store.mail_rule(&rule.id).await.unwrap().unwrap();
+    assert_eq!(updated.id, rule.id);
+    assert_eq!(updated.trigger, Trigger::Unblocked);
+    assert_eq!(updated.subject, "New subject");
+    assert_eq!(updated.audience, Audience::Board);
+    assert_eq!(updated.enabled, rule.enabled);
+    assert_eq!(updated.created_at, rule.created_at);
+
+    let decisions = scratch.store.recent_mail_decisions(10).await.unwrap();
+    assert!(
+        decisions.iter().any(|d| d.rule_id == rule.id),
+        "the pre-existing decision no longer joins to the rule"
+    );
+
+    assert!(matches!(
+        scratch
+            .store
+            .update_mail_rule(
+                "no-such-rule",
+                &Trigger::Unblocked,
+                "x",
+                Audience::Board
+            )
+            .await,
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn a_rules_creator_audience_names_who_opened_the_card() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let watcher = scratch
+        .store
+        .create_user(NewUser {
+            workspace_id: workspace.clone(),
+            email: "viewer@izlek.sh".into(),
+            display_name: "Vera".into(),
+            role: Role::Viewer,
+            invited_by: None,
+        })
+        .await
+        .unwrap();
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let creators = scratch
+        .store
+        .recipients_for_task_creator(&task)
+        .await
+        .unwrap();
+    assert_eq!(
+        creators.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(),
+        [admin.as_str()]
+    );
+
+    let watcher_task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Watched",
+        None,
+        &watcher.id,
+    )
+    .await;
+    assert!(
+        scratch
+            .store
+            .recipients_for_task_creator(&watcher_task)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a Viewer creator was about to be mailed"
+    );
+}
+
 /// Who made an account is recorded when it is made. The first account was made
 /// by nobody, and says so rather than pointing at itself.
 #[tokio::test]
