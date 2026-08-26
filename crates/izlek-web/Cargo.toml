@@ -1,0 +1,71 @@
+[package]
+name = "izlek-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Izlek web app: leptos UI, server functions and the axum server"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.9.0-beta" }
+leptos_router = { version = "0.9.0-beta1" }
+leptos_meta = { version = "0.9.0-beta" }
+leptos_axum = { version = "0.9.0-beta", optional = true }
+serde.workspace = true
+time.workspace = true
+thiserror.workspace = true
+
+izlek-core = { workspace = true }
+axum = { version = "0.8.9", features = ["multipart"], optional = true }
+tokio = { workspace = true, optional = true }
+tower = { version = "0.5.2", optional = true }
+tower-http = { version = "0.7.0", features = ["fs", "compression-gzip"], optional = true }
+async-trait = { version = "0.1.92", optional = true }
+turso = { workspace = true, optional = true }
+# TLS through rustls with the ring provider: no OpenSSL on the deployment box,
+# and no system certificate store to be missing inside a container.
+lettre = { version = "0.11.23", default-features = false, features = [
+  "smtp-transport",
+  "builder",
+  "tokio1-rustls",
+  "ring",
+  "webpki-roots",
+  "pool",
+], optional = true }
+serde_json = { workspace = true, optional = true }
+
+console_error_panic_hook = { version = "0.1.7", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = []
+hydrate = [
+  "leptos/hydrate",
+  "dep:console_error_panic_hook",
+  "dep:wasm-bindgen",
+]
+ssr = [
+  "leptos/ssr",
+  "leptos_meta/ssr",
+  "leptos_router/ssr",
+  "dep:leptos_axum",
+  "dep:axum",
+  "dep:tokio",
+  "dep:tower",
+  "dep:tower-http",
+  "izlek-core/server",
+  "dep:turso",
+  "dep:serde_json",
+  "dep:lettre",
+  "dep:async-trait",
+]
+
+# The HTTP test drives the real router, so it needs the server side of the app.
+# Run it with `cargo test -p izlek-web --features ssr`.
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.5.2", features = ["util"] }
+uuid = { workspace = true }

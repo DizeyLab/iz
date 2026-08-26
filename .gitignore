@@ -4,6 +4,6 @@
 *.db
 *.db-*
 .env
-dizey.key
-dizey.toml
+izlek.key
+izlek.toml
 CLAUDE.md

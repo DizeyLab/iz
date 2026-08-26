@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/dizey-core", "crates/dizey-web"]
+members = ["crates/izlek-core", "crates/izlek-web"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/DizeyLab/izlek"
+repository = "https://github.com/IzlekLab/izlek"
 
 [workspace.dependencies]
-dizey-core = { path = "crates/dizey-core", default-features = false }
+izlek-core = { path = "crates/izlek-core", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.20"
@@ -31,10 +31,10 @@ lto = true
 
 # cargo-leptos drives the two-target (server bin + wasm lib) build.
 [[workspace.metadata.leptos]]
-name = "dizey"
-bin-package = "dizey-web"
-lib-package = "dizey-web"
-output-name = "dizey"
+name = "izlek"
+bin-package = "izlek-web"
+lib-package = "izlek-web"
+output-name = "izlek"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "style/main.scss"
