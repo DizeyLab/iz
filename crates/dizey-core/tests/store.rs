@@ -75,6 +75,7 @@ async fn member(store: &TursoStore, workspace_id: &str, email: &str, name: &str)
             email: email.into(),
             display_name: name.into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await
         .unwrap()
@@ -88,14 +89,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 6);
+    assert_eq!(first.schema_version().await.unwrap(), 7);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 6);
+    assert_eq!(second.schema_version().await.unwrap(), 7);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -254,6 +255,7 @@ async fn an_invited_member_has_no_password_until_they_choose_one() {
             email: "grace@dizey.sh".into(),
             display_name: "Grace".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -279,6 +281,7 @@ async fn addresses_are_unique_and_case_insensitive() {
             email: "  ADA@Dizey.sh ".into(),
             display_name: "Ada again".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await;
     assert!(matches!(dup, Err(StoreError::Conflict("account"))));
@@ -321,6 +324,7 @@ async fn members_list_and_count_for_the_admin_screen() {
                 email: email.into(),
                 display_name: name.into(),
                 role,
+                invited_by: None,
             })
             .await
             .unwrap();
@@ -341,6 +345,7 @@ async fn profile_and_role_updates_stick() {
             email: "grace@dizey.sh".into(),
             display_name: "Grace".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -410,6 +415,7 @@ async fn a_signin_link_stores_only_the_hash_and_is_used_once() {
             email: "grace@dizey.sh".into(),
             display_name: "Grace".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -474,6 +480,7 @@ async fn an_expired_link_is_still_a_live_account() {
             email: "grace@dizey.sh".into(),
             display_name: "Grace".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -1503,6 +1510,7 @@ async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
             email: "mel@dizey.sh".into(),
             display_name: "Mel Duarte".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -1814,6 +1822,7 @@ async fn a_viewer_is_never_offered_as_an_assignee() {
             email: "quiet@dizey.sh".into(),
             display_name: "Quiet Reader".into(),
             role: Role::Viewer,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -2083,6 +2092,7 @@ async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
                 email: format!("member{n}@dizey.sh"),
                 display_name: format!("Member {n}"),
                 role: Role::Member,
+                invited_by: None,
             })
             .await
             .unwrap();
@@ -2395,6 +2405,7 @@ async fn an_orphan_row_is_refused() {
             email: "orphan@dizey.sh".into(),
             display_name: "Orphan".into(),
             role: Role::Member,
+            invited_by: None,
         })
         .await;
     assert!(
@@ -2784,6 +2795,7 @@ async fn a_viewer_is_never_a_recipient() {
             email: "viewer@dizey.sh".into(),
             display_name: "Vera".into(),
             role: Role::Viewer,
+            invited_by: None,
         })
         .await
         .unwrap();
@@ -3394,4 +3406,32 @@ async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() 
     assert_eq!(sent.len(), 1, "the board minus the person who moved it");
     assert_eq!(sent[0].to, "ada@dizey.sh");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Who made an account is recorded when it is made. The first account was made
+/// by nobody, and says so rather than pointing at itself.
+#[tokio::test]
+async fn an_account_records_the_admin_who_made_it() {
+    let (scratch, ws_id, admin_id) = workspace_with_admin().await;
+
+    let owner = scratch.store.user(&admin_id).await.unwrap().unwrap();
+    assert_eq!(owner.invited_by, None, "the first account named an inviter");
+
+    let member = scratch
+        .store
+        .create_user(NewUser {
+            workspace_id: ws_id,
+            email: "grace@dizey.sh".into(),
+            display_name: "Grace".into(),
+            role: Role::Member,
+            invited_by: Some(admin_id.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(member.invited_by.as_deref(), Some(admin_id.as_str()));
+
+    // And it survives a reread, which is the part a column that is only set in
+    // the INSERT would fail.
+    let reread = scratch.store.user(&member.id).await.unwrap().unwrap();
+    assert_eq!(reread.invited_by.as_deref(), Some(admin_id.as_str()));
 }

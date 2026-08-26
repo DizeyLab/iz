@@ -63,6 +63,9 @@ pub struct User {
     pub photo_path: Option<String>,
     pub created_at: OffsetDateTime,
     pub last_signed_in_at: Option<OffsetDateTime>,
+    /// Who made this account. Null for the first account, which nobody
+    /// invited.
+    pub invited_by: Option<String>,
 }
 
 impl User {
@@ -77,6 +80,8 @@ pub struct NewUser {
     pub email: String,
     pub display_name: String,
     pub role: Role,
+    /// The admin who is making this account, or none for the first one.
+    pub invited_by: Option<String>,
 }
 
 /// A first-sign-in link. Only the hash of the token is ever stored; the

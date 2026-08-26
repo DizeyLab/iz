@@ -278,6 +278,9 @@ pub enum Gate {
 pub struct Invited {
     pub display_name: String,
     pub email: String,
+    /// The name of whoever made the account. None only if that person's own
+    /// account has since been removed.
+    pub invited_by: Option<String>,
 }
 
 /// The workspace has exactly one name and no screen that sets it, so it is a
@@ -359,9 +362,18 @@ pub async fn invitation(token: String) -> Result<Option<Invited>, ServerFnError>
     else {
         return Ok(None);
     };
+    let invited_by = match &user.invited_by {
+        Some(admin_id) => store
+            .user(admin_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .map(|admin| admin.display_name),
+        None => None,
+    };
     Ok(Some(Invited {
         display_name: user.display_name,
         email: user.email,
+        invited_by,
     }))
 }
 

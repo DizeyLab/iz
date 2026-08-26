@@ -145,6 +145,7 @@ impl Accounts {
                 email: email.to_string(),
                 display_name: display_name.to_string(),
                 role,
+                invited_by: Some(actor.id.clone()),
             })
             .await
             .map_err(|e| match e {

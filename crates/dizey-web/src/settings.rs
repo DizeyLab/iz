@@ -348,10 +348,18 @@ fn SettingsScreen(
 ) -> impl IntoView {
     let me = snapshot.me.clone();
     let has_sender = snapshot.sender.is_some();
-    let role_note = if snapshot.administers {
-        "First account in this workspace. Only you see the sender, limits and member panels."
-    } else {
-        "You work the board and the rules mail you. The sender, the limits and the member list are the admin's."
+    // Three roles, three true sentences. A Viewer is never mailed by a rule, so
+    // the member's line is not merely vague for them, it is wrong.
+    let role_note = match me.role {
+        dizey_core::Role::Admin => {
+            "First account in this workspace. Only you see the sender, limits and member panels."
+        }
+        dizey_core::Role::Member => {
+            "You work the board and the rules mail you. The sender, the limits and the member list are the admin's."
+        }
+        dizey_core::Role::Viewer => {
+            "You read and export the board. No rule ever mails you, and the sender, the limits and the member list are the admin's."
+        }
     };
 
     view! {

@@ -1246,3 +1246,50 @@ async fn a_resent_link_opens_the_same_account() {
     assert_eq!(redeemed.body, "null", "{}", redeemed.body);
     assert!(redeemed.session.is_some(), "the resent link signed nobody in");
 }
+
+/// The first-sign-in screen greets the invited person with the name of whoever
+/// made the account. It once read back their own name, which is both wrong and
+/// the kind of wrong nobody reports.
+#[tokio::test]
+async fn an_invitation_names_the_admin_who_made_it_and_not_the_invitee() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::auth::InviteMember>(),
+            Some(&admin_cookie),
+            &[
+                ("email", "grace@dizey.sh"),
+                ("display_name", "Grace Hopper"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let token = answer
+        .body
+        .rsplit_once("/join/")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no invitation link")
+        .to_string();
+
+    let answer = app
+        .post(
+            path::<dizey_web::auth::Invitation>(),
+            None,
+            &[("token", token.as_str())],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(
+        answer.body.contains(r#""invited_by":"Ada Lovelace""#),
+        "the invitation does not name the admin: {}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains(r#""display_name":"Grace Hopper""#),
+        "the invitation lost the invitee: {}",
+        answer.body
+    );
+}

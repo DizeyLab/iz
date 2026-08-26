@@ -182,7 +182,13 @@ fn JoinCard(token: String, person: Invited) -> impl IntoView {
         let repeat = repeat.get();
         !repeat.is_empty() && repeat == chosen.get()
     };
-    let invited_by = person.display_name.clone();
+    // Who made the account, when that is still knowable. The fallback names no
+    // one rather than naming the wrong person: the invitee's own name used to
+    // sit here, greeting them with themselves.
+    let made_by = match person.invited_by.clone() {
+        Some(admin) => format!("{admin} made you an account. It has no password yet."),
+        None => "An admin made you an account. It has no password yet.".to_string(),
+    };
 
     view! {
         <main class="auth-stage">
@@ -192,7 +198,7 @@ fn JoinCard(token: String, person: Invited) -> impl IntoView {
                     <div class="auth-head">
                         <div class="auth-title">"Pick a password"</div>
                         <div class="auth-sub">
-                            {invited_by} " made you an account. It has no password yet."
+                            {made_by}
                         </div>
                     </div>
                     <div class="auth-field">

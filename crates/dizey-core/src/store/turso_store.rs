@@ -33,6 +33,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, include_str!("../../migrations/0004_mail.sql")),
     (5, include_str!("../../migrations/0005_freeing.sql")),
     (6, include_str!("../../migrations/0006_sender_is_config.sql")),
+    (7, include_str!("../../migrations/0007_who_invited.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -359,11 +360,12 @@ fn user_from(row: &Row) -> Result<User> {
         photo_path: opt_text(row, 6)?,
         created_at: parse_stamp(&text(row, 7)?)?,
         last_signed_in_at: opt_stamp(row, 8)?,
+        invited_by: opt_text(row, 9)?,
     })
 }
 
 const USER_COLUMNS: &str = "id, workspace_id, email, display_name, role, password_hash, \
-     photo_path, created_at, last_signed_in_at";
+     photo_path, created_at, last_signed_in_at, invited_by";
 
 fn signin_link_from(row: &Row) -> Result<SigninLink> {
     Ok(SigninLink {
@@ -552,15 +554,17 @@ impl Store for TursoStore {
         let id = Uuid::new_v4().to_string();
         self.conn
             .execute(
-                "INSERT INTO user (id, workspace_id, email, display_name, role, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO user \
+                 (id, workspace_id, email, display_name, role, created_at, invited_by) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     id.clone(),
                     new.workspace_id,
                     email,
                     new.display_name,
                     new.role.as_str(),
-                    now_text()?
+                    now_text()?,
+                    new.invited_by
                 ],
             )
             .await
