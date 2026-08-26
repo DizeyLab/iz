@@ -44,6 +44,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         10,
         include_str!("../../migrations/0010_attachments_live_in_the_file.sql"),
     ),
+    (
+        11,
+        include_str!("../../migrations/0011_what_the_mail_decided.sql"),
+    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -103,7 +107,7 @@ impl TursoStore {
         Ok(store)
     }
 
-    /// Migration 0011 could not live in `migrations/`: encrypting a column in
+    /// The password-sealing step could not live in `migrations/`: encrypting a column in
     /// place needs the key, and the key is application state, not something
     /// SQL can reach. So the upgrade happens here instead, once per boot,
     /// idempotently — a value already carrying [`secret::is_sealed`]'s prefix

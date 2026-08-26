@@ -101,14 +101,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 10);
+    assert_eq!(first.schema_version().await.unwrap(), 11);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 10);
+    assert_eq!(second.schema_version().await.unwrap(), 11);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -2790,6 +2790,53 @@ async fn a_rule_is_one_sentence_and_starts_live() {
     assert_eq!(written.len(), 1);
     assert_eq!(written[0].trigger, Trigger::Unblocked);
     assert!(written[0].enabled, "a new rule is live");
+}
+
+#[tokio::test]
+async fn a_decision_is_written_once_per_rule_and_event() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "CLI install script",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let conn = raw_conn(&scratch).await;
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+
+    conn.execute(
+        "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, created_at) \
+         VALUES ('d1', ?1, ?2, ?3, 'owed', '', '2026-08-26')",
+        turso::params![rule.id.clone(), transition.id.clone(), task.clone()],
+    )
+    .await
+    .unwrap();
+
+    // Same rule, same event, same task: a retry, and the unique index is what
+    // makes the retry land on the row that is already there instead of beside
+    // it.
+    let duplicate = conn
+        .execute(
+            "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
+             created_at) VALUES ('d2', ?1, ?2, ?3, 'already_owed', '', '2026-08-26')",
+            turso::params![rule.id.clone(), transition.id.clone(), task.clone()],
+        )
+        .await;
+    assert!(duplicate.is_err(), "a duplicate decision was stored");
+
+    let bad_outcome = conn
+        .execute(
+            "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
+             created_at) VALUES ('d3', ?1, 'other-event', ?2, 'confused', '', '2026-08-26')",
+            turso::params![rule.id.clone(), task.clone()],
+        )
+        .await;
+    assert!(bad_outcome.is_err(), "an unknown outcome was stored");
 }
 
 #[tokio::test]
