@@ -164,10 +164,13 @@ pub async fn redeem_link(
     token: String,
     password: String,
 ) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::{accounts, set_session_cookie};
+    use crate::server::{accounts, client_label, set_session_cookie};
     use dizey_core::accounts::SESSION_LIFETIME;
 
-    match accounts().redeem_signin_link(&token, &password).await {
+    match accounts()
+        .redeem_signin_link(&token, &password, &client_label())
+        .await
+    {
         Ok(signed_in) => {
             set_session_cookie(signed_in.session_token.expose(), SESSION_LIFETIME);
             Ok(None)
@@ -217,7 +220,7 @@ pub async fn change_password(
     current: String,
     new: String,
 ) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::{require_user, set_session_cookie};
+    use crate::server::{client_label, require_user, set_session_cookie};
     use dizey_core::accounts::SESSION_LIFETIME;
 
     let user = match require_user().await {
@@ -225,7 +228,7 @@ pub async fn change_password(
         Err(refusal) => return Ok(Some(refusal)),
     };
     match crate::server::accounts()
-        .change_password(&user.id, &current, &new)
+        .change_password(&user.id, &current, &new, &client_label())
         .await
     {
         Ok(signed_in) => {

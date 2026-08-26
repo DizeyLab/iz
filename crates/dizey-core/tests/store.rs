@@ -804,7 +804,7 @@ async fn an_invited_member_chooses_their_own_password() {
     assert!(matches!(as_them, Err(AccountError::Rejected)));
 
     let signed_in = accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart")
+        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
         .await
         .unwrap();
     assert_eq!(signed_in.user.id, invitation.user.id);
@@ -825,7 +825,7 @@ async fn only_an_admin_may_invite() {
         .await
         .unwrap();
     let member = accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart")
+        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
         .await
         .unwrap()
         .user;
@@ -853,16 +853,16 @@ async fn a_link_works_once_and_a_wrong_one_never_does() {
         .unwrap();
 
     accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart")
+        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
         .await
         .unwrap();
     let again = accounts
-        .redeem_signin_link(invitation.token.expose(), "another-password")
+        .redeem_signin_link(invitation.token.expose(), "another-password", "198.51.100.7")
         .await;
     assert!(matches!(again, Err(AccountError::Rejected)));
 
     let invented = accounts
-        .redeem_signin_link(&"0".repeat(32), "another-password")
+        .redeem_signin_link(&"0".repeat(32), "another-password", "198.51.100.7")
         .await;
     assert!(matches!(invented, Err(AccountError::Rejected)));
 
@@ -882,16 +882,16 @@ async fn a_rejected_password_does_not_burn_the_invitation() {
         .unwrap();
 
     assert!(matches!(
-        accounts.redeem_signin_link(invitation.token.expose(), "grace!!").await,
+        accounts.redeem_signin_link(invitation.token.expose(), "grace!!", "198.51.100.7").await,
         Err(AccountError::Password(PasswordProblem::TooShort))
     ));
     assert!(matches!(
-        accounts.redeem_signin_link(invitation.token.expose(), "grace-hopper-1906").await,
+        accounts.redeem_signin_link(invitation.token.expose(), "grace-hopper-1906", "198.51.100.7").await,
         Err(AccountError::Password(PasswordProblem::LooksLikeYou))
     ));
     // Still redeemable with a password that passes.
     accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart")
+        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
         .await
         .unwrap();
 }
@@ -916,7 +916,7 @@ async fn an_expired_link_is_refused_and_resending_opens_the_same_account() {
         .await
         .unwrap();
     assert!(matches!(
-        accounts.redeem_signin_link(stale.expose(), "sextant-and-chart").await,
+        accounts.redeem_signin_link(stale.expose(), "sextant-and-chart", "198.51.100.7").await,
         Err(AccountError::Rejected)
     ));
 
@@ -926,7 +926,7 @@ async fn an_expired_link_is_refused_and_resending_opens_the_same_account() {
         .unwrap();
     assert_eq!(resent.user.id, invitation.user.id, "same account, new link");
     let signed_in = accounts
-        .redeem_signin_link(resent.token.expose(), "sextant-and-chart")
+        .redeem_signin_link(resent.token.expose(), "sextant-and-chart", "198.51.100.7")
         .await
         .unwrap();
     assert_eq!(signed_in.user.id, invitation.user.id);
@@ -1008,6 +1008,95 @@ async fn sign_in_attempts_are_rate_limited_per_address() {
     ));
 }
 
+/// The lockout question, decided: an address bucket that refuses before the
+/// verify lets anyone who knows a colleague's address keep them out with ten
+/// wrong guesses every fifteen minutes, from anywhere, with no account of their
+/// own. So the address bucket counts but never refuses a correct password.
+#[tokio::test]
+async fn a_flooded_address_never_locks_the_owner_out() {
+    let (_scratch, accounts, _admin) = claimed().await;
+    // Each guess from its own client, so only the address bucket fills.
+    for i in 0..(RATE_LIMIT + 5) {
+        let _ = accounts
+            .sign_in("ada@dizey.sh", "wrong", &format!("203.0.113.{i}"))
+            .await;
+    }
+    // The owner, from a client of their own, still gets in.
+    accounts
+        .sign_in("ada@dizey.sh", "tide-tables-1892", "198.51.100.7")
+        .await
+        .unwrap();
+}
+
+/// The client bucket is the one that caps the Argon2 work, and it does refuse.
+#[tokio::test]
+async fn sign_in_attempts_are_rate_limited_per_client() {
+    let (_scratch, accounts, _admin) = claimed().await;
+    for i in 0..RATE_LIMIT {
+        let _ = accounts
+            .sign_in(&format!("nobody{i}@dizey.sh"), "wrong", "203.0.113.9")
+            .await;
+    }
+    // Refused before any Argon2 work, whatever address it asks about.
+    assert!(matches!(
+        accounts
+            .sign_in("ada@dizey.sh", "tide-tables-1892", "203.0.113.9")
+            .await,
+        Err(AccountError::RateLimited)
+    ));
+}
+
+/// `/join/<token>` runs a full Argon2 hash on every miss, so the guess rate has
+/// to be capped on the client — a bucket keyed on the presented token would be
+/// fresh for every guess and would never fire.
+#[tokio::test]
+async fn link_redemption_is_rate_limited_per_client() {
+    let (_scratch, accounts, admin) = claimed().await;
+    let invitation = accounts
+        .invite(&admin, "grace@dizey.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+    for i in 0..RATE_LIMIT {
+        let bogus = format!("{i:032x}");
+        assert!(matches!(
+            accounts
+                .redeem_signin_link(&bogus, "sextant-and-chart", "203.0.113.9")
+                .await,
+            Err(AccountError::Rejected)
+        ));
+    }
+    // Even the real link is refused now, from that client.
+    assert!(matches!(
+        accounts
+            .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "203.0.113.9")
+            .await,
+        Err(AccountError::RateLimited)
+    ));
+    // And the person on another machine is unaffected.
+    accounts
+        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .await
+        .unwrap();
+}
+
+/// A signed-in browser left unattended is still a guessing oracle on the
+/// current password, and still 19 MiB of hashing per try.
+#[tokio::test]
+async fn changing_a_password_is_rate_limited_per_client() {
+    let (_scratch, accounts, admin) = claimed().await;
+    for _ in 0..RATE_LIMIT {
+        let _ = accounts
+            .change_password(&admin.id, "not-it", "chronometer-1761", "203.0.113.9")
+            .await;
+    }
+    assert!(matches!(
+        accounts
+            .change_password(&admin.id, "tide-tables-1892", "chronometer-1761", "203.0.113.9")
+            .await,
+        Err(AccountError::RateLimited)
+    ));
+}
+
 #[tokio::test]
 async fn a_successful_sign_in_clears_the_bucket() {
     let (_scratch, accounts, _admin) = claimed().await;
@@ -1041,7 +1130,7 @@ async fn changing_a_password_signs_out_every_device() {
     assert!(accounts.authenticate(first.session_token.expose()).await.unwrap().is_some());
 
     let fresh = accounts
-        .change_password(&admin.id, "tide-tables-1892", "chronometer-1761")
+        .change_password(&admin.id, "tide-tables-1892", "chronometer-1761", "198.51.100.7")
         .await
         .unwrap();
 
@@ -1062,11 +1151,11 @@ async fn changing_a_password_signs_out_every_device() {
 async fn changing_a_password_needs_the_current_one_and_obeys_the_rules() {
     let (_scratch, accounts, admin) = claimed().await;
     assert!(matches!(
-        accounts.change_password(&admin.id, "not-it", "chronometer-1761").await,
+        accounts.change_password(&admin.id, "not-it", "chronometer-1761", "198.51.100.7").await,
         Err(AccountError::Rejected)
     ));
     assert!(matches!(
-        accounts.change_password(&admin.id, "tide-tables-1892", "short").await,
+        accounts.change_password(&admin.id, "tide-tables-1892", "short", "198.51.100.7").await,
         Err(AccountError::Password(PasswordProblem::TooShort))
     ));
     // The old password still works after both refusals.

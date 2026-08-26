@@ -191,10 +191,22 @@ impl Accounts {
     /// Every failure — unknown link, expired link, already-used link — is the
     /// same [`AccountError::Rejected`], and the miss path pays for a hash so
     /// the timing says nothing either.
-    pub async fn redeem_signin_link(&self, presented: &str, password: &str) -> Result<SignedIn> {
+    ///
+    /// The limit is bucketed on the client, not on the presented token: a
+    /// bucket keyed on the token would be fresh for every guess and would never
+    /// catch anyone walking the token space, while every miss here pays for a
+    /// full Argon2 hash.
+    pub async fn redeem_signin_link(
+        &self,
+        presented: &str,
+        password: &str,
+        client: &str,
+    ) -> Result<SignedIn> {
         let now = OffsetDateTime::now_utc();
+        let client_bucket = format!("client:{client}");
+        self.check_rate(&client_bucket).await?;
+        self.store.record_auth_attempt(&client_bucket, now).await?;
         let digest = auth::hash_token(presented);
-        self.check_rate(&format!("link:{digest}")).await?;
 
         let link = match self.store.signin_link_by_hash(&digest).await? {
             Some(link) => link,
@@ -230,7 +242,7 @@ impl Accounts {
         }
 
         self.store.set_password_hash(&user.id, &hash).await?;
-        self.store.clear_auth_attempts(&format!("link:{digest}")).await?;
+        self.store.clear_auth_attempts(&client_bucket).await?;
         let user = self.store.user(&user.id).await?.ok_or(StoreError::NotFound)?;
         self.start_session(user).await
     }
@@ -240,6 +252,13 @@ impl Accounts {
     /// Signs a person in. `client` is whatever identifies the caller's machine
     /// — it only ever becomes a rate-limit bucket.
     pub async fn sign_in(&self, email: &str, password: &str, client: &str) -> Result<SignedIn> {
+        let client_bucket = format!("client:{client}");
+        // Checked before anything else, including the pre-claim path below,
+        // which would otherwise be an unmetered dummy-verify.
+        self.check_rate(&client_bucket).await?;
+        let now = OffsetDateTime::now_utc();
+        self.store.record_auth_attempt(&client_bucket, now).await?;
+
         let workspace = match self.store.workspace().await? {
             Some(workspace) => workspace,
             None => {
@@ -248,13 +267,13 @@ impl Accounts {
             }
         };
         let address_bucket = format!("address:{}", email.trim().to_lowercase());
-        let client_bucket = format!("client:{client}");
-        self.check_rate(&address_bucket).await?;
-        self.check_rate(&client_bucket).await?;
-
-        let now = OffsetDateTime::now_utc();
+        // The address bucket counts, but it never refuses on its own: refusing
+        // before the verify would let anyone who knows a colleague's address
+        // lock them out with ten wrong guesses every fifteen minutes. A correct
+        // password always gets in; a wrong one still pays for its Argon2 and
+        // still counts. The client bucket is what caps the work.
+        let address_over_limit = self.over_limit(&address_bucket).await?;
         self.store.record_auth_attempt(&address_bucket, now).await?;
-        self.store.record_auth_attempt(&client_bucket, now).await?;
 
         let user = self.store.user_by_email(&workspace.id, email).await?;
         let hash = user.as_ref().and_then(|u| u.password_hash.clone());
@@ -269,7 +288,11 @@ impl Accounts {
             }
         };
         if !ok {
-            return Err(AccountError::Rejected);
+            return Err(if address_over_limit {
+                AccountError::RateLimited
+            } else {
+                AccountError::Rejected
+            });
         }
 
         let user = user.expect("a hash implies a user");
@@ -286,7 +309,15 @@ impl Accounts {
         user_id: &str,
         current: &str,
         new: &str,
+        client: &str,
     ) -> Result<SignedIn> {
+        // A signed-in browser someone walked away from is still an Argon2
+        // faucet and a guessing oracle on the current password.
+        let client_bucket = format!("client:{client}");
+        self.check_rate(&client_bucket).await?;
+        self.store
+            .record_auth_attempt(&client_bucket, OffsetDateTime::now_utc())
+            .await?;
         let user = self.store.user(user_id).await?.ok_or(StoreError::NotFound)?;
         let ok = match user.password_hash.as_deref() {
             Some(stored) => verify_password(current, stored),
@@ -301,6 +332,7 @@ impl Accounts {
         auth::check_password(new, &user.email, &user.display_name)?;
         let hash = hash_password(new)?;
         self.store.set_password_hash(&user.id, &hash).await?;
+        self.store.clear_auth_attempts(&client_bucket).await?;
         // "Signs out your other devices", as the pane promises.
         self.store
             .revoke_sessions_for_user(&user.id, OffsetDateTime::now_utc())
@@ -370,10 +402,16 @@ impl Accounts {
     }
 
     async fn check_rate(&self, bucket: &str) -> Result<()> {
-        let since = OffsetDateTime::now_utc() - RATE_WINDOW;
-        if self.store.count_auth_attempts(bucket, since).await? >= RATE_LIMIT {
+        if self.over_limit(bucket).await? {
             return Err(AccountError::RateLimited);
         }
         Ok(())
+    }
+
+    /// The same question without the refusal, for the bucket that counts but
+    /// must not lock an account out.
+    async fn over_limit(&self, bucket: &str) -> Result<bool> {
+        let since = OffsetDateTime::now_utc() - RATE_WINDOW;
+        Ok(self.store.count_auth_attempts(bucket, since).await? >= RATE_LIMIT)
     }
 }
