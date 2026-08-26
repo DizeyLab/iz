@@ -170,13 +170,26 @@ impl Engine {
     pub async fn on_transition(&self, transition: &Transition) -> crate::store::Result<Report> {
         let mut report = Report::default();
         let Some(facts) = self.store.task(&transition.task_id).await? else {
-            // corner-cut: a task deleted between the move and this run leaves
-            // no board to look its rules up by — `store.task` filters the
-            // soft delete away, and nothing else maps a column back to a
-            // board. No `task_gone` rows are written here for lack of a
-            // rule_id to write them against; ceiling: a board_id lookup that
-            // reads through the delete, which needs a new store method and is
-            // outside this slice's files (mail.rs, tests/store.rs).
+            // A task deleted between the move and this run has no facts left
+            // to read a board from `store.task`, but its rules still get a
+            // `task_gone` row each — `board_of_task` reads through the soft
+            // delete to find them.
+            let Some(board_id) = self.store.board_of_task(&transition.task_id).await? else {
+                return Ok(report);
+            };
+            let event = Event::Moved(transition.clone());
+            for rule in self.store.mail_rules(&board_id).await? {
+                self.store
+                    .record_mail_decision(
+                        &rule.id,
+                        event.id(),
+                        &transition.task_id,
+                        MailOutcome::TaskGone,
+                        "task was deleted before the mail ran",
+                        event.at(),
+                    )
+                    .await?;
+            }
             return Ok(report);
         };
         let rules = self.store.mail_rules(&facts.board_id).await?;

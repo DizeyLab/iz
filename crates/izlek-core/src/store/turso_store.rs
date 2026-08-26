@@ -2050,6 +2050,16 @@ impl Store for TursoStore {
         }
     }
 
+    async fn board_of_task(&self, task_id: &str) -> Result<Option<String>> {
+        match self
+            .one_row("SELECT board_id FROM task WHERE id = ?1", params![task_id])
+            .await?
+        {
+            Some(row) => Ok(Some(text(&row, 0)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn event(&self, event_id: &str) -> Result<Option<Event>> {
         if let Some(row) = self
             .one_row(

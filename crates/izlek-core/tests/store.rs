@@ -3697,6 +3697,36 @@ async fn a_rule_that_did_not_match_leaves_a_reason() {
 }
 
 #[tokio::test]
+async fn a_deleted_task_still_leaves_a_task_gone_row() {
+    let (dir, store, workspace, admin) = shared().await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // The crossing happened; the task is gone before the engine gets to it —
+    // a retry, or a worker that lagged behind a delete.
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    store
+        .delete_task(&task, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let report = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(report, Default::default());
+    assert!(mailer.sent().is_empty());
+
+    let decisions = store.recent_mail_decisions(10).await.unwrap();
+    let row = decisions
+        .iter()
+        .find(|d| d.rule_id == rule.id && d.task_id == task)
+        .expect("the deleted task still left a row");
+    assert_eq!(row.outcome, MailOutcome::TaskGone);
+    assert!(!row.detail.is_empty(), "the reason is not left blank");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;

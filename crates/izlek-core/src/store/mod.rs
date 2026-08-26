@@ -700,6 +700,12 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// lists what exists, not what is live.
     async fn mail_rules(&self, board_id: &str) -> Result<Vec<MailRule>>;
 
+    /// The board a task belongs to, reading through the soft delete —
+    /// `None` only if the task id never existed. A crossing whose task was
+    /// deleted before the engine ran still owes its rules a `task_gone` row,
+    /// and this is how the engine finds which board's rules those are.
+    async fn board_of_task(&self, task_id: &str) -> Result<Option<String>>;
+
     /// One rule, for a retry that has only the send row to go on.
     async fn mail_rule(&self, rule_id: &str) -> Result<Option<MailRule>>;
 
