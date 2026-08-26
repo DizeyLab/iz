@@ -66,7 +66,9 @@ pub fn hash_password(password: &str) -> Result<String, AuthError> {
 /// the cost later does not lock anyone out.
 pub fn verify_password(password: &str, phc: &str) -> bool {
     match PasswordHash::new(phc) {
-        Ok(parsed) => argon2().verify_password(password.as_bytes(), &parsed).is_ok(),
+        Ok(parsed) => argon2()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok(),
         Err(_) => false,
     }
 }
@@ -146,7 +148,11 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The rules the first-sign-in screen states, checked server-side.
-pub fn check_password(password: &str, email: &str, display_name: &str) -> Result<(), PasswordProblem> {
+pub fn check_password(
+    password: &str,
+    email: &str,
+    display_name: &str,
+) -> Result<(), PasswordProblem> {
     // Counted in characters, not bytes: a ten-character password is ten
     // characters whatever alphabet it is in.
     if password.chars().count() < 10 {
@@ -279,7 +285,11 @@ mod dummy_hash_generator {
     #[test]
     #[ignore = "generator, not a check"]
     fn print_a_dummy_hash() {
-        let token = format!("{}{}", super::Token::mint().expose(), super::Token::mint().expose());
+        let token = format!(
+            "{}{}",
+            super::Token::mint().expose(),
+            super::Token::mint().expose()
+        );
         println!("{}", super::hash_password(&token).unwrap());
     }
 }

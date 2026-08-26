@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::Role;
 use crate::board::{BoardReads, TaskRow};
 use crate::detail::{ActivityKind, DetailReads};
-use crate::Role;
 
 pub mod turso_store;
 

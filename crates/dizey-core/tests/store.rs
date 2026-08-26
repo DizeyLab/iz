@@ -6,9 +6,9 @@
 
 use std::path::PathBuf;
 
+use dizey_core::Role;
 use dizey_core::auth::{Token, hash_password};
 use dizey_core::store::{DeletePolicy, NewUser, Store, StoreError, TursoStore, User};
-use dizey_core::Role;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -129,7 +129,10 @@ async fn a_second_claim_loses_and_changes_nothing() {
     assert!(matches!(second, Err(StoreError::AlreadyClaimed)));
 
     // The loser must not have joined as anything at all.
-    assert_eq!(scratch.store.workspace().await.unwrap().unwrap().name, "Dizey");
+    assert_eq!(
+        scratch.store.workspace().await.unwrap().unwrap().name,
+        "Dizey"
+    );
     assert_eq!(scratch.store.count_users("").await.unwrap(), 0);
     let ws_id = scratch.store.workspace().await.unwrap().unwrap().id;
     assert_eq!(scratch.store.count_users(&ws_id).await.unwrap(), 1);
@@ -179,7 +182,11 @@ async fn concurrent_claims_produce_exactly_one_admin() {
     assert_eq!(winners.len(), 1, "exactly one claim wins: {winners:?}");
 
     let ws_id = store.workspace().await.unwrap().unwrap().id;
-    assert_eq!(store.count_users(&ws_id).await.unwrap(), 1, "no half-written losers");
+    assert_eq!(
+        store.count_users(&ws_id).await.unwrap(),
+        1,
+        "no half-written losers"
+    );
     let owner = store.owner().await.unwrap().unwrap();
     assert_eq!(owner.email, winners[0]);
 
@@ -202,7 +209,10 @@ async fn workspace_defaults_match_the_settings_screen() {
         .unwrap();
     assert_eq!(ws.attachment_limit_bytes, 25 * 1024 * 1024);
     assert_eq!(ws.photo_limit_bytes, 2 * 1024 * 1024);
-    assert!(ws.allowed_file_types.is_empty(), "every type until narrowed");
+    assert!(
+        ws.allowed_file_types.is_empty(),
+        "every type until narrowed"
+    );
     assert_eq!(ws.who_can_delete_tasks, DeletePolicy::Anyone);
     assert!(ws.smtp_host.is_none());
 }
@@ -212,7 +222,15 @@ async fn smtp_password_is_never_part_of_the_workspace_record() {
     let (scratch, ws_id, _) = workspace_with_admin().await;
     scratch
         .store
-        .set_smtp(&ws_id, "smtp.fastmail.com", 465, "dizey", "hunter2", "Dizey", "dizey@dizey.sh")
+        .set_smtp(
+            &ws_id,
+            "smtp.fastmail.com",
+            465,
+            "dizey",
+            "hunter2",
+            "Dizey",
+            "dizey@dizey.sh",
+        )
         .await
         .unwrap();
 
@@ -224,7 +242,12 @@ async fn smtp_password_is_never_part_of_the_workspace_record() {
     let serialised = serde_json::to_string(&ws).unwrap();
     assert!(!serialised.contains("hunter2"), "{serialised}");
     assert_eq!(
-        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        scratch
+            .store
+            .smtp_password(&ws_id)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("hunter2")
     );
 }
@@ -235,7 +258,13 @@ async fn limits_round_trip_including_the_file_type_list() {
     let types = vec!["png".to_string(), "pdf".to_string()];
     scratch
         .store
-        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types, DeletePolicy::Admin)
+        .set_limits(
+            &ws_id,
+            10 * 1024 * 1024,
+            512 * 1024,
+            &types,
+            DeletePolicy::Admin,
+        )
         .await
         .unwrap();
     let ws = scratch.store.workspace().await.unwrap().unwrap();
@@ -329,10 +358,7 @@ async fn members_list_and_count_for_the_admin_screen() {
     assert_eq!(scratch.store.count_users(&ws_id).await.unwrap(), 3);
     let users = scratch.store.users(&ws_id).await.unwrap();
     assert_eq!(users[0].id, admin_id);
-    assert_eq!(
-        users.iter().filter(|u| u.role == Role::Viewer).count(),
-        1
-    );
+    assert_eq!(users.iter().filter(|u| u.role == Role::Viewer).count(), 1);
 }
 
 #[tokio::test]
@@ -354,7 +380,11 @@ async fn profile_and_role_updates_stick() {
         .set_profile(&user.id, "Grace H.", Some("photos/grace.png"))
         .await
         .unwrap();
-    scratch.store.set_role(&user.id, Role::Viewer).await.unwrap();
+    scratch
+        .store
+        .set_role(&user.id, Role::Viewer)
+        .await
+        .unwrap();
     let at = OffsetDateTime::now_utc();
     scratch.store.mark_signed_in(&user.id, at).await.unwrap();
 
@@ -369,8 +399,21 @@ async fn profile_and_role_updates_stick() {
     );
 
     // Clearing the photo is a real update, not a no-op.
-    scratch.store.set_profile(&user.id, "Grace H.", None).await.unwrap();
-    assert!(scratch.store.user(&user.id).await.unwrap().unwrap().photo_path.is_none());
+    scratch
+        .store
+        .set_profile(&user.id, "Grace H.", None)
+        .await
+        .unwrap();
+    assert!(
+        scratch
+            .store
+            .user(&user.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .photo_path
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -427,7 +470,13 @@ async fn a_signin_link_stores_only_the_hash_and_is_used_once() {
             .is_none()
     );
 
-    assert!(scratch.store.consume_signin_link(&link.id, now).await.unwrap());
+    assert!(
+        scratch
+            .store
+            .consume_signin_link(&link.id, now)
+            .await
+            .unwrap()
+    );
     let used = scratch
         .store
         .signin_link_by_hash("hash-of-the-token")
@@ -436,7 +485,13 @@ async fn a_signin_link_stores_only_the_hash_and_is_used_once() {
         .unwrap();
     assert!(!used.is_usable(now));
     // A second use finds nothing left to consume.
-    assert!(!scratch.store.consume_signin_link(&link.id, now).await.unwrap());
+    assert!(
+        !scratch
+            .store
+            .consume_signin_link(&link.id, now)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -556,7 +611,11 @@ async fn a_session_lives_until_it_expires_or_is_revoked() {
         Some(token.hash())
     );
 
-    scratch.store.revoke_session(&session.id, now).await.unwrap();
+    scratch
+        .store
+        .revoke_session(&session.id, now)
+        .await
+        .unwrap();
     let revoked = scratch
         .store
         .session_by_hash(&token.hash())
@@ -782,7 +841,12 @@ async fn the_claim_screen_enforces_its_own_password_rules() {
 async fn a_second_claim_is_refused() {
     let (_scratch, accounts, _admin) = claimed().await;
     let second = accounts
-        .claim_workspace("Theirs", "mallory@elsewhere.example", "Mallory", "tide-tables-1892")
+        .claim_workspace(
+            "Theirs",
+            "mallory@elsewhere.example",
+            "Mallory",
+            "tide-tables-1892",
+        )
         .await;
     assert!(matches!(second, Err(AccountError::AlreadyClaimed)));
 }
@@ -795,7 +859,10 @@ async fn an_invited_member_chooses_their_own_password() {
         .await
         .unwrap();
     assert!(!invitation.user.has_signed_in(), "no password yet");
-    assert!(invitation.expires_at > OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME - Duration::minutes(1));
+    assert!(
+        invitation.expires_at
+            > OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME - Duration::minutes(1)
+    );
 
     // The admin cannot sign in as them in the meantime.
     let as_them = accounts
@@ -804,7 +871,11 @@ async fn an_invited_member_chooses_their_own_password() {
     assert!(matches!(as_them, Err(AccountError::Rejected)));
 
     let signed_in = accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
         .await
         .unwrap();
     assert_eq!(signed_in.user.id, invitation.user.id);
@@ -825,7 +896,11 @@ async fn only_an_admin_may_invite() {
         .await
         .unwrap();
     let member = accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
         .await
         .unwrap()
         .user;
@@ -839,7 +914,9 @@ async fn only_an_admin_may_invite() {
     let mut viewer = member.clone();
     viewer.role = Role::Viewer;
     assert!(matches!(
-        accounts.invite(&viewer, "linus@dizey.sh", "Linus", Role::Viewer).await,
+        accounts
+            .invite(&viewer, "linus@dizey.sh", "Linus", Role::Viewer)
+            .await,
         Err(AccountError::Forbidden)
     ));
 }
@@ -853,11 +930,19 @@ async fn a_link_works_once_and_a_wrong_one_never_does() {
         .unwrap();
 
     accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
         .await
         .unwrap();
     let again = accounts
-        .redeem_signin_link(invitation.token.expose(), "another-password", "198.51.100.7")
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "another-password",
+            "198.51.100.7",
+        )
         .await;
     assert!(matches!(again, Err(AccountError::Rejected)));
 
@@ -882,16 +967,28 @@ async fn a_rejected_password_does_not_burn_the_invitation() {
         .unwrap();
 
     assert!(matches!(
-        accounts.redeem_signin_link(invitation.token.expose(), "grace!!", "198.51.100.7").await,
+        accounts
+            .redeem_signin_link(invitation.token.expose(), "grace!!", "198.51.100.7")
+            .await,
         Err(AccountError::Password(PasswordProblem::TooShort))
     ));
     assert!(matches!(
-        accounts.redeem_signin_link(invitation.token.expose(), "grace-hopper-1906", "198.51.100.7").await,
+        accounts
+            .redeem_signin_link(
+                invitation.token.expose(),
+                "grace-hopper-1906",
+                "198.51.100.7"
+            )
+            .await,
         Err(AccountError::Password(PasswordProblem::LooksLikeYou))
     ));
     // Still redeemable with a password that passes.
     accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
         .await
         .unwrap();
 }
@@ -916,7 +1013,9 @@ async fn an_expired_link_is_refused_and_resending_opens_the_same_account() {
         .await
         .unwrap();
     assert!(matches!(
-        accounts.redeem_signin_link(stale.expose(), "sextant-and-chart", "198.51.100.7").await,
+        accounts
+            .redeem_signin_link(stale.expose(), "sextant-and-chart", "198.51.100.7")
+            .await,
         Err(AccountError::Rejected)
     ));
 
@@ -998,12 +1097,16 @@ async fn sign_in_attempts_are_rate_limited_per_address() {
     }
     // The next attempt is refused before any Argon2 work happens.
     assert!(matches!(
-        accounts.sign_in("ada@dizey.sh", "wrong", "203.0.113.9").await,
+        accounts
+            .sign_in("ada@dizey.sh", "wrong", "203.0.113.9")
+            .await,
         Err(AccountError::RateLimited)
     ));
     // A different address from a fresh client is unaffected.
     assert!(matches!(
-        accounts.sign_in("someone@dizey.sh", "wrong", "203.0.113.9").await,
+        accounts
+            .sign_in("someone@dizey.sh", "wrong", "203.0.113.9")
+            .await,
         Err(AccountError::Rejected)
     ));
 }
@@ -1068,13 +1171,21 @@ async fn link_redemption_is_rate_limited_per_client() {
     // Even the real link is refused now, from that client.
     assert!(matches!(
         accounts
-            .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "203.0.113.9")
+            .redeem_signin_link(
+                invitation.token.expose(),
+                "sextant-and-chart",
+                "203.0.113.9"
+            )
             .await,
         Err(AccountError::RateLimited)
     ));
     // And the person on another machine is unaffected.
     accounts
-        .redeem_signin_link(invitation.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
         .await
         .unwrap();
 }
@@ -1091,7 +1202,12 @@ async fn changing_a_password_is_rate_limited_per_client() {
     }
     assert!(matches!(
         accounts
-            .change_password(&admin.id, "tide-tables-1892", "chronometer-1761", "203.0.113.9")
+            .change_password(
+                &admin.id,
+                "tide-tables-1892",
+                "chronometer-1761",
+                "203.0.113.9"
+            )
             .await,
         Err(AccountError::RateLimited)
     ));
@@ -1111,7 +1227,9 @@ async fn a_successful_sign_in_clears_the_bucket() {
         .unwrap();
     // Someone who mistypes and then gets it right is not left at the edge.
     assert!(matches!(
-        accounts.sign_in("ada@dizey.sh", "wrong", "198.51.100.7").await,
+        accounts
+            .sign_in("ada@dizey.sh", "wrong", "198.51.100.7")
+            .await,
         Err(AccountError::Rejected)
     ));
 }
@@ -1127,20 +1245,41 @@ async fn changing_a_password_signs_out_every_device() {
         .sign_in("ada@dizey.sh", "tide-tables-1892", "198.51.100.8")
         .await
         .unwrap();
-    assert!(accounts.authenticate(first.session_token.expose()).await.unwrap().is_some());
+    assert!(
+        accounts
+            .authenticate(first.session_token.expose())
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     let fresh = accounts
-        .change_password(&admin.id, "tide-tables-1892", "chronometer-1761", "198.51.100.7")
+        .change_password(
+            &admin.id,
+            "tide-tables-1892",
+            "chronometer-1761",
+            "198.51.100.7",
+        )
         .await
         .unwrap();
 
     for old in [&first, &second] {
         assert!(
-            accounts.authenticate(old.session_token.expose()).await.unwrap().is_none(),
+            accounts
+                .authenticate(old.session_token.expose())
+                .await
+                .unwrap()
+                .is_none(),
             "the pane promises this"
         );
     }
-    assert!(accounts.authenticate(fresh.session_token.expose()).await.unwrap().is_some());
+    assert!(
+        accounts
+            .authenticate(fresh.session_token.expose())
+            .await
+            .unwrap()
+            .is_some()
+    );
     accounts
         .sign_in("ada@dizey.sh", "chronometer-1761", "198.51.100.7")
         .await
@@ -1151,11 +1290,15 @@ async fn changing_a_password_signs_out_every_device() {
 async fn changing_a_password_needs_the_current_one_and_obeys_the_rules() {
     let (_scratch, accounts, admin) = claimed().await;
     assert!(matches!(
-        accounts.change_password(&admin.id, "not-it", "chronometer-1761", "198.51.100.7").await,
+        accounts
+            .change_password(&admin.id, "not-it", "chronometer-1761", "198.51.100.7")
+            .await,
         Err(AccountError::Rejected)
     ));
     assert!(matches!(
-        accounts.change_password(&admin.id, "tide-tables-1892", "short", "198.51.100.7").await,
+        accounts
+            .change_password(&admin.id, "tide-tables-1892", "short", "198.51.100.7")
+            .await,
         Err(AccountError::Password(PasswordProblem::TooShort))
     ));
     // The old password still works after both refusals.
@@ -1177,9 +1320,24 @@ async fn signing_out_ends_that_browser_only() {
         .await
         .unwrap();
 
-    accounts.sign_out(laptop.session_token.expose()).await.unwrap();
-    assert!(accounts.authenticate(laptop.session_token.expose()).await.unwrap().is_none());
-    assert!(accounts.authenticate(phone.session_token.expose()).await.unwrap().is_some());
+    accounts
+        .sign_out(laptop.session_token.expose())
+        .await
+        .unwrap();
+    assert!(
+        accounts
+            .authenticate(laptop.session_token.expose())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        accounts
+            .authenticate(phone.session_token.expose())
+            .await
+            .unwrap()
+            .is_some()
+    );
     // Signing out an unknown token is not an error.
     accounts.sign_out(&"0".repeat(32)).await.unwrap();
 }
@@ -1192,11 +1350,15 @@ async fn an_address_can_only_be_invited_once() {
         .await
         .unwrap();
     assert!(matches!(
-        accounts.invite(&admin, "GRACE@dizey.sh", "Grace again", Role::Member).await,
+        accounts
+            .invite(&admin, "GRACE@dizey.sh", "Grace again", Role::Member)
+            .await,
         Err(AccountError::AddressTaken)
     ));
     assert!(matches!(
-        accounts.invite(&admin, "ada@dizey.sh", "Ada again", Role::Member).await,
+        accounts
+            .invite(&admin, "ada@dizey.sh", "Ada again", Role::Member)
+            .await,
         Err(AccountError::AddressTaken)
     ));
 }
@@ -1434,10 +1596,29 @@ async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
 async fn a_cleared_dependency_stops_showing_on_the_card() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
-    let blocking = add_task(store, &workspace, "In Progress", "Invite flow", None, &admin).await;
-    let blocked = add_task(store, &workspace, "Backlog", "Terms of service", None, &admin).await;
+    let blocking = add_task(
+        store,
+        &workspace,
+        "In Progress",
+        "Invite flow",
+        None,
+        &admin,
+    )
+    .await;
+    let blocked = add_task(
+        store,
+        &workspace,
+        "Backlog",
+        "Terms of service",
+        None,
+        &admin,
+    )
+    .await;
     let now = OffsetDateTime::now_utc();
-    store.add_dependency(&blocked, &blocking, now).await.unwrap();
+    store
+        .add_dependency(&blocked, &blocking, now)
+        .await
+        .unwrap();
 
     let board = board_of(store, &workspace).await;
     assert!(
@@ -1646,7 +1827,10 @@ async fn a_task_detail_carries_both_directions_of_its_dependencies() {
     assert_eq!(blocked_by, ["before"]);
     assert_eq!(blocks, ["after"]);
     assert!(detail.is_blocked());
-    assert_eq!(detail.blocked_by[0].blocked_by_label(), "blocking this task");
+    assert_eq!(
+        detail.blocked_by[0].blocked_by_label(),
+        "blocking this task"
+    );
     assert_eq!(detail.blocks[0].blocks_label(), "waiting on this task");
 }
 
@@ -1665,7 +1849,10 @@ async fn a_viewer_is_never_offered_as_an_assignee() {
         .unwrap();
     let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
 
-    let detail = load_detail(store, &workspace, &task).await.unwrap().unwrap();
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         !detail.assignable.iter().any(|p| p.id == quiet.id),
         "a viewer cannot be given work, so the picker never lists one"
@@ -1749,19 +1936,31 @@ async fn deleting_a_task_frees_what_was_waiting_on_it() {
         .add_dependency(&still_stuck, &blocking, now)
         .await
         .unwrap();
-    store.add_dependency(&still_stuck, &other, now).await.unwrap();
+    store
+        .add_dependency(&still_stuck, &other, now)
+        .await
+        .unwrap();
 
     let unblocked = store.delete_task(&blocking, &admin, now).await.unwrap();
-    assert_eq!(unblocked, vec![freed.clone()], "only the one with nothing else in front of it");
+    assert_eq!(
+        unblocked,
+        vec![freed.clone()],
+        "only the one with nothing else in front of it"
+    );
 
     // The deleted task is gone from the board and from the edges it stood in.
     let board = board_of(store, &workspace).await;
-    assert!(!board
-        .columns
-        .iter()
-        .flat_map(|column| column.cards.iter())
-        .any(|card| card.id == blocking));
-    let freed_detail = load_detail(store, &workspace, &freed).await.unwrap().unwrap();
+    assert!(
+        !board
+            .columns
+            .iter()
+            .flat_map(|column| column.cards.iter())
+            .any(|card| card.id == blocking)
+    );
+    let freed_detail = load_detail(store, &workspace, &freed)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(freed_detail.blocked_by.is_empty());
     assert!(!freed_detail.is_blocked());
 
@@ -1772,18 +1971,26 @@ async fn deleting_a_task_frees_what_was_waiting_on_it() {
         .iter()
         .find(|entry| entry.kind == ActivityKind::Unblocked)
         .expect("the freeing is on the record");
-    assert!(unblocked_line.actor.is_none(), "the system did this, not a person");
+    assert!(
+        unblocked_line.actor.is_none(),
+        "the system did this, not a person"
+    );
     assert!(unblocked_line.sentence().starts_with("unblocked this task"));
 
     let stuck_detail = load_detail(store, &workspace, &still_stuck)
         .await
         .unwrap()
         .unwrap();
-    assert!(stuck_detail.is_blocked(), "something else is still in front of it");
-    assert!(!stuck_detail
-        .activity
-        .iter()
-        .any(|entry| entry.kind == ActivityKind::Unblocked));
+    assert!(
+        stuck_detail.is_blocked(),
+        "something else is still in front of it"
+    );
+    assert!(
+        !stuck_detail
+            .activity
+            .iter()
+            .any(|entry| entry.kind == ActivityKind::Unblocked)
+    );
 
     // A second delete finds nothing to delete.
     assert!(matches!(
@@ -1809,9 +2016,16 @@ async fn saving_a_task_records_only_what_changed() {
         )
         .await
         .unwrap();
-    let detail = load_detail(store, &workspace, &task).await.unwrap().unwrap();
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
     let kinds: Vec<&ActivityKind> = detail.activity.iter().map(|e| &e.kind).collect();
-    assert_eq!(kinds, [&ActivityKind::Created], "a save that changed nothing says nothing");
+    assert_eq!(
+        kinds,
+        [&ActivityKind::Created],
+        "a save that changed nothing says nothing"
+    );
 
     store
         .save_task(
@@ -1824,7 +2038,10 @@ async fn saving_a_task_records_only_what_changed() {
         )
         .await
         .unwrap();
-    let detail = load_detail(store, &workspace, &task).await.unwrap().unwrap();
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(detail.title, "second title");
     assert_eq!(detail.description, "some prose");
     assert_eq!(detail.deadline_input(), "2026-09-12");
@@ -1871,10 +2088,17 @@ async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
             .await
             .unwrap();
         store
-            .record_activity(&heavy, Some(&person.id), &ActivityKind::Moved, "to Review", now)
+            .record_activity(
+                &heavy,
+                Some(&person.id),
+                &ActivityKind::Moved,
+                "to Review",
+                now,
+            )
             .await
             .unwrap();
-        let neighbour = add_task(store, &workspace, "Backlog", &format!("n{n}"), None, &admin).await;
+        let neighbour =
+            add_task(store, &workspace, "Backlog", &format!("n{n}"), None, &admin).await;
         store.add_dependency(&neighbour, &heavy, now).await.unwrap();
     }
 

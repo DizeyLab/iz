@@ -15,11 +15,9 @@ use std::sync::Arc;
 
 use time::{Duration, OffsetDateTime};
 
-use crate::auth::{
-    self, AuthError, PasswordProblem, Token, hash_password, verify_password,
-};
-use crate::store::{NewUser, Session, Store, StoreError, User, Workspace};
 use crate::Role;
+use crate::auth::{self, AuthError, PasswordProblem, Token, hash_password, verify_password};
+use crate::store::{NewUser, Session, Store, StoreError, User, Workspace};
 
 /// How long a first-sign-in link is good for. The mockups say seven days, and
 /// an expired link is not a dead account: resending opens the same one.
@@ -243,7 +241,11 @@ impl Accounts {
 
         self.store.set_password_hash(&user.id, &hash).await?;
         self.store.clear_auth_attempts(&client_bucket).await?;
-        let user = self.store.user(&user.id).await?.ok_or(StoreError::NotFound)?;
+        let user = self
+            .store
+            .user(&user.id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
         self.start_session(user).await
     }
 
@@ -318,7 +320,11 @@ impl Accounts {
         self.store
             .record_auth_attempt(&client_bucket, OffsetDateTime::now_utc())
             .await?;
-        let user = self.store.user(user_id).await?.ok_or(StoreError::NotFound)?;
+        let user = self
+            .store
+            .user(user_id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
         let ok = match user.password_hash.as_deref() {
             Some(stored) => verify_password(current, stored),
             None => {
@@ -337,7 +343,11 @@ impl Accounts {
         self.store
             .revoke_sessions_for_user(&user.id, OffsetDateTime::now_utc())
             .await?;
-        let user = self.store.user(&user.id).await?.ok_or(StoreError::NotFound)?;
+        let user = self
+            .store
+            .user(&user.id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
         self.start_session(user).await
     }
 

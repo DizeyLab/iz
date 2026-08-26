@@ -57,10 +57,7 @@ impl TursoStore {
         // (a second process, or a careless second open) fails outright with
         // "database is locked" and silently drops the write unless a busy
         // timeout is set. Both pragmas are set on every connection we hand out.
-        for pragma in [
-            "PRAGMA foreign_keys = ON",
-            "PRAGMA busy_timeout = 5000",
-        ] {
+        for pragma in ["PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000"] {
             conn.execute(pragma, ()).await.map_err(backend)?;
         }
         let store = Self { conn, db };
@@ -112,7 +109,12 @@ impl TursoStore {
 
     /// The schema version the database is actually at.
     pub async fn schema_version(&self) -> Result<i64> {
-        Ok(self.applied_versions().await?.into_iter().max().unwrap_or(0))
+        Ok(self
+            .applied_versions()
+            .await?
+            .into_iter()
+            .max()
+            .unwrap_or(0))
     }
 
     /// A connection of its own, for work that opens a transaction.
@@ -191,9 +193,7 @@ fn opt_text(row: &Row, idx: usize) -> Result<Option<String>> {
 }
 
 fn count_of(row: &Row) -> Result<u64> {
-    row.get::<i64>(0)
-        .map_err(backend)
-        .map(|n| n.max(0) as u64)
+    row.get::<i64>(0).map_err(backend).map(|n| n.max(0) as u64)
 }
 
 fn workspace_from(row: &Row) -> Result<Workspace> {
@@ -230,8 +230,7 @@ fn user_from(row: &Row) -> Result<User> {
         workspace_id: text(row, 1)?,
         email: text(row, 2)?,
         display_name: text(row, 3)?,
-        role: Role::parse(&text(row, 4)?)
-            .ok_or_else(|| StoreError::Corrupt("role".into()))?,
+        role: Role::parse(&text(row, 4)?).ok_or_else(|| StoreError::Corrupt("role".into()))?,
         password_hash: opt_text(row, 5)?,
         photo_path: opt_text(row, 6)?,
         created_at: parse_stamp(&text(row, 7)?)?,
@@ -463,7 +462,11 @@ impl Store for TursoStore {
 
     async fn create_user(&self, new: NewUser) -> Result<User> {
         let email = fold_email(&new.email);
-        if self.user_by_email(&new.workspace_id, &email).await?.is_some() {
+        if self
+            .user_by_email(&new.workspace_id, &email)
+            .await?
+            .is_some()
+        {
             return Err(StoreError::Conflict("account"));
         }
         let id = Uuid::new_v4().to_string();
@@ -494,8 +497,7 @@ impl Store for TursoStore {
     }
 
     async fn user_by_email(&self, workspace_id: &str, email: &str) -> Result<Option<User>> {
-        let sql =
-            format!("SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 AND email = ?2");
+        let sql = format!("SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 AND email = ?2");
         match self
             .one_row(&sql, params![workspace_id, fold_email(email)])
             .await?
@@ -509,7 +511,11 @@ impl Store for TursoStore {
         let sql = format!(
             "SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 ORDER BY created_at, id"
         );
-        let mut rows = self.conn.query(&sql, params![workspace_id]).await.map_err(backend)?;
+        let mut rows = self
+            .conn
+            .query(&sql, params![workspace_id])
+            .await
+            .map_err(backend)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(user_from(&row)?);
@@ -539,7 +545,11 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     async fn set_profile(
@@ -560,7 +570,11 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     async fn set_role(&self, user_id: &str, role: Role) -> Result<()> {
@@ -572,7 +586,11 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     async fn mark_signed_in(&self, user_id: &str, at: OffsetDateTime) -> Result<()> {
@@ -584,7 +602,11 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     async fn create_signin_link(
@@ -708,7 +730,11 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64> {
@@ -749,7 +775,10 @@ impl Store for TursoStore {
 
     async fn clear_auth_attempts(&self, bucket: &str) -> Result<()> {
         self.conn
-            .execute("DELETE FROM auth_attempt WHERE bucket = ?1", params![bucket])
+            .execute(
+                "DELETE FROM auth_attempt WHERE bucket = ?1",
+                params![bucket],
+            )
             .await
             .map_err(backend)?;
         Ok(())
@@ -1362,10 +1391,7 @@ impl DetailReads for TursoStore {
         Ok(out)
     }
 
-    async fn dependencies_for_task(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<(bool, DependencyEdge)>> {
+    async fn dependencies_for_task(&self, task_id: &str) -> Result<Vec<(bool, DependencyEdge)>> {
         // Both directions in one round trip: the leading column says which.
         let mut rows = self
             .conn
