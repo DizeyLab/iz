@@ -2689,11 +2689,10 @@ async fn an_admin_reads_the_logs() {
         .await;
     assert_eq!(forward.body, "null", "{}", forward.body);
 
-    // No sender means the send is held, not sent — the queue calls that
-    // "failed" and the retry stamp says when it looks again, but the attempt
-    // count is untouched: nothing was spent trying.
+    // No sender means the send is held, not sent — the ledger stores that as
+    // a failure with nothing spent, and the queue names the truth: held.
     let snapshot = until_logs_contains(&app, &admin_cookie, "\"recipient\":\"emre@izlek.sh\"").await;
-    assert!(snapshot.contains("\"state\":\"failed\""), "{}", snapshot);
+    assert!(snapshot.contains("\"state\":\"held\""), "{}", snapshot);
     assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
 }
 

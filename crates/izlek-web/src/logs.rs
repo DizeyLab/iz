@@ -118,6 +118,9 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
             subject,
             state: match send.state {
                 SendState::Pending => "pending".to_string(),
+                // A send the engine never attempted is only held — usually
+                // for want of a sender — not failed at anything.
+                SendState::Failed if send.attempts == 0 => "held".to_string(),
                 SendState::Failed => "failed".to_string(),
                 SendState::Sent => "sent".to_string(),
                 SendState::Abandoned => "abandoned".to_string(),
@@ -214,8 +217,8 @@ fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
         .queue
         .into_iter()
         .map(|line| {
-            let state_note = if line.state == "failed" {
-                line.last_error.unwrap_or_else(|| "failed".to_string())
+            let state_note = if line.state == "failed" || line.state == "held" {
+                line.last_error.unwrap_or_else(|| line.state.clone())
             } else {
                 line.state.clone()
             };
