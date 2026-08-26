@@ -140,9 +140,16 @@ pub async fn move_card(
         )
         .await
     {
+        // The crossing is committed by now. The rules read it afterwards and
+        // send outside this call: the move has to stand whether or not a mail
+        // server is reachable.
+        Ok(Moved::Recorded(transition)) => {
+            crate::server::mail().after(transition);
+            Ok(None)
+        }
         // A card dropped back where it came from is not news and is not an
         // error: the board simply re-reads and looks the same.
-        Ok(Moved::Recorded(_)) | Ok(Moved::Unchanged) => Ok(None),
+        Ok(Moved::Unchanged) => Ok(None),
         Ok(Moved::Stale) => Ok(Some(Refusal::MovedAlready)),
         Err(dizey_core::store::StoreError::NotFound) => Ok(Some(Refusal::NotFound)),
         Err(error) => {

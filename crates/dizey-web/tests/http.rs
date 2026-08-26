@@ -38,7 +38,11 @@ impl App {
             .await
             .unwrap();
         let options = LeptosOptions::builder().output_name("dizey").build();
-        let router = dizey_web::server::router(Accounts::new(Arc::new(store)), options);
+        let router = dizey_web::server::router(
+            Accounts::new(Arc::new(store)),
+            dizey_web::server::Mail::silent(),
+            options,
+        );
         Self { dir, router }
     }
 

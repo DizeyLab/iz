@@ -23,7 +23,18 @@ axum = { version = "0.8.9", optional = true }
 tokio = { workspace = true, optional = true }
 tower = { version = "0.5.2", optional = true }
 tower-http = { version = "0.7.0", features = ["fs", "compression-gzip"], optional = true }
+async-trait = { version = "0.1.92", optional = true }
 turso = { workspace = true, optional = true }
+# TLS through rustls with the ring provider: no OpenSSL on the deployment box,
+# and no system certificate store to be missing inside a container.
+lettre = { version = "0.11.23", default-features = false, features = [
+  "smtp-transport",
+  "builder",
+  "tokio1-rustls",
+  "ring",
+  "webpki-roots",
+  "pool",
+], optional = true }
 serde_json = { workspace = true, optional = true }
 
 console_error_panic_hook = { version = "0.1.7", optional = true }
@@ -48,6 +59,8 @@ ssr = [
   "dizey-core/server",
   "dep:turso",
   "dep:serde_json",
+  "dep:lettre",
+  "dep:async-trait",
 ]
 
 # The HTTP test drives the real router, so it needs the server side of the app.

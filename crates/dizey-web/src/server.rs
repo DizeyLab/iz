@@ -8,6 +8,8 @@ use axum::http::HeaderValue;
 use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
 use dizey_core::accounts::{AccountError, Accounts};
+use dizey_core::board::Transition;
+use dizey_core::mail::Engine;
 use dizey_core::store::User;
 use leptos::prelude::*;
 use leptos_axum::ResponseOptions;
@@ -18,6 +20,57 @@ pub const SESSION_COOKIE: &str = "dizey_session";
 /// The workspace's account service, put into context by the router.
 pub fn accounts() -> Accounts {
     expect_context::<Accounts>()
+}
+
+/// The mail engine, or the fact that there is nobody to send through.
+///
+/// A workspace with no sender configured is a working workspace: cards move,
+/// rules can be written, and nothing is mailed. That is a configuration, not a
+/// broken deployment, so it is a `None` here rather than an error at the call
+/// site of every move.
+#[derive(Clone)]
+pub struct Mail(Option<std::sync::Arc<Engine>>);
+
+impl Mail {
+    /// No sender. Crossings are recorded and nothing goes out.
+    pub fn silent() -> Self {
+        Self(None)
+    }
+
+    pub fn sending(engine: std::sync::Arc<Engine>) -> Self {
+        Self(Some(engine))
+    }
+
+    /// Hands a committed crossing to the engine, off the request.
+    ///
+    /// The move is already written by the time this is called and the response
+    /// does not wait for it: a card that took thirty seconds to drop because
+    /// somebody's SMTP host was slow would be a board broken by its own mail
+    /// feature. What the send is owed is in the ledger, so a process that dies
+    /// mid-send loses nothing — the sweep picks it up.
+    pub fn after(&self, transition: Transition) {
+        let Some(engine) = self.0.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            match engine.on_transition(&transition).await {
+                Ok(report) if report.sent + report.failed + report.abandoned > 0 => {
+                    println!(
+                        "dizey mail  {} sent, {} to retry, {} given up on",
+                        report.sent, report.failed, report.abandoned
+                    );
+                }
+                Ok(_) => {}
+                Err(problem) => eprintln!("dizey mail  the ledger could not be read: {problem}"),
+            }
+        });
+    }
+}
+
+/// The engine for this request, or a silent one when the router was built
+/// without a sender.
+pub fn mail() -> Mail {
+    use_context::<Mail>().unwrap_or_else(Mail::silent)
 }
 
 /// The cookie value this request presented, if it presented one.
@@ -153,7 +206,7 @@ impl From<AccountError> for Refusal {
 /// It lives here rather than in `main` so a test can drive the real handlers —
 /// the guards above are only worth anything if something calls them the way a
 /// browser does.
-pub fn router(accounts: Accounts, leptos_options: LeptosOptions) -> axum::Router {
+pub fn router(accounts: Accounts, mail: Mail, leptos_options: LeptosOptions) -> axum::Router {
     use axum::Router;
     use leptos_axum::{LeptosRoutes, generate_route_list};
 
@@ -167,7 +220,11 @@ pub fn router(accounts: Accounts, leptos_options: LeptosOptions) -> axum::Router
                 // Provided here *and* to the server-function handler, which
                 // `leptos_routes_with_context` registers with the same closure.
                 let accounts = accounts.clone();
-                move || provide_context(accounts.clone())
+                let mail = mail.clone();
+                move || {
+                    provide_context(accounts.clone());
+                    provide_context(mail.clone());
+                }
             },
             {
                 let leptos_options = leptos_options.clone();
