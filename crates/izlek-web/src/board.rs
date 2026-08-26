@@ -264,7 +264,6 @@ fn BoardScreen(
     let overdue = view.overdue_count(today);
     let blocked = view.blocked_count();
     let empty = view.is_empty();
-    let board_name = view.board.name.clone();
 
     let columns = view
         .columns
@@ -379,8 +378,6 @@ fn BoardScreen(
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
             </div>
-            <div class="topbar-divider"></div>
-            <span class="board-name">{board_name}</span>
             <div class="spacer"></div>
             <span class="topbar-who" title=me.email.clone()>
                 {me.display_name.clone()}
