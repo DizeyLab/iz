@@ -51,6 +51,16 @@ impl Role {
             Role::Viewer => "viewer",
         }
     }
+
+    /// The inverse of [`Role::as_str`], for values read back out of the store.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "admin" => Some(Role::Admin),
+            "member" => Some(Role::Member),
+            "viewer" => Some(Role::Viewer),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -4,5 +4,7 @@
 //! `ssr` feature so none of it is compiled into the wasm bundle.
 
 pub mod role;
+pub mod store;
 
 pub use role::Role;
+pub use store::{Store, StoreError, TursoStore};

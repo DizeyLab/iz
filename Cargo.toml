@@ -11,11 +11,12 @@ repository = "https://github.com/DizeyLab/izlek"
 [workspace.dependencies]
 dizey-core = { path = "crates/dizey-core" }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
 thiserror = "2.0.20"
 uuid = { version = "1.25.0", features = ["v4", "serde"] }
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing", "macros"] }
 tokio = { version = "1.53.1", features = ["full"] }
-turso = "0.8.0-pre.7"
+turso = "=0.8.0-pre.7"
 
 [profile.release]
 codegen-units = 1
