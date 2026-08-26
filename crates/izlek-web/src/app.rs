@@ -4,6 +4,7 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::{SsrMode, path};
 
 use crate::pages::{Join, Landing};
+use crate::logs::LogsPage;
 use crate::rules::RulesPage;
 use crate::settings::SettingsPage;
 
@@ -50,6 +51,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/") view=Landing ssr=SsrMode::InOrder/>
                 <Route path=path!("/join/:token") view=Join ssr=SsrMode::InOrder/>
                 <Route path=path!("/rules") view=RulesPage ssr=SsrMode::InOrder/>
+                <Route path=path!("/logs") view=LogsPage ssr=SsrMode::InOrder/>
                 <Route path=path!("/settings") view=SettingsPage ssr=SsrMode::InOrder/>
             </Routes>
         </Router>
