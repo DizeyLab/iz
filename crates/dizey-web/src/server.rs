@@ -103,8 +103,14 @@ pub fn mail() -> Mail {
 
 /// The cookie value this request presented, if it presented one.
 pub fn presented_session() -> Option<String> {
-    let parts = use_context::<Parts>()?;
-    for header in parts.headers.get_all(COOKIE) {
+    session_in(&use_context::<Parts>()?.headers)
+}
+
+/// The same scan as `presented_session`, off a plain `HeaderMap` rather than
+/// the leptos request context — for handlers axum calls directly, which have
+/// no such context to read.
+pub fn session_in(headers: &axum::http::HeaderMap) -> Option<String> {
+    for header in headers.get_all(COOKIE) {
         let Ok(raw) = header.to_str() else { continue };
         for pair in raw.split(';') {
             let pair = pair.trim();
@@ -245,6 +251,15 @@ pub fn router(
     let routes = generate_route_list(crate::app::App);
     Router::new()
         .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/files",
+            axum::routing::post(crate::files::upload).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024,
+                ),
+            ),
+        )
+        .route("/files/{id}", axum::routing::get(crate::files::download))
         .leptos_routes_with_context(
             &leptos_options,
             routes,
@@ -265,6 +280,7 @@ pub fn router(
         )
         .fallback(leptos_axum::file_and_error_handler(crate::app::shell))
         .layer(axum::middleware::from_fn(carry_refusal_on_redirect))
+        .layer(axum::Extension(accounts))
         .with_state(leptos_options)
 }
 

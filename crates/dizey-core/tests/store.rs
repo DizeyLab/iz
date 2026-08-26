@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use dizey_core::Role;
 use dizey_core::auth::{Token, hash_password};
 use dizey_core::store::{
-    Audience, MailRule, NewSender, NewUser, SendState, Store, StoreError, Trigger, TursoStore, User,
+    Audience, MailRule, NewAttachment, NewSender, NewUser, SendState, Store, StoreError, Trigger,
+    TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -89,14 +90,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 9);
+    assert_eq!(first.schema_version().await.unwrap(), 10);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 9);
+    assert_eq!(second.schema_version().await.unwrap(), 10);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1852,6 +1853,14 @@ impl DetailReads for CountingDetail<'_> {
         self.inner.comments_for_task(task_id).await
     }
 
+    async fn files_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<dizey_core::detail::FileLine>, StoreError> {
+        self.tick();
+        self.inner.files_for_task(task_id).await
+    }
+
     async fn activity_for_task(&self, task_id: &str) -> Result<Vec<ActivityEntry>, StoreError> {
         self.tick();
         self.inner.activity_for_task(task_id).await
@@ -2152,7 +2161,7 @@ async fn saving_a_task_records_only_what_changed() {
 }
 
 #[tokio::test]
-async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
+async fn a_task_detail_costs_eight_queries_whatever_it_carries() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
     let now = OffsetDateTime::now_utc();
@@ -2160,7 +2169,7 @@ async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
     let bare = add_task(store, &workspace, "Backlog", "bare", None, &admin).await;
     let counted = CountingDetail::new(store);
     load_detail(&counted, &workspace, &bare).await.unwrap();
-    assert_eq!(counted.count(), 7, "a task with nothing hung off it");
+    assert_eq!(counted.count(), 8, "a task with nothing hung off it");
 
     // Twenty comments, twenty activity lines, twenty people who could be
     // assigned and twenty tasks on the other end of a dependency — the four
@@ -2209,7 +2218,7 @@ async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
     assert_eq!(detail.activity.len(), 21);
     assert_eq!(
         counted.count(),
-        7,
+        8,
         "the round trips a detail costs must not follow what it carries"
     );
 }
@@ -3515,4 +3524,126 @@ async fn an_account_records_the_admin_who_made_it() {
     // the INSERT would fail.
     let reread = scratch.store.user(&member.id).await.unwrap().unwrap();
     assert_eq!(reread.invited_by.as_deref(), Some(admin_id.as_str()));
+}
+
+#[tokio::test]
+async fn a_file_goes_into_the_database_file_and_comes_back_byte_for_byte() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+
+    // Bytes that are not text and are not valid UTF-8, because an attachment
+    // is not a string and the column it lives in must not treat it as one.
+    let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xfe];
+    let id = store
+        .add_attachment(NewAttachment {
+            task_id: &task,
+            comment_id: None,
+            file_name: "shot.png",
+            mime_type: "image/png",
+            bytes: bytes.clone(),
+            uploaded_by: &admin,
+            at: now,
+        })
+        .await
+        .unwrap();
+
+    let row = store.attachment(&id).await.unwrap().unwrap();
+    assert_eq!(row.task_id, task);
+    assert_eq!(row.file_name, "shot.png");
+    assert_eq!(row.mime_type, "image/png");
+    assert_eq!(row.size_bytes, bytes.len() as u64);
+    assert_eq!(row.uploaded_by, admin);
+    assert_eq!(store.attachment_bytes(&id).await.unwrap().unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn a_file_name_that_is_a_path_is_stored_as_the_label_it_is() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+
+    // Nothing in the store resolves a name, so the worst name there is comes
+    // back exactly as it went in: it is a label on a chip, not a path.
+    let id = store
+        .add_attachment(NewAttachment {
+            task_id: &task,
+            comment_id: None,
+            file_name: "../../etc/passwd",
+            mime_type: "application/octet-stream",
+            bytes: b"root:x:0:0".to_vec(),
+            uploaded_by: &admin,
+            at: now,
+        })
+        .await
+        .unwrap();
+    let row = store.attachment(&id).await.unwrap().unwrap();
+    assert_eq!(row.file_name, "../../etc/passwd");
+    // And nothing was written anywhere but the database file and its key
+    // (see `store::secret`) — never a file named after the attachment.
+    let written: Vec<String> = std::fs::read_dir(&scratch.dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with("dizey.db") && name != "dizey.key")
+        .collect();
+    assert!(written.is_empty(), "{written:?}");
+}
+
+#[tokio::test]
+async fn the_detail_lists_a_task_s_files_oldest_first_and_never_their_bytes() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+
+    for (n, name) in ["first.pdf", "second.png"].iter().enumerate() {
+        store
+            .add_attachment(NewAttachment {
+                task_id: &task,
+                comment_id: None,
+                file_name: name,
+                mime_type: "application/pdf",
+                bytes: vec![b'x'; 2048],
+                uploaded_by: &admin,
+                at: now + time::Duration::seconds(n as i64),
+            })
+            .await
+            .unwrap();
+    }
+
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
+    let names: Vec<&str> = detail.files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["first.pdf", "second.png"]);
+    assert_eq!(detail.files[0].size_label(), "2 KB");
+}
+
+#[tokio::test]
+async fn a_file_can_be_taken_away_and_saying_so_twice_is_answered_honestly() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+    let id = store
+        .add_attachment(NewAttachment {
+            task_id: &task,
+            comment_id: None,
+            file_name: "note.txt",
+            mime_type: "text/plain",
+            bytes: b"hello".to_vec(),
+            uploaded_by: &admin,
+            at: now,
+        })
+        .await
+        .unwrap();
+
+    assert!(store.delete_attachment(&id).await.unwrap());
+    assert!(!store.delete_attachment(&id).await.unwrap());
+    assert!(store.attachment(&id).await.unwrap().is_none());
+    assert!(store.attachment_bytes(&id).await.unwrap().is_none());
+    assert!(store.attachments(&task).await.unwrap().is_empty());
 }

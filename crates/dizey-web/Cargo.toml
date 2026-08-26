@@ -19,7 +19,7 @@ time.workspace = true
 thiserror.workspace = true
 
 dizey-core = { workspace = true }
-axum = { version = "0.8.9", optional = true }
+axum = { version = "0.8.9", features = ["multipart"], optional = true }
 tokio = { workspace = true, optional = true }
 tower = { version = "0.5.2", optional = true }
 tower-http = { version = "0.7.0", features = ["fs", "compression-gzip"], optional = true }

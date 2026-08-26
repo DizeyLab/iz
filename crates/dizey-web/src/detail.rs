@@ -38,6 +38,10 @@ pub struct DetailSnapshot {
     pub may_comment: bool,
     /// Whether this person may delete the task. A writer may.
     pub may_delete: bool,
+    /// Extensions the upload form's `accept` attribute may offer. Empty means
+    /// every type — the same "empty means everything" the store's limits use.
+    pub allowed_file_types: Vec<String>,
+    pub attachment_limit_mb: u64,
 }
 
 /// Which way round a dependency runs, as it travels in a form.
@@ -54,13 +58,20 @@ pub enum Direction {
 pub(crate) mod guard {
     use crate::auth::Refusal;
     use dizey_core::detail::TaskFacts;
-    use dizey_core::store::User;
+    use dizey_core::store::{Store, User};
 
     /// The task, if this person's workspace is the one holding it. A task in
     /// another workspace is not found rather than forbidden: the answer says
     /// nothing about whether the id is real.
-    pub async fn task_of(user: &User, task_id: &str) -> Result<TaskFacts, Refusal> {
-        let store = crate::server::accounts().store().clone();
+    ///
+    /// Takes the store rather than reading it off leptos context, so a plain
+    /// axum handler with no leptos owner tree — `crate::files`'s upload and
+    /// download routes — can call this the same way a server function does.
+    pub async fn task_of(
+        store: &dyn Store,
+        user: &User,
+        task_id: &str,
+    ) -> Result<TaskFacts, Refusal> {
         match store.task(task_id).await {
             Ok(Some(facts)) if facts.workspace_id == user.workspace_id => Ok(facts),
             Ok(_) => Err(Refusal::NotFound),
@@ -74,7 +85,8 @@ pub(crate) mod guard {
     /// The writer behind this request and the task they named.
     pub async fn writer_and_task(task_id: &str) -> Result<(User, TaskFacts), Refusal> {
         let user = crate::server::require_writer().await?;
-        let facts = task_of(&user, task_id).await?;
+        let store = crate::server::accounts().store().clone();
+        let facts = task_of(store.as_ref(), &user, task_id).await?;
         Ok((user, facts))
     }
 }
@@ -131,12 +143,26 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
     // goes with it, which is what makes that safe — not a role.
     let may_write = user.role.can_write_tasks();
 
+    // The upload form's own limits, read the same way Settings reads them —
+    // megabytes on the screen, bytes in the store.
+    const MB: u64 = 1024 * 1024;
+    let workspace = store.workspace().await.map_err(fail)?;
+    let allowed_file_types = workspace
+        .as_ref()
+        .map(|workspace| workspace.allowed_file_types.clone())
+        .unwrap_or_default();
+    let attachment_limit_mb = workspace
+        .map(|workspace| workspace.attachment_limit_bytes / MB)
+        .unwrap_or(0);
+
     Ok(Ok(DetailSnapshot {
         detail,
         linkable,
         may_write,
         may_comment: user.role.can_comment(),
         may_delete: may_write,
+        allowed_file_types,
+        attachment_limit_mb,
         me: Me {
             id: user.id,
             display_name: user.display_name,
@@ -309,7 +335,8 @@ pub async fn link_tasks(
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let other = match guard::task_of(&actor, &other_id).await {
+    let store = accounts().store().clone();
+    let other = match guard::task_of(store.as_ref(), &actor, &other_id).await {
         Ok(facts) => facts,
         Err(refusal) => return Ok(Some(refusal)),
     };
@@ -318,7 +345,6 @@ pub async fn link_tasks(
         Direction::BlockedBy => (task_id.clone(), other_id.clone()),
         Direction::Blocks => (other_id.clone(), task_id.clone()),
     };
-    let store = accounts().store().clone();
     let now = OffsetDateTime::now_utc();
     match store.add_dependency(&blocked, &blocking, now).await {
         Ok(()) => {}
@@ -354,7 +380,8 @@ pub async fn unlink_tasks(
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let other = match guard::task_of(&actor, &other_id).await {
+    let store = accounts().store().clone();
+    let other = match guard::task_of(store.as_ref(), &actor, &other_id).await {
         Ok(facts) => facts,
         Err(refusal) => return Ok(Some(refusal)),
     };
@@ -363,7 +390,6 @@ pub async fn unlink_tasks(
         Direction::BlockedBy => (task_id.clone(), other_id.clone()),
         Direction::Blocks => (other_id.clone(), task_id.clone()),
     };
-    let store = accounts().store().clone();
     let now = OffsetDateTime::now_utc();
     let fail = |e: dizey_core::store::StoreError| ServerFnError::new(e.to_string());
     store
@@ -397,7 +423,8 @@ pub async fn post_comment(task_id: String, body: String) -> Result<Option<Refusa
     if !user.role.can_comment() {
         return Ok(Some(Refusal::Forbidden));
     }
-    if let Err(refusal) = guard::task_of(&user, &task_id).await {
+    let store = accounts().store().clone();
+    if let Err(refusal) = guard::task_of(store.as_ref(), &user, &task_id).await {
         return Ok(Some(refusal));
     }
     let body = body.trim();
@@ -405,8 +432,7 @@ pub async fn post_comment(task_id: String, body: String) -> Result<Option<Refusa
         return Ok(Some(Refusal::EmptyComment));
     }
 
-    accounts()
-        .store()
+    store
         .add_comment(&task_id, &user.id, body, OffsetDateTime::now_utc())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -458,6 +484,41 @@ pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnErr
     if let Some(freeing) = deletion.event {
         crate::server::mail().after_freeing(freeing, deletion.freed);
     }
+    Ok(None)
+}
+
+/// Deletes an attachment's row and its bytes. This is a hard delete, unlike
+/// [`delete_task`]'s soft one: a file is a blob on disk, not a fact worth
+/// keeping around for the audit trail, so there is nothing to undo by hand.
+/// That is also why the gate is narrower than a writer's — only the person who
+/// put the file there, or an admin cleaning up after them, may take it away.
+#[server]
+pub async fn delete_file(file_id: String) -> Result<Option<Refusal>, ServerFnError> {
+    use crate::server::{accounts, require_user};
+
+    let user = match require_user().await {
+        Ok(user) => user,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    let store = accounts().store().clone();
+    let Some(attachment) = store
+        .attachment(&file_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+    else {
+        return Ok(Some(Refusal::NotFound));
+    };
+    if let Err(refusal) = guard::task_of(store.as_ref(), &user, &attachment.task_id).await {
+        return Ok(Some(refusal));
+    }
+    if user.id != attachment.uploaded_by && !user.role.can_administer() {
+        return Ok(Some(Refusal::Forbidden));
+    }
+
+    store
+        .delete_attachment(&file_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(None)
 }
 
@@ -1144,12 +1205,14 @@ fn DetailScreen(
 ) -> impl IntoView {
     let DetailSnapshot {
         detail,
-        me: _,
+        me,
         today,
         linkable,
         may_write,
         may_comment,
         may_delete,
+        allowed_file_types,
+        attachment_limit_mb,
     } = snapshot;
 
     let id = StoredValue::new(detail.id.clone());
@@ -1164,22 +1227,33 @@ fn DetailScreen(
     let deadline_label = detail.deadline_label(today);
     let assignee_count = detail.assignees.len();
     let comment_count = detail.comments.len();
+    let file_count = detail.files.len();
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
+    let accept = (!allowed_file_types.is_empty()).then(|| {
+        allowed_file_types
+            .iter()
+            .map(|kind| format!(".{kind}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+    let upload_refusal = crate::auth::refusal_from_query("upload_file");
 
     let comment = ServerAction::<PostComment>::new();
     let remove = ServerAction::<DeleteTask>::new();
     let move_to = ServerAction::<crate::board::MoveCard>::new();
+    let drop_file = ServerAction::<DeleteFile>::new();
     let comment_refusal = crate::auth::refusal_of(comment);
     let remove_refusal = crate::auth::refusal_of(remove);
     let move_refusal = crate::auth::refusal_of(move_to);
+    let drop_file_refusal = crate::auth::refusal_of(drop_file);
     // Deleting is two steps: ask what it would cost, then say it out loud and
     // let the person decide. The artboard's red button had no confirmation and
     // this action reaches other people's tasks.
     let ask = ServerAction::<WhatDeleteCosts>::new();
     // Every action that lands re-reads the task and the board behind it. The
     // per-region editors own their own actions and do the same.
-    for value in [comment.value(), move_to.value()] {
+    for value in [comment.value(), move_to.value(), drop_file.value()] {
         Effect::new(move |_| {
             if matches!(value.get(), Some(Ok(None))) {
                 on_change();
@@ -1338,6 +1412,50 @@ fn DetailScreen(
                     }
                 })}
             {(!has_deps).then(|| view! { <p class="detail-quiet">"Nothing blocks this task."</p> })}
+        </section>
+
+        <section class="detail-block">
+            <div class="detail-block-head">
+                <span class="detail-label">"FILES"</span>
+                <span class="detail-count">{file_count}</span>
+            </div>
+            {(file_count > 0)
+                .then(|| {
+                    view! {
+                        <div class="file-list">
+                            {detail
+                                .files
+                                .iter()
+                                .map(|file| {
+                                    view! { <FileChip file=file.clone() me=me.clone() action=drop_file/> }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })}
+            {(file_count == 0).then(|| view! { <p class="detail-quiet">"No files yet."</p> })}
+            {refused(drop_file_refusal)}
+            {may_comment
+                .then(|| {
+                    view! {
+                        <form
+                            class="file-upload"
+                            method="post"
+                            action="/files"
+                            enctype="multipart/form-data"
+                        >
+                            <input type="hidden" name="task_id" value=move || id.get_value()/>
+                            <input type="file" name="file" accept=accept required/>
+                            <button class="file-upload-submit" type="submit">
+                                "Upload"
+                            </button>
+                            <span class="detail-quiet">
+                                {format!("Up to {attachment_limit_mb} MB.")}
+                            </span>
+                        </form>
+                        {refused(upload_refusal)}
+                    }
+                })}
         </section>
 
         <section class="detail-block">
@@ -1613,6 +1731,43 @@ fn DepRow(
                     }
                 })}
         </div>
+    }
+}
+
+/// One attachment, chip-shaped like a dependency. A file posted with a
+/// comment stays listed here too — a person hunting for what someone
+/// attached should not have to remember which comment it rode in on — with a
+/// quiet note saying where it came from.
+#[component]
+fn FileChip(
+    file: dizey_core::detail::FileLine,
+    me: Me,
+    action: ServerAction<DeleteFile>,
+) -> impl IntoView {
+    let may_drop = me.id == file.uploaded_by || me.role.can_administer();
+    let size = file.size_label();
+    let on_comment = file.comment_id.is_some();
+    let file_id = file.id.clone();
+
+    view! {
+        <span class="file-chip">
+            <a class="file-chip-name" href=format!("/files/{}", file.id)>
+                {file.name.clone()}
+            </a>
+            <span class="file-chip-size">{size}</span>
+            {on_comment.then(|| view! { <span class="file-chip-note">"on a comment"</span> })}
+            {may_drop
+                .then(|| {
+                    view! {
+                        <ActionForm action=action attr:class="file-chip-drop-form">
+                            <input type="hidden" name="file_id" value=file_id/>
+                            <button class="file-chip-drop" type="submit" title="Remove this file">
+                                {glyph::cross()}
+                            </button>
+                        </ActionForm>
+                    }
+                })}
+        </span>
     }
 }
 

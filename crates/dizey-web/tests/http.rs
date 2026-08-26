@@ -143,12 +143,126 @@ impl App {
             location,
         }
     }
+
+    /// Posts a multipart form the way a browser's
+    /// `<form enctype="multipart/form-data">` does, hand-built rather than
+    /// pulling in a client crate for it: the fields first, in the order given
+    /// — the upload handler reads `task_id` before it reaches `file` — then
+    /// one `file` part if given.
+    async fn post_multipart(
+        &self,
+        path: &str,
+        cookie: Option<&str>,
+        fields: &[(&str, &str)],
+        file: Option<(&str, &str, &[u8])>,
+    ) -> Answer {
+        const BOUNDARY: &str = "dizey-test-boundary";
+        let mut body = Vec::new();
+        for (name, value) in fields {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some((filename, content_type, bytes)) = file {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            );
+        if let Some(cookie) = cookie {
+            request = request.header(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
+            );
+        }
+        let response = self
+            .router
+            .clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        Answer {
+            status,
+            session: None,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+            location,
+        }
+    }
+
+    /// Gets a page or a download the way a browser does: no `Accept` header
+    /// forcing JSON, an optional cookie, and the raw bytes back untouched — a
+    /// download's body is not always UTF-8.
+    async fn get(&self, path: &str, cookie: Option<&str>) -> Raw {
+        let mut request = Request::builder().method("GET").uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
+            );
+        }
+        let response = self
+            .router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let disposition = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        Raw { status, content_type, disposition, bytes }
+    }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// A GET answer kept as raw bytes: a page's HTML or a download's file, neither
+/// of which the JSON-shaped [`Answer`] below is meant for.
+struct Raw {
+    status: StatusCode,
+    content_type: Option<String>,
+    disposition: Option<String>,
+    bytes: Vec<u8>,
 }
 
 struct Answer {
@@ -1966,4 +2080,462 @@ async fn a_signed_out_browser_may_not_touch_the_rules() {
             answer.body
         );
     }
+}
+
+// An id nobody's workspace owns answers `404` for a signed-in person, the
+// same not-found a stranger to the task would see, and a `303` for nobody at
+// all — never a leptos catch-all page, and never a `403` that would confirm
+// the id belongs to someone else's workspace.
+#[tokio::test]
+async fn a_download_of_an_unknown_attachment_is_not_found_and_signed_out_is_a_redirect() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/files/anything")
+        .header(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={admin}")).unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/files/anything")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+// A signed-in member's detail page carries the upload form no-script needs:
+// a real multipart `<form>` posting to `/files`, not the leptos action form
+// the rest of the screen uses — a browser with no script still has a way to
+// attach a file.
+#[tokio::test]
+async fn the_files_section_is_on_the_detail_page() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Attach something to me").await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/?task={task}"))
+        .header(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={admin}")).unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        body.contains("multipart/form-data"),
+        "no multipart upload form on the detail page"
+    );
+    assert!(
+        body.contains(r#"action="/files""#),
+        "the upload form does not post to /files"
+    );
+}
+
+/// The id of the file named `name` in a [`dizey_web::detail::FetchTask`]
+/// snapshot's body, read the way the page would: found by its name, then the
+/// `id` field that comes right before it on the wire.
+fn attachment_id_named(body: &str, name: &str) -> String {
+    let needle = format!("\",\"name\":\"{name}\"");
+    let before = body
+        .split_once(&needle)
+        .map(|(head, _)| head)
+        .unwrap_or_else(|| panic!("no file named {name} in the detail snapshot: {body}"));
+    before
+        .rsplit_once("\"id\":\"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no id before the file name")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_viewer_who_posts_an_upload_anyway_is_refused() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let viewer = invited(&app, &admin, "quiet@dizey.sh", "Quiet Reader", Role::Viewer).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Viewers cannot attach").await;
+
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&viewer),
+            &[("task_id", &task)],
+            Some(("note.txt", "text/plain", b"hello")),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/?refusal=forbidden&on=upload_file")
+    );
+}
+
+#[tokio::test]
+async fn a_member_uploads_a_file_and_the_chip_comes_back() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let member = invited(&app, &admin, "mo@dizey.sh", "Mo Dubois", Role::Member).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Attach the spec").await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&member),
+            &[("task_id", &task)],
+            Some(("spec.png", "image/png", &png)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}").as_str())
+    );
+
+    let snapshot = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&member),
+            &[("task_id", &task)],
+        )
+        .await;
+    let file_id = attachment_id_named(&snapshot.body, "spec.png");
+
+    let page = app.get(&format!("/?task={task}"), Some(&member)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(&format!("/files/{file_id}")),
+        "no href to the new file: {html}"
+    );
+    assert!(html.contains("spec.png"));
+
+    let download = app.get(&format!("/files/{file_id}"), Some(&member)).await;
+    assert_eq!(download.status, StatusCode::OK);
+    assert_eq!(download.bytes, png);
+}
+
+#[tokio::test]
+async fn a_file_past_the_workspace_limit_is_refused_before_it_is_kept() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Too big to keep").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveLimits>(),
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "1"),
+                ("photo_limit_mb", "2"),
+                ("allowed_file_types", ""),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let big = vec![0u8; 2 * 1024 * 1024];
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("big.bin", "application/octet-stream", &big)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&refusal=file-too-big&on=upload_file").as_str())
+    );
+
+    let snapshot = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(snapshot.body.contains("\"files\":[]"), "{}", snapshot.body);
+}
+
+#[tokio::test]
+async fn a_file_type_off_the_list_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "No executables here").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveLimits>(),
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "25"),
+                ("photo_limit_mb", "2"),
+                ("allowed_file_types", "png"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("evil.exe", "application/octet-stream", b"MZ\x90\x00")),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&refusal=file-type&on=upload_file").as_str())
+    );
+}
+
+#[tokio::test]
+async fn an_empty_allowed_list_lets_anything_through() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Whatever shows up").await;
+
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("anything.bin", "application/octet-stream", &[0x00, 0x01, 0x02])),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}").as_str())
+    );
+}
+
+#[tokio::test]
+async fn the_stored_type_is_what_the_bytes_are_not_what_the_upload_claimed() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Mislabeled on the way in").await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("liar.pdf", "application/pdf", &png)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+
+    let snapshot = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let file_id = attachment_id_named(&snapshot.body, "liar.pdf");
+
+    let download = app.get(&format!("/files/{file_id}"), Some(&admin_cookie)).await;
+    assert_eq!(download.content_type.as_deref(), Some("image/png"));
+}
+
+#[tokio::test]
+async fn a_file_name_that_is_a_path_is_kept_as_a_label() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Filename tries to escape").await;
+
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("../../etc/passwd", "text/plain", b"root:x:0:0")),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+
+    let snapshot = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(
+        snapshot.body.contains("\"name\":\"passwd\""),
+        "the stored name still has a path in it: {}",
+        snapshot.body
+    );
+    let file_id = attachment_id_named(&snapshot.body, "passwd");
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        !html.contains("../../etc/passwd"),
+        "the raw path leaked onto the chip: {html}"
+    );
+
+    let download = app.get(&format!("/files/{file_id}"), Some(&admin_cookie)).await;
+    let disposition = download
+        .disposition
+        .expect("no content-disposition on the download");
+    assert!(!disposition.contains('\r'), "{disposition}");
+    assert!(!disposition.contains('\n'), "{disposition}");
+    assert!(!disposition.contains('/'), "{disposition}");
+}
+
+/// A second workspace is a second database in this harness — there is no way
+/// to build two workspaces sharing one store to prove sibling-workspace
+/// isolation directly. What this proves instead: an attachment id that is
+/// real, just not in *this* store, gets the same 404 an id from nowhere gets.
+#[tokio::test]
+async fn a_file_from_another_workspace_is_not_found() {
+    let app_a = App::open().await;
+    let admin_a = admin(&app_a).await;
+
+    let app_b = App::open().await;
+    let admin_b = admin(&app_b).await;
+    let column_b = first_column(&app_b, &admin_b).await;
+    let task_b = a_task(&app_b, &admin_b, &column_b, "Lives in the other workspace").await;
+    let answer = app_b
+        .post_multipart(
+            "/files",
+            Some(&admin_b),
+            &[("task_id", &task_b)],
+            Some(("theirs.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    let snapshot = app_b
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin_b),
+            &[("task_id", &task_b)],
+        )
+        .await;
+    let file_id = attachment_id_named(&snapshot.body, "theirs.png");
+
+    let answer = app_a.get(&format!("/files/{file_id}"), Some(&admin_a)).await;
+    assert_eq!(answer.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_upload_without_a_file_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Nothing was chosen").await;
+
+    let answer = app
+        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], None)
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&refusal=no-file&on=upload_file").as_str())
+    );
+}
+
+#[tokio::test]
+async fn only_the_uploader_or_an_admin_may_delete_a_file() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member_a = invited(&app, &admin_cookie, "asha@dizey.sh", "Asha", Role::Member).await;
+    let member_b = invited(&app, &admin_cookie, "beau@dizey.sh", "Beau", Role::Member).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Two uploaders, one task").await;
+
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&member_a),
+            &[("task_id", &task)],
+            Some(("mine.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&member_b),
+            &[("task_id", &task)],
+            Some(("theirs.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+
+    let snapshot = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let file_a = attachment_id_named(&snapshot.body, "mine.png");
+    let file_b = attachment_id_named(&snapshot.body, "theirs.png");
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::DeleteFile>(),
+            Some(&member_b),
+            &[("file_id", &file_a)],
+        )
+        .await;
+    assert_eq!(answer.body, "\"Forbidden\"", "{}", answer.body);
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::DeleteFile>(),
+            Some(&member_a),
+            &[("file_id", &file_a)],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "the uploader was refused: {}", answer.body);
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::DeleteFile>(),
+            Some(&admin_cookie),
+            &[("file_id", &file_b)],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "the admin was refused: {}", answer.body);
+
+    let snapshot = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(snapshot.body.contains("\"files\":[]"), "{}", snapshot.body);
 }

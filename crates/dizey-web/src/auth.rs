@@ -46,6 +46,12 @@ pub enum Refusal {
     BadSender(String),
     /// A comment with nothing in it.
     EmptyComment,
+    /// The upload arrived without a file in it.
+    NoFile,
+    /// The bytes kept coming past what this workspace allows per file.
+    FileTooBig,
+    /// The name does not end in one of the extensions the admin allows.
+    FileTypeNotAllowed,
     /// A rule with no subject line: the mail it sends would arrive blank.
     EmptySubject,
     /// The date field did not hold a date.
@@ -87,6 +93,14 @@ impl Refusal {
             }
             Refusal::BadSender(problem) => problem.clone(),
             Refusal::EmptyComment => "Write something first.".to_string(),
+            Refusal::NoFile => "Choose a file first.".to_string(),
+            Refusal::FileTooBig => {
+                "That file is bigger than this workspace allows. The limit is in Settings."
+                    .to_string()
+            }
+            Refusal::FileTypeNotAllowed => {
+                "That kind of file is not on this workspace's allowed list.".to_string()
+            }
             Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -130,6 +144,9 @@ impl Refusal {
             Refusal::BadFileType => "bad-file-type",
             Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
+            Refusal::NoFile => "no-file",
+            Refusal::FileTooBig => "file-too-big",
+            Refusal::FileTypeNotAllowed => "file-type",
             Refusal::EmptySubject => "empty-subject",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
@@ -155,6 +172,9 @@ impl Refusal {
             "link-not-usable" => Refusal::LinkNotUsable,
             "empty-title" => Refusal::EmptyTitle,
             "empty-comment" => Refusal::EmptyComment,
+            "no-file" => Refusal::NoFile,
+            "file-too-big" => Refusal::FileTooBig,
+            "file-type" => Refusal::FileTypeNotAllowed,
             "empty-subject" => Refusal::EmptySubject,
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
@@ -209,6 +229,23 @@ where
     }
 }
 
+/// What a plain form post refused with, read from the address alone.
+///
+/// [`refusal_of`] needs a server action to read the answer off. The upload is
+/// not one — it is a multipart form posted to an axum handler, which can only
+/// ever answer a browser with a redirect — so its refusal always comes back
+/// the way a script-less browser's does, and this reads it from there.
+pub fn refusal_from_query(call: &'static str) -> impl Fn() -> Option<Refusal> + Copy {
+    let query = leptos_router::hooks::use_query_map();
+    move || {
+        let query = query.read();
+        if query.get("on")? != call {
+            return None;
+        }
+        Refusal::from_code(&query.get("refusal")?)
+    }
+}
+
 #[cfg(test)]
 mod refusal_tests {
     use super::*;
@@ -227,6 +264,9 @@ mod refusal_tests {
             Refusal::LinkNotUsable,
             Refusal::EmptyTitle,
             Refusal::EmptyComment,
+            Refusal::NoFile,
+            Refusal::FileTooBig,
+            Refusal::FileTypeNotAllowed,
             Refusal::BadDeadline,
             Refusal::Cycle,
             Refusal::MovedAlready,

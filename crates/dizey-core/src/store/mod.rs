@@ -64,6 +64,37 @@ pub struct Workspace {
     pub allowed_file_types: Vec<String>,
 }
 
+/// One file hung off a task, as a screen lists it: a name, a type, a size and
+/// who put it there. The bytes are deliberately not on this type — it is what
+/// handlers load and pages serialise, and a file's contents have no business
+/// travelling with a list of file names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: String,
+    pub task_id: String,
+    /// The comment it was posted with, when it was posted with one.
+    pub comment_id: Option<String>,
+    /// What the browser called the file. A label, never a path.
+    pub file_name: String,
+    /// What the server decided the bytes are, never what the upload claimed.
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub uploaded_by: String,
+    pub uploaded_at: OffsetDateTime,
+}
+
+/// A file on its way into the table, bytes and all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewAttachment<'a> {
+    pub task_id: &'a str,
+    pub comment_id: Option<&'a str>,
+    pub file_name: &'a str,
+    pub mime_type: &'a str,
+    pub bytes: Vec<u8>,
+    pub uploaded_by: &'a str,
+    pub at: OffsetDateTime,
+}
+
 /// A sender as an admin typed it, on its way to the table.
 ///
 /// `password` is `None` when the admin left the field untouched, which is what
@@ -493,6 +524,29 @@ pub trait Store: BoardReads + DetailReads + 'static {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<String>;
+
+    /// Hangs a file off a task. The bytes go into the database file with the
+    /// row: there is no second place for a Dizey deployment to keep, and no
+    /// path for an uploaded name to become.
+    ///
+    /// Nothing here decides whether the file was allowed — its size, its type
+    /// and who may attach it are the handler's questions, answered before the
+    /// bytes reach this call.
+    async fn add_attachment(&self, new: NewAttachment<'_>) -> Result<String>;
+
+    /// What is hung off a task, oldest first, without the bytes. This is what
+    /// a screen reads; a screen never carries a file's contents.
+    async fn attachments(&self, task_id: &str) -> Result<Vec<Attachment>>;
+
+    /// One file's row, still without its bytes. The `task_id` on it is what the
+    /// handler checks before it hands anything over.
+    async fn attachment(&self, id: &str) -> Result<Option<Attachment>>;
+
+    /// The bytes themselves, for the one handler that serves them.
+    async fn attachment_bytes(&self, id: &str) -> Result<Option<Vec<u8>>>;
+
+    /// Takes a file away for good. `false` when there was no such row.
+    async fn delete_attachment(&self, id: &str) -> Result<bool>;
 
     /// Writes the title, description and deadline the detail screen saved, and
     /// records one activity line per field that actually changed.

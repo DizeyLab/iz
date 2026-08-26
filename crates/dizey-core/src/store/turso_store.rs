@@ -13,14 +13,15 @@ use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
 use super::{
-    Audience, Deletion, Event, Freeing, MailRule, MailSend, NewSender, NewTask, NewUser, Recipient,
-    Result,
+    Attachment, Audience, Deletion, Event, Freeing, MailRule, MailSend, NewAttachment, NewSender,
+    NewTask, NewUser, Recipient, Result,
     SendState, SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
 use crate::detail::{
-    ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, TaskFacts,
+    ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, FileLine,
+    TaskFacts,
 };
 use time::Date;
 use time::format_description::BorrowedFormatItem;
@@ -37,6 +38,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, include_str!("../../migrations/0007_who_invited.sql")),
     (8, include_str!("../../migrations/0008_sender_is_settings.sql")),
     (9, include_str!("../../migrations/0009_sender_test.sql")),
+    (
+        10,
+        include_str!("../../migrations/0010_attachments_live_in_the_file.sql"),
+    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -317,6 +322,20 @@ fn opt_stamp(row: &Row, idx: usize) -> Result<Option<OffsetDateTime>> {
         Some(raw) => Ok(Some(parse_stamp(&raw)?)),
         None => Ok(None),
     }
+}
+
+/// One attachment row, in the column order every query above selects.
+fn attachment_row(row: &Row) -> Result<Attachment> {
+    Ok(Attachment {
+        id: text(row, 0)?,
+        task_id: text(row, 1)?,
+        comment_id: opt_text(row, 2)?,
+        file_name: text(row, 3)?,
+        mime_type: text(row, 4)?,
+        size_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
+        uploaded_by: text(row, 6)?,
+        uploaded_at: parse_stamp(&text(row, 7)?)?,
+    })
 }
 
 fn text(row: &Row, idx: usize) -> Result<String> {
@@ -1242,6 +1261,86 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         Ok(id)
+    }
+
+    async fn add_attachment(&self, new: NewAttachment<'_>) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let size = new.bytes.len() as i64;
+        self.conn
+            .execute(
+                "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
+                 size_bytes, bytes, uploaded_by, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id.clone(),
+                    new.task_id,
+                    new.comment_id,
+                    new.file_name,
+                    new.mime_type,
+                    size,
+                    new.bytes,
+                    new.uploaded_by,
+                    stamp(new.at)?
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(id)
+    }
+
+    async fn attachments(&self, task_id: &str) -> Result<Vec<Attachment>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
+                 uploaded_by, created_at FROM attachment \
+                 WHERE task_id = ?1 ORDER BY created_at, rowid",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(attachment_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn attachment(&self, id: &str) -> Result<Option<Attachment>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
+                 uploaded_by, created_at FROM attachment WHERE id = ?1",
+                params![id],
+            )
+            .await
+            .map_err(backend)?;
+        match rows.next().await.map_err(backend)? {
+            Some(row) => Ok(Some(attachment_row(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn attachment_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let mut rows = self
+            .conn
+            .query("SELECT bytes FROM attachment WHERE id = ?1", params![id])
+            .await
+            .map_err(backend)?;
+        match rows.next().await.map_err(backend)? {
+            Some(row) => Ok(Some(row.get::<Vec<u8>>(0).map_err(backend)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_attachment(&self, id: &str) -> Result<bool> {
+        let gone = self
+            .conn
+            .execute("DELETE FROM attachment WHERE id = ?1", params![id])
+            .await
+            .map_err(backend)?;
+        Ok(gone > 0)
     }
 
     async fn save_task(
@@ -2233,6 +2332,31 @@ impl DetailReads for TursoStore {
                     display_name: text(&row, 4)?,
                     photo_path: opt_text(&row, 5)?,
                 },
+            });
+        }
+        Ok(out)
+    }
+
+    async fn files_for_task(&self, task_id: &str) -> Result<Vec<FileLine>> {
+        // `bytes` is not in the SELECT on purpose: a screen listing five files
+        // must not drag five files through memory to print their names.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, file_name, size_bytes, comment_id, uploaded_by \
+                 FROM attachment WHERE task_id = ?1 ORDER BY created_at, rowid",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(FileLine {
+                id: text(&row, 0)?,
+                name: text(&row, 1)?,
+                size_bytes: row.get::<i64>(2).map_err(backend)?.max(0) as u64,
+                comment_id: opt_text(&row, 3)?,
+                uploaded_by: text(&row, 4)?,
             });
         }
         Ok(out)

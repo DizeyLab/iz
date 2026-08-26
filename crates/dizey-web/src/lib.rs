@@ -10,6 +10,8 @@ pub mod pages;
 pub mod rules;
 pub mod settings;
 #[cfg(feature = "ssr")]
+pub mod files;
+#[cfg(feature = "ssr")]
 pub mod server;
 #[cfg(feature = "ssr")]
 pub mod smtp;

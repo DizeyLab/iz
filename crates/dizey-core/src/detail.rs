@@ -61,6 +61,38 @@ impl DependencyEdge {
     }
 }
 
+/// One file hung off a task, as the detail screen prints it.
+///
+/// The bytes are not here and neither is a path: a chip carries the name to
+/// show, the size to show beside it, and the id the download handler answers
+/// on. The name is display text and nothing resolves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileLine {
+    pub id: String,
+    pub name: String,
+    pub size_bytes: u64,
+    /// The comment this file was posted with, when it was posted with one.
+    pub comment_id: Option<String>,
+    pub uploaded_by: String,
+}
+
+impl FileLine {
+    /// `840 KB`, `1.4 MB` — the size as a chip says it. Whole kilobytes below
+    /// a megabyte, one decimal above, because a chip is not a disk usage
+    /// report.
+    pub fn size_label(&self) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = 1024 * 1024;
+        if self.size_bytes >= MB {
+            format!("{:.1} MB", self.size_bytes as f64 / MB as f64)
+        } else if self.size_bytes >= KB {
+            format!("{} KB", self.size_bytes / KB)
+        } else {
+            format!("{} B", self.size_bytes)
+        }
+    }
+}
+
 /// What deleting a task would take with it. The confirmation step says this
 /// out loud before the button fires.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +248,8 @@ pub struct TaskDetail {
     /// Tasks waiting on this one.
     pub blocks: Vec<DependencyEdge>,
     pub comments: Vec<Comment>,
+    /// Files hung off this task, oldest first.
+    pub files: Vec<FileLine>,
     pub activity: Vec<ActivityEntry>,
 }
 
@@ -276,7 +310,7 @@ pub use reads::{DetailReads, load};
 mod reads {
     use async_trait::async_trait;
 
-    use super::{ActivityEntry, Comment, DependencyEdge, TaskDetail, TaskFacts};
+    use super::{ActivityEntry, Comment, DependencyEdge, FileLine, TaskDetail, TaskFacts};
     use crate::board::{Column, Person};
     use crate::store::Result;
 
@@ -304,14 +338,17 @@ mod reads {
 
         async fn comments_for_task(&self, task_id: &str) -> Result<Vec<Comment>>;
 
+        /// The files hung off a task, without their bytes.
+        async fn files_for_task(&self, task_id: &str) -> Result<Vec<FileLine>>;
+
         async fn activity_for_task(&self, task_id: &str) -> Result<Vec<ActivityEntry>>;
     }
 
-    /// Loads one task detail in seven queries — the task, the board's columns,
+    /// Loads one task detail in eight queries — the task, the board's columns,
     /// its assignees, the workspace's writers, both directions of its
-    /// dependencies, its comments and its activity.
+    /// dependencies, its comments, its files and its activity.
     ///
-    /// Seven, not seven-plus-one-per-comment: `a_task_detail_costs_seven_
+    /// Eight, not eight-plus-one-per-comment: `a_task_detail_costs_eight_
     /// queries_whatever_it_carries` in `tests/store.rs` holds that line.
     pub async fn load(
         reads: &dyn DetailReads,
@@ -332,6 +369,7 @@ mod reads {
         let assignable = reads.assignable_people(workspace_id).await?;
         let edges = reads.dependencies_for_task(task_id).await?;
         let comments = reads.comments_for_task(task_id).await?;
+        let files = reads.files_for_task(task_id).await?;
         let activity = reads.activity_for_task(task_id).await?;
 
         let Some(column) = columns
@@ -365,6 +403,7 @@ mod reads {
             blocked_by,
             blocks,
             comments,
+            files,
             activity,
         }))
     }
