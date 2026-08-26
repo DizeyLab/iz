@@ -35,18 +35,46 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// A workspace and the settings that ride on it. The sender is not here at
-/// all: host, port, username, password and from-address come from the
-/// environment, so no query can return them and no backup of this file carries
-/// the password.
+/// A workspace and the settings that ride on it.
+///
+/// The sender is here except for its password, which has no field on purpose:
+/// this record is what handlers load and what pages serialise, so a password
+/// with a field here is a password one careless response away from the wire.
+/// It is written by [`Store::set_sender`] and read by [`Store::smtp_password`],
+/// which only the mailer calls. What a screen gets instead is
+/// `smtp_password_set` — enough to say "set" and nothing more.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
     pub created_at: OffsetDateTime,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u32>,
+    pub smtp_username: Option<String>,
+    pub smtp_from_name: Option<String>,
+    pub smtp_from_address: Option<String>,
+    /// Whether a password is stored, never the password. Derived in the query
+    /// so that the value itself does not travel even this far.
+    pub smtp_password_set: bool,
     pub attachment_limit_bytes: u64,
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
+}
+
+/// A sender as an admin typed it, on its way to the table.
+///
+/// `password` is `None` when the admin left the field untouched, which is what
+/// the screen sends when a password is already stored: the field is write-only,
+/// so an edit to the port must not blank the password just because the form had
+/// nothing to put in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewSender {
+    pub host: String,
+    pub port: u32,
+    pub username: String,
+    pub password: Option<String>,
+    pub from_name: String,
+    pub from_address: String,
 }
 
 /// An account. `password_hash` is `None` for an invited member who has not
@@ -288,6 +316,15 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn owner(&self) -> Result<Option<User>>;
 
     async fn workspace(&self) -> Result<Option<Workspace>>;
+
+    /// Writes the sender. A `password` of `None` leaves the stored one alone,
+    /// which is how an admin changes the port without retyping a secret the
+    /// screen was never allowed to show them.
+    async fn set_sender(&self, workspace_id: &str, sender: NewSender) -> Result<()>;
+
+    /// Reads the sender's password. Only the mailer calls this, and nothing it
+    /// returns reaches a response body.
+    async fn smtp_password(&self, workspace_id: &str) -> Result<Option<String>>;
 
     async fn set_limits(
         &self,

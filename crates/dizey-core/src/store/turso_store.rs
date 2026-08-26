@@ -13,7 +13,8 @@ use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
 use super::{
-    Audience, Deletion, Event, Freeing, MailRule, MailSend, NewTask, NewUser, Recipient, Result,
+    Audience, Deletion, Event, Freeing, MailRule, MailSend, NewSender, NewTask, NewUser, Recipient,
+    Result,
     SendState, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
 };
 use crate::Role;
@@ -34,6 +35,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("../../migrations/0005_freeing.sql")),
     (6, include_str!("../../migrations/0006_sender_is_config.sql")),
     (7, include_str!("../../migrations/0007_who_invited.sql")),
+    (8, include_str!("../../migrations/0008_sender_is_settings.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -343,11 +345,22 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         attachment_limit_bytes: row.get::<i64>(3).map_err(backend)?.max(0) as u64,
         allowed_file_types,
         photo_limit_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
+        smtp_host: opt_text(row, 6)?,
+        smtp_port: row.get::<Option<u32>>(7).map_err(backend)?,
+        smtp_username: opt_text(row, 8)?,
+        smtp_from_name: opt_text(row, 9)?,
+        smtp_from_address: opt_text(row, 10)?,
+        smtp_password_set: row.get::<i64>(11).map_err(backend)? != 0,
     })
 }
 
-const WORKSPACE_COLUMNS: &str =
-    "id, name, created_at, attachment_limit_bytes, allowed_file_types, photo_limit_bytes";
+// The password is not among these, and the last entry is why: the query asks
+// the database whether a password exists and carries back a 0 or a 1. The value
+// never leaves the row, so no caller can pass it on by accident.
+const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
+     allowed_file_types, photo_limit_bytes, smtp_host, smtp_port, smtp_username, \
+     smtp_from_name, smtp_from_address, \
+     (smtp_password IS NOT NULL AND smtp_password <> '')";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -514,6 +527,44 @@ impl Store for TursoStore {
         match self.one_row(&sql, ()).await? {
             Some(row) => Ok(Some(workspace_from(&row)?)),
             None => Ok(None),
+        }
+    }
+
+    async fn set_sender(&self, workspace_id: &str, sender: NewSender) -> Result<()> {
+        // `COALESCE(?4, smtp_password)` is the write-only field made real: the
+        // screen sends no password when the admin did not type one, and the
+        // stored secret survives an edit to the port. Passing an empty string
+        // is not a way to blank it either — the form sends `None` for empty.
+        self.conn
+            .execute(
+                "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
+                 smtp_password = COALESCE(?4, smtp_password), smtp_from_name = ?5, \
+                 smtp_from_address = ?6 WHERE id = ?7",
+                params![
+                    sender.host,
+                    sender.port as i64,
+                    sender.username,
+                    sender.password,
+                    sender.from_name,
+                    sender.from_address,
+                    workspace_id
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn smtp_password(&self, workspace_id: &str) -> Result<Option<String>> {
+        match self
+            .one_row(
+                "SELECT smtp_password FROM workspace WHERE id = ?1",
+                params![workspace_id],
+            )
+            .await?
+        {
+            Some(row) => opt_text(&row, 0),
+            None => Err(StoreError::NotFound),
         }
     }
 
@@ -2445,12 +2496,13 @@ mod probe {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The sender's columns are gone from the schema, password included. This
-    /// is the property the config-only decision rests on: no handler can be
-    /// made to return a password the table does not have, and a copy of the
-    /// database file carries none.
+    /// The password has a column but never a way out. The table holds it,
+    /// because the server must present it to the mail host on every send; the
+    /// read path does not, because `WORKSPACE_COLUMNS` asks only whether one
+    /// exists. This is the property the whole write-only field rests on, so it
+    /// is asserted against the real query rather than against a comment.
     #[tokio::test]
-    async fn the_workspace_table_has_no_sender_columns_left() {
+    async fn the_workspace_read_path_cannot_carry_the_password() {
         let dir = std::env::temp_dir().join(format!("dizey-sender-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
@@ -2458,24 +2510,41 @@ mod probe {
             .unwrap();
         use crate::store::Store as _;
 
-        let row = store
-            .one_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace'",
-                (),
-            )
-            .await
-            .unwrap()
-            .expect("the workspace table exists");
-        let schema = text(&row, 0).unwrap();
-        assert!(!schema.contains("smtp"), "{schema}");
-
-        // The rebuild put the name back, so everything that references the
-        // workspace still lands on this table.
-        store
+        let (ws, _admin) = store
             .claim_workspace("Dizey", "ada@dizey.sh", "Ada", "hash")
             .await
             .unwrap();
-        assert!(store.workspace().await.unwrap().is_some());
+        store
+            .set_sender(
+                &ws.id,
+                NewSender {
+                    host: "smtp.fastmail.com".into(),
+                    port: 587,
+                    username: "dizey".into(),
+                    password: Some("hunter2-and-then-some".into()),
+                    from_name: "Dizey".into(),
+                    from_address: "dizey@dizey.sh".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // The column exists and holds what was written — the mailer needs it.
+        assert_eq!(
+            store.smtp_password(&ws.id).await.unwrap().as_deref(),
+            Some("hunter2-and-then-some")
+        );
+
+        // And the record a page would be handed does not contain it, anywhere,
+        // under any field name.
+        let loaded = store.workspace().await.unwrap().unwrap();
+        assert!(loaded.smtp_password_set, "a password was stored");
+        let serialised = serde_json::to_string(&loaded).unwrap();
+        assert!(
+            !serialised.contains("hunter2"),
+            "the workspace record carried the password: {serialised}"
+        );
+        assert_eq!(loaded.smtp_host.as_deref(), Some("smtp.fastmail.com"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

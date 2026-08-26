@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use dizey_core::Role;
 use dizey_core::auth::{Token, hash_password};
 use dizey_core::store::{
-    Audience, MailRule, NewUser, SendState, Store, StoreError, Trigger, TursoStore, User,
+    Audience, MailRule, NewSender, NewUser, SendState, Store, StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -89,14 +89,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 7);
+    assert_eq!(first.schema_version().await.unwrap(), 8);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 7);
+    assert_eq!(second.schema_version().await.unwrap(), 8);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -218,16 +218,97 @@ async fn workspace_defaults_match_the_settings_screen() {
     );
 }
 
+/// An admin edits the sender from Settings, so the record carries host, port,
+/// username and from-address. It never carries the password: that field does
+/// not exist on the struct, and what a screen gets is the fact that one is set.
 #[tokio::test]
-async fn the_sender_is_not_in_the_workspace_record_at_all() {
-    let (scratch, _, _) = workspace_with_admin().await;
-    let ws = scratch.store.workspace().await.unwrap().unwrap();
+async fn the_workspace_record_carries_the_sender_but_never_its_password() {
+    let (scratch, ws_id, _) = workspace_with_admin().await;
+    let fresh = scratch.store.workspace().await.unwrap().unwrap();
+    assert_eq!(fresh.smtp_host, None, "a new workspace has no sender");
+    assert!(!fresh.smtp_password_set);
 
-    // Host, port, username, password and from-address come from the
-    // environment. There is no column for any of them, so no response body
-    // that carries a workspace can carry a sender by accident.
+    scratch
+        .store
+        .set_sender(
+            &ws_id,
+            NewSender {
+                host: "smtp.fastmail.com".into(),
+                port: 587,
+                username: "dizey".into(),
+                password: Some("a-very-secret-string".into()),
+                from_name: "Dizey".into(),
+                from_address: "dizey@dizey.sh".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let ws = scratch.store.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.smtp_host.as_deref(), Some("smtp.fastmail.com"));
+    assert_eq!(ws.smtp_port, Some(587));
+    assert_eq!(ws.smtp_username.as_deref(), Some("dizey"));
+    assert_eq!(ws.smtp_from_name.as_deref(), Some("Dizey"));
+    assert_eq!(ws.smtp_from_address.as_deref(), Some("dizey@dizey.sh"));
+    assert!(ws.smtp_password_set, "the screen must be able to say 'set'");
+
     let serialised = serde_json::to_string(&ws).unwrap();
-    assert!(!serialised.contains("smtp"), "{serialised}");
+    assert!(
+        !serialised.contains("a-very-secret-string"),
+        "the password rode along in the workspace record: {serialised}"
+    );
+}
+
+/// Changing the port must not blank the password. The field is write-only, so
+/// the screen has nothing to send back for it, and a save that took the empty
+/// field literally would silently stop the workspace sending mail.
+#[tokio::test]
+async fn a_save_with_no_password_typed_keeps_the_stored_one() {
+    let (scratch, ws_id, _) = workspace_with_admin().await;
+    let mut sender = NewSender {
+        host: "smtp.fastmail.com".into(),
+        port: 587,
+        username: "dizey".into(),
+        password: Some("keep-me".into()),
+        from_name: "Dizey".into(),
+        from_address: "dizey@dizey.sh".into(),
+    };
+    scratch.store.set_sender(&ws_id, sender.clone()).await.unwrap();
+
+    sender.port = 465;
+    sender.password = None;
+    scratch.store.set_sender(&ws_id, sender).await.unwrap();
+
+    let ws = scratch.store.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.smtp_port, Some(465), "the edit did not land");
+    assert!(ws.smtp_password_set, "the password was blanked by an edit");
+    assert_eq!(
+        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        Some("keep-me")
+    );
+}
+
+/// And a password that is typed replaces the old one, which is the other half:
+/// rotation has to work without a shell on the box.
+#[tokio::test]
+async fn a_typed_password_replaces_the_stored_one() {
+    let (scratch, ws_id, _) = workspace_with_admin().await;
+    let mut sender = NewSender {
+        host: "smtp.fastmail.com".into(),
+        port: 587,
+        username: "dizey".into(),
+        password: Some("the-old-one".into()),
+        from_name: "Dizey".into(),
+        from_address: "dizey@dizey.sh".into(),
+    };
+    scratch.store.set_sender(&ws_id, sender.clone()).await.unwrap();
+    sender.password = Some("the-new-one".into());
+    scratch.store.set_sender(&ws_id, sender).await.unwrap();
+
+    assert_eq!(
+        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        Some("the-new-one")
+    );
 }
 
 #[tokio::test]
