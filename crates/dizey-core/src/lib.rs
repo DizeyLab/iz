@@ -6,8 +6,10 @@
 //! token minting.
 
 pub mod board;
+pub mod detail;
 pub mod role;
 pub use board::{BoardView, Column, TaskCard};
+pub use detail::TaskDetail;
 pub use role::Role;
 
 #[cfg(feature = "server")]
@@ -21,5 +23,7 @@ pub mod store;
 pub use accounts::{AccountError, Accounts};
 #[cfg(feature = "server")]
 pub use board::{BoardReads, load as load_board};
+#[cfg(feature = "server")]
+pub use detail::{DetailReads, load as load_detail};
 #[cfg(feature = "server")]
 pub use store::{Store, StoreError, TursoStore};

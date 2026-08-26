@@ -17,6 +17,7 @@ use super::{
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Person, TaskRow};
+use crate::detail::{ActivityEntry, ActivityKind, Comment, DependencyEdge, DetailReads, TaskFacts};
 use time::Date;
 use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
@@ -856,6 +857,18 @@ impl Store for TursoStore {
                 ],
             )
             .await?;
+            tx.execute(
+                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    id.clone(),
+                    new.created_by,
+                    ActivityKind::Created.as_str(),
+                    now.clone()
+                ],
+            )
+            .await?;
             Ok::<_, turso::Error>(Some((task_key, position)))
         }
         .await;
@@ -913,19 +926,87 @@ impl Store for TursoStore {
         blocking_task_id: &str,
         at: OffsetDateTime,
     ) -> Result<()> {
-        // Re-adding a dependency that was cleared puts it back in force rather
-        // than leaving the cleared row to hide it.
-        self.conn
-            .execute(
+        if blocked_task_id == blocking_task_id {
+            return Err(StoreError::Cycle);
+        }
+        let stamp = stamp(at)?;
+
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the reachability read and the insert that invalidates it
+        // must not be interleaved with another writer's pair, or two adds each
+        // pass a check that was true when they read it and the pair closes a
+        // circle neither of them could see.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        let written = async {
+            // Every edge, cleared or not: a cleared edge is a link that is
+            // satisfied, not a link that is gone, and re-adding its other half
+            // would still be a circle on the screen.
+            let mut rows = tx
+                .query(
+                    "SELECT d.blocked_task_id, d.blocking_task_id FROM task_dependency d \
+                     JOIN task b ON b.id = d.blocked_task_id \
+                     JOIN task k ON k.id = d.blocking_task_id \
+                     WHERE b.deleted_at IS NULL AND k.deleted_at IS NULL",
+                    (),
+                )
+                .await?;
+            // blocked -> [what blocks it]
+            let mut edges: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            while let Some(row) = rows.next().await? {
+                edges
+                    .entry(row.get::<String>(0)?)
+                    .or_default()
+                    .push(row.get::<String>(1)?);
+            }
+            drop(rows);
+
+            // Walking "what blocks it" from the proposed blocker: if that walk
+            // reaches the task being blocked, the new edge closes the loop.
+            let mut seen = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(blocking_task_id.to_string());
+            while let Some(node) = queue.pop_front() {
+                if node == blocked_task_id {
+                    return Ok(false);
+                }
+                if !seen.insert(node.clone()) {
+                    continue;
+                }
+                for next in edges.get(&node).into_iter().flatten() {
+                    queue.push_back(next.clone());
+                }
+            }
+
+            // Re-adding a dependency that was cleared puts it back in force
+            // rather than leaving the cleared row to hide it.
+            tx.execute(
                 "INSERT INTO task_dependency (blocked_task_id, blocking_task_id, created_at) \
                  VALUES (?1, ?2, ?3) \
                  ON CONFLICT (blocked_task_id, blocking_task_id) \
                  DO UPDATE SET created_at = ?3, cleared_at = NULL",
-                params![blocked_task_id, blocking_task_id, stamp(at)?],
+                params![blocked_task_id, blocking_task_id, stamp.clone()],
             )
-            .await
-            .map_err(backend)?;
-        Ok(())
+            .await?;
+            Ok::<_, turso::Error>(true)
+        }
+        .await;
+
+        match written {
+            Ok(true) => tx.commit().await.map_err(backend),
+            Ok(false) => {
+                let _ = tx.rollback().await;
+                Err(StoreError::Cycle)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(backend(e))
+            }
+        }
     }
 
     async fn clear_dependency(
@@ -962,6 +1043,421 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         Ok(id)
+    }
+
+    async fn save_task(
+        &self,
+        task_id: &str,
+        title: &str,
+        description: &str,
+        deadline: Option<Date>,
+        actor_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<()> {
+        let deadline = deadline.map(day_text).transpose()?;
+        let stamp = stamp(at)?;
+
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the activity lines say what changed, so they are decided
+        // from the row this write is replacing and must see it unchanged.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        let written = async {
+            let mut rows = tx
+                .query(
+                    "SELECT title, description, deadline FROM task \
+                     WHERE id = ?1 AND deleted_at IS NULL",
+                    params![task_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(false);
+            };
+            let was_title = row.get::<String>(0)?;
+            let was_description = row.get::<String>(1)?;
+            let was_deadline = row.get::<Option<String>>(2)?;
+            drop(rows);
+
+            tx.execute(
+                "UPDATE task SET title = ?2, description = ?3, deadline = ?4, updated_at = ?5 \
+                 WHERE id = ?1",
+                params![task_id, title, description, deadline.clone(), stamp.clone()],
+            )
+            .await?;
+
+            let mut lines: Vec<(&'static str, String)> = Vec::new();
+            if was_title != title {
+                lines.push((ActivityKind::Retitled.as_str(), title.to_string()));
+            }
+            if was_description != description {
+                lines.push((ActivityKind::Described.as_str(), String::new()));
+            }
+            if was_deadline != deadline {
+                match &deadline {
+                    Some(day) => lines.push((ActivityKind::DeadlineSet.as_str(), day.clone())),
+                    None => lines.push((ActivityKind::DeadlineCleared.as_str(), String::new())),
+                }
+            }
+            for (kind, detail) in lines {
+                tx.execute(
+                    "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        task_id,
+                        actor_id,
+                        kind,
+                        detail,
+                        stamp.clone()
+                    ],
+                )
+                .await?;
+            }
+            Ok::<_, turso::Error>(true)
+        }
+        .await;
+
+        match written {
+            Ok(true) => tx.commit().await.map_err(backend),
+            Ok(false) => {
+                let _ = tx.rollback().await;
+                Err(StoreError::NotFound)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(backend(e))
+            }
+        }
+    }
+
+    async fn delete_task(
+        &self,
+        task_id: &str,
+        actor_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<Vec<String>> {
+        let stamp = stamp(at)?;
+
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: whether a task is freed depends on the edges that are
+        // left after this one's are dropped. Reading them outside the write
+        // would let a concurrent link make the answer wrong.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        let written = async {
+            let mut rows = tx
+                .query(
+                    "SELECT task_key FROM task WHERE id = ?1 AND deleted_at IS NULL",
+                    params![task_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(None);
+            };
+            let task_key = row.get::<String>(0)?;
+            drop(rows);
+
+            // Everyone this task was standing in front of, before the edges go.
+            let mut rows = tx
+                .query(
+                    "SELECT d.blocked_task_id FROM task_dependency d \
+                     JOIN task t ON t.id = d.blocked_task_id \
+                     WHERE d.blocking_task_id = ?1 AND d.cleared_at IS NULL \
+                     AND t.deleted_at IS NULL",
+                    params![task_id],
+                )
+                .await?;
+            let mut waiting = Vec::new();
+            while let Some(row) = rows.next().await? {
+                waiting.push(row.get::<String>(0)?);
+            }
+            drop(rows);
+
+            tx.execute(
+                "DELETE FROM task_dependency \
+                 WHERE blocked_task_id = ?1 OR blocking_task_id = ?1",
+                params![task_id],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE task SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1",
+                params![task_id, stamp.clone()],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    task_id,
+                    actor_id,
+                    ActivityKind::Deleted.as_str(),
+                    stamp.clone()
+                ],
+            )
+            .await?;
+
+            // Freed only if nothing else is still in front of them.
+            let mut freed = Vec::new();
+            for blocked in waiting {
+                let mut rows = tx
+                    .query(
+                        "SELECT COUNT(*) FROM task_dependency d \
+                         JOIN task t ON t.id = d.blocking_task_id \
+                         WHERE d.blocked_task_id = ?1 AND d.cleared_at IS NULL \
+                         AND t.deleted_at IS NULL",
+                        params![blocked.clone()],
+                    )
+                    .await?;
+                let left = match rows.next().await? {
+                    Some(row) => row.get::<i64>(0)?,
+                    None => 0,
+                };
+                drop(rows);
+                if left > 0 {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                     VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        blocked.clone(),
+                        ActivityKind::Unblocked.as_str(),
+                        format!("{task_key} was deleted"),
+                        stamp.clone()
+                    ],
+                )
+                .await?;
+                freed.push(blocked);
+            }
+            Ok::<_, turso::Error>(Some(freed))
+        }
+        .await;
+
+        match written {
+            Ok(Some(freed)) => {
+                tx.commit().await.map_err(backend)?;
+                Ok(freed)
+            }
+            Ok(None) => {
+                let _ = tx.rollback().await;
+                Err(StoreError::NotFound)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(backend(e))
+            }
+        }
+    }
+
+    async fn record_activity(
+        &self,
+        task_id: &str,
+        actor_id: Option<&str>,
+        kind: &ActivityKind,
+        detail: &str,
+        at: OffsetDateTime,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    task_id,
+                    actor_id,
+                    kind.as_str(),
+                    detail,
+                    stamp(at)?
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DetailReads for TursoStore {
+    async fn task(&self, task_id: &str) -> Result<Option<TaskFacts>> {
+        let row = self
+            .one_row(
+                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.position, \
+                 t.done_at, t.description, t.board_id, b.workspace_id \
+                 FROM task t JOIN board b ON b.id = t.board_id \
+                 WHERE t.id = ?1 AND t.deleted_at IS NULL",
+                params![task_id],
+            )
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(TaskFacts {
+            row: TaskRow {
+                id: text(&row, 0)?,
+                task_key: text(&row, 1)?,
+                title: text(&row, 2)?,
+                column_id: text(&row, 3)?,
+                deadline: opt_day(&row, 4)?,
+                position: row.get::<f64>(5).map_err(backend)?,
+                done_at: opt_stamp(&row, 6)?,
+            },
+            description: text(&row, 7)?,
+            board_id: text(&row, 8)?,
+            workspace_id: text(&row, 9)?,
+        }))
+    }
+
+    async fn columns_for_board(&self, board_id: &str) -> Result<Vec<Column>> {
+        BoardReads::columns(self, board_id).await
+    }
+
+    async fn assignees_for_task(&self, task_id: &str) -> Result<Vec<Person>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT u.id, u.display_name, u.photo_path FROM task_assignee a \
+                 JOIN user u ON u.id = a.user_id \
+                 WHERE a.task_id = ?1 ORDER BY u.display_name",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(Person {
+                id: text(&row, 0)?,
+                display_name: text(&row, 1)?,
+                photo_path: opt_text(&row, 2)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn assignable_people(&self, workspace_id: &str) -> Result<Vec<Person>> {
+        // Id, name and photo only: the picker shows no addresses and no roles,
+        // so neither leaves the server for this screen.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, display_name, photo_path FROM user \
+                 WHERE workspace_id = ?1 AND role <> ?2 ORDER BY display_name",
+                params![workspace_id, Role::Viewer.as_str()],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(Person {
+                id: text(&row, 0)?,
+                display_name: text(&row, 1)?,
+                photo_path: opt_text(&row, 2)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn dependencies_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(bool, DependencyEdge)>> {
+        // Both directions in one round trip: the leading column says which.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT 1, t.id, t.task_key, t.title, d.cleared_at, t.done_at \
+                 FROM task_dependency d JOIN task t ON t.id = d.blocking_task_id \
+                 WHERE d.blocked_task_id = ?1 AND t.deleted_at IS NULL \
+                 UNION ALL \
+                 SELECT 0, t.id, t.task_key, t.title, d.cleared_at, t.done_at \
+                 FROM task_dependency d JOIN task t ON t.id = d.blocked_task_id \
+                 WHERE d.blocking_task_id = ?2 AND t.deleted_at IS NULL",
+                params![task_id, task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let is_blocked_by = row.get::<i64>(0).map_err(backend)? != 0;
+            out.push((
+                is_blocked_by,
+                DependencyEdge {
+                    task_id: text(&row, 1)?,
+                    task_key: text(&row, 2)?,
+                    title: text(&row, 3)?,
+                    cleared_at: opt_stamp(&row, 4)?,
+                    done_at: opt_stamp(&row, 5)?,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn comments_for_task(&self, task_id: &str) -> Result<Vec<Comment>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, u.photo_path \
+                 FROM comment c JOIN user u ON u.id = c.author_id \
+                 WHERE c.task_id = ?1 ORDER BY c.created_at, c.rowid",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(Comment {
+                id: text(&row, 0)?,
+                body: text(&row, 1)?,
+                at: parse_stamp(&text(&row, 2)?)?,
+                author: Person {
+                    id: text(&row, 3)?,
+                    display_name: text(&row, 4)?,
+                    photo_path: opt_text(&row, 5)?,
+                },
+            });
+        }
+        Ok(out)
+    }
+
+    async fn activity_for_task(&self, task_id: &str) -> Result<Vec<ActivityEntry>> {
+        // LEFT JOIN: a line the system wrote has no actor, and dropping it
+        // would hide exactly the events the rules engine causes.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
+                 u.photo_path \
+                 FROM activity a LEFT JOIN user u ON u.id = a.actor_id \
+                 WHERE a.task_id = ?1 ORDER BY a.created_at, a.rowid",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let actor = match opt_text(&row, 4)? {
+                Some(id) => Some(Person {
+                    id,
+                    display_name: text(&row, 5)?,
+                    photo_path: opt_text(&row, 6)?,
+                }),
+                None => None,
+            };
+            out.push(ActivityEntry {
+                id: text(&row, 0)?,
+                kind: ActivityKind::parse(&text(&row, 1)?),
+                detail: text(&row, 2)?,
+                at: parse_stamp(&text(&row, 3)?)?,
+                actor,
+            });
+        }
+        Ok(out)
     }
 }
 

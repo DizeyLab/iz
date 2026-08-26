@@ -1542,3 +1542,355 @@ fn initials_fall_back_to_two_letters() {
     assert_eq!(person("Ada").initials(), "A");
     assert_eq!(person("  ").initials(), "?");
 }
+
+// -- task detail ------------------------------------------------------------
+
+use dizey_core::detail::{
+    ActivityEntry, ActivityKind, Comment, DependencyEdge, DetailReads, TaskFacts,
+    load as load_detail,
+};
+
+/// The same trick as [`CountingReads`], for the detail screen: the round trips
+/// one task costs must not follow how much it carries.
+struct CountingDetail<'a> {
+    inner: &'a TursoStore,
+    calls: AtomicUsize,
+}
+
+impl<'a> CountingDetail<'a> {
+    fn new(inner: &'a TursoStore) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    fn tick(&self) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[async_trait::async_trait]
+impl DetailReads for CountingDetail<'_> {
+    async fn task(&self, task_id: &str) -> Result<Option<TaskFacts>, StoreError> {
+        self.tick();
+        self.inner.task(task_id).await
+    }
+
+    async fn columns_for_board(
+        &self,
+        board_id: &str,
+    ) -> Result<Vec<dizey_core::Column>, StoreError> {
+        self.tick();
+        self.inner.columns_for_board(board_id).await
+    }
+
+    async fn assignees_for_task(&self, task_id: &str) -> Result<Vec<Person>, StoreError> {
+        self.tick();
+        self.inner.assignees_for_task(task_id).await
+    }
+
+    async fn assignable_people(&self, workspace_id: &str) -> Result<Vec<Person>, StoreError> {
+        self.tick();
+        self.inner.assignable_people(workspace_id).await
+    }
+
+    async fn dependencies_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(bool, DependencyEdge)>, StoreError> {
+        self.tick();
+        self.inner.dependencies_for_task(task_id).await
+    }
+
+    async fn comments_for_task(&self, task_id: &str) -> Result<Vec<Comment>, StoreError> {
+        self.tick();
+        self.inner.comments_for_task(task_id).await
+    }
+
+    async fn activity_for_task(&self, task_id: &str) -> Result<Vec<ActivityEntry>, StoreError> {
+        self.tick();
+        self.inner.activity_for_task(task_id).await
+    }
+}
+
+#[tokio::test]
+async fn a_task_detail_carries_both_directions_of_its_dependencies() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let middle = add_task(store, &workspace, "Backlog", "middle", None, &admin).await;
+    let before = add_task(store, &workspace, "Backlog", "before", None, &admin).await;
+    let after = add_task(store, &workspace, "Backlog", "after", None, &admin).await;
+    store.add_dependency(&middle, &before, now).await.unwrap();
+    store.add_dependency(&after, &middle, now).await.unwrap();
+
+    let detail = load_detail(store, &workspace, &middle)
+        .await
+        .unwrap()
+        .expect("the task is in this workspace");
+    assert_eq!(detail.title, "middle");
+    assert_eq!(detail.column.name, "Backlog");
+    assert_eq!(detail.columns.len(), 4, "every column, for the picker");
+    let blocked_by: Vec<&str> = detail
+        .blocked_by
+        .iter()
+        .map(|edge| edge.title.as_str())
+        .collect();
+    let blocks: Vec<&str> = detail.blocks.iter().map(|e| e.title.as_str()).collect();
+    assert_eq!(blocked_by, ["before"]);
+    assert_eq!(blocks, ["after"]);
+    assert!(detail.is_blocked());
+    assert_eq!(detail.blocked_by[0].blocked_by_label(), "blocking this task");
+    assert_eq!(detail.blocks[0].blocks_label(), "waiting on this task");
+}
+
+#[tokio::test]
+async fn a_viewer_is_never_offered_as_an_assignee() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let quiet = store
+        .create_user(NewUser {
+            workspace_id: workspace.clone(),
+            email: "quiet@dizey.sh".into(),
+            display_name: "Quiet Reader".into(),
+            role: Role::Viewer,
+        })
+        .await
+        .unwrap();
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+
+    let detail = load_detail(store, &workspace, &task).await.unwrap().unwrap();
+    assert!(
+        !detail.assignable.iter().any(|p| p.id == quiet.id),
+        "a viewer cannot be given work, so the picker never lists one"
+    );
+    assert!(detail.assignable.iter().any(|p| p.id == admin));
+}
+
+#[tokio::test]
+async fn a_task_in_another_workspace_is_not_found_rather_than_forbidden() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+
+    // Asking as a workspace that does not hold it says nothing about whether
+    // the id is real.
+    let answer = load_detail(store, "some-other-workspace", &task)
+        .await
+        .unwrap();
+    assert!(answer.is_none());
+}
+
+#[tokio::test]
+async fn a_dependency_that_would_close_a_circle_is_refused() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let a = add_task(store, &workspace, "Backlog", "a", None, &admin).await;
+    let b = add_task(store, &workspace, "Backlog", "b", None, &admin).await;
+    let c = add_task(store, &workspace, "Backlog", "c", None, &admin).await;
+
+    // a waits on b, b waits on c. Now ask for c to wait on a: three nodes, not
+    // a self-edge, and the loop only shows up on the second hop.
+    store.add_dependency(&a, &b, now).await.unwrap();
+    store.add_dependency(&b, &c, now).await.unwrap();
+    assert!(matches!(
+        store.add_dependency(&c, &a, now).await,
+        Err(StoreError::Cycle)
+    ));
+    assert!(matches!(
+        store.add_dependency(&a, &a, now).await,
+        Err(StoreError::Cycle)
+    ));
+
+    // The refusal wrote nothing.
+    let detail = load_detail(store, &workspace, &c).await.unwrap().unwrap();
+    assert!(detail.blocked_by.is_empty());
+}
+
+#[tokio::test]
+async fn a_cleared_dependency_still_counts_as_a_circle() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let a = add_task(store, &workspace, "Backlog", "a", None, &admin).await;
+    let b = add_task(store, &workspace, "Backlog", "b", None, &admin).await;
+    store.add_dependency(&a, &b, now).await.unwrap();
+    store.clear_dependency(&a, &b, now).await.unwrap();
+
+    // A cleared edge is a link that is satisfied, not a link that is gone: the
+    // pair would still draw a circle on the screen.
+    assert!(matches!(
+        store.add_dependency(&b, &a, now).await,
+        Err(StoreError::Cycle)
+    ));
+}
+
+#[tokio::test]
+async fn deleting_a_task_frees_what_was_waiting_on_it() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let blocking = add_task(store, &workspace, "Backlog", "blocking", None, &admin).await;
+    let other = add_task(store, &workspace, "Backlog", "other", None, &admin).await;
+    let freed = add_task(store, &workspace, "Backlog", "freed", None, &admin).await;
+    let still_stuck = add_task(store, &workspace, "Backlog", "stuck", None, &admin).await;
+    store.add_dependency(&freed, &blocking, now).await.unwrap();
+    store
+        .add_dependency(&still_stuck, &blocking, now)
+        .await
+        .unwrap();
+    store.add_dependency(&still_stuck, &other, now).await.unwrap();
+
+    let unblocked = store.delete_task(&blocking, &admin, now).await.unwrap();
+    assert_eq!(unblocked, vec![freed.clone()], "only the one with nothing else in front of it");
+
+    // The deleted task is gone from the board and from the edges it stood in.
+    let board = board_of(store, &workspace).await;
+    assert!(!board
+        .columns
+        .iter()
+        .flat_map(|column| column.cards.iter())
+        .any(|card| card.id == blocking));
+    let freed_detail = load_detail(store, &workspace, &freed).await.unwrap().unwrap();
+    assert!(freed_detail.blocked_by.is_empty());
+    assert!(!freed_detail.is_blocked());
+
+    // And the freeing is a recorded event, because the rules engine will want
+    // to mail about it.
+    let unblocked_line = freed_detail
+        .activity
+        .iter()
+        .find(|entry| entry.kind == ActivityKind::Unblocked)
+        .expect("the freeing is on the record");
+    assert!(unblocked_line.actor.is_none(), "the system did this, not a person");
+    assert!(unblocked_line.sentence().starts_with("unblocked this task"));
+
+    let stuck_detail = load_detail(store, &workspace, &still_stuck)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stuck_detail.is_blocked(), "something else is still in front of it");
+    assert!(!stuck_detail
+        .activity
+        .iter()
+        .any(|entry| entry.kind == ActivityKind::Unblocked));
+
+    // A second delete finds nothing to delete.
+    assert!(matches!(
+        store.delete_task(&blocking, &admin, now).await,
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn saving_a_task_records_only_what_changed() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "first title", None, &admin).await;
+
+    store
+        .save_task(
+            &task,
+            "first title",
+            "",
+            None,
+            &admin,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let detail = load_detail(store, &workspace, &task).await.unwrap().unwrap();
+    let kinds: Vec<&ActivityKind> = detail.activity.iter().map(|e| &e.kind).collect();
+    assert_eq!(kinds, [&ActivityKind::Created], "a save that changed nothing says nothing");
+
+    store
+        .save_task(
+            &task,
+            "second title",
+            "some prose",
+            Some(date!(2026 - 09 - 12)),
+            &admin,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let detail = load_detail(store, &workspace, &task).await.unwrap().unwrap();
+    assert_eq!(detail.title, "second title");
+    assert_eq!(detail.description, "some prose");
+    assert_eq!(detail.deadline_input(), "2026-09-12");
+    let kinds: Vec<&ActivityKind> = detail.activity.iter().map(|e| &e.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            &ActivityKind::Created,
+            &ActivityKind::Retitled,
+            &ActivityKind::Described,
+            &ActivityKind::DeadlineSet
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_task_detail_costs_seven_queries_whatever_it_carries() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let bare = add_task(store, &workspace, "Backlog", "bare", None, &admin).await;
+    let counted = CountingDetail::new(store);
+    load_detail(&counted, &workspace, &bare).await.unwrap();
+    assert_eq!(counted.count(), 7, "a task with nothing hung off it");
+
+    // Twenty comments, twenty activity lines, twenty people who could be
+    // assigned and twenty tasks on the other end of a dependency — the four
+    // things a naive detail query fans out on.
+    let heavy = add_task(store, &workspace, "Backlog", "heavy", None, &admin).await;
+    for n in 0..20 {
+        let person = store
+            .create_user(NewUser {
+                workspace_id: workspace.clone(),
+                email: format!("member{n}@dizey.sh"),
+                display_name: format!("Member {n}"),
+                role: Role::Member,
+            })
+            .await
+            .unwrap();
+        store.assign_task(&heavy, &person.id).await.unwrap();
+        store
+            .add_comment(&heavy, &person.id, "a note", now)
+            .await
+            .unwrap();
+        store
+            .record_activity(&heavy, Some(&person.id), &ActivityKind::Moved, "to Review", now)
+            .await
+            .unwrap();
+        let neighbour = add_task(store, &workspace, "Backlog", &format!("n{n}"), None, &admin).await;
+        store.add_dependency(&neighbour, &heavy, now).await.unwrap();
+    }
+
+    let counted = CountingDetail::new(store);
+    let detail = load_detail(&counted, &workspace, &heavy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.comments.len(), 20);
+    assert_eq!(detail.assignees.len(), 20);
+    assert_eq!(detail.blocks.len(), 20);
+    // Twenty moves plus the line create_task wrote.
+    assert_eq!(detail.activity.len(), 21);
+    assert_eq!(
+        counted.count(),
+        7,
+        "the round trips a detail costs must not follow what it carries"
+    );
+}

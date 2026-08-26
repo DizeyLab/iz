@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::board::{BoardReads, TaskRow};
+use crate::detail::{ActivityKind, DetailReads};
 use crate::Role;
 
 pub mod turso_store;
@@ -27,6 +28,9 @@ pub enum StoreError {
     Conflict(&'static str),
     #[error("stored value is not valid: {0}")]
     Corrupt(String),
+    /// The dependency asked for would put a task behind itself.
+    #[error("that link would make a circle")]
+    Cycle,
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -156,7 +160,7 @@ pub struct NewTask<'a> {
 /// The board's reads live in [`BoardReads`], so the sweep-per-board shape is a
 /// trait a test can wrap and count.
 #[async_trait]
-pub trait Store: BoardReads + 'static {
+pub trait Store: BoardReads + DetailReads + 'static {
     // -- workspace ---------------------------------------------------------
 
     /// Claims an empty database: writes the workspace, its first account and
@@ -312,6 +316,11 @@ pub trait Store: BoardReads + 'static {
     async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()>;
 
     /// `blocked` cannot start until `blocking` is finished.
+    ///
+    /// Refuses with [`StoreError::Cycle`] if the edge would close a loop. The
+    /// check runs inside the same transaction as the insert, so two writers
+    /// racing to add the two halves of a circle cannot both pass a check that
+    /// was true when they read it.
     async fn add_dependency(
         &self,
         blocked_task_id: &str,
@@ -326,6 +335,8 @@ pub trait Store: BoardReads + 'static {
         at: OffsetDateTime,
     ) -> Result<()>;
 
+    /// The author is the session's user, decided by the handler. There is no
+    /// author field on the form.
     async fn add_comment(
         &self,
         task_id: &str,
@@ -333,4 +344,39 @@ pub trait Store: BoardReads + 'static {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<String>;
+
+    /// Writes the title, description and deadline the detail screen saved, and
+    /// records one activity line per field that actually changed.
+    async fn save_task(
+        &self,
+        task_id: &str,
+        title: &str,
+        description: &str,
+        deadline: Option<time::Date>,
+        actor_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<()>;
+
+    /// Removes a task and every dependency edge it stood in. Tasks that were
+    /// waiting only on this one become unblocked, and that is recorded in
+    /// their activity — the rules engine will want to mail about it.
+    ///
+    /// Returns the ids of the tasks that were freed.
+    async fn delete_task(
+        &self,
+        task_id: &str,
+        actor_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<Vec<String>>;
+
+    /// Appends one line to a task's activity trail. `actor_id` is `None` when
+    /// the system did it rather than a person.
+    async fn record_activity(
+        &self,
+        task_id: &str,
+        actor_id: Option<&str>,
+        kind: &ActivityKind,
+        detail: &str,
+        at: OffsetDateTime,
+    ) -> Result<()>;
 }
