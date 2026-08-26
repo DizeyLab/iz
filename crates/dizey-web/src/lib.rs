@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod board;
 pub mod pages;
 #[cfg(feature = "ssr")]
 pub mod server;

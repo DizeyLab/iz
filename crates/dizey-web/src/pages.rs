@@ -7,6 +7,7 @@ use leptos_router::hooks::use_params_map;
 use crate::auth::{
     ClaimWorkspace, Gate, Invited, RedeemLink, Refusal, SignIn, current_gate, invitation,
 };
+use crate::board::Board;
 
 /// The front door. Which screen this is depends on the workspace, and the
 /// server decides — an empty workspace offers setup, a claimed one offers a
@@ -16,29 +17,27 @@ pub fn Landing() -> impl IntoView {
     let gate = Resource::new(|| (), |_| async move { current_gate().await });
 
     view! {
-        <Topbar/>
         <Suspense fallback=|| view! { <main class="auth-stage"></main> }>
             {move || Suspend::new(async move {
                 match gate.await {
                     Ok(Gate::NeedsSetup) => {
-                        view! { <SetupCard on_done=move || gate.refetch()/> }.into_any()
-                    }
-                    Ok(Gate::NeedsSignIn) => {
-                        view! { <SignInCard on_done=move || gate.refetch()/> }.into_any()
-                    }
-                    Ok(Gate::SignedIn(me)) => {
                         view! {
-                            <main class="scaffold-note">
-                                <p>
-                                    "Signed in as " {me.display_name} " (" {me.email} ")."
-                                </p>
-                                <p>"The board is not wired up yet."</p>
-                            </main>
+                            <Topbar/>
+                            <SetupCard on_done=move || gate.refetch()/>
                         }
                             .into_any()
                     }
+                    Ok(Gate::NeedsSignIn) => {
+                        view! {
+                            <Topbar/>
+                            <SignInCard on_done=move || gate.refetch()/>
+                        }
+                            .into_any()
+                    }
+                    Ok(Gate::SignedIn(_)) => view! { <Board/> }.into_any(),
                     Err(_) => {
                         view! {
+                            <Topbar/>
                             <main class="scaffold-note">
                                 <p>"Something went wrong. Reload the page."</p>
                             </main>
@@ -141,7 +140,6 @@ pub fn Join() -> impl IntoView {
     let who = Resource::new(token, |token| async move { invitation(token).await });
 
     view! {
-        <Topbar/>
         <Suspense fallback=|| view! { <main class="auth-stage"></main> }>
             {move || Suspend::new(async move {
                 match who.await {

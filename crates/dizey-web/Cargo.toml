@@ -47,3 +47,10 @@ ssr = [
   "dizey-core/server",
   "dep:turso",
 ]
+
+# The HTTP test drives the real router, so it needs the server side of the app.
+# Run it with `cargo test -p dizey-web --features ssr`.
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.5.2", features = ["util"] }
+uuid = { workspace = true }

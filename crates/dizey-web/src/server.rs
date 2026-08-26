@@ -146,3 +146,34 @@ impl From<AccountError> for Refusal {
         }
     }
 }
+
+/// The whole application as an axum `Router`: the server functions, the
+/// rendered routes and the static files.
+///
+/// It lives here rather than in `main` so a test can drive the real handlers —
+/// the guards above are only worth anything if something calls them the way a
+/// browser does.
+pub fn router(accounts: Accounts, leptos_options: LeptosOptions) -> axum::Router {
+    use axum::Router;
+    use leptos_axum::{LeptosRoutes, generate_route_list};
+
+    let routes = generate_route_list(crate::app::App);
+    Router::new()
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .leptos_routes_with_context(
+            &leptos_options,
+            routes,
+            {
+                // Provided here *and* to the server-function handler, which
+                // `leptos_routes_with_context` registers with the same closure.
+                let accounts = accounts.clone();
+                move || provide_context(accounts.clone())
+            },
+            {
+                let leptos_options = leptos_options.clone();
+                move || crate::app::shell(leptos_options.clone())
+            },
+        )
+        .fallback(leptos_axum::file_and_error_handler(crate::app::shell))
+        .with_state(leptos_options)
+}

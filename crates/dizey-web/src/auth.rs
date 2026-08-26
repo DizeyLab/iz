@@ -24,6 +24,8 @@ pub enum Refusal {
     AddressTaken,
     /// The link is spent, expired, or was never real.
     LinkNotUsable,
+    /// A card with no title is not a card.
+    EmptyTitle,
     Unavailable,
 }
 
@@ -43,6 +45,7 @@ impl Refusal {
                 "This link no longer works. Ask the admin to send another."
                     .to_string()
             }
+            Refusal::EmptyTitle => "Give the task a title.".to_string(),
             Refusal::Unavailable => "Something went wrong. Try again.".to_string(),
         }
     }
@@ -51,6 +54,9 @@ impl Refusal {
 /// The person the current browser is signed in as.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Me {
+    /// The account id, so the board can tell "Mine" from everyone else's
+    /// without a second call.
+    pub id: String,
     pub display_name: String,
     pub email: String,
     pub role: dizey_core::Role,
@@ -85,6 +91,7 @@ pub async fn current_gate() -> Result<Gate, ServerFnError> {
 
     if let Some(user) = current_user().await {
         return Ok(Gate::SignedIn(Me {
+            id: user.id,
             display_name: user.display_name,
             email: user.email,
             role: user.role,
