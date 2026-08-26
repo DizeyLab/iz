@@ -46,6 +46,31 @@ impl App {
         Self { dir, router }
     }
 
+    /// Like `open`, but with a live mail engine reading the workspace's SMTP
+    /// settings, so a transition actually reaches the ledger instead of the
+    /// silent no-op `open`'s router hands every crossing.
+    async fn open_with_mail() -> Self {
+        let dir = std::env::temp_dir().join(format!("izlek-http-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store: Arc<dyn izlek_core::store::Store> = Arc::new(
+            TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let engine = Arc::new(izlek_core::MailEngine::new(
+            store.clone(),
+            Arc::new(izlek_web::smtp::WorkspaceSmtp::new(store.clone())),
+            "https://izlek.sh",
+        ));
+        let options = LeptosOptions::builder().output_name("izlek").build();
+        let router = izlek_web::server::router(
+            Accounts::new(store),
+            izlek_web::server::Mail::sending(engine),
+            options,
+        );
+        Self { dir, router }
+    }
+
     /// Posts a form to a server function, as the browser does, and returns the
     /// status, the JSON body and any session cookie the answer set.
     async fn post(&self, path: &str, cookie: Option<&str>, form: &[(&str, &str)]) -> Answer {
@@ -2538,4 +2563,147 @@ async fn only_the_uploader_or_an_admin_may_delete_a_file() {
         )
         .await;
     assert!(snapshot.body.contains("\"files\":[]"), "{}", snapshot.body);
+}
+
+/// The id of the assignable person on a task whose display name matches.
+async fn person_id(app: &App, cookie: &str, task_id: &str, name: &str) -> String {
+    let answer = app
+        .post(
+            path::<izlek_web::detail::FetchTask>(),
+            Some(cookie),
+            &[("task_id", task_id)],
+        )
+        .await;
+    let needle = format!("\"display_name\":\"{name}\"");
+    let before = answer
+        .body
+        .split_once(&needle)
+        .map(|(head, _)| head)
+        .unwrap_or_else(|| panic!("no such person in {}", answer.body));
+    before
+        .rsplit_once("\"id\":\"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no id before the display name")
+        .to_string()
+}
+
+/// Reads the admin's logs until the snapshot contains `needle`, since the
+/// engine runs off the request in a spawned task. Bounded so a snapshot that
+/// never arrives fails the test instead of hanging it.
+async fn until_logs_contains(app: &App, admin: &str, needle: &str) -> String {
+    for _ in 0..100 {
+        let answer = app
+            .post(path::<izlek_web::logs::CurrentLogs>(), Some(admin), &[])
+            .await;
+        if answer.body.contains(needle) {
+            return answer.body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the logs never showed {needle:?}");
+}
+
+#[tokio::test]
+async fn only_an_admin_may_read_the_logs() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let viewer = invited(&app, &admin_cookie, "pinar@izlek.sh", "Pinar", Role::Viewer).await;
+
+    for who in [&member, &viewer] {
+        let read = app
+            .post(path::<izlek_web::logs::CurrentLogs>(), Some(who), &[])
+            .await;
+        assert!(read.body.contains("Forbidden"), "{}", read.body);
+    }
+
+    let out = app
+        .post(path::<izlek_web::logs::CurrentLogs>(), None, &[])
+        .await;
+    assert!(out.body.contains("SignInFirst"), "{}", out.body);
+}
+
+#[tokio::test]
+async fn an_admin_reads_the_logs() {
+    let app = App::open_with_mail().await;
+    let admin_cookie = admin(&app).await;
+    let mate = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let columns = columns_of(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &columns[0], "Ship it").await;
+    let mate_id = person_id(&app, &admin_cookie, &task, "Emre").await;
+
+    let assigned = app
+        .post(
+            path::<izlek_web::detail::Assign>(),
+            Some(&admin_cookie),
+            &[("task_id", &task), ("user_id", &mate_id)],
+        )
+        .await;
+    assert_eq!(assigned.body, "null", "{}", assigned.body);
+    assert!(rule_written(&app, &admin_cookie, &columns[1], "Task completed").await);
+
+    // Emre is the only assignee and Emre moves the card himself: the audience
+    // empties out to nobody, and the decision says so rather than owing a
+    // mail that would only tell him what he just did.
+    let moved = app
+        .post(
+            path::<izlek_web::board::MoveCard>(),
+            Some(&mate),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
+        .await;
+    assert_eq!(moved.body, "null", "{}", moved.body);
+
+    let snapshot = until_logs_contains(&app, &admin_cookie, "\"outcome\":\"nobody to mail\"").await;
+    assert!(snapshot.contains("\"queue\":[]"), "{}", snapshot);
+
+    // The admin drops it back and moves it again: this time the mover is not
+    // the assignee, so the rule owes Emre a mail. With no sender configured
+    // the send is not a failure — it waits in the queue.
+    let back = app
+        .post(
+            path::<izlek_web::board::MoveCard>(),
+            Some(&admin_cookie),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[1]),
+                ("to_column_id", &columns[0]),
+            ],
+        )
+        .await;
+    assert_eq!(back.body, "null", "{}", back.body);
+    let forward = app
+        .post(
+            path::<izlek_web::board::MoveCard>(),
+            Some(&admin_cookie),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
+        .await;
+    assert_eq!(forward.body, "null", "{}", forward.body);
+
+    // No sender means the send is held, not sent — the queue calls that
+    // "failed" and the retry stamp says when it looks again, but the attempt
+    // count is untouched: nothing was spent trying.
+    let snapshot = until_logs_contains(&app, &admin_cookie, "\"recipient\":\"emre@izlek.sh\"").await;
+    assert!(snapshot.contains("\"state\":\"failed\""), "{}", snapshot);
+    assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
+}
+
+#[tokio::test]
+async fn the_settings_sidenav_offers_logs() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let page = app.get("/settings", Some(&admin_cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("href=\"/logs\""), "{html}");
 }
