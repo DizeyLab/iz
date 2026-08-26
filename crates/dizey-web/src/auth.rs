@@ -32,6 +32,9 @@ pub enum Refusal {
     BadDeadline,
     /// The link asked for would put a task behind itself.
     Cycle,
+    /// The card was already moved out of the column this request thought it
+    /// was in, by somebody else, while this person was deciding.
+    MovedAlready,
     /// No such task — or none this account may see. Deliberately one answer for
     /// both.
     NotFound,
@@ -57,6 +60,9 @@ impl Refusal {
             Refusal::EmptyComment => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
+            Refusal::MovedAlready => {
+                "Somebody moved this card first. This is where it is now.".to_string()
+            }
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::Unavailable => "Something went wrong. Try again.".to_string(),
         }

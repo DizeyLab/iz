@@ -99,6 +99,59 @@ pub async fn create_task(
     Ok(None)
 }
 
+/// Moves a card into a column and, with it, records the crossing.
+///
+/// `from_column_id` is the column the browser had the card in when the drag
+/// started or the status control was opened. It travels with the request so
+/// the store can refuse a drop that was decided against a board somebody else
+/// has already changed, rather than silently overwriting their move.
+#[server]
+pub async fn move_card(
+    task_id: String,
+    from_column_id: String,
+    to_column_id: String,
+) -> Result<Option<Refusal>, ServerFnError> {
+    use crate::detail::guard::writer_and_task;
+    use crate::server::accounts;
+    use dizey_core::board::Moved;
+    use time::OffsetDateTime;
+
+    let (user, facts) = match writer_and_task(&task_id).await {
+        Ok(pair) => pair,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    // The destination is checked against this task's own board before the
+    // store is asked, so a column id from another board is refused by the
+    // handler and not merely by a foreign key.
+    let store = accounts().store().clone();
+    let fail = |e: dizey_core::store::StoreError| ServerFnError::new(e.to_string());
+    let columns = store.columns(&facts.board_id).await.map_err(fail)?;
+    if !columns.iter().any(|column| column.id == to_column_id) {
+        return Ok(Some(Refusal::Forbidden));
+    }
+
+    match store
+        .move_task(
+            &task_id,
+            &from_column_id,
+            &to_column_id,
+            &user.id,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+    {
+        // A card dropped back where it came from is not news and is not an
+        // error: the board simply re-reads and looks the same.
+        Ok(Moved::Recorded(_)) | Ok(Moved::Unchanged) => Ok(None),
+        Ok(Moved::Stale) => Ok(Some(Refusal::MovedAlready)),
+        Err(dizey_core::store::StoreError::NotFound) => Ok(Some(Refusal::NotFound)),
+        Err(error) => {
+            eprintln!("store error: {error}");
+            Ok(Some(Refusal::Unavailable))
+        }
+    }
+}
+
 /// Which cards the filter row is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Filter {
@@ -174,6 +227,18 @@ fn BoardScreen(
     let filter = RwSignal::new(Filter::All);
     // Which column has its composer open, if any.
     let composing = RwSignal::new(None::<String>);
+    // The card currently in the air, and the column it was picked up from.
+    // The column it came from is the drag's claim about the board it started
+    // on, and it travels with the drop so a move decided against a stale board
+    // is refused rather than applied.
+    let dragging = RwSignal::new(None::<(String, String)>);
+    let moving = ServerAction::<MoveCard>::new();
+    let moved = moving.value();
+    Effect::new(move |_| {
+        if matches!(moved.get(), Some(Ok(_))) {
+            on_change();
+        }
+    });
     let may_write = me.role.can_write_tasks();
     let my_id = StoredValue::new(me.id.clone());
 
@@ -231,12 +296,43 @@ fn BoardScreen(
                                 }
                             })}
                     </header>
-                    <div class="column-cards">
+                    <div
+                        class="column-cards"
+                        class:column-drop=move || {
+                            dragging
+                                .get()
+                                .is_some_and(|(_, from)| from != *column_id.read_value())
+                        }
+                        on:dragover=move |event| {
+                            // Saying "yes, you may drop here" is what
+                            // preventing the default on dragover means.
+                            if dragging.get().is_some() {
+                                event.prevent_default();
+                            }
+                        }
+                        on:drop=move |event| {
+                            event.prevent_default();
+                            if let Some((task_id, from)) = dragging.get() {
+                                dragging.set(None);
+                                let to = column_id.read_value().clone();
+                                if from != to {
+                                    moving
+                                        .dispatch(MoveCard {
+                                            task_id,
+                                            from_column_id: from,
+                                            to_column_id: to,
+                                        });
+                                }
+                            }
+                        }
+                    >
                         <For each=move || shown.get() key=|card: &TaskCard| card.id.clone() let:card>
                             <Card
                                 card=card
                                 today=today
                                 done_column=is_done_column
+                                draggable=may_write
+                                dragging=dragging
                                 on_open=move |task_id| opened.set(Some(task_id))
                             />
                         </For>
@@ -351,6 +447,9 @@ fn Card(
     card: TaskCard,
     today: Date,
     done_column: bool,
+    /// A viewer cannot move work, so a viewer's cards do not lift.
+    draggable: bool,
+    dragging: RwSignal<Option<(String, String)>>,
     on_open: impl Fn(String) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let blocks = card.blocks.len();
@@ -361,6 +460,7 @@ fn Card(
     let comments = card.comment_count;
     let assignees = card.assignees.clone();
     let id = StoredValue::new(card.id.clone());
+    let from_column = StoredValue::new(card.column_id.clone());
     let open = move || on_open(id.get_value());
 
     view! {
@@ -371,6 +471,11 @@ fn Card(
             class:card-done=done_column
             role="button"
             tabindex="0"
+            draggable=draggable.then_some("true")
+            on:dragstart=move |_| {
+                dragging.set(Some((id.get_value(), from_column.get_value())));
+            }
+            on:dragend=move |_| dragging.set(None)
             on:click=move |_| open()
             on:keydown=move |event| {
                 if event.key() == "Enter" || event.key() == " " {

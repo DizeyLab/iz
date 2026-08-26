@@ -522,3 +522,160 @@ async fn a_member_may_delete_and_the_delete_is_soft() {
         .await;
     assert_eq!(answer.body, "{\"Err\":\"NotFound\"}");
 }
+
+/// Every column id on the board, in order, read off the wire the way the
+/// browser would.
+async fn columns_of(app: &App, cookie: &str) -> Vec<String> {
+    let answer = app
+        .post(path::<dizey_web::board::CurrentBoard>(), Some(cookie), &[])
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    answer
+        .body
+        .split("{\"column\":{\"id\":\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_viewer_who_posts_a_move_anyway_is_refused() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let viewer = invited(&app, &admin, "quiet@dizey.sh", "Quiet Reader", Role::Viewer).await;
+    let columns = columns_of(&app, &admin).await;
+    let task = a_task(&app, &admin, &columns[0], "Stays in Backlog").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::board::MoveCard>(),
+            Some(&viewer),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(answer.body, "\"Forbidden\"");
+
+    // And nothing moved: the refusal is in the handler, not in the drawing.
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(
+        answer.body.contains(&columns[0]),
+        "the refused move happened anyway: {}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn a_member_may_move_a_card() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let member = invited(&app, &admin, "mo@dizey.sh", "Mo Dubois", Role::Member).await;
+    let columns = columns_of(&app, &admin).await;
+    let task = a_task(&app, &admin, &columns[0], "Gets picked up").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::board::MoveCard>(),
+            Some(&member),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "a member was refused: {}", answer.body);
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(answer.body.contains("\"moved\""), "no move in the activity");
+}
+
+#[tokio::test]
+async fn a_drop_decided_against_a_stale_board_is_refused() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let member = invited(&app, &admin, "mo@dizey.sh", "Mo Dubois", Role::Member).await;
+    let columns = columns_of(&app, &admin).await;
+    let task = a_task(&app, &admin, &columns[0], "Contested").await;
+
+    // Two people picked the same card up out of Backlog.
+    let first = app
+        .post(
+            path::<dizey_web::board::MoveCard>(),
+            Some(&admin),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
+        .await;
+    assert_eq!(first.body, "null");
+
+    let second = app
+        .post(
+            path::<dizey_web::board::MoveCard>(),
+            Some(&member),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[2]),
+            ],
+        )
+        .await;
+    assert_eq!(second.body, "\"MovedAlready\"");
+
+    // The winner's move stands, and there is exactly one crossing.
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert_eq!(
+        answer.body.matches("\"moved\"").count(),
+        1,
+        "the second drop wrote a crossing too: {}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn a_card_cannot_be_moved_into_another_boards_column() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app, &admin).await;
+    let task = a_task(&app, &admin, &columns[0], "Stays put").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::board::MoveCard>(),
+            Some(&admin),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", "00000000-0000-0000-0000-000000000000"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "\"Forbidden\"");
+}

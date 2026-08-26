@@ -8,6 +8,7 @@
 
 use dizey_core::board::Person;
 use dizey_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail};
+use leptos::either::Either;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use time::Date;
@@ -49,7 +50,7 @@ pub enum Direction {
 }
 
 #[cfg(feature = "ssr")]
-mod guard {
+pub(crate) mod guard {
     use crate::auth::Refusal;
     use dizey_core::detail::TaskFacts;
     use dizey_core::store::User;
@@ -432,6 +433,85 @@ pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnErr
 
 // -- the screen -------------------------------------------------------------
 
+/// The artboard's STATUS control: the column the card sits in, and the way to
+/// put it in another one.
+///
+/// It is a real `<form>` with a real `<select>`, so it works with wasm blocked
+/// — that is what the submit button is for. When wasm is running, the change
+/// event submits the form itself and the button is not drawn: picking a column
+/// from a menu and then pressing a second control to confirm it is not what
+/// the design draws, and not what anyone expects from a status field.
+///
+/// The column the card was in travels in a hidden field. It is the request's
+/// claim about the board it was looking at, and the store refuses the move if
+/// that claim has gone stale.
+#[component]
+fn StatusControl(
+    task_id: StoredValue<String>,
+    column_id: String,
+    columns: Vec<dizey_core::board::Column>,
+    action: ServerAction<crate::board::MoveCard>,
+) -> impl IntoView {
+    // An effect never runs on the server, so this is false through SSR and
+    // true once — and only if — hydration happens. It is the honest answer to
+    // "is script running here", which is the question the button depends on.
+    let live = RwSignal::new(false);
+    Effect::new(move |_| live.set(true));
+
+    let here = column_id.clone();
+    let done_column = columns
+        .iter()
+        .find(|column| column.id == column_id)
+        .map(|column| column.is_done)
+        .unwrap_or(false);
+
+    view! {
+        <ActionForm action=action attr:class="status-form">
+            <input type="hidden" name="task_id" value=move || task_id.get_value()/>
+            <input type="hidden" name="from_column_id" value=column_id.clone()/>
+            <span class="status-dot" class:status-dot-done=done_column></span>
+            <select
+                class="status-select"
+                name="to_column_id"
+                on:change=move |event| {
+                    let _ = &event;
+                    #[cfg(feature = "hydrate")]
+                    {
+                        use leptos::wasm_bindgen::JsCast;
+                        if let Some(select) = event
+                            .target()
+                            .and_then(|target| {
+                                target.dyn_into::<leptos::web_sys::HtmlSelectElement>().ok()
+                            })
+                        {
+                            if let Some(form) = select.form() {
+                                let _ = form.request_submit();
+                            }
+                        }
+                    }
+                }
+            >
+                {columns
+                    .iter()
+                    .map(|column| {
+                        let selected = column.id == here;
+                        view! {
+                            <option value=column.id.clone() selected=selected>
+                                {column.name.clone()}
+                            </option>
+                        }
+                    })
+                    .collect_view()}
+            </select>
+            <Show when=move || !live.get()>
+                <button class="status-go" type="submit">
+                    "Move"
+                </button>
+            </Show>
+        </ActionForm>
+    }
+}
+
 /// Whatever a refused call said, rendered where the form that asked for it is.
 /// A refusal shown at the far end of a scrolling modal is a refusal nobody
 /// reads: the person clicked "Link a task" and the sentence has to land under
@@ -545,6 +625,8 @@ fn DetailScreen(
     let description = detail.description.clone();
     let description_field = detail.description.clone();
     let status = detail.column.name.clone();
+    let column_id = detail.column.id.clone();
+    let columns = detail.columns.clone();
     let deadline_input = detail.deadline_input();
     let overdue = detail.is_overdue(today);
     let deadline_label = detail.deadline_label(today);
@@ -555,12 +637,13 @@ fn DetailScreen(
     let comment = ServerAction::<PostComment>::new();
     let link = ServerAction::<LinkTasks>::new();
     let remove = ServerAction::<DeleteTask>::new();
+    let move_to = ServerAction::<crate::board::MoveCard>::new();
     // Deleting is two steps: ask what it would cost, then say it out loud and
     // let the person decide. The artboard's red button had no confirmation and
     // this action reaches other people's tasks.
     let ask = ServerAction::<WhatDeleteCosts>::new();
     // Every action that lands re-reads the task and the board behind it.
-    for value in [save.value(), comment.value(), link.value()] {
+    for value in [save.value(), comment.value(), link.value(), move_to.value()] {
         Effect::new(move |_| {
             if matches!(value.get(), Some(Ok(None))) {
                 on_change();
@@ -589,9 +672,21 @@ fn DetailScreen(
         <div class="detail-fields">
             <div class="detail-field">
                 <span class="detail-label">"STATUS"</span>
-                // Read-only this slice: moving a card is the transition the
-                // mail rules watch, and it lands with the drag.
-                <span class="detail-value">{status}</span>
+                {if may_write {
+                    Either::Left(
+                        view! {
+                            <StatusControl
+                                task_id=id
+                                column_id=column_id
+                                columns=columns
+                                action=move_to
+                            />
+                        },
+                    )
+                } else {
+                    Either::Right(view! { <span class="detail-value">{status}</span> })
+                }}
+                {refused(move_to)}
             </div>
             <div class="detail-field">
                 <span class="detail-label">

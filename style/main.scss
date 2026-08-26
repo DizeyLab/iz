@@ -453,6 +453,14 @@ a {
   }
 }
 
+/* Where a dragged card may land. Only columns it is not already in light up:
+   the card's own column is not a destination. */
+.column-drop {
+  outline: 1px dashed var(--border-strong);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
 .card-done {
   background: #faf9f4;
   box-shadow: none;
@@ -727,6 +735,52 @@ a {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   font-size: 13px;
+}
+
+/* The artboard's STATUS control: a dot, the column name, and the chevron the
+   select draws for itself. It is a form, so it works without script; the
+   submit button beside it is drawn only when script is absent. */
+.status-form {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+  background: #faf9f6;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.status-dot-done { background: #5c7b46; }
+
+.status-select {
+  flex-grow: 1;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+  outline: none;
+}
+
+.status-go {
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  font-size: 11px;
+  padding: 2px 6px;
+  cursor: pointer;
 }
 
 .detail-overdue {
