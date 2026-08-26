@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/izlek-core", "crates/izlek-web"]
+members = ["crates/izlek-core", "crates/izlek-web", "crates/izlek-topcoat"]
 
 [workspace.package]
 version = "0.1.0"
