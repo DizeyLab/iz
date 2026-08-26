@@ -15,9 +15,10 @@ use uuid::Uuid;
 
 use super::secret;
 use super::{
-    ActivityLine, Attachment, Audience, Deletion, Event, Freeing, MailDecision, MailOutcome,
-    MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind,
-    SendState, SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
+    ActivityEvent, ActivityLine, Attachment, Audience, CommentWritten, Deletion, Event, Freeing,
+    MailDecision, MailOutcome, MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser,
+    Recipient, Result, SendKind, SendState, SenderTest, Session, SigninLink, Store, StoreError,
+    TaskCreated, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -1178,8 +1179,9 @@ impl Store for TursoStore {
         })
     }
 
-    async fn create_task(&self, new: NewTask<'_>) -> Result<TaskRow> {
+    async fn create_task(&self, new: NewTask<'_>) -> Result<TaskCreated> {
         let id = Uuid::new_v4().to_string();
+        let activity_id = Uuid::new_v4().to_string();
         let now = now_text()?;
         let deadline = new.deadline.map(day_text).transpose()?;
 
@@ -1248,7 +1250,7 @@ impl Store for TursoStore {
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, '', ?5)",
                 params![
-                    Uuid::new_v4().to_string(),
+                    activity_id.clone(),
                     id.clone(),
                     new.created_by,
                     ActivityKind::Created.as_str(),
@@ -1274,14 +1276,17 @@ impl Store for TursoStore {
         tx.commit().await.map_err(backend)?;
 
         let (task_key, position) = written;
-        Ok(TaskRow {
-            id,
-            task_key,
-            title: new.title.to_string(),
-            column_id: new.column_id.to_string(),
-            deadline: new.deadline,
-            position,
-            done_at: None,
+        Ok(TaskCreated {
+            row: TaskRow {
+                id,
+                task_key,
+                title: new.title.to_string(),
+                column_id: new.column_id.to_string(),
+                deadline: new.deadline,
+                position,
+                done_at: None,
+            },
+            activity_id,
         })
     }
 
@@ -1422,17 +1427,50 @@ impl Store for TursoStore {
         author_id: &str,
         body: &str,
         at: OffsetDateTime,
-    ) -> Result<String> {
-        let id = Uuid::new_v4().to_string();
-        self.conn
-            .execute(
-                "INSERT INTO comment (id, task_id, author_id, body, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id.clone(), task_id, author_id, body, stamp(at)?],
-            )
+    ) -> Result<CommentWritten> {
+        let comment_id = Uuid::new_v4().to_string();
+        let activity_id = Uuid::new_v4().to_string();
+        let when = stamp(at)?;
+
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(backend)?;
-        Ok(id)
+
+        let written = async {
+            tx.execute(
+                "INSERT INTO comment (id, task_id, author_id, body, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![comment_id.clone(), task_id, author_id, body, when.clone()],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                params![
+                    activity_id.clone(),
+                    task_id,
+                    author_id,
+                    ActivityKind::Commented.as_str(),
+                    when.clone()
+                ],
+            )
+            .await?;
+            Ok::<_, turso::Error>(())
+        }
+        .await;
+
+        if let Err(e) = written {
+            let _ = tx.rollback().await;
+            return Err(backend(e));
+        }
+        tx.commit().await.map_err(backend)?;
+
+        Ok(CommentWritten {
+            comment_id,
+            activity_id,
+        })
     }
 
     async fn add_attachment(&self, new: NewAttachment<'_>) -> Result<String> {
@@ -2009,13 +2047,14 @@ impl Store for TursoStore {
         kind: &ActivityKind,
         detail: &str,
         at: OffsetDateTime,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
         self.conn
             .execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    Uuid::new_v4().to_string(),
+                    id.clone(),
                     task_id,
                     actor_id,
                     kind.as_str(),
@@ -2025,7 +2064,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        Ok(())
+        Ok(id)
     }
 
     // -- mail rules --------------------------------------------------------
@@ -2148,13 +2187,36 @@ impl Store for TursoStore {
             )
             .await?
         {
-            Some(row) => Ok(Some(Event::Freed(Freeing {
+            Some(row) => {
+                return Ok(Some(Event::Freed(Freeing {
+                    id: text(&row, 0)?,
+                    board_id: text(&row, 1)?,
+                    cause_key: text(&row, 2)?,
+                    cause_title: text(&row, 3)?,
+                    actor_id: text(&row, 4)?,
+                    at: parse_stamp(&text(&row, 5)?)?,
+                })));
+            }
+            None => {}
+        }
+        match self
+            .one_row(
+                "SELECT activity.id, activity.task_id, task.board_id, activity.kind, \
+                 activity.actor_id, activity.detail, activity.created_at \
+                 FROM activity JOIN task ON task.id = activity.task_id \
+                 WHERE activity.id = ?1",
+                params![event_id],
+            )
+            .await?
+        {
+            Some(row) => Ok(Some(Event::Happened(ActivityEvent {
                 id: text(&row, 0)?,
-                board_id: text(&row, 1)?,
-                cause_key: text(&row, 2)?,
-                cause_title: text(&row, 3)?,
-                actor_id: text(&row, 4)?,
-                at: parse_stamp(&text(&row, 5)?)?,
+                task_id: text(&row, 1)?,
+                board_id: text(&row, 2)?,
+                kind: ActivityKind::parse(&text(&row, 3)?),
+                actor_id: opt_text(&row, 4)?.unwrap_or_default(),
+                detail: text(&row, 5)?,
+                at: parse_stamp(&text(&row, 6)?)?,
             }))),
             None => Ok(None),
         }

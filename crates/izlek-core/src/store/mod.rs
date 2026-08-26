@@ -206,6 +206,23 @@ pub struct NewTask<'a> {
     pub created_by: &'a str,
 }
 
+/// What `create_task` wrote: the task, and the id of the Created activity row
+/// it filed alongside it, so a caller that needs to name the event — a mail
+/// retry, one day — does not have to go read the trail back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskCreated {
+    pub row: TaskRow,
+    pub activity_id: String,
+}
+
+/// What `add_comment` wrote: the comment's id, and the id of the Commented
+/// activity row it filed alongside it in the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentWritten {
+    pub comment_id: String,
+    pub activity_id: String,
+}
+
 /// What makes a rule fire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Trigger {
@@ -406,7 +423,21 @@ pub struct Deletion {
     pub event: Option<Freeing>,
 }
 
-/// The two things that can owe a mail. Both are committed facts with an id, an
+/// One row of a task's activity trail, as an event a rule can fire on. Covers
+/// everything `record_activity` writes that is not already its own event
+/// shape — a comment today, whatever else `ActivityKind` grows later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    pub id: String,
+    pub task_id: String,
+    pub board_id: String,
+    pub kind: ActivityKind,
+    pub actor_id: String,
+    pub detail: String,
+    pub at: OffsetDateTime,
+}
+
+/// The things that can owe a mail. Each is a committed fact with an id, an
 /// actor and a moment, and a retry rebuilds its mail from whichever one the
 /// ledger row points at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +446,8 @@ pub enum Event {
     Moved(crate::board::Transition),
     /// A blocker was deleted and let something go.
     Freed(Freeing),
+    /// An activity row that is neither of the above — a comment, today.
+    Happened(ActivityEvent),
 }
 
 impl Event {
@@ -422,6 +455,7 @@ impl Event {
         match self {
             Event::Moved(transition) => &transition.id,
             Event::Freed(freeing) => &freeing.id,
+            Event::Happened(activity) => &activity.id,
         }
     }
 
@@ -431,6 +465,7 @@ impl Event {
         match self {
             Event::Moved(transition) => &transition.actor_id,
             Event::Freed(freeing) => &freeing.actor_id,
+            Event::Happened(activity) => &activity.actor_id,
         }
     }
 
@@ -439,6 +474,7 @@ impl Event {
         match self {
             Event::Moved(transition) => transition.at,
             Event::Freed(freeing) => freeing.at,
+            Event::Happened(activity) => activity.at,
         }
     }
 }
@@ -603,7 +639,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Writes a task and hands it the next key on its board, in one
     /// transaction, so two writers cannot both take `DZ-14`.
-    async fn create_task(&self, new: NewTask<'_>) -> Result<TaskRow>;
+    async fn create_task(&self, new: NewTask<'_>) -> Result<TaskCreated>;
 
     /// Idempotent: assigning someone twice is not an error.
     async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()>;
@@ -631,14 +667,16 @@ pub trait Store: BoardReads + DetailReads + 'static {
     ) -> Result<()>;
 
     /// The author is the session's user, decided by the handler. There is no
-    /// author field on the form.
+    /// author field on the form. Writes the comment and its Commented
+    /// activity row in the same transaction, so one never exists without the
+    /// other.
     async fn add_comment(
         &self,
         task_id: &str,
         author_id: &str,
         body: &str,
         at: OffsetDateTime,
-    ) -> Result<String>;
+    ) -> Result<CommentWritten>;
 
     /// Hangs a file off a task. The bytes go into the database file with the
     /// row: there is no second place for a Izlek deployment to keep, and no
@@ -717,8 +755,8 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// only; nothing here writes.
     async fn deletion_cost(&self, task_id: &str) -> Result<Option<DeletionCost>>;
 
-    /// Appends one line to a task's activity trail. `actor_id` is `None` when
-    /// the system did it rather than a person.
+    /// Appends one line to a task's activity trail and returns its row id.
+    /// `actor_id` is `None` when the system did it rather than a person.
     async fn record_activity(
         &self,
         task_id: &str,
@@ -726,7 +764,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         kind: &ActivityKind,
         detail: &str,
         at: OffsetDateTime,
-    ) -> Result<()>;
+    ) -> Result<String>;
 
     // -- mail rules --------------------------------------------------------
 

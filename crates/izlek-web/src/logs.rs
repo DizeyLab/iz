@@ -100,6 +100,7 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str) -> S
         ActivityKind::Moved => format!("moved {detail}"),
         ActivityKind::Unblocked => format!("unblocked this task — {detail}"),
         ActivityKind::Deleted => "deleted this task".to_string(),
+        ActivityKind::Commented => "commented".to_string(),
         ActivityKind::Other(_) => detail.to_string(),
     }
 }
@@ -129,6 +130,9 @@ async fn event_happened(
                 .map(|column| format!("moved to {}", column.name)))
         }
         Event::Freed(_) => Ok(Some("unblocked".to_string())),
+        // Not a wired path yet — S4's work — so this only needs to be
+        // exhaustive, not right.
+        Event::Happened(activity) => Ok(Some(activity.kind.as_str().to_string())),
     }
 }
 

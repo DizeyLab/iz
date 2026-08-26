@@ -611,6 +611,9 @@ impl Engine {
                 "{} deleted {} — {}, the last task it was waiting on.",
                 actor, freeing.cause_key, freeing.cause_title
             ),
+            // Not a wired path yet — S4's work — so this only needs to be
+            // exhaustive, not right.
+            (Event::Happened(_), _) => format!("{} touched it.", actor),
         };
         let body = format!(
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",

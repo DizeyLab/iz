@@ -132,6 +132,7 @@ pub enum ActivityKind {
     Moved,
     Unblocked,
     Deleted,
+    Commented,
     /// A kind written by a newer version than the one reading it. The stored
     /// detail is shown as-is rather than dropping the row.
     Other(String),
@@ -152,6 +153,7 @@ impl ActivityKind {
             ActivityKind::Moved => "moved",
             ActivityKind::Unblocked => "unblocked",
             ActivityKind::Deleted => "deleted",
+            ActivityKind::Commented => "commented",
             ActivityKind::Other(raw) => raw,
         }
     }
@@ -170,6 +172,7 @@ impl ActivityKind {
             "moved" => ActivityKind::Moved,
             "unblocked" => ActivityKind::Unblocked,
             "deleted" => ActivityKind::Deleted,
+            "commented" => ActivityKind::Commented,
             other => ActivityKind::Other(other.to_string()),
         }
     }
@@ -205,6 +208,7 @@ impl ActivityEntry {
             ActivityKind::Moved => format!("moved {detail}"),
             ActivityKind::Unblocked => format!("unblocked this task — {detail}"),
             ActivityKind::Deleted => "deleted this task".to_string(),
+            ActivityKind::Commented => "commented".to_string(),
             ActivityKind::Other(_) => detail.to_string(),
         }
     }

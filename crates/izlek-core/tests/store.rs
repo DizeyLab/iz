@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use izlek_core::Role;
 use izlek_core::auth::{Token, hash_password};
 use izlek_core::store::{
-    Audience, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendKind, SendState, Store,
-    StoreError, Trigger, TursoStore, User,
+    Audience, Event, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendKind,
+    SendState, Store, StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -1869,6 +1869,7 @@ async fn add_task(
         })
         .await
         .unwrap()
+        .row
         .id
 }
 
@@ -2538,8 +2539,9 @@ async fn a_task_detail_costs_eight_queries_whatever_it_carries() {
     assert_eq!(detail.comments.len(), 20);
     assert_eq!(detail.assignees.len(), 20);
     assert_eq!(detail.blocks.len(), 20);
-    // Twenty moves plus the line create_task wrote.
-    assert_eq!(detail.activity.len(), 21);
+    // Twenty comments (each its own Commented line), twenty moves, plus the
+    // line create_task wrote.
+    assert_eq!(detail.activity.len(), 41);
     assert_eq!(
         counted.count(),
         8,
@@ -4380,4 +4382,62 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
     assert_eq!(feed[0].kind, ActivityKind::Retitled);
     assert_eq!(feed[1].task_id, task_a);
     assert_eq!(feed[1].actor_name.as_deref(), Some("Ada"));
+}
+
+#[tokio::test]
+async fn a_comment_leaves_one_activity_row_that_resolves_as_an_event() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "note me", None, &admin).await;
+
+    let written = store
+        .add_comment(&task, &admin, "hello", OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let activity = store.activity_for_task(&task).await.unwrap();
+    let commented: Vec<_> = activity
+        .iter()
+        .filter(|line| line.kind == ActivityKind::Commented)
+        .collect();
+    assert_eq!(commented.len(), 1);
+    assert_eq!(commented[0].id, written.activity_id);
+
+    match store.event(&written.activity_id).await.unwrap() {
+        Some(Event::Happened(event)) => {
+            assert_eq!(event.task_id, task);
+            assert_eq!(event.actor_id, admin);
+            assert_eq!(event.kind, ActivityKind::Commented);
+        }
+        other => panic!("expected Event::Happened, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_created_task_s_activity_id_resolves_as_an_event() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let column_id = column_named(store, &workspace, "Backlog").await;
+
+    let created = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            title: "brand new",
+            description: "",
+            deadline: None,
+            created_by: &admin,
+        })
+        .await
+        .unwrap();
+
+    match store.event(&created.activity_id).await.unwrap() {
+        Some(Event::Happened(event)) => {
+            assert_eq!(event.task_id, created.row.id);
+            assert_eq!(event.actor_id, admin);
+            assert_eq!(event.kind, ActivityKind::Created);
+        }
+        other => panic!("expected Event::Happened, got {other:?}"),
+    }
 }
