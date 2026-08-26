@@ -4,7 +4,12 @@
 #![recursion_limit = "256"]
 
 pub mod auth;
+pub mod detail;
+pub mod files;
 pub mod layout;
+pub mod logs;
+pub mod rules;
+pub mod settings;
 pub mod pages;
 pub mod server;
 pub mod smtp;
