@@ -94,6 +94,141 @@ async fn member(store: &TursoStore, workspace_id: &str, email: &str, name: &str)
         .id
 }
 
+/// Builds a database file shaped like schema version 12 — every migration
+/// through 0012 applied, nothing after — by replaying the migration files
+/// straight off disk on a raw connection, the same way [`TursoStore::apply`]
+/// does it one at a time. Used only to put a rule, a send and a decision in
+/// place before 0013 exists, so 0013 runs against real rows rather than an
+/// empty table.
+async fn a_pre_0013_store_with_a_rule_send_and_decision()
+-> (PathBuf, String, String, String, String) {
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("izlek.db").to_string_lossy().into_owned();
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    conn.execute(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+        (),
+    )
+    .await
+    .unwrap();
+
+    let migrations_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut files: Vec<_> = std::fs::read_dir(&migrations_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n < "0013")
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    for (i, file) in files.iter().enumerate() {
+        let sql = std::fs::read_to_string(file).unwrap();
+        conn.execute_batch(&sql).await.unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?1, '2026-08-26T00:00:00Z')",
+            turso::params![(i + 1) as i64],
+        )
+        .await
+        .unwrap();
+    }
+
+    let workspace = Uuid::new_v4().to_string();
+    let admin = Uuid::new_v4().to_string();
+    let board = Uuid::new_v4().to_string();
+    let backlog = Uuid::new_v4().to_string();
+    let done = Uuid::new_v4().to_string();
+    let task = Uuid::new_v4().to_string();
+    let rule = Uuid::new_v4().to_string();
+    let transition = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO workspace (id, name, created_at) VALUES (?1, 'Izlek', '2026-08-26T00:00:00Z')",
+        turso::params![workspace.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO user (id, workspace_id, email, display_name, role, password_hash, \
+         created_at) VALUES (?1, ?2, 'ada@izlek.sh', 'Ada', 'admin', 'x', '2026-08-26T00:00:00Z')",
+        turso::params![admin.clone(), workspace.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO board (id, workspace_id, name, created_at) VALUES (?1, ?2, 'Board', \
+         '2026-08-26T00:00:00Z')",
+        turso::params![board.clone(), workspace.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO board_column (id, board_id, name, position, is_done) VALUES (?1, ?2, \
+         'Backlog', 0, 0)",
+        turso::params![backlog.clone(), board.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO board_column (id, board_id, name, position, is_done) VALUES (?1, ?2, \
+         'Done', 1, 1)",
+        turso::params![done.clone(), board.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO task (id, board_id, task_key, title, column_id, created_by, created_at, \
+         updated_at) VALUES (?1, ?2, 'DZ-1', 'Ship it', ?3, ?4, '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z')",
+        turso::params![task.clone(), board.clone(), done.clone(), admin.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO transition (id, task_id, from_column, to_column, actor_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, '2026-08-26T00:00:00Z')",
+        turso::params![
+            transition.clone(),
+            task.clone(),
+            backlog.clone(),
+            done.clone(),
+            admin.clone()
+        ],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO mail_rule (id, board_id, trigger_kind, trigger_column, subject, audience, \
+         enabled, created_at) VALUES (?1, ?2, 'status', ?3, 'Task completed', 'assignees', 1, \
+         '2026-08-26T00:00:00Z')",
+        turso::params![rule.clone(), board.clone(), done.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO mail_send (id, rule_id, event_id, task_id, recipient, state, attempts, \
+         claimed_at) VALUES ('s1', ?1, ?2, ?3, 'ada@izlek.sh', 'pending', 0, '2026-08-26T00:00:00Z')",
+        turso::params![rule.clone(), transition.clone(), task.clone()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
+         created_at) VALUES ('d1', ?1, ?2, ?3, 'owed', '', '2026-08-26T00:00:00Z')",
+        turso::params![rule.clone(), transition.clone(), task.clone()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    (PathBuf::from(path), workspace, board, rule, task)
+}
+
 #[tokio::test]
 async fn migrations_apply_once_and_survive_reopen() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
@@ -101,17 +236,52 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 12);
+    assert_eq!(first.schema_version().await.unwrap(), 13);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 12);
+    assert_eq!(second.schema_version().await.unwrap(), 13);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
+    // `mail_send.rule_id` and `mail_decision.rule_id` both carry ON DELETE
+    // CASCADE at `mail_rule`, and every connection this store opens runs with
+    // foreign keys on. Rebuilding `mail_rule` — dropping the old table while
+    // rows still point at it — would, without a guard, cascade the drop
+    // straight through this rule's own send and its own decision.
+    let (path, workspace, board, rule, task) =
+        a_pre_0013_store_with_a_rule_send_and_decision().await;
+
+    let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
+    assert_eq!(store.schema_version().await.unwrap(), 13);
+    assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
+
+    let rules = store.mail_rules(&board).await.unwrap();
+    assert_eq!(rules.len(), 1, "the rule survived the rebuild");
+    assert_eq!(rules[0].id, rule);
+    assert_eq!(rules[0].audience, Audience::Assignees);
+
+    let sends = store.sends_for_rule(&rule, 10).await.unwrap();
+    assert_eq!(sends.len(), 1, "the send survived, joined to its rule");
+    assert_eq!(sends[0].task_id, Some(task.clone()));
+
+    let decisions = store.recent_mail_decisions(10).await.unwrap();
+    assert_eq!(
+        decisions.len(),
+        1,
+        "the decision survived, joined to its rule"
+    );
+    assert_eq!(decisions[0].rule_id, rule);
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
 #[tokio::test]
@@ -2692,7 +2862,7 @@ async fn an_orphan_row_is_refused() {
         .execute(
             "INSERT INTO user (id, workspace_id, email, display_name, role, created_at) \
              VALUES ('u-orphan', 'no-such-workspace', 'orphan@izlek.sh', 'Orphan', \
-             'member', '2026-08-26T00:00:00Z')",
+             'member', '2026-08-26')",
             (),
         )
         .await;

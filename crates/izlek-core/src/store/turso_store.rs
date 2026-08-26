@@ -52,6 +52,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         12,
         include_str!("../../migrations/0012_a_mail_that_owes_no_rule.sql"),
     ),
+    (
+        13,
+        include_str!("../../migrations/0013_more_than_a_move.sql"),
+    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
