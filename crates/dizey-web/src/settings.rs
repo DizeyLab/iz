@@ -547,6 +547,7 @@ fn SettingsScreen(
 #[component]
 fn ProfilePanel(me: Me) -> impl IntoView {
     let action = ServerAction::<SaveProfile>::new();
+    let out = ServerAction::<crate::auth::SignOut>::new();
     let value = action.value();
     let saved = move || matches!(value.get(), Some(Ok(None)));
     let refusal = move || match value.get() {
@@ -592,6 +593,16 @@ fn ProfilePanel(me: Me) -> impl IntoView {
                     </button>
                 </div>
             </ActionForm>
+            <div class="panel-body panel-foot panel-foot-split">
+                <span class="field-note">
+                    "Signing out ends this browser's session. Anywhere else you are signed in stays signed in."
+                </span>
+                <ActionForm action=out>
+                    <button class="quiet" type="submit">
+                        "Sign out"
+                    </button>
+                </ActionForm>
+            </div>
         </section>
     }
 }

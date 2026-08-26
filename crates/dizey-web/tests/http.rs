@@ -1485,3 +1485,84 @@ async fn an_invitation_names_the_admin_who_made_it_and_not_the_invitee() {
         answer.body
     );
 }
+
+/// Signing out ends the session on the server, not merely in the browser. A
+/// cookie that survived in a copied header, a bookmarked tab or a shared
+/// machine must stop working the moment the button is pressed.
+#[tokio::test]
+async fn signing_out_stops_the_session_being_worth_anything() {
+    let app = App::open().await;
+    let cookie = admin(&app).await;
+
+    let works = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+    assert!(works.body.contains("administers"), "{}", works.body);
+
+    let out = app
+        .post(path::<dizey_web::auth::SignOut>(), Some(&cookie), &[])
+        .await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+
+    // The same cookie, replayed. The server has to be the one refusing.
+    let after = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+    assert!(
+        !after.body.contains("administers"),
+        "the session outlived signing out: {}",
+        after.body
+    );
+}
+
+/// A browser with no script is sent home, where no session means the sign-in
+/// page. Without this the click looks like nothing happening on the very page
+/// that is now about nobody.
+#[tokio::test]
+async fn signing_out_without_script_lands_on_the_sign_in_page() {
+    let app = App::open().await;
+    let cookie = admin(&app).await;
+
+    let out = app
+        .post_without_script(
+            path::<dizey_web::auth::SignOut>(),
+            Some(&cookie),
+            "http://dizey.test/settings",
+            &[],
+        )
+        .await;
+
+    assert_eq!(out.status, StatusCode::FOUND, "{}", out.body);
+    assert_eq!(out.location.as_deref(), Some("/"), "{:?}", out.location);
+}
+
+/// Signing out is not a way to sign anybody else out. The other person's
+/// session is untouched, and so is every other browser of the person leaving.
+#[tokio::test]
+async fn signing_out_leaves_every_other_session_alone() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+
+    let out = app
+        .post(path::<dizey_web::auth::SignOut>(), Some(&member), &[])
+        .await;
+    assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+
+    let still = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(still.body.contains("administers"), "{}", still.body);
+}

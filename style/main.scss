@@ -1575,6 +1575,26 @@ a {
   align-items: center;
   gap: 12px;
   justify-content: flex-end;
+
+  // A foot with something to say on the left and the button on the right.
+  &-split { justify-content: space-between; }
+}
+
+// The quiet counterpart of `.primary`, for an action that is real but is not
+// what the panel is for — signing out of a panel about your name, say.
+.quiet {
+  height: 36px;
+  padding: 0 16px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover { background: #f1efe8; }
 }
 
 .field {

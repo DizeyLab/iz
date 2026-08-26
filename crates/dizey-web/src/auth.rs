@@ -423,6 +423,12 @@ pub async fn sign_in(email: String, password: String) -> Result<Option<Refusal>,
 }
 
 /// Ends this browser's session. Other browsers keep theirs.
+///
+/// The answer is a redirect home rather than a value, because there is nothing
+/// left to say to the page that asked: whoever was signed in is not any more,
+/// and every panel on it is about them. Home with no session is the sign-in
+/// page, so both a hydrated browser and one without script land in the same
+/// place, which is the one that makes sense.
 #[server]
 pub async fn sign_out() -> Result<(), ServerFnError> {
     use crate::server::{accounts, clear_session_cookie, presented_session};
@@ -431,6 +437,7 @@ pub async fn sign_out() -> Result<(), ServerFnError> {
         let _ = accounts().sign_out(&presented).await;
     }
     clear_session_cookie();
+    leptos_axum::redirect("/", false);
     Ok(())
 }
 
