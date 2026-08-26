@@ -76,6 +76,36 @@ impl Mail {
         });
     }
 
+    /// Hands a recorded activity to the engine, off the request, the same way
+    /// `after` hands a transition.
+    ///
+    /// The activity row is already written by the time this is called; this
+    /// rehydrates it and lets the engine decide whether any rule owes a mail.
+    /// `store` is the same store the request already wrote through — the
+    /// engine has no public handle back to it, so the caller carries it.
+    pub fn after_activity(&self, store: std::sync::Arc<dyn izlek_core::store::Store>, activity_id: String) {
+        let Some(engine) = self.0.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let report = match store.event(&activity_id).await {
+                Ok(Some(izlek_core::store::Event::Happened(ev))) => {
+                    match engine.on_activity(&ev).await {
+                        Ok(_) => {
+                            engine
+                                .deliver_owed(time::OffsetDateTime::now_utc(), 8)
+                                .await
+                        }
+                        Err(problem) => Err(problem),
+                    }
+                }
+                Ok(_) => return,
+                Err(problem) => Err(problem),
+            };
+            Self::log(report);
+        });
+    }
+
     /// Hands a committed delete to the engine, off the request, the same way.
     ///
     /// A blocker being deleted frees the tasks that were waiting on it just as

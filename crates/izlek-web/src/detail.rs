@@ -268,7 +268,7 @@ pub async fn assign(task_id: String, user_id: String) -> Result<Option<Refusal>,
         .assign_task(&task_id, &person.id)
         .await
         .map_err(fail)?;
-    store
+    let activity_id = store
         .record_activity(
             &task_id,
             Some(&actor.id),
@@ -278,6 +278,7 @@ pub async fn assign(task_id: String, user_id: String) -> Result<Option<Refusal>,
         )
         .await
         .map_err(fail)?;
+    crate::server::mail().after_activity(store, activity_id);
     Ok(None)
 }
 
@@ -304,7 +305,7 @@ pub async fn unassign(task_id: String, user_id: String) -> Result<Option<Refusal
         .unassign_task(&task_id, &person.id)
         .await
         .map_err(fail)?;
-    store
+    let activity_id = store
         .record_activity(
             &task_id,
             Some(&actor.id),
@@ -314,6 +315,7 @@ pub async fn unassign(task_id: String, user_id: String) -> Result<Option<Refusal
         )
         .await
         .map_err(fail)?;
+    crate::server::mail().after_activity(store, activity_id);
     Ok(None)
 }
 
@@ -351,7 +353,7 @@ pub async fn link_tasks(
         Err(StoreError::Cycle) => return Ok(Some(Refusal::Cycle)),
         Err(error) => return Err(ServerFnError::new(error.to_string())),
     }
-    store
+    let activity_id = store
         .record_activity(
             &task_id,
             Some(&actor.id),
@@ -361,6 +363,7 @@ pub async fn link_tasks(
         )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+    crate::server::mail().after_activity(store, activity_id);
     Ok(None)
 }
 
@@ -396,7 +399,7 @@ pub async fn unlink_tasks(
         .clear_dependency(&blocked, &blocking, now)
         .await
         .map_err(fail)?;
-    store
+    let activity_id = store
         .record_activity(
             &task_id,
             Some(&actor.id),
@@ -406,6 +409,7 @@ pub async fn unlink_tasks(
         )
         .await
         .map_err(fail)?;
+    crate::server::mail().after_activity(store, activity_id);
     Ok(None)
 }
 
@@ -432,10 +436,11 @@ pub async fn post_comment(task_id: String, body: String) -> Result<Option<Refusa
         return Ok(Some(Refusal::EmptyComment));
     }
 
-    store
+    let written = store
         .add_comment(&task_id, &user.id, body, OffsetDateTime::now_utc())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+    crate::server::mail().after_activity(store, written.activity_id);
     Ok(None)
 }
 

@@ -85,7 +85,7 @@ pub async fn create_task(
         return Ok(Some(Refusal::Forbidden));
     }
 
-    store
+    let created = store
         .create_task(NewTask {
             board_id: &board.id,
             column_id: &column_id,
@@ -96,6 +96,7 @@ pub async fn create_task(
         })
         .await
         .map_err(fail)?;
+    crate::server::mail().after_activity(store, created.activity_id);
     Ok(None)
 }
 
