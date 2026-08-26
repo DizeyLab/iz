@@ -6,11 +6,27 @@ async fn main() {
     use leptos::prelude::*;
     use std::sync::Arc;
 
+    // Every variable the app reads is resolved here, before anything is
+    // opened. A missing one stops the boot with its name in the message: the
+    // failure this prevents is not an empty database, it is a second Dizey
+    // writing a different file while everyone believes they share a board.
+    let config = match dizey_core::Config::from_env() {
+        Ok(config) => config,
+        Err(problem) => {
+            eprintln!("dizey: {problem}");
+            std::process::exit(2);
+        }
+    };
+    // Said once, so the answer to "which file are we on" lives in the log.
+    for line in config.report() {
+        println!("dizey    {line}");
+    }
+
     // One process per database file: Turso is a single-writer engine and a
     // second process on the same file loses writes rather than queueing.
-    let database = std::env::var("DIZEY_DATABASE").unwrap_or_else(|_| "dizey.db".to_string());
+    //
     // `open` applies any unapplied migration before it returns.
-    let store = TursoStore::open(&database)
+    let store = TursoStore::open(&config.database.to_string_lossy())
         .await
         .expect("failed to open the database");
     let accounts = Accounts::new(Arc::new(store));

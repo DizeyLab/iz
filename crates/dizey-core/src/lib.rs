@@ -17,12 +17,16 @@ pub mod accounts;
 #[cfg(feature = "server")]
 pub mod auth;
 #[cfg(feature = "server")]
+pub mod config;
+#[cfg(feature = "server")]
 pub mod store;
 
 #[cfg(feature = "server")]
 pub use accounts::{AccountError, Accounts};
 #[cfg(feature = "server")]
 pub use board::{BoardReads, load as load_board};
+#[cfg(feature = "server")]
+pub use config::{Config, ConfigError};
 #[cfg(feature = "server")]
 pub use detail::{DetailReads, load as load_detail};
 #[cfg(feature = "server")]
