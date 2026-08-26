@@ -7,7 +7,11 @@ repository.workspace = true
 description = "Domain model and storage for Dizey"
 
 [dependencies]
+argon2.workspace = true
 async-trait = "0.1.92"
+rand.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

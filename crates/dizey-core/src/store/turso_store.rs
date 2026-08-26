@@ -8,21 +8,27 @@
 use async_trait::async_trait;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use turso::transaction::TransactionBehavior;
 use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
 use super::{
-    DeletePolicy, NewUser, Result, SigninLink, Store, StoreError, User, Workspace,
+    DeletePolicy, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace,
 };
 use crate::Role;
 
 /// Every migration, in order. Adding one means appending a file and a line.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/0001_init.sql")),
+    (2, include_str!("../../migrations/0002_auth.sql")),
+];
 
 pub struct TursoStore {
+    /// Shared by every single-statement call. Turso serialises statements on a
+    /// connection, so this is safe; transactions are the exception and take a
+    /// connection of their own.
     conn: Connection,
-    // Held so the database outlives its connection.
-    _db: turso::Database,
+    db: turso::Database,
 }
 
 impl TursoStore {
@@ -42,7 +48,7 @@ impl TursoStore {
         ] {
             conn.execute(pragma, ()).await.map_err(backend)?;
         }
-        let store = Self { conn, _db: db };
+        let store = Self { conn, db };
         store.migrate().await?;
         Ok(store)
     }
@@ -94,6 +100,17 @@ impl TursoStore {
         Ok(self.applied_versions().await?.into_iter().max().unwrap_or(0))
     }
 
+    /// A connection of its own, for work that opens a transaction.
+    /// `Connection::transaction` takes `&mut self`, and a transaction on the
+    /// shared connection would swallow everyone else's statements.
+    async fn tx_conn(&self) -> Result<Connection> {
+        let conn = self.db.connect().map_err(backend)?;
+        for pragma in ["PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000"] {
+            conn.execute(pragma, ()).await.map_err(backend)?;
+        }
+        Ok(conn)
+    }
+
     async fn one_row(&self, sql: &str, args: impl turso::IntoParams) -> Result<Option<Row>> {
         let mut rows = self.conn.query(sql, args).await.map_err(backend)?;
         rows.next().await.map_err(backend)
@@ -102,6 +119,13 @@ impl TursoStore {
 
 fn backend<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Backend(e.to_string())
+}
+
+/// Turso reports constraint failures as text; there is no typed error to match
+/// on in 0.8.0-pre.7.
+fn is_constraint_violation(e: &turso::Error) -> bool {
+    let text = e.to_string().to_lowercase();
+    text.contains("constraint") || text.contains("unique")
 }
 
 fn now_text() -> Result<String> {
@@ -195,6 +219,18 @@ fn signin_link_from(row: &Row) -> Result<SigninLink> {
     })
 }
 
+fn session_from(row: &Row) -> Result<Session> {
+    Ok(Session {
+        id: text(row, 0)?,
+        user_id: text(row, 1)?,
+        created_at: parse_stamp(&text(row, 2)?)?,
+        expires_at: parse_stamp(&text(row, 3)?)?,
+        revoked_at: opt_stamp(row, 4)?,
+    })
+}
+
+const SESSION_COLUMNS: &str = "id, user_id, created_at, expires_at, revoked_at";
+
 /// Addresses are matched case-insensitively; the display form is kept as typed.
 fn fold_email(email: &str) -> String {
     email.trim().to_lowercase()
@@ -202,19 +238,89 @@ fn fold_email(email: &str) -> String {
 
 #[async_trait]
 impl Store for TursoStore {
-    async fn create_workspace(&self, name: &str) -> Result<Workspace> {
-        if self.workspace().await?.is_some() {
-            return Err(StoreError::Conflict("workspace"));
-        }
-        let id = Uuid::new_v4().to_string();
-        self.conn
-            .execute(
-                "INSERT INTO workspace (id, name, created_at) VALUES (?1, ?2, ?3)",
-                params![id.clone(), name, now_text()?],
-            )
+    async fn claim_workspace(
+        &self,
+        workspace_name: &str,
+        email: &str,
+        display_name: &str,
+        password_hash: &str,
+    ) -> Result<(Workspace, User)> {
+        let workspace_id = Uuid::new_v4().to_string();
+        let admin_id = Uuid::new_v4().to_string();
+        let now = now_text()?;
+        let email = fold_email(email);
+
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: take the write lock at BEGIN, so a second claimant waits
+        // out the busy timeout here instead of doing the whole insert and
+        // discovering the conflict at the end.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(backend)?;
-        self.workspace().await?.ok_or(StoreError::NotFound)
+
+        let claimed = async {
+            tx.execute(
+                "INSERT INTO workspace (id, name, created_at) VALUES (?1, ?2, ?3)",
+                params![workspace_id.clone(), workspace_name, now.clone()],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO user (id, workspace_id, email, display_name, role, password_hash, \
+                 created_at) VALUES (?1, ?2, ?3, ?4, 'admin', ?5, ?6)",
+                params![
+                    admin_id.clone(),
+                    workspace_id.clone(),
+                    email,
+                    display_name,
+                    password_hash,
+                    now.clone()
+                ],
+            )
+            .await?;
+            // The claim itself. Fixed primary key, so the second writer loses.
+            tx.execute(
+                "INSERT INTO workspace_owner (singleton, user_id, claimed_at) \
+                 VALUES (1, ?1, ?2)",
+                params![admin_id.clone(), now],
+            )
+            .await?;
+            Ok::<_, turso::Error>(())
+        }
+        .await;
+
+        match claimed {
+            Ok(()) => tx.commit().await.map_err(|e| {
+                if is_constraint_violation(&e) {
+                    StoreError::AlreadyClaimed
+                } else {
+                    backend(e)
+                }
+            })?,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(if is_constraint_violation(&e) {
+                    StoreError::AlreadyClaimed
+                } else {
+                    backend(e)
+                });
+            }
+        }
+
+        let workspace = self.workspace().await?.ok_or(StoreError::NotFound)?;
+        let admin = self.user(&admin_id).await?.ok_or(StoreError::NotFound)?;
+        Ok((workspace, admin))
+    }
+
+    async fn owner(&self) -> Result<Option<User>> {
+        let sql = format!(
+            "SELECT {USER_COLUMNS} FROM user \
+             WHERE id = (SELECT user_id FROM workspace_owner WHERE singleton = 1)"
+        );
+        match self.one_row(&sql, ()).await? {
+            Some(row) => Ok(Some(user_from(&row)?)),
+            None => Ok(None),
+        }
     }
 
     async fn workspace(&self) -> Result<Option<Workspace>> {
@@ -467,16 +573,135 @@ impl Store for TursoStore {
         }
     }
 
-    async fn consume_signin_link(&self, id: &str, at: OffsetDateTime) -> Result<()> {
-        let n = self
-            .conn
+    async fn consume_signin_link(&self, id: &str, at: OffsetDateTime) -> Result<bool> {
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        // Conditional update plus rows-affected, never read-then-write: the
+        // second redemption of a prefetched link updates nothing.
+        let n = tx
             .execute(
                 "UPDATE signin_link SET used_at = ?1 WHERE id = ?2 AND used_at IS NULL",
                 params![stamp(at)?, id],
             )
             .await
             .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(n == 1)
+    }
+
+    async fn create_session(
+        &self,
+        user_id: &str,
+        token_hash: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Session> {
+        let id = Uuid::new_v4().to_string();
+        self.conn
+            .execute(
+                "INSERT INTO session (id, user_id, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id.clone(),
+                    user_id,
+                    token_hash,
+                    now_text()?,
+                    stamp(expires_at)?
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        let sql = format!("SELECT {SESSION_COLUMNS} FROM session WHERE id = ?1");
+        match self.one_row(&sql, params![id]).await? {
+            Some(row) => session_from(&row),
+            None => Err(StoreError::NotFound),
+        }
+    }
+
+    async fn session_by_hash(&self, token_hash: &str) -> Result<Option<Session>> {
+        let sql = format!("SELECT {SESSION_COLUMNS} FROM session WHERE token_hash = ?1");
+        match self.one_row(&sql, params![token_hash]).await? {
+            Some(row) => Ok(Some(session_from(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn session_token_hash(&self, id: &str) -> Result<Option<String>> {
+        match self
+            .one_row("SELECT token_hash FROM session WHERE id = ?1", params![id])
+            .await?
+        {
+            Some(row) => Ok(Some(text(&row, 0)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn revoke_session(&self, id: &str, at: OffsetDateTime) -> Result<()> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE session SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
+                params![stamp(at)?, id],
+            )
+            .await
+            .map_err(backend)?;
         if n == 0 { Err(StoreError::NotFound) } else { Ok(()) }
+    }
+
+    async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64> {
+        self.conn
+            .execute(
+                "UPDATE session SET revoked_at = ?1 WHERE user_id = ?2 AND revoked_at IS NULL",
+                params![stamp(at)?, user_id],
+            )
+            .await
+            .map_err(backend)
+    }
+
+    async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES (?1, ?2, ?3)",
+                params![Uuid::new_v4().to_string(), bucket, stamp(at)?],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn count_auth_attempts(&self, bucket: &str, since: OffsetDateTime) -> Result<u64> {
+        // RFC 3339 in UTC sorts lexicographically, which is why the timestamps
+        // are stored in that shape.
+        match self
+            .one_row(
+                "SELECT COUNT(*) FROM auth_attempt WHERE bucket = ?1 AND attempted_at >= ?2",
+                params![bucket, stamp(since)?],
+            )
+            .await?
+        {
+            Some(row) => count_of(&row),
+            None => Ok(0),
+        }
+    }
+
+    async fn clear_auth_attempts(&self, bucket: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM auth_attempt WHERE bucket = ?1", params![bucket])
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64> {
+        self.conn
+            .execute(
+                "DELETE FROM auth_attempt WHERE attempted_at < ?1",
+                params![stamp(before)?],
+            )
+            .await
+            .map_err(backend)
     }
 }
 

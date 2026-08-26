@@ -16,6 +16,8 @@ pub use turso_store::TursoStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("this workspace already has an owner")]
+    AlreadyClaimed,
     #[error("database: {0}")]
     Backend(String),
     #[error("not found")]
@@ -120,14 +122,44 @@ impl SigninLink {
     }
 }
 
+/// A signed-in browser. As with every other token, only the hash of the cookie
+/// value is stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Session {
+    pub id: String,
+    pub user_id: String,
+    pub created_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    pub revoked_at: Option<OffsetDateTime>,
+}
+
+impl Session {
+    pub fn is_live(&self, now: OffsetDateTime) -> bool {
+        self.revoked_at.is_none() && now < self.expires_at
+    }
+}
+
 /// The storage boundary. Dyn-safe on purpose: handlers hold `Arc<dyn Store>`.
 #[async_trait]
 pub trait Store: Send + Sync + 'static {
     // -- workspace ---------------------------------------------------------
 
-    /// Creates the workspace. Fails with [`StoreError::Conflict`] if one
-    /// already exists: Dizey hosts a single workspace per database.
-    async fn create_workspace(&self, name: &str) -> Result<Workspace>;
+    /// Claims an empty database: writes the workspace, its first account and
+    /// the single owner row in one transaction.
+    ///
+    /// The owner row has a fixed primary key, so two requests racing to claim
+    /// the same empty workspace cannot both win, and the loser gets
+    /// [`StoreError::AlreadyClaimed`] rather than quietly joining as a member.
+    async fn claim_workspace(
+        &self,
+        workspace_name: &str,
+        email: &str,
+        display_name: &str,
+        password_hash: &str,
+    ) -> Result<(Workspace, User)>;
+
+    /// The account that claimed the workspace, if it has been claimed.
+    async fn owner(&self) -> Result<Option<User>>;
 
     async fn workspace(&self) -> Result<Option<Workspace>>;
 
@@ -198,5 +230,49 @@ pub trait Store: Send + Sync + 'static {
     /// link apart from a wrong one — an expired link is not a dead account.
     async fn signin_link_by_hash(&self, token_hash: &str) -> Result<Option<SigninLink>>;
 
-    async fn consume_signin_link(&self, id: &str, at: OffsetDateTime) -> Result<()>;
+    /// Marks the link used, in a transaction, conditional on it still being
+    /// unused, and reports whether this call is the one that consumed it.
+    ///
+    /// Mail clients prefetch links, so two redemptions of the same link is
+    /// ordinary traffic rather than an attack: exactly one of them must win.
+    async fn consume_signin_link(&self, id: &str, at: OffsetDateTime) -> Result<bool>;
+
+    // -- sessions ----------------------------------------------------------
+
+    async fn create_session(
+        &self,
+        user_id: &str,
+        token_hash: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Session>;
+
+    /// Looks a session up by the hash of the cookie value. Returns it whether
+    /// or not it is still live; the caller decides.
+    async fn session_by_hash(&self, token_hash: &str) -> Result<Option<Session>>;
+
+    /// The stored digest for a session, so the caller can compare it in
+    /// constant time rather than trusting the index lookup alone.
+    async fn session_token_hash(&self, id: &str) -> Result<Option<String>>;
+
+    async fn revoke_session(&self, id: &str, at: OffsetDateTime) -> Result<()>;
+
+    /// Signs out every browser this account has. This is what the change-
+    /// password pane promises.
+    async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64>;
+
+    // -- rate limiting -----------------------------------------------------
+
+    /// Records one attempt against a bucket — an address, or a client address.
+    async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()>;
+
+    /// How many attempts that bucket has made since `since`.
+    async fn count_auth_attempts(&self, bucket: &str, since: OffsetDateTime) -> Result<u64>;
+
+    /// Forgets a bucket's attempts. Called on a success, so a person who
+    /// mistypes twice and then gets it right is not left near the limit.
+    async fn clear_auth_attempts(&self, bucket: &str) -> Result<()>;
+
+    /// Drops attempt rows older than `before`, so the ledger does not grow
+    /// without bound.
+    async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64>;
 }
