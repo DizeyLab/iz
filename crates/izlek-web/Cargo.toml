@@ -39,6 +39,7 @@ serde_json = { workspace = true, optional = true }
 
 console_error_panic_hook = { version = "0.1.7", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [features]
 default = []
@@ -46,6 +47,7 @@ hydrate = [
   "leptos/hydrate",
   "dep:console_error_panic_hook",
   "dep:wasm-bindgen",
+  "dep:js-sys",
 ]
 ssr = [
   "leptos/ssr",

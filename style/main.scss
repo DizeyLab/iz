@@ -1033,16 +1033,98 @@ a {
   .glyph { color: #a04a24; }
 }
 
-.detail-date {
-  width: 100%;
-  height: 32px;
-  padding: 0 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--surface);
-  font-family: inherit;
-  font-size: 13px;
+// -- deadline calendar -------------------------------------------------------
+
+.datepick-panel { width: 190px; }
+
+.datepick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.datepick-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--ink);
+}
+
+.datepick-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+
+  &:hover { background: #f3f1ea; }
+}
+
+.datepick-prev .glyph { transform: rotate(90deg); }
+.datepick-next .glyph { transform: rotate(-90deg); }
+
+.datepick-weekdays,
+.datepick-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.datepick-weekdays {
+  margin-bottom: 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted-soft);
+  text-align: center;
+}
+
+.datepick-cell {
+  height: 24px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.datepick-day {
+  border-radius: 5px;
+  color: var(--ink);
+  cursor: pointer;
+
+  &:hover { background: #f3f1ea; }
+}
+
+.datepick-today { box-shadow: inset 0 0 0 1px var(--accent); }
+
+.datepick-selected {
+  background: var(--accent);
+  color: var(--surface);
+
+  &:hover { background: var(--accent); }
+}
+
+.datepick-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.datepick-action {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+
+  &:hover { color: var(--accent-ink); }
 }
 
 // -- assignees --------------------------------------------------------------
@@ -1058,8 +1140,9 @@ a {
   border-radius: var(--radius);
 }
 
-// Chips never shrink and never truncate: the row gives up labels instead, and
-// what is left is a whole first name or an avatar on its own.
+// Chips never shrink: the row gives up labels instead, and what is left is a
+// whole name or an avatar on its own. A name too long for the row ellipsizes
+// rather than losing whole words.
 .assignee-chip {
   display: inline-flex;
   flex: none;
@@ -1073,6 +1156,9 @@ a {
 }
 
 .assignee-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 12px;
   color: var(--ink);
 }

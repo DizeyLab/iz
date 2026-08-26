@@ -983,6 +983,43 @@ fn DeadlineControl(
     });
     let toggle = format!("deadline-{}", task_id.get_value());
 
+    let initial = parse_ymd(&deadline_input);
+    let chosen = RwSignal::new(deadline_input);
+    let view_pos = RwSignal::new(initial.map(|(y, m, _)| (y, m)).unwrap_or((1970, 1)));
+    let today = RwSignal::new(None::<(i32, u8, u8)>);
+    Effect::new(move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            let now = js_sys::Date::new_0();
+            let day = (
+                now.get_full_year() as i32,
+                now.get_month() as u8 + 1,
+                now.get_date() as u8,
+            );
+            today.set(Some(day));
+            if initial.is_none() {
+                view_pos.set((day.0, day.1));
+            }
+        }
+    });
+
+    // Copy, not moved: this fires from three separate buttons in the grid and
+    // footer, and each needs its own call.
+    let close = move || {
+        #[cfg(feature = "hydrate")]
+        {
+            use leptos::wasm_bindgen::JsCast;
+            let toggle = format!("deadline-{}", task_id.get_value());
+            if let Some(input) = leptos::web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|doc| doc.get_element_by_id(&toggle))
+                .and_then(|el| el.dyn_into::<leptos::web_sys::HtmlInputElement>().ok())
+            {
+                input.set_checked(false);
+            }
+        }
+    };
+
     Either::Right(view! {
         <div class="edit edit-pop">
             <input
@@ -1004,10 +1041,101 @@ fn DeadlineControl(
                 <span class="field-text">{deadline_label}</span>
                 {glyph::chevron()}
             </label>
-            <div class="edit-form pop-panel">
+            <div class="edit-form pop-panel datepick-panel">
                 <ActionForm action=action attr:class="pop-form">
                     <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                    <input class="detail-date" type="date" name="deadline" value=deadline_input/>
+                    <input type="hidden" name="deadline" value=move || chosen.get()/>
+                    <div class="datepick-head">
+                        <button
+                            class="datepick-nav datepick-prev"
+                            type="button"
+                            aria-label="Previous month"
+                            on:click=move |_| {
+                                view_pos.update(|pos| *pos = prev_month(*pos));
+                            }
+                        >
+                            {glyph::chevron()}
+                        </button>
+                        <span class="datepick-title">{move || month_title(view_pos.get())}</span>
+                        <button
+                            class="datepick-nav datepick-next"
+                            type="button"
+                            aria-label="Next month"
+                            on:click=move |_| {
+                                view_pos.update(|pos| *pos = next_month(*pos));
+                            }
+                        >
+                            {glyph::chevron()}
+                        </button>
+                    </div>
+                    <div class="datepick-weekdays">
+                        <span>"M"</span>
+                        <span>"T"</span>
+                        <span>"W"</span>
+                        <span>"T"</span>
+                        <span>"F"</span>
+                        <span>"S"</span>
+                        <span>"S"</span>
+                    </div>
+                    <div class="datepick-grid">
+                        {move || {
+                            let pos = view_pos.get();
+                            let selected = parse_ymd(&chosen.get()).map(|(y, m, d)| (y, m, d));
+                            let today_ymd = today.get();
+                            month_cells(pos)
+                                .into_iter()
+                                .map(|cell| {
+                                    match cell {
+                                        None => view! { <span class="datepick-cell"></span> }.into_any(),
+                                        Some(day) => {
+                                            let is_today = today_ymd == Some((pos.0, pos.1, day));
+                                            let is_selected = selected == Some((pos.0, pos.1, day));
+                                            view! {
+                                                <button
+                                                    class="datepick-cell datepick-day"
+                                                    class:datepick-today=is_today
+                                                    class:datepick-selected=is_selected
+                                                    type="button"
+                                                    on:click=move |_| {
+                                                        chosen.set(ymd_string(pos.0, pos.1, day));
+                                                        close();
+                                                    }
+                                                >
+                                                    {day}
+                                                </button>
+                                            }
+                                                .into_any()
+                                        }
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </div>
+                    <div class="datepick-foot">
+                        <button
+                            class="datepick-action"
+                            type="button"
+                            on:click=move |_| {
+                                chosen.set(String::new());
+                                close();
+                            }
+                        >
+                            "Clear"
+                        </button>
+                        <button
+                            class="datepick-action"
+                            type="button"
+                            on:click=move |_| {
+                                if let Some((y, m, d)) = today.get() {
+                                    view_pos.set((y, m));
+                                    chosen.set(ymd_string(y, m, d));
+                                    close();
+                                }
+                            }
+                        >
+                            "Today"
+                        </button>
+                    </div>
                     <div class="edit-row">
                         <button
                             class="edit-save"
@@ -1025,6 +1153,49 @@ fn DeadlineControl(
             </div>
         </div>
     })
+}
+
+/// `yyyy-mm-dd` into its three numbers, or nothing for the unset deadline.
+fn parse_ymd(input: &str) -> Option<(i32, u8, u8)> {
+    let mut parts = input.splitn(3, '-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    Some((year, month, day))
+}
+
+fn ymd_string(year: i32, month: u8, day: u8) -> String {
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn prev_month((year, month): (i32, u8)) -> (i32, u8) {
+    if month == 1 { (year - 1, 12) } else { (year, month - 1) }
+}
+
+fn next_month((year, month): (i32, u8)) -> (i32, u8) {
+    if month == 12 { (year + 1, 1) } else { (year, month + 1) }
+}
+
+fn month_title((year, month): (i32, u8)) -> String {
+    time::Month::try_from(month)
+        .map(|named| format!("{named} {year}"))
+        .unwrap_or_else(|_| format!("{month} {year}"))
+}
+
+/// The grid for one month: blanks for the lead-in before day 1 (the week
+/// starts Monday, as the header row says), then every day in the month.
+fn month_cells((year, month): (i32, u8)) -> Vec<Option<u8>> {
+    let Ok(time_month) = time::Month::try_from(month) else {
+        return Vec::new();
+    };
+    let lead = time::Date::from_calendar_date(year, time_month, 1)
+        .map(|date| date.weekday().number_days_from_monday())
+        .unwrap_or(0);
+    let days = time_month.length(year);
+    (0..lead)
+        .map(|_| None)
+        .chain((1..=days).map(Some))
+        .collect()
 }
 /// The round "+" from the artboard, and the list of people it opens.
 ///
@@ -1437,6 +1608,7 @@ fn DetailScreen(
             {refused(drop_file_refusal)}
             {may_comment
                 .then(|| {
+                    let upload_input_id = format!("file-upload-{}", id.get_value());
                     view! {
                         <form
                             class="file-upload"
@@ -1445,10 +1617,34 @@ fn DetailScreen(
                             enctype="multipart/form-data"
                         >
                             <input type="hidden" name="task_id" value=move || id.get_value()/>
-                            <input type="file" name="file" accept=accept required/>
-                            <button class="file-upload-submit" type="submit">
-                                "Upload"
-                            </button>
+                            <label class="file-upload-submit" for=upload_input_id.clone()>
+                                "Attach"
+                            </label>
+                            <input
+                                class="visually-hidden"
+                                id=upload_input_id
+                                type="file"
+                                name="file"
+                                accept=accept
+                                required
+                                on:change=move |event| {
+                                    let _ = &event;
+                                    #[cfg(feature = "hydrate")]
+                                    {
+                                        use leptos::wasm_bindgen::JsCast;
+                                        if let Some(input) = event
+                                            .target()
+                                            .and_then(|target| {
+                                                target.dyn_into::<leptos::web_sys::HtmlInputElement>().ok()
+                                            })
+                                        {
+                                            if let Some(form) = input.form() {
+                                                let _ = form.request_submit();
+                                            }
+                                        }
+                                    }
+                                }
+                            />
                         </form>
                         {refused(upload_refusal)}
                     }
@@ -1630,20 +1826,12 @@ fn AssigneeChip(
     });
     let name = person.display_name.clone();
     let person_id = person.id.clone();
-    // A chip carries a first name or no name at all. Half a name with an
-    // ellipsis after it — "Be…" — is noise where a name should be, and an
-    // avatar on its own still says who it is.
-    let full_name = name.clone();
-    let first_name = name
-        .split_whitespace()
-        .next()
-        .unwrap_or(name.as_str())
-        .to_owned();
+    let remove_title = format!("Take {name} off this task");
 
     view! {
-        <span class="assignee-chip" title=full_name>
+        <span class="assignee-chip" title=name.clone()>
             <Avatar person=person extra="avatar-sm"/>
-            <span class="assignee-name">{first_name}</span>
+            <span class="assignee-name">{name.clone()}</span>
             {may_write
                 .then(|| {
                     view! {
@@ -1653,7 +1841,7 @@ fn AssigneeChip(
                             <button
                                 class="assignee-remove"
                                 type="submit"
-                                title=format!("Take {name} off this task")
+                                title=remove_title
                             >
                                 {glyph::cross()}
                             </button>

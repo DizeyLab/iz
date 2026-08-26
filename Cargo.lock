@@ -1876,6 +1876,7 @@ dependencies = [
  "axum",
  "console_error_panic_hook",
  "izlek-core",
+ "js-sys",
  "leptos",
  "leptos_axum",
  "leptos_meta",
