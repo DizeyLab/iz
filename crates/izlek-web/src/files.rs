@@ -9,7 +9,7 @@
 use axum::extract::{Extension, Multipart, Path};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use izlek_core::accounts::Accounts;
+use izlek_core::accounts::{AccountError, Accounts};
 use izlek_core::store::{NewAttachment, User};
 use time::OffsetDateTime;
 
@@ -18,9 +18,16 @@ use crate::detail::guard;
 
 /// The person behind this request, read off the session cookie in `headers`
 /// rather than the leptos request context a plain axum handler has none of.
-pub async fn user_of(accounts: &Accounts, headers: &HeaderMap) -> Option<User> {
-    let session = crate::server::session_in(headers)?;
-    accounts.authenticate(&session).await.ok().flatten()
+///
+/// A store error is returned as such, not folded into "nobody" — the callers
+/// below tell it apart from a missing session the same way `server::require_user`
+/// does, so a database hiccup answers "something went wrong" rather than
+/// sending a signed-in person back through the door.
+pub async fn user_of(accounts: &Accounts, headers: &HeaderMap) -> Result<Option<User>, AccountError> {
+    let Some(session) = crate::server::session_in(headers) else {
+        return Ok(None);
+    };
+    accounts.authenticate(&session).await
 }
 
 /// Where the browser lands once the upload is settled, success or refusal
@@ -89,8 +96,10 @@ pub async fn upload(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let Some(user) = user_of(&accounts, &headers).await else {
-        return home(Refusal::SignInFirst);
+    let user = match user_of(&accounts, &headers).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return home(Refusal::SignInFirst),
+        Err(error) => return home(error.into()),
     };
     if !user.role.can_comment() {
         return home(Refusal::Forbidden);
@@ -239,8 +248,10 @@ pub async fn download(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let Some(user) = user_of(&accounts, &headers).await else {
-        return home(Refusal::SignInFirst);
+    let user = match user_of(&accounts, &headers).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return home(Refusal::SignInFirst),
+        Err(error) => return home(error.into()),
     };
 
     let store = accounts.store().clone();

@@ -338,7 +338,10 @@ pub const WORKSPACE_NAME: &str = "Izlek";
 pub async fn current_gate() -> Result<Gate, ServerFnError> {
     use crate::server::{accounts, current_user};
 
-    if let Some(user) = current_user().await {
+    if let Some(user) = current_user()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+    {
         return Ok(Gate::SignedIn(Me {
             id: user.id,
             display_name: user.display_name,

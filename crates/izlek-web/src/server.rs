@@ -197,15 +197,31 @@ fn write_cookie(value: &str) {
     }
 }
 
-/// The person behind this request, or nobody.
-pub async fn current_user() -> Option<User> {
-    let presented = presented_session()?;
-    accounts().authenticate(&presented).await.ok().flatten()
+/// The person behind this request, or nobody, or the store failing to say.
+///
+/// A store error is not "nobody" — a busy database mid-drag is a fact about
+/// the database, not about whether this browser is signed in, and a caller
+/// that folded the two together would send a signed-in person to a sign-in
+/// screen because a write elsewhere held a lock for a moment.
+pub async fn current_user() -> Result<Option<User>, AccountError> {
+    let Some(presented) = presented_session() else {
+        return Ok(None);
+    };
+    accounts().authenticate(&presented).await
 }
 
 /// The person behind this request, or a refusal the caller can return as-is.
+///
+/// A store error becomes `Refusal::Unavailable` — the same place every other
+/// account error already lands, via `From<AccountError> for Refusal` below —
+/// rather than `SignInFirst`, which would tell a signed-in person to sign in
+/// again over what was only a database hiccup.
 pub async fn require_user() -> Result<User, Refusal> {
-    current_user().await.ok_or(Refusal::SignInFirst)
+    match current_user().await {
+        Ok(Some(user)) => Ok(user),
+        Ok(None) => Err(Refusal::SignInFirst),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The admin behind this request. A member or a viewer is refused *here*, not
