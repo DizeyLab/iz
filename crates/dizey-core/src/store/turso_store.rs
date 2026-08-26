@@ -1640,16 +1640,21 @@ impl DetailReads for TursoStore {
 
     async fn dependencies_for_task(&self, task_id: &str) -> Result<Vec<(bool, DependencyEdge)>> {
         // Both directions in one round trip: the leading column says which.
+        // `cleared_at` is only ever set by an unlink, so a cleared row is not a
+        // link any more and does not belong on the screen. A link whose blocker
+        // is finished still shows — that is `done_at`, and it reads as cleared.
         let mut rows = self
             .conn
             .query(
                 "SELECT 1, t.id, t.task_key, t.title, d.cleared_at, t.done_at \
                  FROM task_dependency d JOIN task t ON t.id = d.blocking_task_id \
-                 WHERE d.blocked_task_id = ?1 AND t.deleted_at IS NULL \
+                 WHERE d.blocked_task_id = ?1 AND d.cleared_at IS NULL \
+                 AND t.deleted_at IS NULL \
                  UNION ALL \
                  SELECT 0, t.id, t.task_key, t.title, d.cleared_at, t.done_at \
                  FROM task_dependency d JOIN task t ON t.id = d.blocked_task_id \
-                 WHERE d.blocking_task_id = ?2 AND t.deleted_at IS NULL",
+                 WHERE d.blocking_task_id = ?2 AND d.cleared_at IS NULL \
+                 AND t.deleted_at IS NULL",
                 params![task_id, task_id],
             )
             .await

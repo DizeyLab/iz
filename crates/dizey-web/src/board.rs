@@ -533,8 +533,10 @@ fn Card(
     }
 }
 
+/// A person as a circle. `extra` carries the size the surface wants — the
+/// board's own 22px is the default, the modal asks for its 18px and 28px.
 #[component]
-fn Avatar(person: Person) -> impl IntoView {
+pub(crate) fn Avatar(person: Person, #[prop(optional)] extra: &'static str) -> impl IntoView {
     let initials = person.initials();
     // Five tones from the mockups' palette, picked from the id so a person
     // keeps the same one wherever they appear.
@@ -544,7 +546,7 @@ fn Avatar(person: Person) -> impl IntoView {
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
         % 5;
     view! {
-        <span class=format!("avatar avatar-tone-{tone}") title=person.display_name.clone()>
+        <span class=format!("avatar avatar-tone-{tone} {extra}") title=person.display_name.clone()>
             {initials}
         </span>
     }

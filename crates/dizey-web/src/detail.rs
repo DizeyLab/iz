@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use time::Date;
 
 use crate::auth::{Me, Refusal};
+use crate::board::Avatar;
 
 /// A task this board could be linked to: enough to name it in the picker and
 /// nothing more.
@@ -101,13 +102,16 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
     };
 
     // What the picker may offer: this board's other tasks, minus the ones
-    // already on either end of a link with this one.
+    // already on either end of a live link with this one. A cleared edge is
+    // not a link any more, so its task comes back to the picker — the store's
+    // upsert revives that row rather than duplicating it.
     let mut linkable = Vec::new();
     if let Some(board) = store.board(&user.workspace_id).await.map_err(fail)? {
         let taken: Vec<&str> = detail
             .blocked_by
             .iter()
             .chain(detail.blocks.iter())
+            .filter(|edge| edge.cleared_at.is_none())
             .map(|edge| edge.task_id.as_str())
             .collect();
         for task in store.tasks_for_board(&board.id).await.map_err(fail)? {
@@ -145,30 +149,50 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
 
 /// Saves the title, the description and the deadline. Status is not here: the
 /// column a task sits in is changed by moving it, which is the next slice.
+/// Saves one region of the task, and leaves the rest of it alone.
+///
+/// Each field arrives only from the editor that was open, so a person fixing
+/// a deadline cannot silently write back the description as it looked when
+/// they opened the modal — the fields nobody edited are read from the store,
+/// not from a hidden input carrying a stale copy.
 #[server]
 pub async fn save_task(
     task_id: String,
-    title: String,
-    description: String,
-    deadline: String,
+    title: Option<String>,
+    description: Option<String>,
+    deadline: Option<String>,
 ) -> Result<Option<Refusal>, ServerFnError> {
     use crate::server::accounts;
     use time::OffsetDateTime;
     use time::macros::format_description;
 
-    let (user, _) = match guard::writer_and_task(&task_id).await {
+    let (user, facts) = match guard::writer_and_task(&task_id).await {
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let title = title.trim().to_string();
-    if title.is_empty() {
-        return Ok(Some(Refusal::EmptyTitle));
-    }
-    let deadline = match deadline.trim() {
-        "" => None,
-        raw => match Date::parse(raw, format_description!("[year]-[month]-[day]")) {
-            Ok(day) => Some(day),
-            Err(_) => return Ok(Some(Refusal::BadDeadline)),
+
+    let title = match title {
+        Some(given) => {
+            let trimmed = given.trim().to_string();
+            if trimmed.is_empty() {
+                return Ok(Some(Refusal::EmptyTitle));
+            }
+            trimmed
+        }
+        None => facts.row.title.clone(),
+    };
+    let description = match &description {
+        Some(given) => given.trim().to_string(),
+        None => facts.description.clone(),
+    };
+    let deadline = match deadline.as_deref() {
+        None => facts.row.deadline,
+        Some(raw) => match raw.trim() {
+            "" => None,
+            day => match Date::parse(day, format_description!("[year]-[month]-[day]")) {
+                Ok(day) => Some(day),
+                Err(_) => return Ok(Some(Refusal::BadDeadline)),
+            },
         },
     };
 
@@ -177,7 +201,7 @@ pub async fn save_task(
         .save_task(
             &task_id,
             &title,
-            description.trim(),
+            &description,
             deadline,
             &user.id,
             OffsetDateTime::now_utc(),
@@ -503,6 +527,7 @@ fn StatusControl(
                     })
                     .collect_view()}
             </select>
+            {glyph::chevron()}
             <Show when=move || !live.get()>
                 <button class="status-go" type="submit">
                     "Move"
@@ -602,6 +627,501 @@ pub fn TaskDetailModal(
     }
 }
 
+/// The artboard's glyphs, drawn rather than typed. A missing character in a
+/// font is a hole in the design; an inline path is the same shape everywhere.
+mod glyph {
+    use leptos::prelude::*;
+
+    pub fn chevron() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph"
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+            >
+                <path d="M4 6l4 4 4-4"></path>
+            </svg>
+        }
+    }
+
+    pub fn calendar() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph"
+                width="13"
+                height="13"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                aria-hidden="true"
+            >
+                <rect x="2.5" y="3.5" width="11" height="10" rx="1.5"></rect>
+                <path d="M2.5 6.5h11M5.5 2v2.5M10.5 2v2.5"></path>
+            </svg>
+        }
+    }
+
+    pub fn plus() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph"
+                width="12"
+                height="12"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                aria-hidden="true"
+            >
+                <path d="M8 3v10M3 8h10"></path>
+            </svg>
+        }
+    }
+
+    pub fn cross() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph"
+                width="13"
+                height="13"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                aria-hidden="true"
+            >
+                <path d="M4 4l8 8M12 4l-8 8"></path>
+            </svg>
+        }
+    }
+
+    pub fn tick() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph dep-tick"
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+            >
+                <path d="M3 8.5l3.5 3.5L13 5"></path>
+            </svg>
+        }
+    }
+
+    pub fn lock() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph"
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+            >
+                <rect x="3.5" y="7" width="9" height="6.5" rx="1.5"></rect>
+                <path d="M5.5 7V5a2.5 2.5 0 015 0v2"></path>
+            </svg>
+        }
+    }
+
+    pub fn bin() -> impl IntoView {
+        view! {
+            <svg
+                class="glyph"
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+            >
+                <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l0.7 8.5a1 1 0 001 0.9h3.6a1 1 0 001-0.9l0.7-8.5"></path>
+            </svg>
+        }
+    }
+}
+
+/// The title, as the artboard draws it: the heading itself, with the rename
+/// hidden behind it.
+///
+/// Editing is a state the screen enters, not a second field sitting beside the
+/// first. The checkbox is the state — it is what a click on the heading flips,
+/// what Cancel flips back, and it needs no script to do either. The heading and
+/// the input are never on screen together.
+#[component]
+fn TitleControl(
+    task_id: StoredValue<String>,
+    title: String,
+    may_write: bool,
+    on_change: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    if !may_write {
+        return Either::Left(view! { <h2 class="detail-title">{title}</h2> });
+    }
+    let action = ServerAction::<SaveTask>::new();
+    let value = action.value();
+    Effect::new(move |_| {
+        if matches!(value.get(), Some(Ok(None))) {
+            on_change();
+        }
+    });
+    let toggle = format!("rename-{}", task_id.get_value());
+    let field = title.clone();
+
+    Either::Right(view! {
+        <div class="edit">
+            <input
+                class="edit-toggle"
+                type="checkbox"
+                id=toggle.clone()
+                aria-label="Rename this task"
+            />
+            <h2 class="detail-title edit-view">
+                <label class="edit-hit" for=toggle.clone()>
+                    {title}
+                </label>
+            </h2>
+            <ActionForm action=action attr:class="edit-form title-form">
+                <input type="hidden" name="task_id" value=move || task_id.get_value()/>
+                <input
+                    class="title-input"
+                    type="text"
+                    name="title"
+                    value=field
+                    autocomplete="off"
+                    required
+                />
+                <button class="edit-save" type="submit" disabled=move || action.pending().get()>
+                    "Save"
+                </button>
+                <label class="edit-cancel" for=toggle>
+                    "Cancel"
+                </label>
+            </ActionForm>
+            {refused(action)}
+        </div>
+    })
+}
+
+/// The description as prose, with the textarea behind it.
+///
+/// Clicking the prose swaps this region and only this region. Nothing else on
+/// the screen moves, and the rest of the task is not carried along in hidden
+/// inputs — the save names the description alone.
+#[component]
+fn DescriptionControl(
+    task_id: StoredValue<String>,
+    description: String,
+    may_write: bool,
+    on_change: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    let empty = description.trim().is_empty();
+    let prose = if empty {
+        "No description yet.".to_string()
+    } else {
+        description.clone()
+    };
+
+    if !may_write {
+        return Either::Left(
+            view! { <p class="detail-prose" class:detail-prose-empty=empty>{prose}</p> },
+        );
+    }
+    let action = ServerAction::<SaveTask>::new();
+    let value = action.value();
+    Effect::new(move |_| {
+        if matches!(value.get(), Some(Ok(None))) {
+            on_change();
+        }
+    });
+    let toggle = format!("describe-{}", task_id.get_value());
+    let field = description.clone();
+
+    Either::Right(view! {
+        <div class="edit">
+            <input
+                class="edit-toggle"
+                type="checkbox"
+                id=toggle.clone()
+                aria-label="Edit the description"
+            />
+            <label class="detail-prose edit-view edit-hit" class:detail-prose-empty=empty for=toggle.clone()>
+                {prose}
+            </label>
+            <ActionForm action=action attr:class="edit-form describe-form">
+                <input type="hidden" name="task_id" value=move || task_id.get_value()/>
+                <textarea class="detail-textarea" name="description" rows="5" prop:value=field.clone()>
+                    {field.clone()}
+                </textarea>
+                <div class="edit-row">
+                    <button class="edit-save" type="submit" disabled=move || action.pending().get()>
+                        "Save"
+                    </button>
+                    <label class="edit-cancel" for=toggle>
+                        "Cancel"
+                    </label>
+                </div>
+            </ActionForm>
+            {refused(action)}
+        </div>
+    })
+}
+
+/// One deadline control: the artboard's calendar glyph, the date as a person
+/// reads it, and the chevron. The picker is what opens when it is clicked —
+/// there is no second DEADLINE row further down the screen.
+#[component]
+fn DeadlineControl(
+    task_id: StoredValue<String>,
+    deadline_label: String,
+    deadline_input: String,
+    overdue: bool,
+    may_write: bool,
+    on_change: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    if !may_write {
+        return Either::Left(
+            view! {
+                <span class="field-box" class:detail-overdue=overdue>
+                    {glyph::calendar()}
+                    <span class="field-text">{deadline_label}</span>
+                </span>
+            },
+        );
+    }
+    let action = ServerAction::<SaveTask>::new();
+    let value = action.value();
+    Effect::new(move |_| {
+        if matches!(value.get(), Some(Ok(None))) {
+            on_change();
+        }
+    });
+    let toggle = format!("deadline-{}", task_id.get_value());
+
+    Either::Right(view! {
+        <div class="edit edit-pop">
+            <input
+                class="edit-toggle"
+                type="checkbox"
+                id=toggle.clone()
+                aria-label="Change the deadline"
+            />
+            <label
+                class="field-box edit-view edit-hit"
+                class:detail-overdue=overdue
+                for=toggle.clone()
+            >
+                {glyph::calendar()}
+                <span class="field-text">{deadline_label}</span>
+                {glyph::chevron()}
+            </label>
+            <div class="edit-form pop-panel">
+                <ActionForm action=action attr:class="pop-form">
+                    <input type="hidden" name="task_id" value=move || task_id.get_value()/>
+                    <input class="detail-date" type="date" name="deadline" value=deadline_input/>
+                    <div class="edit-row">
+                        <button
+                            class="edit-save"
+                            type="submit"
+                            disabled=move || action.pending().get()
+                        >
+                            "Save"
+                        </button>
+                        <label class="edit-cancel" for=toggle>
+                            "Cancel"
+                        </label>
+                    </div>
+                </ActionForm>
+                {refused(action)}
+            </div>
+        </div>
+    })
+}
+/// The round "+" from the artboard, and the list of people it opens.
+///
+/// A native `<select>` cannot be made to look like this control, so the picker
+/// is the same popover the deadline uses: a checkbox holds the open state, and
+/// each person is their own one-field form. It works with the wasm bundle
+/// blocked, and it is still the design's round button.
+#[component]
+fn AssigneePicker(
+    task_id: StoredValue<String>,
+    people: Vec<Person>,
+    on_change: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    if people.is_empty() {
+        return None;
+    }
+    let action = ServerAction::<Assign>::new();
+    let value = action.value();
+    Effect::new(move |_| {
+        if matches!(value.get(), Some(Ok(None))) {
+            on_change();
+        }
+    });
+    let toggle = format!("assign-{}", task_id.get_value());
+
+    Some(view! {
+        <div class="edit edit-pop assignee-pop">
+            <input
+                class="edit-toggle"
+                type="checkbox"
+                id=toggle.clone()
+                aria-label="Put someone on this task"
+            />
+            <label class="assignee-add edit-view edit-hit" for=toggle.clone()>
+                {glyph::plus()}
+            </label>
+            <div class="edit-form pop-panel">
+                <div class="pop-list">
+                    {people
+                        .into_iter()
+                        .map(|person| {
+                            let name = person.display_name.clone();
+                            view! {
+                                <ActionForm action=action attr:class="pop-row-form">
+                                    <input
+                                        type="hidden"
+                                        name="task_id"
+                                        value=move || task_id.get_value()
+                                    />
+                                    <input type="hidden" name="user_id" value=person.id.clone()/>
+                                    <button class="pop-row" type="submit">
+                                        <Avatar person=person.clone() extra="avatar-sm"/>
+                                        <span class="pop-row-name">{name}</span>
+                                    </button>
+                                </ActionForm>
+                            }
+                        })
+                        .collect_view()}
+                </div>
+                {refused(action)}
+            </div>
+        </div>
+    })
+}
+
+/// The 26px "Link a task" chip in the DEPENDENCIES header, and the picker it
+/// opens: the tasks as a list, the direction as two words, one button.
+#[component]
+fn LinkPicker(
+    task_id: StoredValue<String>,
+    linkable: Vec<LinkTarget>,
+    on_change: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    if linkable.is_empty() {
+        return None;
+    }
+    let action = ServerAction::<LinkTasks>::new();
+    let value = action.value();
+    Effect::new(move |_| {
+        if matches!(value.get(), Some(Ok(None))) {
+            on_change();
+        }
+    });
+    let toggle = format!("link-{}", task_id.get_value());
+    let direction = format!("link-direction-{}", task_id.get_value());
+
+    Some(view! {
+        <div class="edit edit-pop link-pop">
+            <input
+                class="edit-toggle"
+                type="checkbox"
+                id=toggle.clone()
+                aria-label="Link another task"
+            />
+            <label class="dep-chip edit-view edit-hit" for=toggle.clone()>
+                {glyph::plus()}
+                <span class="dep-chip-text">"Link a task"</span>
+            </label>
+            <div class="edit-form pop-panel pop-panel-wide">
+                <ActionForm action=action attr:class="pop-form">
+                    <input type="hidden" name="task_id" value=move || task_id.get_value()/>
+                    <div class="pop-list pop-list-scroll">
+                        {linkable
+                            .iter()
+                            .map(|target| {
+                                let key = target.task_key.clone();
+                                let title = target.title.clone();
+                                view! {
+                                    <label class="pick-row">
+                                        <input
+                                            type="radio"
+                                            name="other_id"
+                                            value=target.id.clone()
+                                            required
+                                        />
+                                        <span class="dep-key">{key}</span>
+                                        <span class="pick-title">{title}</span>
+                                    </label>
+                                }
+                            })
+                            .collect_view()}
+                    </div>
+                    <fieldset class="pick-direction">
+                        <legend class="detail-label">"DIRECTION"</legend>
+                        <label class="pick-row">
+                            <input
+                                type="radio"
+                                name="direction"
+                                value="blocked_by"
+                                checked
+                                id=format!("{direction}-blocked-by")
+                            />
+                            <span class="pick-title">"blocks this task"</span>
+                        </label>
+                        <label class="pick-row">
+                            <input
+                                type="radio"
+                                name="direction"
+                                value="blocks"
+                                id=format!("{direction}-blocks")
+                            />
+                            <span class="pick-title">"waits on this task"</span>
+                        </label>
+                    </fieldset>
+                    <div class="edit-row">
+                        <button
+                            class="edit-save"
+                            type="submit"
+                            disabled=move || action.pending().get()
+                        >
+                            "Link"
+                        </button>
+                        <label class="edit-cancel" for=toggle>
+                            "Cancel"
+                        </label>
+                    </div>
+                </ActionForm>
+                {refused(action)}
+            </div>
+        </div>
+    })
+}
 #[component]
 fn DetailScreen(
     snapshot: DetailSnapshot,
@@ -621,9 +1141,7 @@ fn DetailScreen(
     let id = StoredValue::new(detail.id.clone());
     let task_key = detail.task_key.clone();
     let title = detail.title.clone();
-    let title_field = detail.title.clone();
     let description = detail.description.clone();
-    let description_field = detail.description.clone();
     let status = detail.column.name.clone();
     let column_id = detail.column.id.clone();
     let columns = detail.columns.clone();
@@ -631,19 +1149,20 @@ fn DetailScreen(
     let overdue = detail.is_overdue(today);
     let deadline_label = detail.deadline_label(today);
     let assignee_count = detail.assignees.len();
+    let comment_count = detail.comments.len();
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
+    let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
 
-    let save = ServerAction::<SaveTask>::new();
     let comment = ServerAction::<PostComment>::new();
-    let link = ServerAction::<LinkTasks>::new();
     let remove = ServerAction::<DeleteTask>::new();
     let move_to = ServerAction::<crate::board::MoveCard>::new();
     // Deleting is two steps: ask what it would cost, then say it out loud and
     // let the person decide. The artboard's red button had no confirmation and
     // this action reaches other people's tasks.
     let ask = ServerAction::<WhatDeleteCosts>::new();
-    // Every action that lands re-reads the task and the board behind it.
-    for value in [save.value(), comment.value(), link.value(), move_to.value()] {
+    // Every action that lands re-reads the task and the board behind it. The
+    // per-region editors own their own actions and do the same.
+    for value in [comment.value(), move_to.value()] {
         Effect::new(move |_| {
             if matches!(value.get(), Some(Ok(None))) {
                 on_change();
@@ -660,12 +1179,18 @@ fn DetailScreen(
 
     view! {
         <header class="detail-head">
-            <span class="detail-key">{task_key}</span>
-            <h2 class="detail-title">{title}</h2>
-            <div class="spacer"></div>
+            <div class="detail-headline">
+                <span class="detail-key">{task_key}</span>
+                <TitleControl task_id=id title=title may_write=may_write on_change=on_change/>
+            </div>
             <span class="detail-esc">"esc"</span>
-            <button class="detail-close" type="button" on:click=move |_| on_close()>
-                "✕"
+            <button
+                class="detail-close"
+                type="button"
+                aria-label="Close this task"
+                on:click=move |_| on_close()
+            >
+                {glyph::cross()}
             </button>
         </header>
 
@@ -684,7 +1209,14 @@ fn DetailScreen(
                         },
                     )
                 } else {
-                    Either::Right(view! { <span class="detail-value">{status}</span> })
+                    Either::Right(
+                        view! {
+                            <span class="field-box">
+                                <span class="status-dot"></span>
+                                <span class="field-text">{status}</span>
+                            </span>
+                        },
+                    )
                 }}
                 {refused(move_to)}
             </div>
@@ -707,6 +1239,7 @@ fn DetailScreen(
                             }
                         })
                         .collect_view()}
+                    <div class="spacer"></div>
                     {may_write
                         .then(|| {
                             view! { <AssigneePicker task_id=id people=unassigned on_change=on_change/> }
@@ -715,67 +1248,40 @@ fn DetailScreen(
             </div>
             <div class="detail-field">
                 <span class="detail-label">"DEADLINE"</span>
-                <span class="detail-value" class:detail-overdue=overdue>
-                    {deadline_label}
-                </span>
+                <DeadlineControl
+                    task_id=id
+                    deadline_label=deadline_label
+                    deadline_input=deadline_input
+                    overdue=overdue
+                    may_write=may_write
+                    on_change=on_change
+                />
             </div>
         </div>
 
-        <ActionForm action=save attr:class="detail-form">
-            <input type="hidden" name="task_id" value=move || id.get_value()/>
-            <span class="detail-label">"TITLE"</span>
-            <input
-                class="detail-input"
-                type="text"
-                name="title"
-                value=title_field
-                required
-                disabled=!may_write
-            />
+        <section class="detail-block">
             <span class="detail-label">"DESCRIPTION"</span>
-            <textarea
-                class="detail-textarea"
-                name="description"
-                rows="4"
-                disabled=!may_write
-                prop:value=description_field
-            >
-                {description}
-            </textarea>
-            <span class="detail-label">"DEADLINE"</span>
-            <input
-                class="detail-input detail-date"
-                type="date"
-                name="deadline"
-                value=deadline_input
-                disabled=!may_write
+            <DescriptionControl
+                task_id=id
+                description=description
+                may_write=may_write
+                on_change=on_change
             />
-            {may_write
-                .then(|| {
-                    view! {
-                        <div class="detail-form-row">
-                            <button
-                                class="detail-save"
-                                type="submit"
-                                disabled=move || save.pending().get()
-                            >
-                                "Save"
-                            </button>
-                        </div>
-                        {refused(save)}
-                    }
-                })}
-        </ActionForm>
+        </section>
 
-        <section class="detail-section">
-            <div class="detail-section-head">
+        <section class="detail-block">
+            <div class="detail-block-head">
                 <span class="detail-label">"DEPENDENCIES"</span>
+                <div class="spacer"></div>
+                {may_write
+                    .then(|| {
+                        view! { <LinkPicker task_id=id linkable=linkable on_change=on_change/> }
+                    })}
             </div>
-            {(!detail.blocked_by.is_empty())
+            {has_deps
                 .then(|| {
                     view! {
-                        <div class="dep-group">
-                            <span class="dep-heading">"BLOCKED BY"</span>
+                        <div class="dep-list">
                             {detail
                                 .blocked_by
                                 .iter()
@@ -791,14 +1297,6 @@ fn DetailScreen(
                                     }
                                 })
                                 .collect_view()}
-                        </div>
-                    }
-                })}
-            {(!detail.blocks.is_empty())
-                .then(|| {
-                    view! {
-                        <div class="dep-group">
-                            <span class="dep-heading">"BLOCKS"</span>
                             {detail
                                 .blocks
                                 .iter()
@@ -817,73 +1315,51 @@ fn DetailScreen(
                         </div>
                     }
                 })}
-            {(may_write && !linkable.is_empty())
-                .then(|| {
-                    view! {
-                        <ActionForm action=link attr:class="dep-link">
-                            <input type="hidden" name="task_id" value=move || id.get_value()/>
-                            <select class="dep-select" name="other_id">
-                                {linkable
-                                    .iter()
-                                    .map(|target| {
-                                        view! {
-                                            <option value=target.id.clone()>
-                                                {format!("{} {}", target.task_key, target.title)}
-                                            </option>
-                                        }
-                                    })
-                                    .collect_view()}
-                            </select>
-                            <select class="dep-select" name="direction">
-                                <option value="blocked_by">"blocks this task"</option>
-                                <option value="blocks">"waits on this task"</option>
-                            </select>
-                            <button class="dep-add" type="submit" disabled=move || link.pending().get()>
-                                "Link a task"
-                            </button>
-                        </ActionForm>
-                        {refused(link)}
-                    }
-                })}
+            {(!has_deps).then(|| view! { <p class="detail-quiet">"Nothing blocks this task."</p> })}
         </section>
 
-        <section class="detail-section">
-            <span class="detail-label">"COMMENTS"</span>
-            {detail
-                .comments
-                .iter()
-                .map(|entry| view! { <CommentRow comment=entry.clone()/> })
-                .collect_view()}
-            {may_comment
-                .then(|| {
-                    view! {
-                        <ActionForm action=comment attr:class="comment-composer">
-                            <input type="hidden" name="task_id" value=move || id.get_value()/>
-                            <textarea
-                                class="comment-input"
-                                name="body"
-                                rows="3"
-                                placeholder="Write a comment…"
-                                required
-                            ></textarea>
-                            <div class="comment-row">
-                                <span class="comment-hint">"⌘↵ to post"</span>
-                                <div class="spacer"></div>
-                                <button
-                                    class="comment-post"
-                                    type="submit"
-                                    disabled=move || comment.pending().get()
-                                >
-                                    "Comment"
-                                </button>
-                            </div>
-                        </ActionForm>
-                        {refused(comment)}
-                    }
-                })}
+        <section class="detail-block">
+            <div class="detail-block-head">
+                <span class="detail-label">"COMMENTS"</span>
+                <span class="detail-count">{comment_count}</span>
+            </div>
+            <div class="comment-list">
+                {detail
+                    .comments
+                    .iter()
+                    .map(|entry| view! { <CommentRow comment=entry.clone()/> })
+                    .collect_view()}
+                {may_comment
+                    .then(|| {
+                        view! {
+                            <ActionForm action=comment attr:class="comment-composer">
+                                <input type="hidden" name="task_id" value=move || id.get_value()/>
+                                <textarea
+                                    class="comment-input"
+                                    name="body"
+                                    rows="3"
+                                    placeholder="Write a comment…"
+                                    required
+                                ></textarea>
+                                <div class="comment-row">
+                                    <span class="comment-hint">"⌘↵ to post"</span>
+                                    <div class="spacer"></div>
+                                    <button
+                                        class="comment-post"
+                                        type="submit"
+                                        disabled=move || comment.pending().get()
+                                    >
+                                        "Comment"
+                                    </button>
+                                </div>
+                            </ActionForm>
+                            {refused(comment)}
+                        }
+                    })}
+            </div>
         </section>
 
-        <section class="detail-section">
+        <section class="detail-block">
             <span class="detail-label">"ACTIVITY"</span>
             {detail
                 .activity
@@ -987,7 +1463,8 @@ fn DetailScreen(
                                 type="submit"
                                 disabled=move || ask.pending().get()
                             >
-                                "Delete task"
+                                {glyph::bin()}
+                                <span>"Delete task"</span>
                             </button>
                         </ActionForm>
                     }
@@ -1015,67 +1492,29 @@ fn AssigneeChip(
         }
     });
     let name = person.display_name.clone();
+    let person_id = person.id.clone();
 
     view! {
         <span class="assignee-chip">
-            {name.clone()}
+            <Avatar person=person extra="avatar-sm"/>
+            <span class="assignee-name">{name.clone()}</span>
             {may_write
                 .then(|| {
                     view! {
                         <ActionForm action=action attr:class="assignee-drop">
                             <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                            <input type="hidden" name="user_id" value=person.id.clone()/>
+                            <input type="hidden" name="user_id" value=person_id/>
                             <button
                                 class="assignee-remove"
                                 type="submit"
                                 title=format!("Take {name} off this task")
                             >
-                                "✕"
+                                {glyph::cross()}
                             </button>
                         </ActionForm>
                     }
                 })}
         </span>
-    }
-}
-
-#[component]
-fn AssigneePicker(
-    task_id: StoredValue<String>,
-    people: Vec<Person>,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let action = ServerAction::<Assign>::new();
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let empty = people.is_empty();
-
-    view! {
-        {(!empty)
-            .then(|| {
-                view! {
-                    <ActionForm action=action attr:class="assignee-add">
-                <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                <select class="assignee-select" name="user_id">
-                    {people
-                        .iter()
-                        .map(|person| {
-                            view! {
-                                <option value=person.id.clone()>{person.display_name.clone()}</option>
-                            }
-                        })
-                        .collect_view()}
-                </select>
-                    <button class="assignee-assign" type="submit">
-                        "Assign"
-                    </button>
-                    </ActionForm>
-                }
-            })}
     }
 }
 
@@ -1105,15 +1544,25 @@ fn DepRow(
         Direction::BlockedBy => "blocked_by",
         Direction::Blocks => "blocks",
     };
+    // The artboard puts the direction in the row itself, in a fixed column, so
+    // the rows line up whichever way round they run.
+    let tag = if waiting { "BLOCKS" } else { "BLOCKED BY" };
 
     view! {
         <div class="dep-row" class:dep-row-waiting=waiting>
-            {cleared.then(|| view! { <span class="dep-tick">"✓"</span> })}
+            <span class="dep-tag">{tag}</span>
+            {if waiting {
+                Either::Left(glyph::lock())
+            } else if cleared {
+                Either::Right(Either::Left(glyph::tick()))
+            } else {
+                Either::Right(Either::Right(glyph::lock()))
+            }}
             <span class="dep-key">{edge.task_key.clone()}</span>
             <span class="dep-title">{edge.title.clone()}</span>
             <div class="spacer"></div>
             <span class="dep-note">{note}</span>
-            {(may_write && !cleared)
+            {may_write
                 .then(|| {
                     view! {
                         <ActionForm action=action attr:class="dep-unlink-form">
@@ -1121,7 +1570,7 @@ fn DepRow(
                             <input type="hidden" name="other_id" value=other_id/>
                             <input type="hidden" name="direction" value=wire/>
                             <button class="dep-unlink" type="submit" title="Remove this link">
-                                "✕"
+                                {glyph::cross()}
                             </button>
                         </ActionForm>
                     }
@@ -1134,13 +1583,17 @@ fn DepRow(
 fn CommentRow(comment: Comment) -> impl IntoView {
     use dizey_core::detail::moment_label;
 
+    let author = comment.author.clone();
     view! {
         <div class="comment">
-            <div class="comment-head">
-                <span class="comment-who">{comment.author.display_name.clone()}</span>
-                <span class="comment-when">{moment_label(comment.at)}</span>
+            <Avatar person=author extra="avatar-lg"/>
+            <div class="comment-said">
+                <div class="comment-head">
+                    <span class="comment-who">{comment.author.display_name.clone()}</span>
+                    <span class="comment-when">{moment_label(comment.at)}</span>
+                </div>
+                <div class="comment-body">{comment.body.clone()}</div>
             </div>
-            <div class="comment-body">{comment.body.clone()}</div>
         </div>
     }
 }
