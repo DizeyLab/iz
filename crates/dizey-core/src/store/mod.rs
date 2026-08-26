@@ -190,6 +190,68 @@ pub struct MailSend {
     pub sent_at: Option<OffsetDateTime>,
 }
 
+/// A deletion that freed something, kept so a mail owed because of it can be
+/// rebuilt later. The task it names is gone by the time anyone reads this, so
+/// its key and title are copied rather than looked up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Freeing {
+    pub id: String,
+    pub board_id: String,
+    /// The deleted task, as the mail has to name it.
+    pub cause_key: String,
+    pub cause_title: String,
+    pub actor_id: String,
+    pub at: OffsetDateTime,
+}
+
+/// What a delete did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deletion {
+    /// Tasks that were waiting only on the deleted one, and now wait on
+    /// nothing.
+    pub freed: Vec<String>,
+    /// The recorded freeing, written only when something was actually freed:
+    /// a delete that frees nobody is not an event any rule can fire on.
+    pub event: Option<Freeing>,
+}
+
+/// The two things that can owe a mail. Both are committed facts with an id, an
+/// actor and a moment, and a retry rebuilds its mail from whichever one the
+/// ledger row points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Event {
+    /// A card crossed into a column.
+    Moved(crate::board::Transition),
+    /// A blocker was deleted and let something go.
+    Freed(Freeing),
+}
+
+impl Event {
+    pub fn id(&self) -> &str {
+        match self {
+            Event::Moved(transition) => &transition.id,
+            Event::Freed(freeing) => &freeing.id,
+        }
+    }
+
+    /// Who did it. Nobody is ever mailed about their own action, so this is
+    /// the address the engine takes off every audience.
+    pub fn actor_id(&self) -> &str {
+        match self {
+            Event::Moved(transition) => &transition.actor_id,
+            Event::Freed(freeing) => &freeing.actor_id,
+        }
+    }
+
+    /// When it happened — the fact's own clock, not the sender's.
+    pub fn at(&self) -> OffsetDateTime {
+        match self {
+            Event::Moved(transition) => transition.at,
+            Event::Freed(freeing) => freeing.at,
+        }
+    }
+}
+
 /// Somebody a rule can mail. The address is here because this is the one place
 /// that needs it; it never rides out to a page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,16 +490,15 @@ pub trait Store: BoardReads + DetailReads + 'static {
     ) -> Result<Moved>;
 
     /// Removes a task and every dependency edge it stood in. Tasks that were
-    /// waiting only on this one become unblocked, and that is recorded in
-    /// their activity — the rules engine will want to mail about it.
-    ///
-    /// Returns the ids of the tasks that were freed.
+    /// waiting only on this one become unblocked, that is recorded in their
+    /// activity, and — when anything was freed — the freeing itself is written
+    /// as an event the rules engine can fire on and a retry can read back.
     async fn delete_task(
         &self,
         task_id: &str,
         actor_id: &str,
         at: OffsetDateTime,
-    ) -> Result<Vec<String>>;
+    ) -> Result<Deletion>;
 
     /// What a delete would take with it, for the confirmation step. Reads
     /// only; nothing here writes.
@@ -472,10 +533,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// One rule, for a retry that has only the send row to go on.
     async fn mail_rule(&self, rule_id: &str) -> Result<Option<MailRule>>;
 
-    /// One crossing, by id. A retry rebuilds its mail from the facts as they
-    /// were committed, and the crossing's own clock is one of them: a send
-    /// retried on Thursday still says the card moved on Tuesday.
-    async fn transition(&self, transition_id: &str) -> Result<Option<crate::board::Transition>>;
+    /// One event, by id, whether it was a crossing or a freeing. A retry
+    /// rebuilds its mail from the facts as they were committed, and the
+    /// event's own clock is one of them: a send retried on Thursday still says
+    /// the card moved on Tuesday.
+    async fn event(&self, event_id: &str) -> Result<Option<Event>>;
 
     async fn set_mail_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()>;
 

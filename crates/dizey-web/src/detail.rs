@@ -436,8 +436,8 @@ pub async fn what_delete_costs(
 
 /// Deletes a task. A writer may: the delete is soft — the row keeps a
 /// `deleted_at`, its comments and its edges stay in the table — so a mistake is
-/// recoverable by hand. Whatever was waiting only on it becomes unblocked, and
-/// the store records that.
+/// recoverable by hand. Whatever was waiting only on it becomes unblocked, the
+/// store records that as an event, and the unblocked rules fire on it.
 #[server]
 pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnError> {
     use crate::server::accounts;
@@ -447,11 +447,17 @@ pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnErr
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    accounts()
+    let deletion = accounts()
         .store()
         .delete_task(&task_id, &user.id, OffsetDateTime::now_utc())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+    // A blocker being deleted unblocks whatever was waiting only on it, which
+    // is the same news as the blocker finishing. The freeing is committed; the
+    // send is a separate step, off the request.
+    if let Some(freeing) = deletion.event {
+        crate::server::mail().after_freeing(freeing, deletion.freed);
+    }
     Ok(None)
 }
 

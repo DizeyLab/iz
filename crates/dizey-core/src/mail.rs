@@ -7,6 +7,12 @@
 //! including the moment the card moved: a send retried on Thursday still says
 //! Tuesday.
 //!
+//! Nobody is ever mailed about their own action. A rule's audience is resolved
+//! and the person who did the thing is taken off it, on every audience, always:
+//! three people on one board do not need Dizey telling each of them what they
+//! themselves just did. A rule whose audience is only the actor sends nothing
+//! and owes nothing — that is not a failure and does not appear as one.
+//!
 //! Sending is deliberately outside the move's transaction. The crossing has to
 //! commit whether or not a mail server is reachable, and a board that hangs for
 //! thirty seconds because somebody's SMTP host is down is a board broken by its
@@ -18,7 +24,7 @@ use async_trait::async_trait;
 use time::{Duration, OffsetDateTime};
 
 use crate::board::Transition;
-use crate::store::{Audience, MailRule, MailSend, Store, Trigger};
+use crate::store::{Audience, Event, Freeing, MailRule, MailSend, Store, Trigger};
 
 /// Why the mail server would not take it, and whether that can change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,19 +121,50 @@ impl Engine {
             return Ok(report);
         };
         let rules = self.store.mail_rules(&facts.board_id).await?;
+        let event = Event::Moved(transition.clone());
 
         for rule in rules.iter().filter(|rule| rule.enabled) {
             match &rule.trigger {
                 Trigger::StatusBecomes(column) if *column == transition.to_column => {
-                    self.owe(rule, transition, &transition.task_id, &mut report)
+                    self.owe(rule, &event, &transition.task_id, &mut report)
                         .await?;
                 }
                 Trigger::Unblocked => {
                     for freed in self.freed_by(transition, &facts.board_id).await? {
-                        self.owe(rule, transition, &freed, &mut report).await?;
+                        self.owe(rule, &event, &freed, &mut report).await?;
                     }
                 }
                 Trigger::StatusBecomes(_) => {}
+            }
+        }
+        Ok(report)
+    }
+
+    /// Everything a delete owes. A task stops being blocked in two ways and
+    /// only one of them is a crossing: the blocker finishes, or the blocker is
+    /// deleted. Both fire the unblocked rule, both claim through the same
+    /// unique index, and the freed task is told once either way.
+    ///
+    /// Called after the delete has committed, with the tasks the store says it
+    /// freed.
+    pub async fn on_freeing(
+        &self,
+        freeing: &Freeing,
+        freed: &[String],
+    ) -> crate::store::Result<Report> {
+        let mut report = Report::default();
+        if freed.is_empty() {
+            return Ok(report);
+        }
+        let rules = self.store.mail_rules(&freeing.board_id).await?;
+        let event = Event::Freed(freeing.clone());
+
+        for rule in rules
+            .iter()
+            .filter(|rule| rule.enabled && rule.trigger == Trigger::Unblocked)
+        {
+            for task_id in freed {
+                self.owe(rule, &event, task_id, &mut report).await?;
             }
         }
         Ok(report)
@@ -177,10 +214,15 @@ impl Engine {
     }
 
     /// Claims one mail per recipient and tries each one it owns.
+    ///
+    /// The person who caused the event is taken off the audience before
+    /// anything is claimed: an empty audience leaves no ledger row at all, so
+    /// a rule that only ever resolves to the actor is silent rather than being
+    /// a row the admin has to read as a failure.
     async fn owe(
         &self,
         rule: &MailRule,
-        transition: &Transition,
+        event: &Event,
         task_id: &str,
         report: &mut Report,
     ) -> crate::store::Result<()> {
@@ -189,13 +231,16 @@ impl Engine {
             Audience::Board => self.store.recipients_for_board(&rule.board_id).await?,
         };
         let now = OffsetDateTime::now_utc();
-        for recipient in recipients {
+        for recipient in recipients
+            .into_iter()
+            .filter(|recipient| recipient.user_id != event.actor_id())
+        {
             let claimed = self
                 .store
-                .claim_send(&rule.id, &transition.id, task_id, &recipient.email, now)
+                .claim_send(&rule.id, event.id(), task_id, &recipient.email, now)
                 .await?;
             match claimed {
-                Some(send) => self.attempt(&send, rule, transition, report).await?,
+                Some(send) => self.attempt(&send, rule, event, report).await?,
                 None => report.already_owned += 1,
             }
         }
@@ -214,10 +259,10 @@ impl Engine {
             let Some(rule) = self.store.mail_rule(&send.rule_id).await? else {
                 continue;
             };
-            let Some(transition) = self.store.transition(&send.event_id).await? else {
+            let Some(event) = self.store.event(&send.event_id).await? else {
                 continue;
             };
-            self.attempt(&send, &rule, &transition, &mut report).await?;
+            self.attempt(&send, &rule, &event, &mut report).await?;
         }
         Ok(report)
     }
@@ -227,10 +272,10 @@ impl Engine {
         &self,
         send: &MailSend,
         rule: &MailRule,
-        transition: &Transition,
+        event: &Event,
         report: &mut Report,
     ) -> crate::store::Result<()> {
-        let Some(mail) = self.compose(send, rule, transition).await? else {
+        let Some(mail) = self.compose(send, rule, event).await? else {
             return Ok(());
         };
         let now = OffsetDateTime::now_utc();
@@ -263,14 +308,14 @@ impl Engine {
         &self,
         send: &MailSend,
         rule: &MailRule,
-        transition: &Transition,
+        event: &Event,
     ) -> crate::store::Result<Option<Outgoing>> {
         let Some(facts) = self.store.task(&send.task_id).await? else {
             return Ok(None);
         };
         let actor = self
             .store
-            .user(&transition.actor_id)
+            .user(event.actor_id())
             .await?
             .map(|user| user.display_name)
             .unwrap_or_else(|| "Somebody".to_string());
@@ -282,20 +327,26 @@ impl Engine {
                 .map(|column| column.name.clone())
                 .unwrap_or_else(|| "a column".to_string())
         };
-        let happened = match &rule.trigger {
-            Trigger::StatusBecomes(_) => format!(
+        let happened = match (event, &rule.trigger) {
+            (Event::Moved(transition), Trigger::StatusBecomes(_)) => format!(
                 "{} moved it from {} to {}.",
                 actor,
                 named(&transition.from_column),
                 named(&transition.to_column)
             ),
-            Trigger::Unblocked => format!("{} finished the last task it was waiting on.", actor),
+            (Event::Moved(_), Trigger::Unblocked) => {
+                format!("{} finished the last task it was waiting on.", actor)
+            }
+            (Event::Freed(freeing), _) => format!(
+                "{} deleted {} — {}, the last task it was waiting on.",
+                actor, freeing.cause_key, freeing.cause_title
+            ),
         };
         let body = format!(
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",
             key = facts.row.task_key,
             title = facts.row.title,
-            when = day_and_time(transition.at),
+            when = day_and_time(event.at()),
             base = self.base_url,
             id = facts.row.id,
         );

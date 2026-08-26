@@ -13,8 +13,8 @@ use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
 use super::{
-    Audience, MailRule, MailSend, NewTask, NewUser, Recipient, Result, SendState, Session,
-    SigninLink, Store, StoreError, Trigger, User, Workspace,
+    Audience, Deletion, Event, Freeing, MailRule, MailSend, NewTask, NewUser, Recipient, Result,
+    SendState, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -31,6 +31,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../../migrations/0002_auth.sql")),
     (3, include_str!("../../migrations/0003_transition.sql")),
     (4, include_str!("../../migrations/0004_mail.sql")),
+    (5, include_str!("../../migrations/0005_freeing.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -1430,7 +1431,7 @@ impl Store for TursoStore {
         task_id: &str,
         actor_id: &str,
         at: OffsetDateTime,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Deletion> {
         let stamp = stamp(at)?;
 
         let mut conn = self.tx_conn().await?;
@@ -1445,7 +1446,8 @@ impl Store for TursoStore {
         let written = async {
             let mut rows = tx
                 .query(
-                    "SELECT task_key FROM task WHERE id = ?1 AND deleted_at IS NULL",
+                    "SELECT task_key, title, board_id FROM task \
+                     WHERE id = ?1 AND deleted_at IS NULL",
                     params![task_id],
                 )
                 .await?;
@@ -1453,6 +1455,8 @@ impl Store for TursoStore {
                 return Ok(None);
             };
             let task_key = row.get::<String>(0)?;
+            let title = row.get::<String>(1)?;
+            let board_id = row.get::<String>(2)?;
             drop(rows);
 
             // Everyone this task was standing in front of, before the edges go.
@@ -1526,14 +1530,45 @@ impl Store for TursoStore {
                 .await?;
                 freed.push(blocked);
             }
-            Ok::<_, turso::Error>(Some(freed))
+
+            // The freeing is written in the same transaction as the delete, so
+            // a mail owed because of it is owed by a fact that committed. A
+            // delete that freed nobody is not an event: nothing can fire on it
+            // and nothing needs to read it back.
+            let event = if freed.is_empty() {
+                None
+            } else {
+                let event = Freeing {
+                    id: Uuid::new_v4().to_string(),
+                    board_id,
+                    cause_key: task_key.clone(),
+                    cause_title: title,
+                    actor_id: actor_id.to_string(),
+                    at,
+                };
+                tx.execute(
+                    "INSERT INTO freeing (id, board_id, cause_key, cause_title, actor_id, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        event.id.clone(),
+                        event.board_id.clone(),
+                        event.cause_key.clone(),
+                        event.cause_title.clone(),
+                        event.actor_id.clone(),
+                        stamp.clone()
+                    ],
+                )
+                .await?;
+                Some(event)
+            };
+            Ok::<_, turso::Error>(Some(Deletion { freed, event }))
         }
         .await;
 
         match written {
-            Ok(Some(freed)) => {
+            Ok(Some(deletion)) => {
                 tx.commit().await.map_err(backend)?;
-                Ok(freed)
+                Ok(deletion)
             }
             Ok(None) => {
                 let _ = tx.rollback().await;
@@ -1705,23 +1740,40 @@ impl Store for TursoStore {
         }
     }
 
-    async fn transition(&self, transition_id: &str) -> Result<Option<Transition>> {
-        match self
+    async fn event(&self, event_id: &str) -> Result<Option<Event>> {
+        if let Some(row) = self
             .one_row(
                 "SELECT id, task_id, from_column, to_column, actor_id, created_at \
                  FROM transition WHERE id = ?1",
-                params![transition_id],
+                params![event_id],
             )
             .await?
         {
-            Some(row) => Ok(Some(Transition {
+            return Ok(Some(Event::Moved(Transition {
                 id: text(&row, 0)?,
                 task_id: text(&row, 1)?,
                 from_column: text(&row, 2)?,
                 to_column: text(&row, 3)?,
                 actor_id: text(&row, 4)?,
                 at: parse_stamp(&text(&row, 5)?)?,
-            })),
+            })));
+        }
+        match self
+            .one_row(
+                "SELECT id, board_id, cause_key, cause_title, actor_id, created_at \
+                 FROM freeing WHERE id = ?1",
+                params![event_id],
+            )
+            .await?
+        {
+            Some(row) => Ok(Some(Event::Freed(Freeing {
+                id: text(&row, 0)?,
+                board_id: text(&row, 1)?,
+                cause_key: text(&row, 2)?,
+                cause_title: text(&row, 3)?,
+                actor_id: text(&row, 4)?,
+                at: parse_stamp(&text(&row, 5)?)?,
+            }))),
             None => Ok(None),
         }
     }

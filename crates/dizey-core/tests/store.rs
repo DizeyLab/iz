@@ -88,14 +88,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 4);
+    assert_eq!(first.schema_version().await.unwrap(), 5);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 4);
+    assert_eq!(second.schema_version().await.unwrap(), 5);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1965,11 +1965,15 @@ async fn deleting_a_task_frees_what_was_waiting_on_it() {
         .await
         .unwrap();
 
-    let unblocked = store.delete_task(&blocking, &admin, now).await.unwrap();
+    let deletion = store.delete_task(&blocking, &admin, now).await.unwrap();
     assert_eq!(
-        unblocked,
+        deletion.freed,
         vec![freed.clone()],
         "only the one with nothing else in front of it"
+    );
+    assert!(
+        deletion.event.is_some(),
+        "a delete that freed somebody is an event the rules can fire on"
     );
 
     // The deleted task is gone from the board and from the edges it stood in.
@@ -2183,7 +2187,7 @@ async fn a_delete_says_what_it_would_take_with_it() {
 
     // And it is a preview: nothing was written.
     assert_eq!(
-        store.delete_task(&doomed, &admin, now).await.unwrap(),
+        store.delete_task(&doomed, &admin, now).await.unwrap().freed,
         vec![freed.clone()]
     );
     assert!(store.deletion_cost(&doomed).await.unwrap().is_none());
@@ -3189,5 +3193,224 @@ async fn a_card_that_did_not_move_owes_nobody_a_mail() {
         .await
         .unwrap();
     assert_eq!(outcome, Moved::Unchanged);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_deleted_blocker_also_says_you_can_start_now() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let waiting = add_task(
+        &store,
+        &workspace,
+        "Backlog",
+        "Onboarding mails",
+        None,
+        &admin,
+    )
+    .await;
+    let blocker = add_task(&store, &workspace, "Backlog", "Signing keys", None, &admin).await;
+    store.assign_task(&waiting, &mate).await.unwrap();
+    let now = OffsetDateTime::now_utc();
+    store.add_dependency(&waiting, &blocker, now).await.unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Unblocked,
+            "You can start now",
+            Audience::Assignees,
+            now,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+
+    // A blocker can leave the way in two ways, and being deleted is one of
+    // them. The person waiting hears about it either way.
+    let deletion = store.delete_task(&blocker, &admin, now).await.unwrap();
+    assert_eq!(deletion.freed, vec![waiting.clone()]);
+    let freeing = deletion.event.clone().expect("the freeing is a fact");
+    let first = engine
+        .on_freeing(&freeing, &deletion.freed)
+        .await
+        .unwrap();
+    assert_eq!(first.sent, 1);
+
+    // And the same freeing processed twice mails once: the unique index is
+    // what decides, exactly as it does for a crossing.
+    let again = engine.on_freeing(&freeing, &deletion.freed).await.unwrap();
+    assert_eq!(again.sent, 0);
+    assert_eq!(again.already_owned, 1);
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@dizey.sh");
+    assert_eq!(sent[0].subject, "You can start now");
+    assert!(
+        sent[0].body.contains("Onboarding mails"),
+        "the mail is about the freed task: {}",
+        sent[0].body
+    );
+    assert!(
+        sent[0].body.contains("Signing keys"),
+        "and it names the blocker that went away: {}",
+        sent[0].body
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_delete_that_leaves_somebody_still_waiting_mails_nobody() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let waiting = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let first = add_task(&store, &workspace, "Backlog", "Signing keys", None, &admin).await;
+    let second = add_task(&store, &workspace, "Backlog", "Install script", None, &admin).await;
+    store.assign_task(&waiting, &mate).await.unwrap();
+    let now = OffsetDateTime::now_utc();
+    store.add_dependency(&waiting, &first, now).await.unwrap();
+    store.add_dependency(&waiting, &second, now).await.unwrap();
+    let rule = store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Unblocked,
+            "You can start now",
+            Audience::Assignees,
+            now,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+
+    // Deleting one of two blockers frees nobody, so there is no event at all
+    // and nothing to fire on.
+    let deletion = store.delete_task(&first, &admin, now).await.unwrap();
+    assert!(deletion.freed.is_empty());
+    assert!(deletion.event.is_none());
+    assert!(mailer.sent().is_empty());
+
+    // Deleting the second one does free it.
+    let deletion = store.delete_task(&second, &admin, now).await.unwrap();
+    let freeing = deletion.event.clone().expect("the freeing is a fact");
+    assert_eq!(
+        engine
+            .on_freeing(&freeing, &deletion.freed)
+            .await
+            .unwrap()
+            .sent,
+        1
+    );
+    assert_eq!(store.sends_for_rule(&rule.id, 10).await.unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_mail_owed_by_a_delete_is_rebuilt_from_the_delete_on_a_retry() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let waiting = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let blocker = add_task(&store, &workspace, "Backlog", "Signing keys", None, &admin).await;
+    store.assign_task(&waiting, &mate).await.unwrap();
+    let now = OffsetDateTime::now_utc();
+    store.add_dependency(&waiting, &blocker, now).await.unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Unblocked,
+            "You can start now",
+            Audience::Assignees,
+            now,
+        )
+        .await
+        .unwrap();
+
+    // The mail server is down when the blocker is deleted. The sweep picks the
+    // send up later with only the ledger row to go on, so the freeing has to be
+    // readable back as an event — the deleted task's key included, since the
+    // task itself is gone.
+    let mailer = Remembering::refusing(vec![MailError::retryable("connection refused")]);
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let deletion = store.delete_task(&blocker, &admin, now).await.unwrap();
+    let freeing = deletion.event.clone().unwrap();
+    assert_eq!(
+        engine
+            .on_freeing(&freeing, &deletion.freed)
+            .await
+            .unwrap()
+            .failed,
+        1
+    );
+    assert!(mailer.sent().is_empty());
+
+    let later = OffsetDateTime::now_utc() + Duration::hours(2);
+    assert_eq!(engine.deliver_owed(later, 10).await.unwrap().sent, 1);
+    let body = mailer.sent()[0].body.clone();
+    assert!(
+        body.contains("Signing keys"),
+        "the retry still names the task that was deleted: {body}"
+    );
+    assert!(
+        body.contains(&format!("{} at", freeing.at.day())),
+        "and says when the delete happened, not when the mail went: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn nobody_is_mailed_about_what_they_did_themselves() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+
+    // Emre is the only assignee and Emre moved the card. Telling him what he
+    // just did is how a person learns to filter Dizey's mail away.
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
+    let report = engine.on_transition(&transition).await.unwrap();
+    assert_eq!(report, Default::default());
+    assert!(mailer.sent().is_empty());
+    // And nothing is owed: an audience that empties out leaves no ledger row,
+    // so the admin's trail does not show a send that never was.
+    assert!(store.sends_for_rule(&rule.id, 10).await.unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@dizey.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let column_id = column_named(&store, &workspace, "Done").await;
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(column_id),
+            "Task completed",
+            Audience::Board,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://dizey.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
+    assert_eq!(engine.on_transition(&transition).await.unwrap().sent, 1);
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1, "the board minus the person who moved it");
+    assert_eq!(sent[0].to, "ada@dizey.sh");
     let _ = std::fs::remove_dir_all(&dir);
 }

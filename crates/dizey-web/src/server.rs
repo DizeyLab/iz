@@ -10,7 +10,7 @@ use axum::http::request::Parts;
 use dizey_core::accounts::{AccountError, Accounts};
 use dizey_core::board::Transition;
 use dizey_core::mail::Engine;
-use dizey_core::store::User;
+use dizey_core::store::{Freeing, User};
 use leptos::prelude::*;
 use leptos_axum::ResponseOptions;
 
@@ -53,17 +53,37 @@ impl Mail {
             return;
         };
         tokio::spawn(async move {
-            match engine.on_transition(&transition).await {
-                Ok(report) if report.sent + report.failed + report.abandoned > 0 => {
-                    println!(
-                        "dizey mail  {} sent, {} to retry, {} given up on",
-                        report.sent, report.failed, report.abandoned
-                    );
-                }
-                Ok(_) => {}
-                Err(problem) => eprintln!("dizey mail  the ledger could not be read: {problem}"),
-            }
+            let report = engine.on_transition(&transition).await;
+            Self::log(report);
         });
+    }
+
+    /// Hands a committed delete to the engine, off the request, the same way.
+    ///
+    /// A blocker being deleted frees the tasks that were waiting on it just as
+    /// finishing it would, so the unblocked rule fires on both. The freeing is
+    /// already written; this only reads it.
+    pub fn after_freeing(&self, freeing: Freeing, freed: Vec<String>) {
+        let Some(engine) = self.0.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let report = engine.on_freeing(&freeing, &freed).await;
+            Self::log(report);
+        });
+    }
+
+    fn log(report: dizey_core::store::Result<dizey_core::mail::Report>) {
+        match report {
+            Ok(report) if report.sent + report.failed + report.abandoned > 0 => {
+                println!(
+                    "dizey mail  {} sent, {} to retry, {} given up on",
+                    report.sent, report.failed, report.abandoned
+                );
+            }
+            Ok(_) => {}
+            Err(problem) => eprintln!("dizey mail  the ledger could not be read: {problem}"),
+        }
     }
 }
 
