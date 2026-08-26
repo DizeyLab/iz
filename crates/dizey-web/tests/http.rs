@@ -895,11 +895,14 @@ async fn an_admin_sees_the_sender_and_never_a_password() {
         .await;
 
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    assert!(answer.body.contains("smtp.fastmail.com"), "{}", answer.body);
-    assert!(answer.body.contains("465"), "{}", answer.body);
+    // The whole of what a screen may know about the sender, exactly: four
+    // fields, and no fifth one a password could be carried in.
     assert!(
-        !answer.body.to_lowercase().contains("password"),
-        "the answer carries a password field: {}",
+        answer.body.contains(
+            "\"sender\":{\"host\":\"smtp.fastmail.com\",\"port\":465,\
+             \"username\":\"dizey\",\"from\":\"dizey@dizey.sh\"}"
+        ),
+        "{}",
         answer.body
     );
 }
@@ -1082,4 +1085,164 @@ async fn a_file_type_that_is_not_an_extension_is_refused() {
         )
         .await;
     assert_eq!(answer.body, "\"BadFileType\"", "{}", answer.body);
+}
+
+/// The member list is the admin's. A Member asking gets an answer with no
+/// list in it — not a table the page declined to draw.
+#[tokio::test]
+async fn a_member_is_not_sent_the_member_list() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+    let _ = invited(&app, &admin_cookie, "quiet@dizey.sh", "Quiet", Role::Viewer).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&member),
+            &[],
+        )
+        .await;
+    assert!(answer.body.contains("\"members\":null"), "{}", answer.body);
+    assert!(!answer.body.contains("quiet@dizey.sh"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn an_admin_sees_who_has_a_password_and_never_a_hash() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _ = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+    // Invited and never signed in: the account exists, the password does not.
+    let answer = app
+        .post(
+            path::<dizey_web::auth::InviteMember>(),
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@dizey.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(answer.body.contains("mert@dizey.sh"), "{}", answer.body);
+    assert!(answer.body.contains("\"has_password\":false"), "{}", answer.body);
+    assert!(answer.body.contains("\"has_password\":true"), "{}", answer.body);
+    assert!(
+        !answer.body.contains("$argon2"),
+        "a hash reached the page: {}",
+        answer.body
+    );
+}
+
+/// Resending is admin-only, and "only" is the handler: a Member who posts it
+/// gets no link back.
+#[tokio::test]
+async fn a_member_who_posts_a_resend_anyway_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+    let mert = app
+        .post(
+            path::<dizey_web::auth::InviteMember>(),
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@dizey.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
+    let members = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    let mert_id = members
+        .body
+        .split_once("\"id\":\"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no member id")
+        .to_string();
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::ResendLink>(),
+            Some(&member),
+            &[("user_id", &mert_id)],
+        )
+        .await;
+    assert_eq!(answer.body, "{\"Err\":\"Forbidden\"}", "{}", answer.body);
+    assert!(!answer.body.contains("/join/"), "{}", answer.body);
+}
+
+/// An expired link is not a dead account: a resend opens the same one, and the
+/// link it hands back is a working one.
+#[tokio::test]
+async fn a_resent_link_opens_the_same_account() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let invitation = app
+        .post(
+            path::<dizey_web::auth::InviteMember>(),
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@dizey.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(invitation.status, StatusCode::OK, "{}", invitation.body);
+
+    let list = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    let mert_id = list
+        .body
+        .split_once("mert@dizey.sh")
+        .map(|(before, _)| before)
+        .and_then(|before| before.rsplit_once("\"id\":\""))
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no member id")
+        .to_string();
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::ResendLink>(),
+            Some(&admin_cookie),
+            &[("user_id", &mert_id)],
+        )
+        .await;
+    let token = answer
+        .body
+        .rsplit_once("/join/")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no link in the answer")
+        .to_string();
+
+    let redeemed = app
+        .post(
+            path::<dizey_web::auth::RedeemLink>(),
+            None,
+            &[("token", &token), ("password", "lantern gravel spoon meadow")],
+        )
+        .await;
+    assert_eq!(redeemed.body, "null", "{}", redeemed.body);
+    assert!(redeemed.session.is_some(), "the resent link signed nobody in");
 }

@@ -1660,3 +1660,115 @@ a {
 
   &:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
 }
+
+// -- the member list --------------------------------------------------------
+
+.member-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+
+  th {
+    text-align: left;
+    padding: 0 12px 8px 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    font-weight: 400;
+    color: var(--muted-soft);
+    border-bottom: 1px solid var(--border);
+  }
+
+  td {
+    padding: 10px 12px 10px 0;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+}
+
+.member-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.member-you {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.member-address {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.member-account {
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.member-resend { display: inline-flex; }
+
+.quiet {
+  height: 28px;
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+
+  &:hover { border-color: var(--accent); color: var(--accent-ink); }
+}
+
+.member-invite {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.field-role { flex-grow: 0; width: 140px; }
+
+// The link exists once. It is shown once, and said to be shown once.
+.member-link {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--accent-tint);
+  border: 1px solid #d6dbe8;
+  border-radius: var(--radius);
+}
+
+.member-link-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-ink);
+  word-break: break-all;
+}
+
+.role-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.topbar-link {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+
+  &:hover { color: var(--accent-ink); }
+}

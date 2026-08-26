@@ -59,6 +59,24 @@ pub const WIDEST_PHOTO_MB: u64 = 20;
 
 const MB: u64 = 1024 * 1024;
 
+/// One row of the member list, as an admin may see it. There is no password
+/// and no token here: whether a password exists is a fact about the account,
+/// and the token of a live link is shown once at the moment it is minted and
+/// is never readable afterwards — the store keeps only its hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub id: String,
+    pub display_name: String,
+    pub email: String,
+    pub role: dizey_core::Role,
+    pub has_password: bool,
+    /// The day they last signed in, as the list writes it, or nothing.
+    pub last_signed_in: Option<String>,
+    pub is_you: bool,
+    /// The first account. It administers the workspace and cannot be removed.
+    pub is_owner: bool,
+}
+
 /// One settings screen's worth of state. `sender` is `None` for two different
 /// reasons — no sender configured, or not an admin asking — and neither of
 /// them is a reason to send a host name to somebody who may not have it, so
@@ -71,6 +89,9 @@ pub struct SettingsSnapshot {
     /// The limits, for the admin who may change them. A Member's answer does
     /// not carry the panel's contents.
     pub limits: Option<Limits>,
+    /// The member list, for the admin who holds it. Everyone else gets
+    /// nothing — not a hidden table.
+    pub members: Option<Vec<Member>>,
 }
 
 /// The settings this browser may see.
@@ -83,6 +104,14 @@ pub async fn current_settings() -> Result<Result<SettingsSnapshot, Refusal>, Ser
         Err(refusal) => return Ok(Err(refusal)),
     };
     let administers = user.role.can_administer();
+    let limits = match administers {
+        true => Some(limits_now(&user.workspace_id).await?),
+        false => None,
+    };
+    let members = match administers {
+        true => Some(members_now(&user).await?),
+        false => None,
+    };
     Ok(Ok(SettingsSnapshot {
         me: Me {
             id: user.id,
@@ -95,11 +124,56 @@ pub async fn current_settings() -> Result<Result<SettingsSnapshot, Refusal>, Ser
         sender: administers
             .then(|| use_context::<Option<Sender>>().flatten())
             .flatten(),
-        limits: match administers {
-            true => Some(limits_now(&user.workspace_id).await?),
-            false => None,
-        },
+        limits,
+        members,
     }))
+}
+
+#[cfg(feature = "ssr")]
+async fn members_now(asking: &dizey_core::store::User) -> Result<Vec<Member>, ServerFnError> {
+    let store = crate::server::accounts().store().clone();
+    let owner = store
+        .owner()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .map(|owner| owner.id);
+    let users = store
+        .users(&asking.workspace_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(users
+        .into_iter()
+        .map(|user| Member {
+            has_password: user.password_hash.is_some(),
+            last_signed_in: user.last_signed_in_at.map(|at| dizey_core::board::day_label(at.date())),
+            is_you: user.id == asking.id,
+            is_owner: owner.as_deref() == Some(user.id.as_str()),
+            id: user.id,
+            display_name: user.display_name,
+            email: user.email,
+            role: user.role,
+        })
+        .collect())
+}
+
+/// Sends the same person another first-sign-in link, and hands the admin the
+/// address to pass on. Admin-only, checked here.
+///
+/// The link is returned exactly once, at the moment it is minted: the store
+/// keeps only its hash, so no later call — not this one, not a page reload —
+/// can produce it again.
+#[server]
+pub async fn resend_link(user_id: String) -> Result<Result<String, Refusal>, ServerFnError> {
+    use crate::server::{accounts, require_admin};
+
+    let admin = match require_admin().await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    match accounts().resend_invitation(&admin, &user_id).await {
+        Ok(invitation) => Ok(Ok(format!("/join/{}", invitation.token.expose()))),
+        Err(error) => Ok(Err(error.into())),
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -222,7 +296,15 @@ pub fn SettingsPage() -> impl IntoView {
         <Suspense fallback=|| view! { <main class="settings-stage"></main> }>
             {move || Suspend::new(async move {
                 match settings.await {
-                    Ok(Ok(snapshot)) => view! { <SettingsScreen snapshot=snapshot/> }.into_any(),
+                    Ok(Ok(snapshot)) => {
+                        view! {
+                            <SettingsScreen
+                                snapshot=snapshot
+                                on_change=Callback::new(move |()| settings.refetch())
+                            />
+                        }
+                            .into_any()
+                    }
                     Ok(Err(refusal)) => {
                         view! {
                             <main class="scaffold-note">
@@ -249,7 +331,7 @@ pub fn SettingsPage() -> impl IntoView {
 }
 
 #[component]
-fn SettingsScreen(snapshot: SettingsSnapshot) -> impl IntoView {
+fn SettingsScreen(snapshot: SettingsSnapshot, on_change: Callback<()>) -> impl IntoView {
     let me = snapshot.me.clone();
     let has_sender = snapshot.sender.is_some();
     let role_note = if snapshot.administers {
@@ -296,6 +378,11 @@ fn SettingsScreen(snapshot: SettingsSnapshot) -> impl IntoView {
                 {(snapshot.administers && !has_sender)
                     .then(|| view! { <NoSenderPanel/> })}
                 {snapshot.limits.map(|limits| view! { <LimitsPanel limits=limits/> })}
+                {snapshot
+                    .members
+                    .map(|members| {
+                        view! { <MembersPanel members=members on_change=on_change/> }
+                    })}
             </main>
         </div>
     }
@@ -535,5 +622,173 @@ mod file_type_tests {
         assert!(parse_types("../etc").is_none());
         assert!(parse_types("*").is_none());
         assert!(parse_types("tar.gz").is_none());
+    }
+}
+
+/// The member list, the invitation form, and the sentence about the roles that
+/// the artboard puts under it.
+#[component]
+fn MembersPanel(members: Vec<Member>, on_change: Callback<()>) -> impl IntoView {
+    let invite = ServerAction::<crate::auth::InviteMember>::new();
+    let resend = ServerAction::<ResendLink>::new();
+    // The link a call handed back, kept only until the next call. It is shown
+    // once because it exists once: what the store holds is its hash.
+    let link = RwSignal::new(None::<String>);
+    let refusal = RwSignal::new(None::<String>);
+
+    let carry = move |value: Option<Result<Result<String, Refusal>, ServerFnError>>| {
+        match value {
+            Some(Ok(Ok(path))) => {
+                link.set(Some(path));
+                refusal.set(None);
+                on_change.run(());
+            }
+            Some(Ok(Err(problem))) => {
+                link.set(None);
+                refusal.set(Some(problem.message()));
+            }
+            Some(Err(_)) => {
+                link.set(None);
+                refusal.set(Some(Refusal::Unavailable.message()));
+            }
+            None => {}
+        }
+    };
+    let invited = invite.value();
+    Effect::new(move |_| carry(invited.get()));
+    let resent = resend.value();
+    Effect::new(move |_| carry(resent.get()));
+
+    let rows = members
+        .into_iter()
+        .map(|member| {
+            let account = if member.is_owner {
+                "the first account, administers the workspace".to_string()
+            } else if !member.has_password {
+                "no password yet".to_string()
+            } else if let Some(day) = member.last_signed_in.clone() {
+                format!("password set — last signed in {day}")
+            } else {
+                "password set".to_string()
+            };
+            let id = member.id.clone();
+            view! {
+                <tr class="member-row">
+                    <td class="member-name">
+                        {member.display_name.clone()}
+                        {member
+                            .is_you
+                            .then(|| view! { <span class="member-you">"you"</span> })}
+                    </td>
+                    <td class="member-address">{member.email.clone()}</td>
+                    <td>
+                        <span class="chip chip-role">{member.role.as_str().to_string()}</span>
+                    </td>
+                    <td class="member-account">
+                        {account}
+                        {(!member.has_password)
+                            .then(|| {
+                                view! {
+                                    <ActionForm action=resend attr:class="member-resend">
+                                        <input type="hidden" name="user_id" value=id.clone()/>
+                                        <button class="quiet" type="submit">
+                                            "Resend link"
+                                        </button>
+                                    </ActionForm>
+                                }
+                            })}
+                    </td>
+                </tr>
+            }
+        })
+        .collect_view();
+
+    view! {
+        <section class="panel">
+            <div class="panel-head">
+                <h2 class="panel-title">"Members"</h2>
+                <span class="chip chip-admin">"Admin only"</span>
+            </div>
+            <div class="panel-body">
+                <table class="member-table">
+                    <thead>
+                        <tr>
+                            <th>"NAME"</th>
+                            <th>"ADDRESS"</th>
+                            <th>"ROLE"</th>
+                            <th>"ACCOUNT"</th>
+                        </tr>
+                    </thead>
+                    <tbody>{rows}</tbody>
+                </table>
+
+                <ActionForm action=invite attr:class="member-invite">
+                    <label class="field">
+                        <span class="field-label">"NAME"</span>
+                        <input
+                            class="field-input"
+                            type="text"
+                            name="display_name"
+                            maxlength="80"
+                            required
+                        />
+                    </label>
+                    <label class="field">
+                        <span class="field-label">"ADDRESS"</span>
+                        <input class="field-input" type="email" name="email" required/>
+                    </label>
+                    <label class="field field-role">
+                        <span class="field-label">"ROLE"</span>
+                        <select class="field-input" name="role">
+                            <option value="member">"Member"</option>
+                            <option value="viewer">"Viewer"</option>
+                            <option value="admin">"Admin"</option>
+                        </select>
+                    </label>
+                    <button class="primary" type="submit">
+                        "Add member"
+                    </button>
+                </ActionForm>
+
+                <p class="panel-lede">
+                    "You create the account with a name and an address. No password is set — the person picks one the first time they sign in."
+                </p>
+
+                {move || {
+                    refusal
+                        .get()
+                        .map(|message| view! { <p class="field-error">{message}</p> })
+                }}
+                {move || {
+                    link.get()
+                        .map(|path| {
+                            view! {
+                                <div class="member-link">
+                                    <span class="field-label">"SIGN-IN LINK — SHOWN ONCE"</span>
+                                    <code class="member-link-value">{path}</code>
+                                    <span class="field-note">
+                                        "Pass it on now. Dizey keeps only its hash, so nothing can show it again — send another link instead. Links expire after 7 days, and an expired link is not a dead account: resending opens the same one."
+                                    </span>
+                                </div>
+                            }
+                        })
+                }}
+
+                <div class="role-note">
+                    <p class="panel-lede">
+                        <b>"Admin"</b>
+                        " holds the sender, the limits and this list."
+                    </p>
+                    <p class="panel-lede">
+                        <b>"Member"</b>
+                        " works the board and is mailed by the rules."
+                    </p>
+                    <p class="panel-lede">
+                        <b>"Viewer"</b>
+                        " reads and exports — cannot be assigned a task, cannot comment, and no rule ever mails them."
+                    </p>
+                </div>
+            </div>
+        </section>
     }
 }

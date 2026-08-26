@@ -385,6 +385,9 @@ fn BoardScreen(
             <span class="topbar-who" title=me.email.clone()>
                 {me.display_name.clone()}
             </span>
+            <a class="topbar-link" href="/settings">
+                "Settings"
+            </a>
             {may_write
                 .then(|| {
                     view! {
