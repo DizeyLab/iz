@@ -597,6 +597,9 @@ fn SettingsScreen(
                 <a class="sidenav-item" href="/">
                     "Board"
                 </a>
+                <a class="sidenav-item" href="/rules">
+                    "Mail rules"
+                </a>
                 <a class="sidenav-item sidenav-item-on" href="/settings">
                     "Settings"
                 </a>

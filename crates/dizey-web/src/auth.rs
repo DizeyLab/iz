@@ -46,6 +46,8 @@ pub enum Refusal {
     BadSender(String),
     /// A comment with nothing in it.
     EmptyComment,
+    /// A rule with no subject line: the mail it sends would arrive blank.
+    EmptySubject,
     /// The date field did not hold a date.
     BadDeadline,
     /// The link asked for would put a task behind itself.
@@ -85,6 +87,7 @@ impl Refusal {
             }
             Refusal::BadSender(problem) => problem.clone(),
             Refusal::EmptyComment => "Write something first.".to_string(),
+            Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
             Refusal::MovedAlready => {
@@ -127,6 +130,7 @@ impl Refusal {
             Refusal::BadFileType => "bad-file-type",
             Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
+            Refusal::EmptySubject => "empty-subject",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
             Refusal::MovedAlready => "moved-already",
@@ -151,6 +155,7 @@ impl Refusal {
             "link-not-usable" => Refusal::LinkNotUsable,
             "empty-title" => Refusal::EmptyTitle,
             "empty-comment" => Refusal::EmptyComment,
+            "empty-subject" => Refusal::EmptySubject,
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
             "moved-already" => Refusal::MovedAlready,

@@ -4,6 +4,7 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::{SsrMode, path};
 
 use crate::pages::{Join, Landing};
+use crate::rules::RulesPage;
 use crate::settings::SettingsPage;
 
 /// The HTML document the server streams. `cargo-leptos` writes the bundle to
@@ -48,6 +49,7 @@ pub fn App() -> impl IntoView {
             <Routes fallback=NotFound>
                 <Route path=path!("/") view=Landing ssr=SsrMode::InOrder/>
                 <Route path=path!("/join/:token") view=Join ssr=SsrMode::InOrder/>
+                <Route path=path!("/rules") view=RulesPage ssr=SsrMode::InOrder/>
                 <Route path=path!("/settings") view=SettingsPage ssr=SsrMode::InOrder/>
             </Routes>
         </Router>

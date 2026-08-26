@@ -1643,3 +1643,327 @@ async fn testing_a_sender_that_was_never_filled_in_says_so_rather_than_sending()
         .await;
     assert!(!seen.body.contains("\"test\":{"), "{}", seen.body);
 }
+
+/// Writes one rule as the admin, and reports whether the server took it.
+async fn rule_written(app: &App, admin: &str, column_id: &str, subject: &str) -> bool {
+    let answer = app
+        .post(
+            path::<dizey_web::rules::CreateRule>(),
+            Some(admin),
+            &[
+                ("trigger", "status"),
+                ("column_id", column_id),
+                ("subject", subject),
+                ("audience", "assignees"),
+            ],
+        )
+        .await;
+    answer.status == StatusCode::OK && answer.body == "null"
+}
+
+/// The id of the one rule the workspace has.
+async fn only_rule(app: &App, admin: &str) -> String {
+    let answer = app
+        .post(path::<dizey_web::rules::CurrentRules>(), Some(admin), &[])
+        .await;
+    answer
+        .body
+        .split("\"rules\":[")
+        .nth(1)
+        .and_then(|rest| rest.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no rule id in {}", answer.body))
+        .to_string()
+}
+
+#[tokio::test]
+async fn an_admin_writes_a_rule_and_reads_it_back_as_a_sentence() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+
+    assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
+
+    let answer = app
+        .post(
+            path::<dizey_web::rules::CurrentRules>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(
+        answer.body.contains("\"when\":\"When status becomes\""),
+        "{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("\"subject\":\"Task completed\""),
+        "{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("\"audience\":\"assignees\""),
+        "{}",
+        answer.body
+    );
+    // Nothing has been sent, and the row says so rather than nothing at all.
+    assert!(answer.body.contains("\"last_sent\":null"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn a_rule_with_no_subject_is_refused_and_says_why() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::rules::CreateRule>(),
+            Some(&admin_cookie),
+            &[
+                ("trigger", "status"),
+                ("column_id", &column),
+                ("subject", "   "),
+                ("audience", "assignees"),
+            ],
+        )
+        .await;
+    assert!(answer.body.contains("EmptySubject"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn a_rule_may_not_be_hung_off_a_column_that_is_not_on_this_board() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::rules::CreateRule>(),
+            Some(&admin_cookie),
+            &[
+                ("trigger", "status"),
+                ("column_id", &Uuid::new_v4().to_string()),
+                ("subject", "Task completed"),
+                ("audience", "assignees"),
+            ],
+        )
+        .await;
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+
+    let seen = app
+        .post(
+            path::<dizey_web::rules::CurrentRules>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(seen.body.contains("\"rules\":[]"), "{}", seen.body);
+}
+
+#[tokio::test]
+async fn an_audience_the_screen_never_offers_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::rules::CreateRule>(),
+            Some(&admin_cookie),
+            &[
+                ("trigger", "status"),
+                ("column_id", &column),
+                ("subject", "Task completed"),
+                ("audience", "everyone-everywhere"),
+            ],
+        )
+        .await;
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn switching_a_rule_off_leaves_it_listed_and_switched_off() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
+    let rule = only_rule(&app, &admin_cookie).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::rules::SetRuleEnabled>(),
+            Some(&admin_cookie),
+            &[("rule_id", &rule), ("enabled", "false")],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    // The screen lists what exists, not what is live.
+    let seen = app
+        .post(
+            path::<dizey_web::rules::CurrentRules>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(seen.body.contains("\"enabled\":false"), "{}", seen.body);
+    assert!(
+        seen.body.contains("\"subject\":\"Task completed\""),
+        "{}",
+        seen.body
+    );
+}
+
+#[tokio::test]
+async fn a_rule_id_this_workspace_does_not_own_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let stranger = Uuid::new_v4().to_string();
+
+    for path in [
+        path::<dizey_web::rules::SetRuleEnabled>(),
+        path::<dizey_web::rules::DeleteRule>(),
+    ] {
+        let answer = app
+            .post(
+                path,
+                Some(&admin_cookie),
+                &[("rule_id", &stranger), ("enabled", "false")],
+            )
+            .await;
+        assert!(answer.body.contains("NotFound"), "{path}: {}", answer.body);
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_rule_takes_it_off_the_screen() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
+    let rule = only_rule(&app, &admin_cookie).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::rules::DeleteRule>(),
+            Some(&admin_cookie),
+            &[("rule_id", &rule)],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let seen = app
+        .post(
+            path::<dizey_web::rules::CurrentRules>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(seen.body.contains("\"rules\":[]"), "{}", seen.body);
+}
+
+#[tokio::test]
+async fn only_an_admin_may_read_or_write_the_rules() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
+    let rule = only_rule(&app, &admin_cookie).await;
+
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+    let viewer = invited(&app, &admin_cookie, "pinar@dizey.sh", "Pinar", Role::Viewer).await;
+
+    for who in [&member, &viewer] {
+        let read = app
+            .post(path::<dizey_web::rules::CurrentRules>(), Some(who), &[])
+            .await;
+        assert!(read.body.contains("Forbidden"), "{}", read.body);
+
+        let written = app
+            .post(
+                path::<dizey_web::rules::CreateRule>(),
+                Some(who),
+                &[
+                    ("trigger", "status"),
+                    ("column_id", &column),
+                    ("subject", "Mail everyone about me"),
+                    ("audience", "board"),
+                ],
+            )
+            .await;
+        assert!(written.body.contains("Forbidden"), "{}", written.body);
+
+        let switched = app
+            .post(
+                path::<dizey_web::rules::SetRuleEnabled>(),
+                Some(who),
+                &[("rule_id", &rule), ("enabled", "false")],
+            )
+            .await;
+        assert!(switched.body.contains("Forbidden"), "{}", switched.body);
+
+        let deleted = app
+            .post(
+                path::<dizey_web::rules::DeleteRule>(),
+                Some(who),
+                &[("rule_id", &rule)],
+            )
+            .await;
+        assert!(deleted.body.contains("Forbidden"), "{}", deleted.body);
+    }
+
+    // And the rule is untouched: still there, still on.
+    let seen = app
+        .post(
+            path::<dizey_web::rules::CurrentRules>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(seen.body.contains("\"enabled\":true"), "{}", seen.body);
+    assert!(
+        !seen.body.contains("Mail everyone about me"),
+        "{}",
+        seen.body
+    );
+}
+
+#[tokio::test]
+async fn a_signed_out_browser_may_not_touch_the_rules() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app, &admin_cookie).await;
+    assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
+    let rule = only_rule(&app, &admin_cookie).await;
+
+    for (path, form) in [
+        (
+            path::<dizey_web::rules::CurrentRules>(),
+            vec![] as Vec<(&str, &str)>,
+        ),
+        (
+            path::<dizey_web::rules::CreateRule>(),
+            vec![
+                ("trigger", "status"),
+                ("column_id", column.as_str()),
+                ("subject", "Task completed"),
+                ("audience", "assignees"),
+            ],
+        ),
+        (
+            path::<dizey_web::rules::SetRuleEnabled>(),
+            vec![("rule_id", rule.as_str()), ("enabled", "false")],
+        ),
+        (
+            path::<dizey_web::rules::DeleteRule>(),
+            vec![("rule_id", rule.as_str())],
+        ),
+    ] {
+        let answer = app.post(path, None, &form).await;
+        assert!(
+            answer.body.contains("SignInFirst"),
+            "{path}: {}",
+            answer.body
+        );
+    }
+}

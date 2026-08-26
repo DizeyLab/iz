@@ -1803,3 +1803,161 @@ a {
 
   &:hover { color: var(--accent-ink); }
 }
+
+// --- Mail rules (MailRules artboard) ---------------------------------------
+
+// Text only a screen reader needs: the switch says what it does in a word the
+// eye reads from its position, and the ear cannot.
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.rules-quiet {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+
+  // A rule that is switched off is still listed — the screen shows what
+  // exists, not what is live — and reads as the quieter of the two.
+  &-off {
+    background: #faf9f4;
+    opacity: 0.75;
+  }
+}
+
+.rule-switch-form { display: flex; flex-shrink: 0; }
+
+.rule-switch {
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: #d5d1c7;
+  position: relative;
+  cursor: pointer;
+
+  &-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--surface);
+  }
+
+  &-on {
+    background: var(--accent);
+    .rule-switch-knob { left: auto; right: 2px; }
+  }
+}
+
+.rule-sentence {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-grow: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #3d3a34;
+}
+
+// One chosen word inside the sentence: a column, a subject, an audience.
+.rule-term {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  background: var(--accent-tint);
+  border: 1px solid #d8dce6;
+  border-radius: 5px;
+  font-weight: 500;
+}
+
+.rule-row-off .rule-term {
+  background: #f1efe8;
+  border-color: var(--border-strong);
+}
+
+.rule-stamp {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-soft);
+}
+
+.rule-delete {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover { background: #f1efe8; color: #a04a24; }
+}
+
+.rule-new {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.rule-new-open {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  cursor: pointer;
+  list-style: none;
+
+  &::marker, &::-webkit-details-marker { display: none; }
+  &::before { content: '+'; margin-right: 8px; font-size: 15px; }
+}
+
+.rule-new-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.rule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
