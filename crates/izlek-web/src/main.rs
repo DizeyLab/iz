@@ -6,7 +6,7 @@ async fn main() {
     use leptos::prelude::*;
     use std::sync::Arc;
 
-    // izlek.toml is read here, before anything is opened, and written with
+    // config/izlek.toml is read here, before anything is opened, and written with
     // development defaults if it is not there yet. A broken key stops the
     // boot with its name in the message: the failure this prevents is not an
     // empty database, it is a second Izlek writing a different file while

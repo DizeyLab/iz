@@ -1,0 +1,4 @@
+# Where the one database file lives. One process holds it.
+database = "izlek.db"
+# The origin sign-in links in mail point at.
+base_url = "http://127.0.0.1:3000"

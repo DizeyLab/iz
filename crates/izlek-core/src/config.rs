@@ -1,4 +1,4 @@
-//! Everything Izlek reads from `izlek.toml`, in one place.
+//! Everything Izlek reads from `config/izlek.toml`, in one place.
 //!
 //! Nothing here has a silent default once the file exists. A key that is
 //! missing, empty or unusable stops the boot and says which key and which
@@ -10,8 +10,8 @@
 //! pointing at a host that is not us.
 //!
 //! Development still needs to be one command, so the *absence* of
-//! `izlek.toml` is the opt-in that takes the development defaults: the app
-//! writes the file itself, with those defaults in it and comments saying
+//! `config/izlek.toml` is the opt-in that takes the development defaults: the
+//! app writes the file itself, with those defaults in it and comments saying
 //! what each key does, and starts. That is opt-in on purpose too — it only
 //! ever happens once, because the second boot finds the file it wrote the
 //! first time and reads it like any other. A real deployment is handed the
@@ -31,10 +31,11 @@ use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The name of the file `Config::load` reads and, failing that, writes.
-const FILE_NAME: &str = "izlek.toml";
+/// The path, relative to the working directory, of the file `Config::load`
+/// reads and, failing that, writes.
+const FILE_NAME: &str = "config/izlek.toml";
 
-/// What a freshly written `izlek.toml` says, comments included. Development
+/// What a freshly written `config/izlek.toml` says, comments included. Development
 /// defaults, so that a plain `izlek` in an empty directory is one command.
 const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One process holds it.
 database = "izlek.db"
@@ -42,7 +43,7 @@ database = "izlek.db"
 base_url = "http://127.0.0.1:3000"
 "#;
 
-/// The shape of `izlek.toml`, before the values are checked.
+/// The shape of `config/izlek.toml`, before the values are checked.
 #[derive(Deserialize)]
 struct Toml {
     database: Option<String>,
@@ -56,7 +57,7 @@ pub struct Config {
     pub database: PathBuf,
     /// The origin links in mail point at, with no trailing slash.
     pub base_url: String,
-    /// Whether `izlek.toml` did not exist and was just written with the
+    /// Whether `config/izlek.toml` did not exist and was just written with the
     /// development defaults this boot.
     pub defaulted: bool,
 }
@@ -101,20 +102,25 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
-    /// Reads `izlek.toml` from the current directory, writing it with the
-    /// development defaults first if it is not there.
+    /// Reads `config/izlek.toml` from the current directory, writing it with
+    /// the development defaults first if it is not there.
     pub fn load() -> Result<Config, ConfigError> {
         Config::load_from(Path::new("."))
     }
 
     /// The same reading, against any directory — which is how it is tested
     /// without a test being able to disturb another test's working
-    /// directory, or another test's `izlek.toml`.
+    /// directory, or another test's `config/izlek.toml`.
     pub fn load_from(dir: &Path) -> Result<Config, ConfigError> {
         let path = dir.join(FILE_NAME);
         match std::fs::read_to_string(&path) {
             Ok(text) => Config::parse(&text, dir, false),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|err| {
+                        ConfigError::Io(format!("could not create {}: {err}", parent.display()))
+                    })?;
+                }
                 std::fs::write(&path, DEVELOPMENT_DEFAULTS).map_err(|err| {
                     ConfigError::Io(format!("could not write {}: {err}", path.display()))
                 })?;
@@ -173,8 +179,8 @@ impl Config {
 }
 
 /// An absolute path for a file that may not exist yet: the directory is
-/// resolved against `base` (the directory `izlek.toml` was read from), the
-/// file name is kept as written.
+/// resolved against `base` (the directory `config/izlek.toml` was read
+/// from), the file name is kept as written.
 fn absolute(base: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();

@@ -5,5 +5,5 @@
 *.db-*
 .env
 izlek.key
-izlek.toml
+/config/izlek.toml
 CLAUDE.md
