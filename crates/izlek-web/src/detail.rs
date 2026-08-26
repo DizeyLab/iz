@@ -1694,24 +1694,26 @@ fn DetailScreen(
 
         <section class="detail-block">
             <span class="detail-label">"ACTIVITY"</span>
-            {detail
-                .activity
-                .iter()
-                .map(|entry| {
-                    let who = entry
-                        .actor
-                        .as_ref()
-                        .map(|person| person.display_name.clone())
-                        .unwrap_or_else(|| "Izlek".to_string());
-                    view! {
-                        <div class="activity-line">
-                            <span class="activity-stamp">{entry.moment()}</span>
-                            <strong class="activity-who">{who}</strong>
-                            <span class="activity-what">{entry.sentence()}</span>
-                        </div>
-                    }
-                })
-                .collect_view()}
+            <div class="activity-list">
+                {detail
+                    .activity
+                    .iter()
+                    .map(|entry| {
+                        let who = entry
+                            .actor
+                            .as_ref()
+                            .map(|person| person.display_name.clone())
+                            .unwrap_or_else(|| "Izlek".to_string());
+                        view! {
+                            <div class="activity-line">
+                                <span class="activity-stamp">{entry.moment()}</span>
+                                <strong class="activity-who">{who}</strong>
+                                <span class="activity-what">{entry.sentence()}</span>
+                            </div>
+                        }
+                    })
+                    .collect_view()}
+            </div>
         </section>
 
         {refused(remove_refusal)}

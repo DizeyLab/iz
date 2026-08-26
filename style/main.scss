@@ -375,7 +375,6 @@ a {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
-  align-items: start;
 }
 
 .column {
@@ -424,6 +423,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex: 1;
 }
 
 .column-empty-add {
@@ -1515,6 +1515,14 @@ a {
 }
 
 // -- activity ---------------------------------------------------------------
+
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
 
 .activity-line {
   display: flex;

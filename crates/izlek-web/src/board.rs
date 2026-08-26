@@ -291,7 +291,36 @@ fn BoardScreen(
                 move || composing.get().as_deref() == Some(column_id.read_value().as_str());
 
             view! {
-                <section class="column">
+                <section
+                    class="column"
+                    class:column-drop=move || {
+                        dragging
+                            .get()
+                            .is_some_and(|(_, from)| from != *column_id.read_value())
+                    }
+                    on:dragover=move |event| {
+                        // Saying "yes, you may drop here" is what
+                        // preventing the default on dragover means.
+                        if dragging.get().is_some() {
+                            event.prevent_default();
+                        }
+                    }
+                    on:drop=move |event| {
+                        event.prevent_default();
+                        if let Some((task_id, from)) = dragging.get() {
+                            dragging.set(None);
+                            let to = column_id.read_value().clone();
+                            if from != to {
+                                moving
+                                    .dispatch(MoveCard {
+                                        task_id,
+                                        from_column_id: from,
+                                        to_column_id: to,
+                                    });
+                            }
+                        }
+                    }
+                >
                     <header class="column-head">
                         <span class="column-name">{name}</span>
                         <span class="column-count">{move || shown.get().len()}</span>
@@ -309,36 +338,7 @@ fn BoardScreen(
                                 }
                             })}
                     </header>
-                    <div
-                        class="column-cards"
-                        class:column-drop=move || {
-                            dragging
-                                .get()
-                                .is_some_and(|(_, from)| from != *column_id.read_value())
-                        }
-                        on:dragover=move |event| {
-                            // Saying "yes, you may drop here" is what
-                            // preventing the default on dragover means.
-                            if dragging.get().is_some() {
-                                event.prevent_default();
-                            }
-                        }
-                        on:drop=move |event| {
-                            event.prevent_default();
-                            if let Some((task_id, from)) = dragging.get() {
-                                dragging.set(None);
-                                let to = column_id.read_value().clone();
-                                if from != to {
-                                    moving
-                                        .dispatch(MoveCard {
-                                            task_id,
-                                            from_column_id: from,
-                                            to_column_id: to,
-                                        });
-                                }
-                            }
-                        }
-                    >
+                    <div class="column-cards">
                         <For each=move || shown.get() key=|card: &TaskCard| card.id.clone() let:card>
                             <Card
                                 card=card
