@@ -29,7 +29,9 @@ use async_trait::async_trait;
 use time::{Duration, OffsetDateTime};
 
 use crate::board::Transition;
-use crate::store::{Audience, Event, Freeing, MailOutcome, MailRule, MailSend, Store, Trigger};
+use crate::store::{
+    Audience, Event, Freeing, MailOutcome, MailRule, MailSend, SendKind, Store, Trigger,
+};
 
 /// Why the mail server would not take it, and whether that can change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,7 +418,8 @@ impl Engine {
                             now,
                         )
                         .await?;
-                    self.attempt(&send, rule, event, report).await?;
+                    let mail = self.compose(&send, rule, event).await?;
+                    self.attempt(&send, mail, report).await?;
                 }
                 None => {
                     self.store
@@ -445,9 +448,17 @@ impl Engine {
     ) -> crate::store::Result<Report> {
         let mut report = Report::default();
         for send in self.store.sends_owed(now, limit).await? {
-            // An invite owes no rule and no event; delivering it is a later
-            // slice, so it is skipped here rather than treated as a rule send
-            // with holes in it.
+            // An invite owes no rule and no event: it carries its own subject
+            // and body, composed once at mint time.
+            if send.kind == SendKind::Invite {
+                let mail = Outgoing {
+                    to: send.recipient.clone(),
+                    subject: send.subject.clone().unwrap_or_default(),
+                    body: send.body.clone().unwrap_or_default(),
+                };
+                self.attempt(&send, Some(mail), &mut report).await?;
+                continue;
+            }
             let Some(rule_id) = send.rule_id.as_deref() else {
                 continue;
             };
@@ -460,7 +471,8 @@ impl Engine {
             let Some(event) = self.store.event(event_id).await? else {
                 continue;
             };
-            self.attempt(&send, &rule, &event, &mut report).await?;
+            let mail = self.compose(&send, &rule, &event).await?;
+            self.attempt(&send, mail, &mut report).await?;
         }
         Ok(report)
     }
@@ -469,11 +481,10 @@ impl Engine {
     async fn attempt(
         &self,
         send: &MailSend,
-        rule: &MailRule,
-        event: &Event,
+        mail: Option<Outgoing>,
         report: &mut Report,
     ) -> crate::store::Result<()> {
-        let Some(mail) = self.compose(send, rule, event).await? else {
+        let Some(mail) = mail else {
             return Ok(());
         };
         let now = OffsetDateTime::now_utc();

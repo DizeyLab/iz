@@ -84,11 +84,17 @@ pub struct Invitation {
 #[derive(Clone)]
 pub struct Accounts {
     store: Arc<dyn Store>,
+    /// The origin the sign-in link in an invite mail points at, with no
+    /// trailing slash.
+    base_url: String,
 }
 
 impl Accounts {
-    pub fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn Store>, base_url: impl Into<String>) -> Self {
+        Self {
+            store,
+            base_url: base_url.into(),
+        }
     }
 
     pub fn store(&self) -> &Arc<dyn Store> {
@@ -170,11 +176,21 @@ impl Accounts {
         self.mint_link(actor, &user).await
     }
 
-    async fn mint_link(&self, _actor: &User, user: &User) -> Result<Invitation> {
+    async fn mint_link(&self, actor: &User, user: &User) -> Result<Invitation> {
         let token = Token::mint();
         let expires_at = OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME;
         self.store
             .create_signin_link(&user.id, &token.hash(), expires_at)
+            .await?;
+        let subject = "Your Izlek sign-in link";
+        let body = format!(
+            "{actor} added you to Izlek.\n\n{base}/join/{token}\n\nThe link works once and expires in 7 days.\n",
+            actor = actor.display_name,
+            base = self.base_url,
+            token = token.expose(),
+        );
+        self.store
+            .queue_invite(&user.email, subject, &body, OffsetDateTime::now_utc())
             .await?;
         Ok(Invitation {
             user: user.clone(),

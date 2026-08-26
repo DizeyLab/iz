@@ -978,7 +978,7 @@ async fn accounts() -> (Scratch, Accounts) {
     let store = TursoStore::open(scratch.dir.join("izlek.db").to_str().unwrap())
         .await
         .unwrap();
-    let accounts = Accounts::new(Arc::new(store) as Arc<dyn Store>);
+    let accounts = Accounts::new(Arc::new(store) as Arc<dyn Store>, "https://izlek.sh");
     (scratch, accounts)
 }
 
@@ -1080,6 +1080,25 @@ async fn an_invited_member_chooses_their_own_password() {
         .sign_in("grace@izlek.sh", "sextant-and-chart", "198.51.100.7")
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn adding_a_member_queues_the_mail_that_carries_the_link() {
+    let (_scratch, accounts, admin) = claimed().await;
+    let invitation = accounts
+        .invite(&admin, "grace@izlek.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+
+    let queue = accounts.store().mail_queue(10).await.unwrap();
+    let queued = queue
+        .iter()
+        .find(|s| s.recipient == "grace@izlek.sh")
+        .expect("the invite mail is on the outbox");
+    assert_eq!(queued.kind, SendKind::Invite);
+    let body = queued.body.as_deref().unwrap();
+    let link = format!("https://izlek.sh/join/{}", invitation.token.expose());
+    assert!(body.contains(&link), "body was: {body}");
 }
 
 #[tokio::test]
@@ -3975,6 +3994,30 @@ async fn an_invite_mail_is_owed_without_a_rule() {
     let queue = store.mail_queue(10).await.unwrap();
     let found = queue.iter().find(|s| s.id == invite.id).unwrap();
     assert_eq!(found.rule_id, None);
+}
+
+#[tokio::test]
+async fn an_invite_mail_with_no_sender_is_held_not_failed() {
+    let (dir, store, _workspace, _admin) = shared().await;
+    let now = OffsetDateTime::now_utc();
+    store
+        .queue_invite("newcomer@izlek.sh", "Join Izlek", "Come aboard.", now)
+        .await
+        .unwrap();
+
+    let mailer = Remembering::refusing(vec![MailError::unsent("no sender configured")]);
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let report = engine.deliver_owed(now, 10).await.unwrap();
+    assert_eq!(report.held, 1);
+    assert_eq!(report.sent, 0);
+
+    let queue = store.mail_queue(10).await.unwrap();
+    let held = queue
+        .iter()
+        .find(|s| s.recipient == "newcomer@izlek.sh")
+        .unwrap();
+    assert_eq!(held.attempts, 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
