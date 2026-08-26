@@ -1421,16 +1421,19 @@ a {
 }
 
 .file-upload-submit {
-  height: 30px;
-  padding: 0 14px;
-  border: none;
-  border-radius: var(--radius);
-  background: var(--ink);
-  color: #fffefb;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--muted);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
 
+  &:hover { color: #a04a24; border-color: #a04a24; }
   &:disabled { opacity: 0.5; cursor: default; }
 }
 
