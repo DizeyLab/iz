@@ -1895,7 +1895,7 @@ async fn a_dependency_that_would_close_a_circle_is_refused() {
 }
 
 #[tokio::test]
-async fn a_cleared_dependency_still_counts_as_a_circle() {
+async fn a_cleared_dependency_is_not_a_circle() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
     let now = OffsetDateTime::now_utc();
@@ -1905,8 +1905,38 @@ async fn a_cleared_dependency_still_counts_as_a_circle() {
     store.add_dependency(&a, &b, now).await.unwrap();
     store.clear_dependency(&a, &b, now).await.unwrap();
 
-    // A cleared edge is a link that is satisfied, not a link that is gone: the
-    // pair would still draw a circle on the screen.
+    // `cleared_at` is set by an unlink and nothing else, and a cleared row no
+    // longer appears on the screen. Refusing the other direction would refuse a
+    // circle nobody can see — and leave the pair unlinkable for good, because
+    // the cleared row never goes away. A link whose blocker is merely finished
+    // is a different thing: that is `done_at`, the edge is live, and it still
+    // walks.
+    store.add_dependency(&b, &a, now).await.unwrap();
+
+    let detail = load_detail(store, &workspace, &b).await.unwrap().unwrap();
+    assert_eq!(detail.blocked_by.len(), 1, "the new link stands");
+    let detail = load_detail(store, &workspace, &a).await.unwrap().unwrap();
+    assert!(detail.blocked_by.is_empty(), "the cleared one is gone");
+}
+
+#[tokio::test]
+async fn a_finished_blocker_still_counts_as_a_circle() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let a = add_task(store, &workspace, "Backlog", "a", None, &admin).await;
+    let b = add_task(store, &workspace, "Backlog", "b", None, &admin).await;
+    store.add_dependency(&a, &b, now).await.unwrap();
+    let done = column_named(store, &workspace, "Done").await;
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    store
+        .move_task(&b, &backlog, &done, &admin, now)
+        .await
+        .unwrap();
+
+    // b is finished, so the row reads as cleared on the screen — but the link
+    // is still in force, and the other direction is still a circle.
     assert!(matches!(
         store.add_dependency(&b, &a, now).await,
         Err(StoreError::Cycle)
@@ -2364,4 +2394,74 @@ async fn a_deleted_card_does_not_move() {
         .await;
 
     assert!(matches!(refused, Err(StoreError::NotFound)));
+}
+
+/// The schema's REFERENCES clauses are only worth anything if the engine acts
+/// on them. A drive database once held members pointing at a workspace id with
+/// no row behind it — those rows went in through the `sqlite3` CLI, which has
+/// `foreign_keys` OFF by default, but the only way to know that is to prove the
+/// store's own connections have it ON and refuse the same insert.
+#[tokio::test]
+async fn an_orphan_row_is_refused() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+
+    // Through the store's own API first: a user needs a workspace that exists.
+    let refused = scratch
+        .store
+        .create_user(NewUser {
+            workspace_id: "no-such-workspace".into(),
+            email: "orphan@dizey.sh".into(),
+            display_name: "Orphan".into(),
+            role: Role::Member,
+        })
+        .await;
+    assert!(
+        refused.is_err(),
+        "a user in a workspace that does not exist was accepted"
+    );
+
+    // And at the engine, where the pragma either fired or did not. Turso is
+    // single-writer, so this gets a file of its own rather than a second handle
+    // on the live one, which would fail with "database is locked" and tell us
+    // nothing about foreign keys.
+    let existing = scratch
+        .store
+        .users(&workspace)
+        .await
+        .expect("the workspace reads back")
+        .len();
+    assert_eq!(existing, 1, "only the admin");
+
+    let dir = std::env::temp_dir().join(format!("dizey-fk-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dizey.db").to_str().unwrap().to_owned();
+    {
+        TursoStore::open(&path).await.unwrap();
+    }
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    let mut rows = conn.query("PRAGMA foreign_keys", ()).await.unwrap();
+    let on = rows.next().await.unwrap().expect("the pragma reads back");
+    assert_eq!(
+        on.get::<i64>(0).unwrap(),
+        1,
+        "foreign_keys did not stay ON for this connection"
+    );
+    drop(rows);
+
+    let refused = conn
+        .execute(
+            "INSERT INTO user (id, workspace_id, email, display_name, role, created_at) \
+             VALUES ('u-orphan', 'no-such-workspace', 'orphan@dizey.sh', 'Orphan', \
+             'member', '2026-08-26T00:00:00Z')",
+            (),
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "the engine accepted a user pointing at no workspace"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -977,15 +977,18 @@ impl Store for TursoStore {
             .map_err(backend)?;
 
         let written = async {
-            // Every edge, cleared or not: a cleared edge is a link that is
-            // satisfied, not a link that is gone, and re-adding its other half
-            // would still be a circle on the screen.
+            // Live edges only. `cleared_at` is set by an unlink and nothing
+            // else, so a cleared edge is a link that was removed — walking it
+            // refuses a link the screen no longer shows as a circle. A link
+            // whose blocker is merely finished still walks: that is `done_at`,
+            // and the edge is still in force.
             let mut rows = tx
                 .query(
                     "SELECT d.blocked_task_id, d.blocking_task_id FROM task_dependency d \
                      JOIN task b ON b.id = d.blocked_task_id \
                      JOIN task k ON k.id = d.blocking_task_id \
-                     WHERE b.deleted_at IS NULL AND k.deleted_at IS NULL",
+                     WHERE d.cleared_at IS NULL \
+                     AND b.deleted_at IS NULL AND k.deleted_at IS NULL",
                     (),
                 )
                 .await?;
