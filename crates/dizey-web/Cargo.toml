@@ -1,0 +1,48 @@
+[package]
+name = "dizey-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dizey web app: leptos UI, server functions and the axum server"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.9.0-beta" }
+leptos_router = { version = "0.9.0-beta1" }
+leptos_meta = { version = "0.9.0-beta" }
+leptos_axum = { version = "0.9.0-beta", optional = true }
+serde.workspace = true
+thiserror.workspace = true
+
+dizey-core = { workspace = true, optional = true }
+axum = { version = "0.8.9", optional = true }
+tokio = { workspace = true, optional = true }
+tower = { version = "0.5.2", optional = true }
+tower-http = { version = "0.7.0", features = ["fs", "compression-gzip"], optional = true }
+turso = { workspace = true, optional = true }
+
+console_error_panic_hook = { version = "0.1.7", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = []
+hydrate = [
+  "leptos/hydrate",
+  "dep:console_error_panic_hook",
+  "dep:wasm-bindgen",
+]
+ssr = [
+  "leptos/ssr",
+  "leptos_meta/ssr",
+  "leptos_router/ssr",
+  "dep:leptos_axum",
+  "dep:axum",
+  "dep:tokio",
+  "dep:tower",
+  "dep:tower-http",
+  "dep:dizey-core",
+  "dep:turso",
+]

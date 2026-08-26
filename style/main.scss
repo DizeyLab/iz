@@ -1,0 +1,81 @@
+// Design tokens taken from the Dizey artboards.
+:root {
+  --bg: #f7f6f2;
+  --surface: #fffefb;
+  --border: #e7e4dc;
+  --border-strong: #e0ddd4;
+  --ink: #1c1b18;
+  --muted: #6f6b63;
+  --muted-soft: #8a8578;
+  --accent: #46557b;
+  --accent-tint: #eef0f5;
+  --accent-ink: #2f3c5c;
+
+  --font-sans: 'Schibsted Grotesk', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --radius: 6px;
+  --topbar-height: 56px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+a {
+  color: var(--accent);
+  &:hover { color: var(--accent-ink); }
+}
+
+.topbar {
+  height: var(--topbar-height);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 24px;
+}
+
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 1px;
+
+  &-text {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  &-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    display: inline-block;
+    margin-left: 3px;
+  }
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+.board-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.scaffold-note {
+  padding: 32px 24px;
+  color: var(--muted);
+}
