@@ -421,6 +421,9 @@ pub struct Deletion {
     /// The recorded freeing, written only when something was actually freed:
     /// a delete that frees nobody is not an event any rule can fire on.
     pub event: Option<Freeing>,
+    /// The id of the Deleted activity row, always written, so the mail engine
+    /// can fire on it the same way it does the rest of a task's trail.
+    pub activity_id: String,
 }
 
 /// One row of a task's activity trail, as an event a rule can fire on. Covers
@@ -702,7 +705,9 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn delete_attachment(&self, id: &str) -> Result<bool>;
 
     /// Writes the title, description and deadline the detail screen saved, and
-    /// records one activity line per field that actually changed.
+    /// records one activity line per field that actually changed. Returns the
+    /// ids of the activity rows it wrote, in write order — empty when nothing
+    /// changed — so the caller can hand each to the mail engine.
     async fn save_task(
         &self,
         task_id: &str,
@@ -711,7 +716,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         deadline: Option<time::Date>,
         actor_id: &str,
         at: OffsetDateTime,
-    ) -> Result<()>;
+    ) -> Result<Vec<String>>;
 
     /// Moves a task into a column and records the crossing, both in one
     /// transaction, so a transition never exists without the move that caused

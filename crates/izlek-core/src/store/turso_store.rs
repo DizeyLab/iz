@@ -1561,7 +1561,7 @@ impl Store for TursoStore {
         deadline: Option<Date>,
         actor_id: &str,
         at: OffsetDateTime,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let deadline = deadline.map(day_text).transpose()?;
         let stamp = stamp(at)?;
 
@@ -1582,7 +1582,7 @@ impl Store for TursoStore {
                 )
                 .await?;
             let Some(row) = rows.next().await? else {
-                return Ok(false);
+                return Ok(None);
             };
             let was_title = row.get::<String>(0)?;
             let was_description = row.get::<String>(1)?;
@@ -1609,28 +1609,24 @@ impl Store for TursoStore {
                     None => lines.push((ActivityKind::DeadlineCleared.as_str(), String::new())),
                 }
             }
+            let mut ids = Vec::with_capacity(lines.len());
             for (kind, detail) in lines {
+                let id = Uuid::new_v4().to_string();
                 tx.execute(
                     "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        Uuid::new_v4().to_string(),
-                        task_id,
-                        actor_id,
-                        kind,
-                        detail,
-                        stamp.clone()
-                    ],
+                    params![id.clone(), task_id, actor_id, kind, detail, stamp.clone()],
                 )
                 .await?;
+                ids.push(id);
             }
-            Ok::<_, turso::Error>(true)
+            Ok::<_, turso::Error>(Some(ids))
         }
         .await;
 
         match written {
-            Ok(true) => tx.commit().await.map_err(backend),
-            Ok(false) => {
+            Ok(Some(ids)) => tx.commit().await.map(|_| ids).map_err(backend),
+            Ok(None) => {
                 let _ = tx.rollback().await;
                 Err(StoreError::NotFound)
             }
@@ -1870,11 +1866,12 @@ impl Store for TursoStore {
                 params![task_id, stamp.clone()],
             )
             .await?;
+            let deleted_activity_id = Uuid::new_v4().to_string();
             tx.execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, '', ?5)",
                 params![
-                    Uuid::new_v4().to_string(),
+                    deleted_activity_id.clone(),
                     task_id,
                     actor_id,
                     ActivityKind::Deleted.as_str(),
@@ -1948,7 +1945,11 @@ impl Store for TursoStore {
                 .await?;
                 Some(event)
             };
-            Ok::<_, turso::Error>(Some(Deletion { freed, event }))
+            Ok::<_, turso::Error>(Some(Deletion {
+                freed,
+                event,
+                activity_id: deleted_activity_id,
+            }))
         }
         .await;
 

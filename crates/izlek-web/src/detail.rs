@@ -222,8 +222,8 @@ pub async fn save_task(
         },
     };
 
-    accounts()
-        .store()
+    let store = accounts().store().clone();
+    let activity_ids = store
         .save_task(
             &task_id,
             &title,
@@ -234,6 +234,9 @@ pub async fn save_task(
         )
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+    for activity_id in activity_ids {
+        crate::server::mail().after_activity(store.clone(), activity_id);
+    }
     Ok(None)
 }
 
@@ -478,8 +481,8 @@ pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnErr
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let deletion = accounts()
-        .store()
+    let store = accounts().store().clone();
+    let deletion = store
         .delete_task(&task_id, &user.id, OffsetDateTime::now_utc())
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -489,6 +492,7 @@ pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnErr
     if let Some(freeing) = deletion.event {
         crate::server::mail().after_freeing(freeing, deletion.freed);
     }
+    crate::server::mail().after_activity(store, deletion.activity_id);
     Ok(None)
 }
 

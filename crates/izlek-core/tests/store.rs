@@ -2375,6 +2375,10 @@ async fn deleting_a_task_frees_what_was_waiting_on_it() {
         deletion.event.is_some(),
         "a delete that freed somebody is an event the rules can fire on"
     );
+    match store.event(&deletion.activity_id).await.unwrap() {
+        Some(Event::Happened(ev)) => assert_eq!(ev.kind, ActivityKind::Deleted),
+        other => panic!("expected a Happened Deleted event, got {other:?}"),
+    }
 
     // The deleted task is gone from the board and from the edges it stood in.
     let board = board_of(store, &workspace).await;
@@ -2433,7 +2437,7 @@ async fn saving_a_task_records_only_what_changed() {
     let store = &scratch.store;
     let task = add_task(store, &workspace, "Backlog", "first title", None, &admin).await;
 
-    store
+    let ids = store
         .save_task(
             &task,
             "first title",
@@ -2444,6 +2448,7 @@ async fn saving_a_task_records_only_what_changed() {
         )
         .await
         .unwrap();
+    assert_eq!(ids, Vec::<String>::new(), "a save that changed nothing writes nothing");
     let detail = load_detail(store, &workspace, &task)
         .await
         .unwrap()
@@ -2455,7 +2460,7 @@ async fn saving_a_task_records_only_what_changed() {
         "a save that changed nothing says nothing"
     );
 
-    store
+    let ids = store
         .save_task(
             &task,
             "second title",
@@ -2466,6 +2471,18 @@ async fn saving_a_task_records_only_what_changed() {
         )
         .await
         .unwrap();
+    let expected_kinds = [
+        ActivityKind::Retitled,
+        ActivityKind::Described,
+        ActivityKind::DeadlineSet,
+    ];
+    assert_eq!(ids.len(), expected_kinds.len());
+    for (id, kind) in ids.iter().zip(expected_kinds) {
+        match store.event(id).await.unwrap() {
+            Some(Event::Happened(ev)) => assert_eq!(ev.kind, kind),
+            other => panic!("expected a Happened event for {id}, got {other:?}"),
+        }
+    }
     let detail = load_detail(store, &workspace, &task)
         .await
         .unwrap()
