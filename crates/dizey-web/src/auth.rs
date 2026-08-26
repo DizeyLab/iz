@@ -26,6 +26,15 @@ pub enum Refusal {
     LinkNotUsable,
     /// A card with no title is not a card.
     EmptyTitle,
+    /// A comment with nothing in it.
+    EmptyComment,
+    /// The date field did not hold a date.
+    BadDeadline,
+    /// The link asked for would put a task behind itself.
+    Cycle,
+    /// No such task — or none this account may see. Deliberately one answer for
+    /// both.
+    NotFound,
     Unavailable,
 }
 
@@ -42,10 +51,13 @@ impl Refusal {
             Refusal::AlreadyClaimed => "This workspace already has an owner.".to_string(),
             Refusal::AddressTaken => "That address already has an account.".to_string(),
             Refusal::LinkNotUsable => {
-                "This link no longer works. Ask the admin to send another."
-                    .to_string()
+                "This link no longer works. Ask the admin to send another.".to_string()
             }
             Refusal::EmptyTitle => "Give the task a title.".to_string(),
+            Refusal::EmptyComment => "Write something first.".to_string(),
+            Refusal::BadDeadline => "That is not a date.".to_string(),
+            Refusal::Cycle => "That link would put this task behind itself.".to_string(),
+            Refusal::NotFound => "No such task.".to_string(),
             Refusal::Unavailable => "Something went wrong. Try again.".to_string(),
         }
     }
@@ -189,17 +201,11 @@ pub async fn redeem_link(
 /// Signing in. Answers the same whether the address is unknown, has no password
 /// yet, or the password is wrong.
 #[server]
-pub async fn sign_in(
-    email: String,
-    password: String,
-) -> Result<Option<Refusal>, ServerFnError> {
+pub async fn sign_in(email: String, password: String) -> Result<Option<Refusal>, ServerFnError> {
     use crate::server::{accounts, client_label, set_session_cookie};
     use dizey_core::accounts::SESSION_LIFETIME;
 
-    match accounts()
-        .sign_in(&email, &password, &client_label())
-        .await
-    {
+    match accounts().sign_in(&email, &password, &client_label()).await {
         Ok(signed_in) => {
             set_session_cookie(signed_in.session_token.expose(), SESSION_LIFETIME);
             Ok(None)

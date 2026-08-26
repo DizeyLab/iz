@@ -28,18 +28,23 @@ use uuid::Uuid;
 struct App {
     dir: PathBuf,
     router: Router,
+    /// The same store the router talks to, so a test can set a workspace
+    /// setting that has no screen yet.
+    store: Arc<TursoStore>,
 }
 
 impl App {
     async fn open() -> Self {
         let dir = std::env::temp_dir().join(format!("dizey-http-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
-            .await
-            .unwrap();
+        let store = Arc::new(
+            TursoStore::open(dir.join("dizey.db").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
         let options = LeptosOptions::builder().output_name("dizey").build();
-        let router = dizey_web::server::router(Accounts::new(Arc::new(store)), options);
-        Self { dir, router }
+        let router = dizey_web::server::router(Accounts::new(store.clone()), options);
+        Self { dir, router, store }
     }
 
     /// Posts a form to a server function, as the browser does, and returns the
@@ -196,21 +201,17 @@ async fn first_column(app: &App, cookie: &str) -> String {
 async fn a_viewer_who_posts_to_create_task_anyway_is_refused() {
     let app = App::open().await;
     let admin = admin(&app).await;
-    let viewer = invited(
-        &app,
-        &admin,
-        "quiet@dizey.sh",
-        "Quiet Reader",
-        Role::Viewer,
-    )
-    .await;
+    let viewer = invited(&app, &admin, "quiet@dizey.sh", "Quiet Reader", Role::Viewer).await;
     let column = first_column(&app, &admin).await;
 
     let answer = app
         .post(
             path::<dizey_web::board::CreateTask>(),
             Some(&viewer),
-            &[("title", "Viewer should not get this"), ("column_id", &column)],
+            &[
+                ("title", "Viewer should not get this"),
+                ("column_id", &column),
+            ],
         )
         .await;
 
@@ -294,4 +295,221 @@ async fn the_board_is_not_readable_without_a_session() {
         .post(path::<dizey_web::board::CurrentBoard>(), None, &[])
         .await;
     assert_eq!(answer.body, "{\"Err\":\"SignInFirst\"}");
+}
+
+/// Makes a task and hands back its id, read off the board the way the browser
+/// would.
+async fn a_task(app: &App, cookie: &str, column: &str, title: &str) -> String {
+    let answer = app
+        .post(
+            path::<dizey_web::board::CreateTask>(),
+            Some(cookie),
+            &[("title", title), ("column_id", column)],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "the task was refused: {}", answer.body);
+
+    let answer = app
+        .post(path::<dizey_web::board::CurrentBoard>(), Some(cookie), &[])
+        .await;
+    let needle = format!("\"title\":\"{title}\"");
+    let before = answer
+        .body
+        .split_once(&needle)
+        .map(|(head, _)| head)
+        .expect("the new task is not on the board");
+    before
+        .rsplit_once("{\"id\":\"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no id on the new task")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_viewer_who_posts_a_comment_anyway_is_refused() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let viewer = invited(&app, &admin, "eyes@dizey.sh", "Ida Eyes", Role::Viewer).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Ship the detail modal").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::PostComment>(),
+            Some(&viewer),
+            &[("task_id", &task), ("body", "Viewers cannot say this")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(answer.body, "\"Forbidden\"");
+
+    // The refusal is not cosmetic: nothing was written.
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(
+        !answer.body.contains("Viewers cannot say this"),
+        "the refused comment was written anyway: {}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn a_member_may_comment_and_the_author_is_the_session() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let member = invited(&app, &admin, "kai@dizey.sh", "Kai Renner", Role::Member).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Wire the picker").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::PostComment>(),
+            Some(&member),
+            &[("task_id", &task), ("body", "Picker is narrow on purpose")],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "a member was refused: {}", answer.body);
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(answer.body.contains("Picker is narrow on purpose"));
+    assert!(
+        answer.body.contains("Kai Renner"),
+        "the comment is not attributed to the session's user: {}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn a_link_that_would_close_a_circle_is_refused_at_the_endpoint() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app, &admin).await;
+    let first = a_task(&app, &admin, &column, "Lay the cable").await;
+    let second = a_task(&app, &admin, &column, "Light the cable").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::LinkTasks>(),
+            Some(&admin),
+            &[
+                ("task_id", &second),
+                ("other_id", &first),
+                ("direction", "blocked_by"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        answer.body, "null",
+        "the first link was refused: {}",
+        answer.body
+    );
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::LinkTasks>(),
+            Some(&admin),
+            &[
+                ("task_id", &first),
+                ("other_id", &second),
+                ("direction", "blocked_by"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "\"Cycle\"");
+}
+
+#[tokio::test]
+async fn a_task_id_from_nowhere_is_not_found() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::FetchTask>(),
+            Some(&admin),
+            &[("task_id", "00000000-0000-0000-0000-000000000000")],
+        )
+        .await;
+    assert_eq!(answer.body, "{\"Err\":\"NotFound\"}");
+}
+
+#[tokio::test]
+async fn a_viewer_who_posts_a_delete_anyway_is_refused() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let viewer = invited(&app, &admin, "wren@dizey.sh", "Wren Ash", Role::Viewer).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Viewers cannot remove this").await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::DeleteTask>(),
+            Some(&viewer),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert_eq!(answer.body, "\"Forbidden\"");
+
+    let answer = app
+        .post(path::<dizey_web::board::CurrentBoard>(), Some(&admin), &[])
+        .await;
+    assert!(
+        answer.body.contains("Viewers cannot remove this"),
+        "the refused delete happened anyway: {}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn a_member_cannot_delete_when_the_workspace_says_admins_only() {
+    use dizey_core::store::{DeletePolicy, Store};
+
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let member = invited(&app, &admin, "rae@dizey.sh", "Rae Okonkwo", Role::Member).await;
+    let column = first_column(&app, &admin).await;
+    let task = a_task(&app, &admin, &column, "Not yours to remove").await;
+
+    // The workspace ships as 'anyone'; the settings screen that flips this is a
+    // later slice, so the test sets it the way that screen will.
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    app.store
+        .set_limits(
+            &workspace.id,
+            workspace.attachment_limit_bytes,
+            workspace.photo_limit_bytes,
+            &workspace.allowed_file_types,
+            DeletePolicy::Admin,
+        )
+        .await
+        .unwrap();
+
+    let answer = app
+        .post(
+            path::<dizey_web::detail::DeleteTask>(),
+            Some(&member),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert_eq!(answer.body, "\"Forbidden\"");
+
+    let answer = app
+        .post(path::<dizey_web::board::CurrentBoard>(), Some(&admin), &[])
+        .await;
+    assert!(
+        answer.body.contains("Not yours to remove"),
+        "the refused delete happened anyway: {}",
+        answer.body
+    );
 }

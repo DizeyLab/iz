@@ -162,16 +162,15 @@ fn BoardScreen(
     let filter = RwSignal::new(Filter::All);
     // Which column has its composer open, if any.
     let composing = RwSignal::new(None::<String>);
+    // Which card is open in the detail modal, if any.
+    let opened = RwSignal::new(None::<String>);
     let may_write = me.role.can_write_tasks();
     let my_id = StoredValue::new(me.id.clone());
 
     // The New task button opens the composer in the first column, which is
     // where a new card belongs when nobody has said otherwise.
-    let first_column_id = StoredValue::new(
-        view.columns
-            .first()
-            .map(|column| column.column.id.clone()),
-    );
+    let first_column_id =
+        StoredValue::new(view.columns.first().map(|column| column.column.id.clone()));
 
     let overdue = view.overdue_count(today);
     let blocked = view.blocked_count();
@@ -224,7 +223,12 @@ fn BoardScreen(
                     </header>
                     <div class="column-cards">
                         <For each=move || shown.get() key=|card: &TaskCard| card.id.clone() let:card>
-                            <Card card=card today=today done_column=is_done_column/>
+                            <Card
+                                card=card
+                                today=today
+                                done_column=is_done_column
+                                on_open=move |task_id| opened.set(Some(task_id))
+                            />
                         </For>
                         <Show when=move || may_write && is_composing()>
                             <Composer
@@ -302,6 +306,19 @@ fn BoardScreen(
                         </div>
                     }
                 })}
+            {move || {
+                opened
+                    .get()
+                    .map(|task_id| {
+                        view! {
+                            <crate::detail::TaskDetailModal
+                                task_id=task_id
+                                on_close=move || opened.set(None)
+                                on_change=on_change
+                            />
+                        }
+                    })
+            }}
         </main>
     }
 }
@@ -320,7 +337,12 @@ fn FilterTab(filter: RwSignal<Filter>, this: Filter, label: &'static str) -> imp
 }
 
 #[component]
-fn Card(card: TaskCard, today: Date, done_column: bool) -> impl IntoView {
+fn Card(
+    card: TaskCard,
+    today: Date,
+    done_column: bool,
+    on_open: impl Fn(String) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
     let blocks = card.blocks.len();
     let blocked_by = card.blocked_by.join(", ");
     let deadline = card.deadline_label(today);
@@ -328,9 +350,25 @@ fn Card(card: TaskCard, today: Date, done_column: bool) -> impl IntoView {
     let dated = card.deadline.is_some() || card.is_done();
     let comments = card.comment_count;
     let assignees = card.assignees.clone();
+    let id = StoredValue::new(card.id.clone());
+    let open = move || on_open(id.get_value());
 
     view! {
-        <article class="card" class:card-done=done_column>
+        // The whole card is the way in: the artboard has no separate control,
+        // so the card itself carries the role and answers the keyboard.
+        <article
+            class="card"
+            class:card-done=done_column
+            role="button"
+            tabindex="0"
+            on:click=move |_| open()
+            on:keydown=move |event| {
+                if event.key() == "Enter" || event.key() == " " {
+                    event.prevent_default();
+                    open();
+                }
+            }
+        >
             <div class="card-keys">
                 <span class="card-key">{card.task_key.clone()}</span>
                 {(blocks > 0)
@@ -363,9 +401,15 @@ fn Card(card: TaskCard, today: Date, done_column: bool) -> impl IntoView {
                         .is_empty()
                         .then(|| {
                             view! {
-                                <span class="avatar avatar-none" title="Nobody is on this yet">
-                                    "?"
-                                </span>
+                                // An empty circle, the avatar's size, in the
+                                // avatar's place: the card's bottom row does
+                                // not reflow when someone is assigned.
+                                <span
+                                    class="avatar avatar-none"
+                                    role="img"
+                                    aria-label="nobody assigned"
+                                    title="Nobody assigned"
+                                ></span>
                             }
                         })}
                 </div>
