@@ -432,6 +432,29 @@ pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnErr
 
 // -- the screen -------------------------------------------------------------
 
+/// Whatever a refused call said, rendered where the form that asked for it is.
+/// A refusal shown at the far end of a scrolling modal is a refusal nobody
+/// reads: the person clicked "Link a task" and the sentence has to land under
+/// that button, not under the activity trail.
+fn refused<S>(action: ServerAction<S>) -> impl IntoView
+where
+    S: leptos::server_fn::ServerFn<Output = Option<Refusal>> + Send + Sync + Clone + 'static,
+    S::Error: Clone + Send + Sync + 'static,
+{
+    move || {
+        action
+            .value()
+            .get()
+            .and_then(|answer| match answer {
+                Ok(refusal) => refusal,
+                // The call never arrived, which is not the person's mistake and
+                // is not a sentence about their task.
+                Err(_) => Some(Refusal::Unavailable),
+            })
+            .map(|refusal| view! { <p class="modal-problem">{refusal.message()}</p> })
+    }
+}
+
 /// The modal. `esc` closes it, as the artboard's chip says.
 #[component]
 pub fn TaskDetailModal(
@@ -451,27 +474,22 @@ pub fn TaskDetailModal(
         on_change();
     };
 
-    view! {
-        <div
-            class="modal-scrim"
-            on:click=move |_| on_close()
-            on:keydown=move |event| {
-                if event.key() == "Escape" {
-                    on_close();
-                }
+    // Escape listens on the window, not on the modal. The modal is inserted
+    // after the click that opened it, so focus is still on the card behind the
+    // scrim and a listener bound to this element would never hear the key.
+    #[cfg(feature = "hydrate")]
+    {
+        let handle = window_event_listener(leptos::ev::keydown, move |event| {
+            if event.key() == "Escape" {
+                on_close();
             }
-        >
-            <div
-                class="modal"
-                tabindex="-1"
-                autofocus
-                on:click=move |event| event.stop_propagation()
-                on:keydown=move |event| {
-                    if event.key() == "Escape" {
-                        on_close();
-                    }
-                }
-            >
+        });
+        on_cleanup(move || handle.remove());
+    }
+
+    view! {
+        <div class="modal-scrim" on:click=move |_| on_close()>
+            <div class="modal" tabindex="-1" on:click=move |event| event.stop_propagation()>
                 <Suspense fallback=|| {
                     view! { <div class="modal-loading"></div> }
                 }>
@@ -556,13 +574,6 @@ fn DetailScreen(
             on_close();
         }
     });
-
-    let problem = move || {
-        [save.value(), comment.value(), link.value(), remove.value()]
-            .into_iter()
-            .find_map(|value| value.get().and_then(|answer| answer.ok().flatten()))
-            .map(|refusal| view! { <p class="modal-problem">{refusal.message()}</p> })
-    };
 
     view! {
         <header class="detail-head">
@@ -656,6 +667,7 @@ fn DetailScreen(
                                 "Save"
                             </button>
                         </div>
+                        {refused(save)}
                     }
                 })}
         </ActionForm>
@@ -735,6 +747,7 @@ fn DetailScreen(
                                 "Link a task"
                             </button>
                         </ActionForm>
+                        {refused(link)}
                     }
                 })}
         </section>
@@ -770,6 +783,7 @@ fn DetailScreen(
                                 </button>
                             </div>
                         </ActionForm>
+                        {refused(comment)}
                     }
                 })}
         </section>
@@ -796,7 +810,7 @@ fn DetailScreen(
                 .collect_view()}
         </section>
 
-        {problem}
+        {refused(remove)}
 
         {move || {
             ask.value()

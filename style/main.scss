@@ -712,8 +712,8 @@ a {
 }
 
 .detail-label {
+  font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--muted-soft);
 }
@@ -852,9 +852,9 @@ a {
 }
 
 .dep-heading {
+  font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--muted-soft);
 }
 

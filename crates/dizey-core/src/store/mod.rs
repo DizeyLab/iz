@@ -341,12 +341,12 @@ pub trait Store: BoardReads + DetailReads + 'static {
         at: OffsetDateTime,
     ) -> Result<Vec<String>>;
 
-    /// Appends one line to a task's activity trail. `actor_id` is `None` when
-    /// the system did it rather than a person.
     /// What a delete would take with it, for the confirmation step. Reads
     /// only; nothing here writes.
     async fn deletion_cost(&self, task_id: &str) -> Result<Option<DeletionCost>>;
 
+    /// Appends one line to a task's activity trail. `actor_id` is `None` when
+    /// the system did it rather than a person.
     async fn record_activity(
         &self,
         task_id: &str,

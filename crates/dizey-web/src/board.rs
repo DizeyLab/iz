@@ -120,6 +120,11 @@ impl Filter {
 #[component]
 pub fn Board() -> impl IntoView {
     let board = Resource::new(|| (), |_| async move { current_board().await });
+    // Which card is open in the detail modal, if any. It lives out here, above
+    // the suspense boundary: a refetch rebuilds `BoardScreen` from scratch, and
+    // a signal owned by that component would be born empty again — closing the
+    // modal every time something inside it saved.
+    let opened = RwSignal::new(None::<String>);
 
     view! {
         <Suspense fallback=|| {
@@ -128,7 +133,13 @@ pub fn Board() -> impl IntoView {
             {move || Suspend::new(async move {
                 match board.await {
                     Ok(Ok(snapshot)) => {
-                        view! { <BoardScreen snapshot=snapshot on_change=move || board.refetch()/> }
+                        view! {
+                            <BoardScreen
+                                snapshot=snapshot
+                                opened=opened
+                                on_change=move || board.refetch()
+                            />
+                        }
                             .into_any()
                     }
                     Ok(Err(refusal)) => {
@@ -156,14 +167,13 @@ pub fn Board() -> impl IntoView {
 #[component]
 fn BoardScreen(
     snapshot: BoardSnapshot,
+    opened: RwSignal<Option<String>>,
     on_change: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let BoardSnapshot { view, me, today } = snapshot;
     let filter = RwSignal::new(Filter::All);
     // Which column has its composer open, if any.
     let composing = RwSignal::new(None::<String>);
-    // Which card is open in the detail modal, if any.
-    let opened = RwSignal::new(None::<String>);
     let may_write = me.role.can_write_tasks();
     let my_id = StoredValue::new(me.id.clone());
 
