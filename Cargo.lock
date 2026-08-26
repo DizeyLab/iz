@@ -2136,9 +2136,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "grass",
+ "http",
  "izlek-core",
  "lettre",
  "serde",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",

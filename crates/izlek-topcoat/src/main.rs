@@ -56,7 +56,7 @@ async fn main() {
         .cookies()
         .assets(AssetBundle::load().expect("failed to load the asset bundle"))
         .app_context(accounts)
-        .app_context(engine)
+        .app_context(izlek_topcoat::server::Mail::sending(engine.clone()))
         .build();
 
     topcoat::start(router).await.expect("server error");

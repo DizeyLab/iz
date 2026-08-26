@@ -20,6 +20,7 @@ topcoat = { version = "0.6.2", default-features = false, features = [
 ] }
 izlek-core = { workspace = true, features = ["server"] }
 serde.workspace = true
+serde_json.workspace = true
 time.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
@@ -37,3 +38,6 @@ lettre = { version = "0.11.23", default-features = false, features = [
 
 [build-dependencies]
 grass = "0.13"
+
+[dev-dependencies]
+http = "1.5"
