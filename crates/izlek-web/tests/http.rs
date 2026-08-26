@@ -2817,3 +2817,170 @@ async fn the_settings_sidenav_offers_logs() {
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("href=\"/logs\""), "{html}");
 }
+
+/// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`
+/// exists beyond the `already` count — the engine runs off the request in a
+/// spawned task, so the row is not there yet when the triggering call
+/// returns. Bounded so a send that never arrives fails the test instead of
+/// hanging it.
+async fn until_rule_send_to(
+    app: &App,
+    rule_id: &str,
+    recipient: &str,
+    already: usize,
+) -> izlek_core::store::MailSend {
+    for _ in 0..500 {
+        let matching: Vec<_> = app
+            .store
+            .mail_queue(50)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|send| {
+                send.kind == SendKind::Rule
+                    && send.rule_id.as_deref() == Some(rule_id)
+                    && send.recipient == recipient
+            })
+            .collect();
+        if matching.len() > already {
+            return matching.into_iter().next().unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no rule send to {recipient} for rule {rule_id} ever queued");
+}
+
+/// One rule rides two different events across its lifetime, and a rewrite in
+/// place keeps riding the second without becoming a new rule: a comment mails
+/// the task's creator, not the commenter, and after the rule is rewritten to
+/// fire on a rename instead, a rename mails the assignee, not the renamer.
+#[tokio::test]
+async fn a_rule_rides_every_event_and_can_be_rewritten() {
+    let app = App::open_with_mail().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let column = first_column(&app, &admin_cookie).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship the picker").await;
+
+    let created = app
+        .post(
+            path::<izlek_web::rules::CreateRule>(),
+            Some(&admin_cookie),
+            &[
+                ("trigger", "commented"),
+                ("column_id", ""),
+                ("subject", "Someone commented"),
+                ("audience", "creator"),
+            ],
+        )
+        .await;
+    assert_eq!(created.body, "null", "{}", created.body);
+    let rule = only_rule(&app, &admin_cookie).await;
+
+    // A second member comments; the task's creator is the admin, not them.
+    let commented = app
+        .post(
+            path::<izlek_web::detail::PostComment>(),
+            Some(&member),
+            &[("task_id", &task), ("body", "Looks good")],
+        )
+        .await;
+    assert_eq!(commented.body, "null", "{}", commented.body);
+
+    let send = until_rule_send_to(&app, &rule, "ada@izlek.sh", 0).await;
+    assert_eq!(send.recipient, "ada@izlek.sh");
+    assert!(
+        app.store.mail_queue(50).await.unwrap().iter().all(|send| {
+            !(send.kind == SendKind::Rule
+                && send.rule_id.as_deref() == Some(rule.as_str())
+                && send.recipient == "deniz@izlek.sh")
+        }),
+        "the commenter was mailed instead of the creator"
+    );
+    let decisions = app.store.recent_mail_decisions(50).await.unwrap();
+    assert!(
+        decisions.iter().any(|decision| {
+            decision.rule_id == rule
+                && matches!(decision.outcome, izlek_core::store::MailOutcome::Owed)
+        }),
+        "the decisions ledger has no matched decision for the rule"
+    );
+
+    // The admin is put on the task so the rewritten rule's assignees audience
+    // has someone to address once it fires on a rename.
+    let admin_id = person_id(&app, &admin_cookie, &task, "Ada Lovelace").await;
+    let assigned = app
+        .post(
+            path::<izlek_web::detail::Assign>(),
+            Some(&admin_cookie),
+            &[("task_id", &task), ("user_id", &admin_id)],
+        )
+        .await;
+    assert_eq!(assigned.body, "null", "{}", assigned.body);
+
+    // The rule is rewritten in place: same id, new trigger, subject and
+    // audience.
+    let updated = app
+        .post(
+            path::<izlek_web::rules::UpdateRule>(),
+            Some(&admin_cookie),
+            &[
+                ("rule_id", &rule),
+                ("trigger", "retitled"),
+                ("column_id", ""),
+                ("subject", "Renamed"),
+                ("audience", "assignees"),
+            ],
+        )
+        .await;
+    assert_eq!(updated.body, "null", "the rewrite was refused: {}", updated.body);
+    assert_eq!(
+        only_rule(&app, &admin_cookie).await,
+        rule,
+        "a new rule was made instead of the old one rewritten"
+    );
+
+    let seen = app
+        .post(path::<izlek_web::rules::CurrentRules>(), Some(&admin_cookie), &[])
+        .await;
+    assert!(seen.body.contains(&format!("\"id\":\"{rule}\"")), "{}", seen.body);
+    assert!(seen.body.contains("\"enabled\":true"), "{}", seen.body);
+    assert!(seen.body.contains("\"trigger_kind\":\"retitled\""), "{}", seen.body);
+    assert!(seen.body.contains("\"subject\":\"Renamed\""), "{}", seen.body);
+
+    // The second member renames the task; the rule now fires on retitle and
+    // addresses the assignee — the admin — not the member who renamed it.
+    let already = app
+        .store
+        .mail_queue(50)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|send| {
+            send.kind == SendKind::Rule
+                && send.rule_id.as_deref() == Some(rule.as_str())
+                && send.recipient == "ada@izlek.sh"
+        })
+        .count();
+    let renamed = app
+        .post(
+            path::<izlek_web::detail::SaveTask>(),
+            Some(&member),
+            &[("task_id", &task), ("title", "Ship the redesigned picker")],
+        )
+        .await;
+    assert_eq!(renamed.body, "null", "{}", renamed.body);
+
+    until_rule_send_to(&app, &rule, "ada@izlek.sh", already).await;
+    assert!(
+        app.store.mail_queue(50).await.unwrap().iter().all(|send| {
+            !(send.kind == SendKind::Rule
+                && send.rule_id.as_deref() == Some(rule.as_str())
+                && send.recipient == "deniz@izlek.sh")
+        }),
+        "the renamer was mailed instead of being excluded as the actor"
+    );
+
+    let logs = until_logs_contains(&app, &admin_cookie, "\"subject\":\"Renamed\"").await;
+    assert!(logs.contains("\"recipient\":\"ada@izlek.sh\""), "{}", logs);
+}
