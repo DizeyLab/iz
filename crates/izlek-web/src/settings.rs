@@ -104,6 +104,7 @@ pub struct Limits {
 pub const WIDEST_ATTACHMENT_MB: u64 = 500;
 pub const WIDEST_PHOTO_MB: u64 = 20;
 
+#[cfg(feature = "ssr")]
 const MB: u64 = 1024 * 1024;
 
 /// One row of the member list, as an admin may see it. There is no password
