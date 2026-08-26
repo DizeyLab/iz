@@ -17,7 +17,7 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Request, StatusCode, header};
 use izlek_core::Role;
 use izlek_core::accounts::Accounts;
-use izlek_core::store::TursoStore;
+use izlek_core::store::{SendKind, Store, TursoStore};
 use izlek_web::server::SESSION_COOKIE;
 use leptos::prelude::LeptosOptions;
 use leptos::server_fn::ServerFn;
@@ -28,22 +28,25 @@ use uuid::Uuid;
 struct App {
     dir: PathBuf,
     router: Router,
+    store: Arc<dyn Store>,
 }
 
 impl App {
     async fn open() -> Self {
         let dir = std::env::temp_dir().join(format!("izlek-http-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
-            .await
-            .unwrap();
+        let store: Arc<dyn Store> = Arc::new(
+            TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+                .await
+                .unwrap(),
+        );
         let options = LeptosOptions::builder().output_name("izlek").build();
         let router = izlek_web::server::router(
-            Accounts::new(Arc::new(store), "http://127.0.0.1:3000"),
+            Accounts::new(store.clone(), "http://127.0.0.1:3000"),
             izlek_web::server::Mail::silent(),
             options,
         );
-        Self { dir, router }
+        Self { dir, router, store }
     }
 
     /// Like `open`, but with a live mail engine reading the workspace's SMTP
@@ -64,11 +67,11 @@ impl App {
         ));
         let options = LeptosOptions::builder().output_name("izlek").build();
         let router = izlek_web::server::router(
-            Accounts::new(store, "https://izlek.sh"),
+            Accounts::new(store.clone(), "https://izlek.sh"),
             izlek_web::server::Mail::sending(engine),
             options,
         );
-        Self { dir, router }
+        Self { dir, router, store }
     }
 
     /// Posts a form to a server function, as the browser does, and returns the
@@ -366,6 +369,25 @@ async fn admin(app: &App) -> String {
     answer.session.expect("claiming set no session cookie")
 }
 
+/// The join token no longer rides the server function's answer — only the
+/// invitee's address does. It rides the invite mail this function digs out of
+/// the outbox instead: the newest pending invite queued for that address.
+async fn queued_join_token(app: &App, email: &str) -> String {
+    let sends = app.store.mail_queue(10).await.unwrap();
+    let body = sends
+        .into_iter()
+        .rev()
+        .find(|send| {
+            send.kind == SendKind::Invite && send.rule_id.is_none() && send.recipient == email
+        })
+        .and_then(|send| send.body)
+        .expect("no invite mail queued for {email}");
+    body.rsplit_once("/join/")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .expect("no invitation link in the mail body")
+        .to_string()
+}
+
 /// Invites someone in the given role and signs them in, returning their cookie.
 async fn invited(app: &App, admin: &str, email: &str, name: &str, role: Role) -> String {
     let role = match role {
@@ -381,12 +403,7 @@ async fn invited(app: &App, admin: &str, email: &str, name: &str, role: Role) ->
         )
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    let token = answer
-        .body
-        .rsplit_once("/join/")
-        .and_then(|(_, rest)| rest.split('"').next())
-        .expect("no invitation link in {answer.body}")
-        .to_string();
+    let token = queued_join_token(app, email).await;
 
     let answer = app
         .post(
@@ -401,6 +418,107 @@ async fn invited(app: &App, admin: &str, email: &str, name: &str, role: Role) ->
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
     assert_eq!(answer.body, "null", "first sign-in was refused");
     answer.session.expect("first sign-in set no session cookie")
+}
+
+/// Inviting a member never hands the join link to the browser: the address
+/// comes back, and the link travels only in the mail the invitee gets.
+#[tokio::test]
+async fn adding_a_member_mails_them_the_link() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<izlek_web::auth::InviteMember>(),
+            Some(&admin_cookie),
+            &[
+                ("email", "nour@izlek.sh"),
+                ("display_name", "Nour"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("nour@izlek.sh"), "{}", answer.body);
+    assert!(!answer.body.contains("/join/"), "{}", answer.body);
+
+    let sends = app.store.mail_queue(10).await.unwrap();
+    let invites: Vec<_> = sends
+        .iter()
+        .filter(|send| {
+            send.kind == SendKind::Invite
+                && send.rule_id.is_none()
+                && send.recipient == "nour@izlek.sh"
+        })
+        .collect();
+    assert_eq!(invites.len(), 1, "{invites:?}");
+    assert!(
+        invites[0].body.as_deref().unwrap_or_default().contains("/join/"),
+        "{:?}",
+        invites[0]
+    );
+}
+
+/// A resend queues a second invite mail rather than replacing the first —
+/// the outbox keeps both attempts.
+#[tokio::test]
+async fn a_resend_queues_another_mail() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let invitation = app
+        .post(
+            path::<izlek_web::auth::InviteMember>(),
+            Some(&admin_cookie),
+            &[
+                ("email", "sena@izlek.sh"),
+                ("display_name", "Sena"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(invitation.status, StatusCode::OK, "{}", invitation.body);
+
+    let list = app
+        .post(
+            path::<izlek_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    let sena_id = list
+        .body
+        .split_once("sena@izlek.sh")
+        .map(|(before, _)| before)
+        .and_then(|before| before.rsplit_once("\"id\":\""))
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no member id")
+        .to_string();
+
+    let count = |sends: &[izlek_core::store::MailSend]| {
+        sends
+            .iter()
+            .filter(|send| {
+                send.kind == SendKind::Invite
+                    && send.rule_id.is_none()
+                    && send.recipient == "sena@izlek.sh"
+            })
+            .count()
+    };
+    let before = count(&app.store.mail_queue(10).await.unwrap());
+    assert_eq!(before, 1);
+
+    let resent = app
+        .post(
+            path::<izlek_web::settings::ResendLink>(),
+            Some(&admin_cookie),
+            &[("user_id", &sena_id)],
+        )
+        .await;
+    assert_eq!(resent.body, "{\"Ok\":\"sena@izlek.sh\"}", "{}", resent.body);
+
+    let after = count(&app.store.mail_queue(10).await.unwrap());
+    assert_eq!(after, 2);
 }
 
 /// The id of the board's first column, read the way the board page reads it.
@@ -1561,12 +1679,8 @@ async fn a_resent_link_opens_the_same_account() {
             &[("user_id", &mert_id)],
         )
         .await;
-    let token = answer
-        .body
-        .rsplit_once("/join/")
-        .and_then(|(_, rest)| rest.split('"').next())
-        .expect("no link in the answer")
-        .to_string();
+    assert_eq!(answer.body, "{\"Ok\":\"mert@izlek.sh\"}", "{}", answer.body);
+    let token = queued_join_token(&app, "mert@izlek.sh").await;
 
     let redeemed = app
         .post(
@@ -1599,12 +1713,7 @@ async fn an_invitation_names_the_admin_who_made_it_and_not_the_invitee() {
         )
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    let token = answer
-        .body
-        .rsplit_once("/join/")
-        .and_then(|(_, rest)| rest.split('"').next())
-        .expect("no invitation link")
-        .to_string();
+    let token = queued_join_token(&app, "grace@izlek.sh").await;
 
     let answer = app
         .post(
@@ -2659,7 +2768,9 @@ async fn an_admin_reads_the_logs() {
     assert_eq!(moved.body, "null", "{}", moved.body);
 
     let snapshot = until_logs_contains(&app, &admin_cookie, "\"outcome\":\"nobody to mail\"").await;
-    assert!(snapshot.contains("\"queue\":[]"), "{}", snapshot);
+    // The queue still carries Emre's invite mail — unrelated to this rule —
+    // so the check is that the rule itself queued nothing, not an empty queue.
+    assert!(!snapshot.contains("\"subject\":\"Task completed\""), "{}", snapshot);
 
     // The admin drops it back and moves it again: this time the mover is not
     // the assignee, so the rule owes Emre a mail. With no sender configured
