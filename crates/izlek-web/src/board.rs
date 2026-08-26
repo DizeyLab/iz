@@ -181,7 +181,7 @@ impl Filter {
 pub fn Board() -> impl IntoView {
     let board = Resource::new(|| (), |_| async move { current_board().await });
     // Which card is open in the detail modal, if any. It lives out here, above
-    // the suspense boundary: a refetch rebuilds `BoardScreen` from scratch, and
+    // the transition boundary: a refetch rebuilds `BoardScreen` from scratch, and
     // a signal owned by that component would be born empty again — closing the
     // modal every time something inside it saved.
     // Seeded from `?task=`, so a card is a link and the modal has an address. A
@@ -194,7 +194,7 @@ pub fn Board() -> impl IntoView {
     );
 
     view! {
-        <Suspense fallback=|| {
+        <Transition fallback=|| {
             view! { <main class="board-stage"></main> }
         }>
             {move || Suspend::new(async move {
@@ -227,7 +227,7 @@ pub fn Board() -> impl IntoView {
                     }
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

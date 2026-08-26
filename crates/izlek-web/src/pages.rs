@@ -17,7 +17,7 @@ pub fn Landing() -> impl IntoView {
     let gate = Resource::new(|| (), |_| async move { current_gate().await });
 
     view! {
-        <Suspense fallback=|| view! { <main class="auth-stage"></main> }>
+        <Transition fallback=|| view! { <main class="auth-stage"></main> }>
             {move || Suspend::new(async move {
                 match gate.await {
                     Ok(Gate::NeedsSetup) => {
@@ -46,7 +46,7 @@ pub fn Landing() -> impl IntoView {
                     }
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 
@@ -140,7 +140,7 @@ pub fn Join() -> impl IntoView {
     let who = Resource::new(token, |token| async move { invitation(token).await });
 
     view! {
-        <Suspense fallback=|| view! { <main class="auth-stage"></main> }>
+        <Transition fallback=|| view! { <main class="auth-stage"></main> }>
             {move || Suspend::new(async move {
                 match who.await {
                     Ok(Some(person)) => view! { <JoinCard token=token() person=person/> }.into_any(),
@@ -159,7 +159,7 @@ pub fn Join() -> impl IntoView {
                     }
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

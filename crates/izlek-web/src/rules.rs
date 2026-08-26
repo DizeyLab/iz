@@ -265,7 +265,7 @@ pub fn RulesPage() -> impl IntoView {
     let rules = Resource::new(|| (), |_| async move { current_rules().await });
 
     view! {
-        <Suspense fallback=|| view! { <main class="settings-stage"></main> }>
+        <Transition fallback=|| view! { <main class="settings-stage"></main> }>
             {move || Suspend::new(async move {
                 match rules.await {
                     Ok(Ok(snapshot)) => {
@@ -298,7 +298,7 @@ pub fn RulesPage() -> impl IntoView {
                     }
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

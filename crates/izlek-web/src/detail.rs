@@ -647,7 +647,7 @@ pub fn TaskDetailModal(
     view! {
         <div class="modal-scrim" on:click=move |_| on_close()>
             <div class="modal" tabindex="-1" on:click=move |event| event.stop_propagation()>
-                <Suspense fallback=|| {
+                <Transition fallback=|| {
                     view! { <div class="modal-loading"></div> }
                 }>
                     {move || Suspend::new(async move {
@@ -673,7 +673,7 @@ pub fn TaskDetailModal(
                             }
                         }
                     })}
-                </Suspense>
+                </Transition>
             </div>
         </div>
     }

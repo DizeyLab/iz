@@ -510,7 +510,7 @@ pub async fn save_profile(display_name: String) -> Result<Option<Refusal>, Serve
 pub fn SettingsPage() -> impl IntoView {
     let settings = Resource::new(|| (), |_| async move { current_settings().await });
     // The link a call hands back, and the word for a call that was refused.
-    // They live here, above the Suspense, because a successful call refetches
+    // They live here, above the Transition, because a successful call refetches
     // the snapshot: signals owned by the members panel would be dropped with it
     // and the link — which the store keeps only as a hash — would be gone for
     // good before anyone could read it.
@@ -518,7 +518,7 @@ pub fn SettingsPage() -> impl IntoView {
     let link_refusal = RwSignal::new(None::<String>);
 
     view! {
-        <Suspense fallback=|| view! { <main class="settings-stage"></main> }>
+        <Transition fallback=|| view! { <main class="settings-stage"></main> }>
             {move || Suspend::new(async move {
                 match settings.await {
                     Ok(Ok(snapshot)) => {
@@ -553,7 +553,7 @@ pub fn SettingsPage() -> impl IntoView {
                     }
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 
