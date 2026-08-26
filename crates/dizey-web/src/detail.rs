@@ -1498,11 +1498,20 @@ fn AssigneeChip(
     });
     let name = person.display_name.clone();
     let person_id = person.id.clone();
+    // A chip carries a first name or no name at all. Half a name with an
+    // ellipsis after it — "Be…" — is noise where a name should be, and an
+    // avatar on its own still says who it is.
+    let full_name = name.clone();
+    let first_name = name
+        .split_whitespace()
+        .next()
+        .unwrap_or(name.as_str())
+        .to_owned();
 
     view! {
-        <span class="assignee-chip">
+        <span class="assignee-chip" title=full_name>
             <Avatar person=person extra="avatar-sm"/>
-            <span class="assignee-name">{name.clone()}</span>
+            <span class="assignee-name">{first_name}</span>
             {may_write
                 .then(|| {
                     view! {
@@ -1543,7 +1552,12 @@ fn DepRow(
         Direction::BlockedBy => edge.blocked_by_label(),
         Direction::Blocks => edge.blocks_label(),
     };
-    let waiting = matches!(direction, Direction::Blocks);
+    // Amber means someone is stuck. This task blocking another one is the
+    // normal state of a dependency and says nothing about this task, so the
+    // colour belongs to the row on the receiving end — and only while its
+    // blocker is unfinished. Otherwise the board's "1 blocked" pill and the row
+    // colour tell two different stories about who is waiting.
+    let waiting = matches!(direction, Direction::BlockedBy) && !cleared;
     let other_id = edge.task_id.clone();
     let wire = match direction {
         Direction::BlockedBy => "blocked_by",
@@ -1551,17 +1565,18 @@ fn DepRow(
     };
     // The artboard puts the direction in the row itself, in a fixed column, so
     // the rows line up whichever way round they run.
-    let tag = if waiting { "BLOCKS" } else { "BLOCKED BY" };
+    let tag = match direction {
+        Direction::BlockedBy => "BLOCKED BY",
+        Direction::Blocks => "BLOCKS",
+    };
 
     view! {
         <div class="dep-row" class:dep-row-waiting=waiting>
             <span class="dep-tag">{tag}</span>
-            {if waiting {
-                Either::Left(glyph::lock())
-            } else if cleared {
-                Either::Right(Either::Left(glyph::tick()))
+            {if cleared {
+                Either::Left(glyph::tick())
             } else {
-                Either::Right(Either::Right(glyph::lock()))
+                Either::Right(glyph::lock())
             }}
             <span class="dep-key">{edge.task_key.clone()}</span>
             <span class="dep-title">{edge.title.clone()}</span>
