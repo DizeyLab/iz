@@ -1184,14 +1184,19 @@ fn DetailScreen(
                 <TitleControl task_id=id title=title may_write=may_write on_change=on_change/>
             </div>
             <span class="detail-esc">"esc"</span>
-            <button
+            // A link back to the bare board, so closing works without script; with
+            // script the handler closes in place and the navigation is cancelled.
+            <a
                 class="detail-close"
-                type="button"
+                href="/"
                 aria-label="Close this task"
-                on:click=move |_| on_close()
+                on:click=move |event| {
+                    event.prevent_default();
+                    on_close();
+                }
             >
                 {glyph::cross()}
-            </button>
+            </a>
         </header>
 
         <div class="detail-fields">

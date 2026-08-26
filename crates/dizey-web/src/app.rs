@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::components::{Route, Router, Routes};
-use leptos_router::path;
+use leptos_router::{SsrMode, path};
 
 use crate::pages::{Join, Landing};
 
@@ -39,9 +39,14 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="leptos" href="/pkg/dizey.css"/>
         <Title text="Dizey"/>
         <Router>
+            // In-order streaming, not the out-of-order default. Out-of-order ships
+            // the page inside a <template> and relies on a script to move it into
+            // place, so a browser without JavaScript gets an empty <main>. In-order
+            // pauses the stream at each <Suspense> and writes the real markup where
+            // it belongs, which is what makes the forms below reachable at all.
             <Routes fallback=NotFound>
-                <Route path=path!("/") view=Landing/>
-                <Route path=path!("/join/:token") view=Join/>
+                <Route path=path!("/") view=Landing ssr=SsrMode::InOrder/>
+                <Route path=path!("/join/:token") view=Join ssr=SsrMode::InOrder/>
             </Routes>
         </Router>
     }

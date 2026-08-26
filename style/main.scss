@@ -440,6 +440,10 @@ a {
 }
 
 .card {
+  // The card is an anchor so it has an address; it must not read as one.
+  display: block;
+  text-decoration: none;
+  color: inherit;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -909,6 +913,7 @@ a {
   border-radius: var(--radius);
   background: transparent;
   color: var(--muted);
+  text-decoration: none;
   cursor: pointer;
 
   &:hover { background: #f3f1ea; }

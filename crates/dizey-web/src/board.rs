@@ -177,7 +177,14 @@ pub fn Board() -> impl IntoView {
     // the suspense boundary: a refetch rebuilds `BoardScreen` from scratch, and
     // a signal owned by that component would be born empty again — closing the
     // modal every time something inside it saved.
-    let opened = RwSignal::new(None::<String>);
+    // Seeded from `?task=`, so a card is a link and the modal has an address. A
+    // browser without script lands here with the modal already open; with script
+    // the card's click handler wins and nothing navigates.
+    let opened = RwSignal::new(
+        leptos_router::hooks::use_query_map()
+            .read_untracked()
+            .get("task"),
+    );
 
     view! {
         <Suspense fallback=|| {
@@ -466,19 +473,21 @@ fn Card(
     view! {
         // The whole card is the way in: the artboard has no separate control,
         // so the card itself carries the role and answers the keyboard.
-        <article
+        <a
             class="card"
             class:card-done=done_column
-            role="button"
-            tabindex="0"
+            href=format!("/?task={}", card.id)
             draggable=draggable.then_some("true")
             on:dragstart=move |_| {
                 dragging.set(Some((id.get_value(), from_column.get_value())));
             }
             on:dragend=move |_| dragging.set(None)
-            on:click=move |_| open()
+            on:click=move |event| {
+                event.prevent_default();
+                open();
+            }
             on:keydown=move |event| {
-                if event.key() == "Enter" || event.key() == " " {
+                if event.key() == " " {
                     event.prevent_default();
                     open();
                 }
@@ -529,7 +538,7 @@ fn Card(
                         })}
                 </div>
             </div>
-        </article>
+        </a>
     }
 }
 
