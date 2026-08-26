@@ -268,6 +268,76 @@ pub struct MailSend {
     pub sent_at: Option<OffsetDateTime>,
 }
 
+/// What a rule decided about one event, win or not. Written for every rule an
+/// event touches, not only the ones that owed a mail, so "why did nobody get
+/// mailed" has a row to read instead of a log to search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MailOutcome {
+    /// A send was claimed for this.
+    Owed,
+    /// A send already existed; this is a replay.
+    AlreadyOwed,
+    /// The audience resolved to nobody.
+    NoRecipients,
+    /// The event did not fire this rule.
+    NotMatched,
+    /// The rule was off when the event happened.
+    Disabled,
+    /// The task named by the event is deleted.
+    TaskGone,
+}
+
+impl MailOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MailOutcome::Owed => "owed",
+            MailOutcome::AlreadyOwed => "already_owed",
+            MailOutcome::NoRecipients => "no_recipients",
+            MailOutcome::NotMatched => "not_matched",
+            MailOutcome::Disabled => "disabled",
+            MailOutcome::TaskGone => "task_gone",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "owed" => Some(MailOutcome::Owed),
+            "already_owed" => Some(MailOutcome::AlreadyOwed),
+            "no_recipients" => Some(MailOutcome::NoRecipients),
+            "not_matched" => Some(MailOutcome::NotMatched),
+            "disabled" => Some(MailOutcome::Disabled),
+            "task_gone" => Some(MailOutcome::TaskGone),
+            _ => None,
+        }
+    }
+}
+
+/// One row of what a rule decided about one event and task, whether or not it
+/// owed a mail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailDecision {
+    pub id: String,
+    pub rule_id: String,
+    pub event_id: String,
+    pub task_id: String,
+    pub outcome: MailOutcome,
+    pub detail: String,
+    pub at: OffsetDateTime,
+}
+
+/// One line of the workspace-wide activity feed: what happened, on which task,
+/// and who did it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityLine {
+    pub task_id: String,
+    pub title: String,
+    /// Absent when the system did it rather than a person.
+    pub actor_name: Option<String>,
+    pub kind: ActivityKind,
+    pub detail: String,
+    pub at: OffsetDateTime,
+}
+
 /// A deletion that freed something, kept so a mail owed because of it can be
 /// rebuilt later. The task it names is gone by the time anyone reads this, so
 /// its key and title are copied rather than looked up.
@@ -698,6 +768,38 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Every send a rule has made, newest first, for the admin's trail.
     async fn sends_for_rule(&self, rule_id: &str, limit: u32) -> Result<Vec<MailSend>>;
+
+    // -- mail decisions and observability -----------------------------------
+
+    /// Records what a rule decided about one event and task. Idempotent: a
+    /// replayed event lands on the row that is already there rather than
+    /// beside it.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_mail_decision(
+        &self,
+        rule_id: &str,
+        event_id: &str,
+        task_id: &str,
+        outcome: MailOutcome,
+        detail: &str,
+        at: OffsetDateTime,
+    ) -> Result<()>;
+
+    /// The most recent decisions across every rule, newest first.
+    async fn recent_mail_decisions(&self, limit: u32) -> Result<Vec<MailDecision>>;
+
+    /// When each rule last decided anything, for the "last checked" line.
+    async fn mail_rule_last_decision(&self) -> Result<Vec<(String, OffsetDateTime)>>;
+
+    /// What is still owed: claimed but not yet accepted, and anything that
+    /// failed and may be tried again.
+    async fn mail_queue(&self, limit: u32) -> Result<Vec<MailSend>>;
+
+    /// Every send, whatever its state, newest first.
+    async fn recent_sends(&self, limit: u32) -> Result<Vec<MailSend>>;
+
+    /// The workspace's activity feed across every task, newest first.
+    async fn recent_activity(&self, limit: u32) -> Result<Vec<ActivityLine>>;
 
     // -- who gets mailed ---------------------------------------------------
 

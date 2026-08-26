@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use super::secret;
 use super::{
-    Attachment, Audience, Deletion, Event, Freeing, MailRule, MailSend, NewAttachment, NewSender,
-    NewTask, NewUser, Recipient, Result,
-    SendState, SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
+    ActivityLine, Attachment, Audience, Deletion, Event, Freeing, MailDecision, MailOutcome,
+    MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendState,
+    SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -316,6 +316,23 @@ fn send_from(row: &Row) -> Result<MailSend> {
         last_error: opt_text(row, 7)?,
         next_attempt_at: opt_stamp(row, 8)?,
         sent_at: opt_stamp(row, 9)?,
+    })
+}
+
+const DECISION_COLUMNS: &str = "id, rule_id, event_id, task_id, outcome, detail, created_at";
+
+fn decision_from(row: &Row) -> Result<MailDecision> {
+    let raw = text(row, 4)?;
+    let outcome =
+        MailOutcome::parse(&raw).ok_or_else(|| StoreError::Corrupt(format!("mail outcome {raw:?}")))?;
+    Ok(MailDecision {
+        id: text(row, 0)?,
+        rule_id: text(row, 1)?,
+        event_id: text(row, 2)?,
+        task_id: text(row, 3)?,
+        outcome,
+        detail: text(row, 5)?,
+        at: parse_stamp(&text(row, 6)?)?,
     })
 }
 
@@ -2272,6 +2289,124 @@ impl Store for TursoStore {
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(send_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    // -- mail decisions and observability -----------------------------------
+
+    async fn record_mail_decision(
+        &self,
+        rule_id: &str,
+        event_id: &str,
+        task_id: &str,
+        outcome: MailOutcome,
+        detail: &str,
+        at: OffsetDateTime,
+    ) -> Result<()> {
+        let id = Uuid::new_v4().to_string();
+        self.conn
+            .execute(
+                "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
+                 created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT (rule_id, event_id, task_id) DO NOTHING",
+                params![id, rule_id, event_id, task_id, outcome.as_str(), detail, stamp(at)?],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn recent_mail_decisions(&self, limit: u32) -> Result<Vec<MailDecision>> {
+        let sql = format!(
+            "SELECT {DECISION_COLUMNS} FROM mail_decision \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, params![i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(decision_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn mail_rule_last_decision(&self) -> Result<Vec<(String, OffsetDateTime)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT rule_id, MAX(created_at) FROM mail_decision GROUP BY rule_id",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push((text(&row, 0)?, parse_stamp(&text(&row, 1)?)?));
+        }
+        Ok(out)
+    }
+
+    async fn mail_queue(&self, limit: u32) -> Result<Vec<MailSend>> {
+        let sql = format!(
+            "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
+             ORDER BY next_attempt_at LIMIT ?1"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, params![i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(send_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn recent_sends(&self, limit: u32) -> Result<Vec<MailSend>> {
+        let sql = format!(
+            "SELECT {SEND_COLUMNS} FROM mail_send ORDER BY claimed_at DESC, rowid DESC LIMIT ?1"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, params![i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(send_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn recent_activity(&self, limit: u32) -> Result<Vec<ActivityLine>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT a.task_id, t.title, u.display_name, a.kind, a.detail, a.created_at \
+                 FROM activity a \
+                 JOIN task t ON t.id = a.task_id \
+                 LEFT JOIN user u ON u.id = a.actor_id \
+                 ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?1",
+                params![i64::from(limit)],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(ActivityLine {
+                task_id: text(&row, 0)?,
+                title: text(&row, 1)?,
+                actor_name: opt_text(&row, 2)?,
+                kind: ActivityKind::parse(&text(&row, 3)?),
+                detail: text(&row, 4)?,
+                at: parse_stamp(&text(&row, 5)?)?,
+            });
         }
         Ok(out)
     }

@@ -3829,3 +3829,89 @@ async fn a_file_can_be_taken_away_and_saying_so_twice_is_answered_honestly() {
     assert!(store.attachment_bytes(&id).await.unwrap().is_none());
     assert!(store.attachments(&task).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+    let rule = a_rule(store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+
+    let pending = store
+        .claim_send(&rule.id, &transition.id, &task, "pending@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let failed = store
+        .claim_send(&rule.id, &transition.id, &task, "failed@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .record_send_refused(&failed.id, "timeout", Some(now + Duration::minutes(5)), now)
+        .await
+        .unwrap();
+
+    let sent = store
+        .claim_send(&rule.id, &transition.id, &task, "sent@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    store.record_send_accepted(&sent.id, now).await.unwrap();
+
+    let abandoned = store
+        .claim_send(&rule.id, &transition.id, &task, "abandoned@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .record_send_refused(&abandoned.id, "bounced", None, now)
+        .await
+        .unwrap();
+
+    let queue = store.mail_queue(10).await.unwrap();
+    let ids: Vec<&str> = queue.iter().map(|s| s.id.as_str()).collect();
+    assert!(ids.contains(&pending.id.as_str()));
+    assert!(ids.contains(&failed.id.as_str()));
+    assert!(!ids.contains(&sent.id.as_str()));
+    assert!(!ids.contains(&abandoned.id.as_str()));
+}
+
+#[tokio::test]
+async fn the_activity_feed_is_the_whole_workspace_newest_first() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let other = member(store, &workspace, "sam@izlek.sh", "Sam").await;
+    let task_a = add_task(store, &workspace, "Backlog", "first task", None, &admin).await;
+    let task_b = add_task(store, &workspace, "Backlog", "second task", None, &admin).await;
+    let t0 = OffsetDateTime::now_utc();
+
+    store
+        .record_activity(&task_a, Some(&admin), &ActivityKind::Created, "", t0)
+        .await
+        .unwrap();
+    store
+        .record_activity(
+            &task_b,
+            Some(&other),
+            &ActivityKind::Retitled,
+            "new title",
+            t0 + Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+
+    let feed = store.recent_activity(10).await.unwrap();
+    // Two "created" lines came free with the two tasks; the two just recorded
+    // sit newest first, ahead of both of those.
+    assert_eq!(feed.len(), 4);
+    assert_eq!(feed[0].task_id, task_b);
+    assert_eq!(feed[0].title, "second task");
+    assert_eq!(feed[0].actor_name.as_deref(), Some("Sam"));
+    assert_eq!(feed[0].kind, ActivityKind::Retitled);
+    assert_eq!(feed[1].task_id, task_a);
+    assert_eq!(feed[1].actor_name.as_deref(), Some("Ada"));
+}
