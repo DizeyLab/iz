@@ -12,7 +12,10 @@ use turso::transaction::TransactionBehavior;
 use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
-use super::{NewTask, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace};
+use super::{
+    Audience, MailRule, MailSend, NewTask, NewUser, Recipient, Result, SendState, Session,
+    SigninLink, Store, StoreError, Trigger, User, Workspace,
+};
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
 use crate::detail::{
@@ -27,6 +30,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_auth.sql")),
     (3, include_str!("../../migrations/0003_transition.sql")),
+    (4, include_str!("../../migrations/0004_mail.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -133,6 +137,84 @@ impl TursoStore {
         let mut rows = self.conn.query(sql, args).await.map_err(backend)?;
         rows.next().await.map_err(backend)
     }
+}
+
+const RULE_COLUMNS: &str =
+    "id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at";
+
+const SEND_COLUMNS: &str = "id, rule_id, event_id, task_id, recipient, state, attempts, \
+     last_error, next_attempt_at, sent_at";
+
+fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
+    match trigger {
+        Trigger::StatusBecomes(column) => ("status", Some(column.clone())),
+        Trigger::Unblocked => ("unblocked", None),
+    }
+}
+
+fn audience_text(audience: Audience) -> &'static str {
+    match audience {
+        Audience::Assignees => "assignees",
+        Audience::Board => "board",
+    }
+}
+
+fn rule_from(row: &Row) -> Result<MailRule> {
+    let kind = text(row, 2)?;
+    let column = opt_text(row, 3)?;
+    let trigger = match (kind.as_str(), column) {
+        ("status", Some(column)) => Trigger::StatusBecomes(column),
+        ("unblocked", None) => Trigger::Unblocked,
+        (kind, _) => return Err(StoreError::Corrupt(format!("mail rule trigger {kind:?}"))),
+    };
+    let audience = match text(row, 5)?.as_str() {
+        "assignees" => Audience::Assignees,
+        "board" => Audience::Board,
+        other => return Err(StoreError::Corrupt(format!("mail rule audience {other:?}"))),
+    };
+    Ok(MailRule {
+        id: text(row, 0)?,
+        board_id: text(row, 1)?,
+        trigger,
+        subject: text(row, 4)?,
+        audience,
+        enabled: row.get::<i64>(6).map_err(backend)? != 0,
+        created_at: parse_stamp(&text(row, 7)?)?,
+    })
+}
+
+fn send_from(row: &Row) -> Result<MailSend> {
+    let state = match text(row, 5)?.as_str() {
+        "pending" => SendState::Pending,
+        "sent" => SendState::Sent,
+        "failed" => SendState::Failed,
+        "abandoned" => SendState::Abandoned,
+        other => return Err(StoreError::Corrupt(format!("send state {other:?}"))),
+    };
+    Ok(MailSend {
+        id: text(row, 0)?,
+        rule_id: text(row, 1)?,
+        event_id: text(row, 2)?,
+        task_id: text(row, 3)?,
+        recipient: text(row, 4)?,
+        state,
+        attempts: row.get::<i64>(6).map_err(backend)?.max(0) as u32,
+        last_error: opt_text(row, 7)?,
+        next_attempt_at: opt_stamp(row, 8)?,
+        sent_at: opt_stamp(row, 9)?,
+    })
+}
+
+async fn recipients_from(rows: &mut turso::Rows) -> Result<Vec<Recipient>> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(backend)? {
+        out.push(Recipient {
+            user_id: text(&row, 0)?,
+            email: text(&row, 1)?,
+            display_name: text(&row, 2)?,
+        });
+    }
+    Ok(out)
 }
 
 fn backend<E: std::fmt::Display>(e: E) -> StoreError {
@@ -1560,6 +1642,271 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         Ok(())
+    }
+
+    // -- mail rules --------------------------------------------------------
+
+    async fn create_mail_rule(
+        &self,
+        board_id: &str,
+        trigger: &Trigger,
+        subject: &str,
+        audience: Audience,
+        at: OffsetDateTime,
+    ) -> Result<MailRule> {
+        let id = Uuid::new_v4().to_string();
+        let (kind, column) = trigger_parts(trigger);
+        self.conn
+            .execute(
+                "INSERT INTO mail_rule \
+                 (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, \
+                  created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+                params![
+                    id.clone(),
+                    board_id,
+                    kind,
+                    column,
+                    subject,
+                    audience_text(audience),
+                    stamp(at)?
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        let sql = format!("SELECT {RULE_COLUMNS} FROM mail_rule WHERE id = ?1");
+        match self.one_row(&sql, params![id]).await? {
+            Some(row) => rule_from(&row),
+            None => Err(StoreError::NotFound),
+        }
+    }
+
+    async fn mail_rules(&self, board_id: &str) -> Result<Vec<MailRule>> {
+        let sql = format!(
+            "SELECT {RULE_COLUMNS} FROM mail_rule WHERE board_id = ?1 ORDER BY created_at, rowid"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, params![board_id])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(rule_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn set_mail_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE mail_rule SET enabled = ?1 WHERE id = ?2",
+                params![i64::from(enabled), rule_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn delete_mail_rule(&self, rule_id: &str) -> Result<()> {
+        // The ledger goes with the rule — ON DELETE CASCADE on `mail_send`,
+        // which the foreign-keys pragma makes real.
+        let n = self
+            .conn
+            .execute("DELETE FROM mail_rule WHERE id = ?1", params![rule_id])
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn mail_rule_last_sent(&self, board_id: &str) -> Result<Vec<(String, OffsetDateTime)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT s.rule_id, MAX(s.sent_at) FROM mail_send s \
+                 JOIN mail_rule r ON r.id = s.rule_id \
+                 WHERE r.board_id = ?1 AND s.sent_at IS NOT NULL \
+                 GROUP BY s.rule_id",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push((text(&row, 0)?, parse_stamp(&text(&row, 1)?)?));
+        }
+        Ok(out)
+    }
+
+    // -- the send ledger ---------------------------------------------------
+
+    async fn claim_send(
+        &self,
+        rule_id: &str,
+        event_id: &str,
+        task_id: &str,
+        recipient: &str,
+        at: OffsetDateTime,
+    ) -> Result<Option<MailSend>> {
+        let id = Uuid::new_v4().to_string();
+        // The index is the decision. `DO NOTHING` turns the second engine run
+        // into zero rows affected rather than an error to interpret, and the
+        // caller that gets `None` sends nothing.
+        let n = self
+            .conn
+            .execute(
+                "INSERT INTO mail_send \
+                 (id, rule_id, event_id, task_id, recipient, state, attempts, claimed_at, \
+                  next_attempt_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, ?6) \
+                 ON CONFLICT (rule_id, event_id, task_id, recipient) DO NOTHING",
+                params![
+                    id.clone(),
+                    rule_id,
+                    event_id,
+                    task_id,
+                    recipient,
+                    stamp(at)?
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
+        match self.one_row(&sql, params![id]).await? {
+            Some(row) => send_from(&row).map(Some),
+            None => Err(StoreError::NotFound),
+        }
+    }
+
+    async fn record_send_accepted(&self, send_id: &str, at: OffsetDateTime) -> Result<()> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE mail_send \
+                 SET state = 'sent', attempts = attempts + 1, sent_at = ?1, \
+                     next_attempt_at = NULL, last_error = NULL \
+                 WHERE id = ?2",
+                params![stamp(at)?, send_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn record_send_refused(
+        &self,
+        send_id: &str,
+        error: &str,
+        retry_at: Option<OffsetDateTime>,
+        _at: OffsetDateTime,
+    ) -> Result<()> {
+        // A refusal is written whether or not it will be retried: a mail that
+        // never arrived and left no trace is the failure that makes people stop
+        // trusting the tool.
+        let state = if retry_at.is_some() {
+            "failed"
+        } else {
+            "abandoned"
+        };
+        let retry = match retry_at {
+            Some(at) => Some(stamp(at)?),
+            None => None,
+        };
+        let n = self
+            .conn
+            .execute(
+                "UPDATE mail_send \
+                 SET state = ?1, attempts = attempts + 1, last_error = ?2, next_attempt_at = ?3 \
+                 WHERE id = ?4",
+                params![state, error, retry, send_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>> {
+        let sql = format!(
+            "SELECT {SEND_COLUMNS} FROM mail_send \
+             WHERE next_attempt_at IS NOT NULL AND next_attempt_at <= ?1 \
+             ORDER BY next_attempt_at LIMIT ?2"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, params![stamp(now)?, i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(send_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn sends_for_rule(&self, rule_id: &str, limit: u32) -> Result<Vec<MailSend>> {
+        let sql = format!(
+            "SELECT {SEND_COLUMNS} FROM mail_send WHERE rule_id = ?1 \
+             ORDER BY claimed_at DESC, rowid DESC LIMIT ?2"
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, params![rule_id, i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(send_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    // -- who gets mailed ---------------------------------------------------
+
+    async fn recipients_for_task(&self, task_id: &str) -> Result<Vec<Recipient>> {
+        // The role filter is belt as well as braces: a Viewer cannot be
+        // assigned in the first place, and if one ever were, no mail would go
+        // out to them from here.
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT u.id, u.email, u.display_name FROM task_assignee a \
+                 JOIN user u ON u.id = a.user_id \
+                 WHERE a.task_id = ?1 AND u.role <> ?2 ORDER BY u.display_name",
+                params![task_id, Role::Viewer.as_str()],
+            )
+            .await
+            .map_err(backend)?;
+        recipients_from(&mut rows).await
+    }
+
+    async fn recipients_for_board(&self, board_id: &str) -> Result<Vec<Recipient>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT u.id, u.email, u.display_name FROM user u \
+                 JOIN board b ON b.workspace_id = u.workspace_id \
+                 WHERE b.id = ?1 AND u.role <> ?2 ORDER BY u.display_name",
+                params![board_id, Role::Viewer.as_str()],
+            )
+            .await
+            .map_err(backend)?;
+        recipients_from(&mut rows).await
     }
 }
 

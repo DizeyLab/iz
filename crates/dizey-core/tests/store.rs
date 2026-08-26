@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 use dizey_core::Role;
 use dizey_core::auth::{Token, hash_password};
-use dizey_core::store::{NewUser, Store, StoreError, TursoStore, User};
+use dizey_core::store::{
+    Audience, MailRule, NewUser, SendState, Store, StoreError, Trigger, TursoStore, User,
+};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -86,14 +88,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 3);
+    assert_eq!(first.schema_version().await.unwrap(), 4);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 3);
+    assert_eq!(second.schema_version().await.unwrap(), 4);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -2464,4 +2466,414 @@ async fn an_orphan_row_is_refused() {
         "the engine accepted a user pointing at no workspace"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -- mail rules and the send ledger ---------------------------------------
+
+async fn moved_to(
+    store: &TursoStore,
+    workspace: &str,
+    task: &str,
+    from: &str,
+    to: &str,
+    actor: &str,
+) -> dizey_core::board::Transition {
+    let from_id = column_named(store, workspace, from).await;
+    let to_id = column_named(store, workspace, to).await;
+    match store
+        .move_task(task, &from_id, &to_id, actor, OffsetDateTime::now_utc())
+        .await
+        .unwrap()
+    {
+        Moved::Recorded(transition) => transition,
+        other => panic!("the move did not happen: {other:?}"),
+    }
+}
+
+async fn a_rule(store: &TursoStore, workspace: &str, column: &str, subject: &str) -> MailRule {
+    let board = store.board(workspace).await.unwrap().unwrap();
+    let column_id = column_named(store, workspace, column).await;
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(column_id),
+            subject,
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_rule_that_fires_on_nothing_is_refused_by_the_schema() {
+    // The store's own API cannot build a half-written rule, so this reaches
+    // past it: a status rule with no column, straight at the table. The check
+    // constraint is the guard, and if it were ever dropped this insert would
+    // quietly succeed and the engine would carry a rule that matches nothing.
+    let dir = std::env::temp_dir().join(format!("dizey-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dizey.db").to_string_lossy().into_owned();
+    let store = TursoStore::open(&path).await.unwrap();
+    let (workspace, _admin) = claim(&store).await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    drop(store);
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    // Foreign keys are a per-connection pragma, and this connection is not one
+    // the store handed out — so it says so itself, the way the store does on
+    // every connection it opens.
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    let refused = conn
+        .execute(
+            "INSERT INTO mail_rule \
+             (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at) \
+             VALUES ('r1', ?1, 'status', NULL, 'Task completed', 'assignees', 1, '2026-08-26')",
+            turso::params![board.id.clone()],
+        )
+        .await;
+    assert!(refused.is_err(), "a status rule with no column was stored");
+
+    let missing_column = conn
+        .execute(
+            "INSERT INTO mail_rule \
+             (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at) \
+             VALUES ('r2', ?1, 'status', 'no-such-column', 'Task completed', 'assignees', 1, \
+                     '2026-08-26')",
+            turso::params![board.id],
+        )
+        .await;
+    assert!(
+        missing_column.is_err(),
+        "a rule pointed at a column that is not there was stored"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rule_is_one_sentence_and_starts_live() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let board = scratch.store.board(&workspace).await.unwrap().unwrap();
+
+    // An unblocked rule names no column and a status rule must. The schema
+    // holds that line, so no code path can write a rule that fires on nothing.
+    scratch
+        .store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Unblocked,
+            "You can start now",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .expect("an unblocked rule is whole without a column");
+
+    let written = scratch.store.mail_rules(&board.id).await.unwrap();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].trigger, Trigger::Unblocked);
+    assert!(written[0].enabled, "a new rule is live");
+}
+
+#[tokio::test]
+async fn the_index_decides_who_owns_a_send() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "CLI install script",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+
+    let now = OffsetDateTime::now_utc();
+    let first = scratch
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "ada@dizey.sh", now)
+        .await
+        .unwrap();
+    assert!(first.is_some(), "the first run owns the send");
+
+    // The engine running a second time over the same crossing — a restart, a
+    // retry sweep, two workers — must not mail Ada twice. Nothing is read
+    // first: the insert loses.
+    let second = scratch
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "ada@dizey.sh", now)
+        .await
+        .unwrap();
+    assert!(second.is_none(), "the second run owns nothing");
+
+    let ledger = scratch.store.sends_for_rule(&rule.id, 10).await.unwrap();
+    assert_eq!(ledger.len(), 1, "one row, one mail");
+}
+
+#[tokio::test]
+async fn a_second_crossing_is_a_second_send() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+
+    // Done, back to Review, Done again. That is two crossings into Done, and
+    // the person is owed two mails: the transition is the event, not the
+    // column the card happens to be sitting in.
+    let first = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let _back = moved_to(&scratch.store, &workspace, &task, "Done", "Review", &admin).await;
+    let again = moved_to(&scratch.store, &workspace, &task, "Review", "Done", &admin).await;
+    assert_ne!(first.id, again.id);
+
+    let now = OffsetDateTime::now_utc();
+    for transition in [&first, &again] {
+        assert!(
+            scratch
+                .store
+                .claim_send(&rule.id, &transition.id, &task, "ada@dizey.sh", now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(
+        scratch
+            .store
+            .sends_for_rule(&rule.id, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_refused_send_is_recorded_and_owed_again() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+    let send = scratch
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "ada@dizey.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(send.state, SendState::Pending);
+
+    // A connection that timed out says nothing about the address, so it is
+    // owed again — and the answer the server gave is kept either way.
+    scratch
+        .store
+        .record_send_refused(
+            &send.id,
+            "connection timed out",
+            Some(now + Duration::minutes(5)),
+            now,
+        )
+        .await
+        .unwrap();
+    let after = &scratch.store.sends_for_rule(&rule.id, 10).await.unwrap()[0];
+    assert_eq!(after.state, SendState::Failed);
+    assert_eq!(after.attempts, 1);
+    assert_eq!(after.last_error.as_deref(), Some("connection timed out"));
+
+    assert!(
+        scratch.store.sends_owed(now, 10).await.unwrap().is_empty(),
+        "not owed until it is due"
+    );
+    let owed = scratch
+        .store
+        .sends_owed(now + Duration::minutes(6), 10)
+        .await
+        .unwrap();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].id, send.id);
+}
+
+#[tokio::test]
+async fn a_refused_address_is_not_retried_forever() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+    let send = scratch
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "gone@dizey.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // "No such mailbox" will be just as true tomorrow. It is written down and
+    // never offered again.
+    scratch
+        .store
+        .record_send_refused(&send.id, "550 no such mailbox", None, now)
+        .await
+        .unwrap();
+    let after = &scratch.store.sends_for_rule(&rule.id, 10).await.unwrap()[0];
+    assert_eq!(after.state, SendState::Abandoned);
+    assert_eq!(after.last_error.as_deref(), Some("550 no such mailbox"));
+    assert!(
+        scratch
+            .store
+            .sends_owed(now + Duration::days(30), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an abandoned send is owed to nobody"
+    );
+}
+
+#[tokio::test]
+async fn an_accepted_send_stops_being_owed() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+    let send = scratch
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "ada@dizey.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    scratch
+        .store
+        .record_send_accepted(&send.id, now)
+        .await
+        .unwrap();
+
+    assert!(
+        scratch
+            .store
+            .sends_owed(now + Duration::days(1), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let board = scratch.store.board(&workspace).await.unwrap().unwrap();
+    let last = scratch.store.mail_rule_last_sent(&board.id).await.unwrap();
+    assert_eq!(last.len(), 1);
+    assert_eq!(last[0].0, rule.id);
+}
+
+#[tokio::test]
+async fn a_viewer_is_never_a_recipient() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let watcher = scratch
+        .store
+        .create_user(NewUser {
+            workspace_id: workspace.clone(),
+            email: "viewer@dizey.sh".into(),
+            display_name: "Vera".into(),
+            role: Role::Viewer,
+        })
+        .await
+        .unwrap();
+    let mate = member(&scratch.store, &workspace, "emre@dizey.sh", "Emre").await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    scratch.store.assign_task(&task, &mate).await.unwrap();
+    // Assigning a Viewer is refused higher up; if a row ever appeared anyway,
+    // the store still does not hand the address to the mailer.
+    let _ = scratch.store.assign_task(&task, &watcher.id).await;
+
+    let board = scratch.store.board(&workspace).await.unwrap().unwrap();
+    for list in [
+        scratch.store.recipients_for_task(&task).await.unwrap(),
+        scratch.store.recipients_for_board(&board.id).await.unwrap(),
+    ] {
+        assert!(
+            list.iter().all(|person| person.email != "viewer@dizey.sh"),
+            "a Viewer was about to be mailed: {list:?}"
+        );
+    }
+    let assignees = scratch.store.recipients_for_task(&task).await.unwrap();
+    assert_eq!(
+        assignees
+            .iter()
+            .map(|p| p.email.as_str())
+            .collect::<Vec<_>>(),
+        ["emre@dizey.sh"]
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_rule_takes_its_ledger_with_it() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let rule = a_rule(&scratch.store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&scratch.store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+    scratch
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "ada@dizey.sh", now)
+        .await
+        .unwrap();
+
+    scratch.store.delete_mail_rule(&rule.id).await.unwrap();
+    assert!(
+        scratch
+            .store
+            .sends_for_rule(&rule.id, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        scratch.store.delete_mail_rule(&rule.id).await,
+        Err(StoreError::NotFound)
+    ));
 }

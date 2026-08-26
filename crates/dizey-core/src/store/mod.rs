@@ -128,6 +128,77 @@ pub struct NewTask<'a> {
     pub created_by: &'a str,
 }
 
+/// What makes a rule fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Trigger {
+    /// A card crossed into this column. The crossing is the fact, not the
+    /// card's current column: a card that goes Review -> Done -> Review has
+    /// crossed into Done once.
+    StatusBecomes(String),
+    /// A task whose last blocker just finished, so the people on it can start.
+    Unblocked,
+}
+
+/// Who a rule mails. A Viewer appears in neither list — a Viewer cannot be
+/// assigned and is never mailed, and that is decided here rather than left to
+/// whoever calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Audience {
+    Assignees,
+    Board,
+}
+
+/// One sentence: when this happens, send this subject to these people.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailRule {
+    pub id: String,
+    pub board_id: String,
+    pub trigger: Trigger,
+    pub subject: String,
+    pub audience: Audience,
+    pub enabled: bool,
+    pub created_at: OffsetDateTime,
+}
+
+/// Where one mail got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SendState {
+    /// Claimed by an engine run, not yet accepted by the mail server.
+    Pending,
+    Sent,
+    /// The server refused in a way that may not be true later — a timeout, a
+    /// host that is down. It will be tried again.
+    Failed,
+    /// Refused in a way that will not change, or out of attempts. Nobody will
+    /// try again, and the admin can see that it was tried.
+    Abandoned,
+}
+
+/// One mail a rule owes one person, and what happened to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailSend {
+    pub id: String,
+    pub rule_id: String,
+    /// The transition that caused it.
+    pub event_id: String,
+    pub task_id: String,
+    pub recipient: String,
+    pub state: SendState,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<OffsetDateTime>,
+    pub sent_at: Option<OffsetDateTime>,
+}
+
+/// Somebody a rule can mail. The address is here because this is the one place
+/// that needs it; it never rides out to a page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recipient {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: String,
+}
+
 /// The storage boundary. Dyn-safe on purpose: handlers hold `Arc<dyn Store>`.
 ///
 /// The board's reads live in [`BoardReads`], so the sweep-per-board shape is a
@@ -382,4 +453,76 @@ pub trait Store: BoardReads + DetailReads + 'static {
         detail: &str,
         at: OffsetDateTime,
     ) -> Result<()>;
+
+    // -- mail rules --------------------------------------------------------
+
+    async fn create_mail_rule(
+        &self,
+        board_id: &str,
+        trigger: &Trigger,
+        subject: &str,
+        audience: Audience,
+        at: OffsetDateTime,
+    ) -> Result<MailRule>;
+
+    /// Every rule on the board, switched off ones included: the admin screen
+    /// lists what exists, not what is live.
+    async fn mail_rules(&self, board_id: &str) -> Result<Vec<MailRule>>;
+
+    async fn set_mail_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()>;
+
+    async fn delete_mail_rule(&self, rule_id: &str) -> Result<()>;
+
+    /// When each rule last got a mail accepted, for the "last sent" line.
+    async fn mail_rule_last_sent(&self, board_id: &str) -> Result<Vec<(String, OffsetDateTime)>>;
+
+    // -- the send ledger ---------------------------------------------------
+
+    /// Takes ownership of one mail by writing its row, and answers `None` if
+    /// somebody already owns it.
+    ///
+    /// The unique index decides, not a preceding read: the engine running
+    /// twice over one transition inserts twice and the second insert loses.
+    /// Nothing is handed to the mail server before this row exists, so a
+    /// crash mid-send leaves a row that says pending rather than a mail
+    /// nobody can account for.
+    async fn claim_send(
+        &self,
+        rule_id: &str,
+        event_id: &str,
+        task_id: &str,
+        recipient: &str,
+        at: OffsetDateTime,
+    ) -> Result<Option<MailSend>>;
+
+    /// The server took it.
+    async fn record_send_accepted(&self, send_id: &str, at: OffsetDateTime) -> Result<()>;
+
+    /// The server refused it. `retry_at` is `Some` while it is worth trying
+    /// again and `None` when it never will be — a refused address, or the last
+    /// attempt spent — and the answer the server gave is kept either way, so
+    /// the admin can see that a rule tried and failed rather than wondering
+    /// where the mail went.
+    async fn record_send_refused(
+        &self,
+        send_id: &str,
+        error: &str,
+        retry_at: Option<OffsetDateTime>,
+        at: OffsetDateTime,
+    ) -> Result<()>;
+
+    /// Sends owed right now: claimed but never accepted, and due.
+    async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>>;
+
+    /// Every send a rule has made, newest first, for the admin's trail.
+    async fn sends_for_rule(&self, rule_id: &str, limit: u32) -> Result<Vec<MailSend>>;
+
+    // -- who gets mailed ---------------------------------------------------
+
+    /// The people a task points at. Viewers cannot be assigned, so none appear.
+    async fn recipients_for_task(&self, task_id: &str) -> Result<Vec<Recipient>>;
+
+    /// Everyone who may write on the board. Viewers are left out here, in the
+    /// store, so no caller can mail one by forgetting to filter.
+    async fn recipients_for_board(&self, board_id: &str) -> Result<Vec<Recipient>>;
 }
