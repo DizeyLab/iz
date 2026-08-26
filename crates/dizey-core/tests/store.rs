@@ -86,14 +86,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 2);
+    assert_eq!(first.schema_version().await.unwrap(), 3);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 2);
+    assert_eq!(second.schema_version().await.unwrap(), 3);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1357,7 +1357,7 @@ async fn an_address_can_only_be_invited_once() {
 
 // -- board ------------------------------------------------------------------
 
-use dizey_core::board::{BoardReads, BoardView, Person, load};
+use dizey_core::board::{BoardReads, BoardView, Moved, Person, load};
 use dizey_core::store::NewTask;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use time::Date;
@@ -2168,4 +2168,200 @@ async fn key_of(store: &TursoStore, workspace: &str, title: &str) -> String {
         .expect("no such card")
         .task_key
         .clone()
+}
+
+// -- moving a card ---------------------------------------------------------
+
+#[tokio::test]
+async fn a_move_writes_the_crossing_in_the_same_breath() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let progress = column_named(store, &workspace, "In Progress").await;
+    let task = add_task(
+        store,
+        &workspace,
+        "Backlog",
+        "wire the sender",
+        None,
+        &admin,
+    )
+    .await;
+
+    let moved = store
+        .move_task(&task, &backlog, &progress, &admin, now)
+        .await
+        .unwrap();
+
+    let Moved::Recorded(transition) = moved else {
+        panic!("a card that changed column has a transition, got {moved:?}");
+    };
+    assert_eq!(transition.task_id, task);
+    assert_eq!(transition.from_column, backlog);
+    assert_eq!(transition.to_column, progress);
+    assert_eq!(transition.actor_id, admin);
+    // The mail engine reads this timestamp rather than its own clock, so it is
+    // the move's moment and not the send's.
+    assert_eq!(transition.at, now);
+
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == task).unwrap();
+    assert_eq!(card.column_id, progress);
+
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
+    let line = detail
+        .activity
+        .iter()
+        .find(|line| line.kind == ActivityKind::Moved)
+        .expect("the move is in the activity trail");
+    assert_eq!(
+        line.actor.as_ref().map(|who| who.id.as_str()),
+        Some(admin.as_str())
+    );
+    assert_eq!(line.detail, "Backlog to In Progress");
+}
+
+#[tokio::test]
+async fn a_card_dropped_back_where_it_came_from_did_not_move() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let task = add_task(store, &workspace, "Backlog", "stays put", None, &admin).await;
+    let before = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let moved = store
+        .move_task(&task, &backlog, &backlog, &admin, now)
+        .await
+        .unwrap();
+
+    assert_eq!(moved, Moved::Unchanged);
+    let after = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.activity.len(),
+        before.activity.len(),
+        "a drop that changed nothing wrote nothing"
+    );
+}
+
+#[tokio::test]
+async fn two_drags_of_one_card_leave_one_crossing() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let progress = column_named(store, &workspace, "In Progress").await;
+    let review = column_named(store, &workspace, "Review").await;
+    let task = add_task(store, &workspace, "Backlog", "contested", None, &admin).await;
+
+    // Both people picked the card up out of Backlog. Only one drop can be
+    // acting on the board that was actually there.
+    let first = store
+        .move_task(&task, &backlog, &progress, &admin, now)
+        .await
+        .unwrap();
+    let second = store
+        .move_task(&task, &backlog, &review, &admin, now)
+        .await
+        .unwrap();
+
+    assert!(matches!(first, Moved::Recorded(_)));
+    assert_eq!(
+        second,
+        Moved::Stale,
+        "the second drop is not allowed to cross out of a column the card had left"
+    );
+
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
+    let crossings = detail
+        .activity
+        .iter()
+        .filter(|line| line.kind == ActivityKind::Moved)
+        .count();
+    assert_eq!(crossings, 1);
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == task).unwrap();
+    assert_eq!(card.column_id, progress, "the winner's move stands");
+}
+
+#[tokio::test]
+async fn the_done_column_stamps_the_card_and_leaving_it_unstamps() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let done = column_named(store, &workspace, "Done").await;
+    let task = add_task(store, &workspace, "Backlog", "finishes", None, &admin).await;
+
+    store
+        .move_task(&task, &backlog, &done, &admin, now)
+        .await
+        .unwrap();
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == task).unwrap();
+    assert!(card.is_done(), "a card in the done column is done");
+    assert!(card.done_at.is_some());
+
+    store
+        .move_task(&task, &done, &backlog, &admin, now)
+        .await
+        .unwrap();
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == task).unwrap();
+    assert!(!card.is_done(), "dragged back out, it is not finished");
+    assert!(card.done_at.is_none());
+}
+
+#[tokio::test]
+async fn a_column_from_another_board_is_not_a_destination() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let task = add_task(store, &workspace, "Backlog", "stays here", None, &admin).await;
+
+    let refused = store
+        .move_task(&task, &backlog, "not-a-column", &admin, now)
+        .await;
+
+    assert!(matches!(refused, Err(StoreError::NotFound)));
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == task).unwrap();
+    assert_eq!(card.column_id, backlog, "nothing moved");
+}
+
+#[tokio::test]
+async fn a_deleted_card_does_not_move() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let progress = column_named(store, &workspace, "In Progress").await;
+    let task = add_task(store, &workspace, "Backlog", "gone", None, &admin).await;
+    store.delete_task(&task, &admin, now).await.unwrap();
+
+    let refused = store
+        .move_task(&task, &backlog, &progress, &admin, now)
+        .await;
+
+    assert!(matches!(refused, Err(StoreError::NotFound)));
 }

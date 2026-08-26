@@ -39,6 +39,37 @@ pub struct TaskRow {
     pub done_at: Option<OffsetDateTime>,
 }
 
+/// One card crossing from one column into another, as it was written.
+///
+/// `at` is the moment the move committed, taken inside the same transaction
+/// as the move. The mail engine reads it rather than stamping its own clock:
+/// a send retried on Thursday still has to say the card moved on Tuesday.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transition {
+    pub id: String,
+    pub task_id: String,
+    pub from_column: String,
+    pub to_column: String,
+    pub actor_id: String,
+    pub at: OffsetDateTime,
+}
+
+/// What a move attempt did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Moved {
+    /// The card changed column. This is the fact that was written, and the
+    /// only outcome the mail rules act on.
+    Recorded(Transition),
+    /// The card was dropped back in the column it came from. Nothing was
+    /// written: that is not a transition, and a rule must not fire for it.
+    Unchanged,
+    /// Somebody else moved the card between the drag starting and the drop
+    /// landing, so the column this move was told to move it out of is no
+    /// longer the column it is in. Nothing was written and the caller should
+    /// re-read the board rather than overwrite a decision it never saw.
+    Stale,
+}
+
 /// Whoever a card can point at. The address is not here: a board card never
 /// shows one, so it never leaves the server for this screen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

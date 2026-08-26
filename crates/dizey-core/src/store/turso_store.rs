@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{NewTask, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace};
 use crate::Role;
-use crate::board::{BoardMeta, BoardReads, Column, Person, TaskRow};
+use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
 use crate::detail::{
     ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, TaskFacts,
 };
@@ -26,6 +26,7 @@ use time::macros::format_description;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_auth.sql")),
+    (3, include_str!("../../migrations/0003_transition.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -147,6 +148,14 @@ fn is_constraint_violation(e: &turso::Error) -> bool {
 
 fn now_text() -> Result<String> {
     stamp(OffsetDateTime::now_utc())
+}
+
+/// What the body of a move transaction decided, before the commit or rollback
+/// that acts on it.
+enum Outcome {
+    Wrote,
+    Stale,
+    Missing,
 }
 
 fn stamp(at: OffsetDateTime) -> Result<String> {
@@ -1149,6 +1158,178 @@ impl Store for TursoStore {
         match written {
             Ok(true) => tx.commit().await.map_err(backend),
             Ok(false) => {
+                let _ = tx.rollback().await;
+                Err(StoreError::NotFound)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(backend(e))
+            }
+        }
+    }
+
+    async fn move_task(
+        &self,
+        task_id: &str,
+        from_column_id: &str,
+        to_column_id: &str,
+        actor_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<Moved> {
+        let stamp = stamp(at)?;
+        let transition_id = Uuid::new_v4().to_string();
+
+        // Dropping a card back where it came from is not a move. Answer before
+        // opening a transaction: there is nothing to serialise.
+        if from_column_id == to_column_id {
+            return Ok(Moved::Unchanged);
+        }
+
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the whole point is that two drops on the same card cannot
+        // both read "it is in Backlog" and both write a crossing out of it.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        let written = async {
+            let mut rows = tx
+                .query(
+                    "SELECT board_id, column_id FROM task \
+                     WHERE id = ?1 AND deleted_at IS NULL",
+                    params![task_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(Outcome::Missing);
+            };
+            let board_id = row.get::<String>(0)?;
+            let sitting_in = row.get::<String>(1)?;
+            drop(rows);
+
+            // Somebody moved it while the drag was in the air.
+            if sitting_in != from_column_id {
+                return Ok(Outcome::Stale);
+            }
+
+            // The destination has to be a column of this task's own board: a
+            // column id arrives in a form, and a form is not a promise.
+            let mut rows = tx
+                .query(
+                    "SELECT name, is_done FROM board_column WHERE id = ?1 AND board_id = ?2",
+                    params![to_column_id, board_id.clone()],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(Outcome::Missing);
+            };
+            let to_name = row.get::<String>(0)?;
+            let to_is_done = row.get::<i64>(1)? != 0;
+            drop(rows);
+
+            let mut rows = tx
+                .query(
+                    "SELECT name FROM board_column WHERE id = ?1",
+                    params![from_column_id],
+                )
+                .await?;
+            let from_name = match rows.next().await? {
+                Some(row) => row.get::<String>(0)?,
+                None => from_column_id.to_string(),
+            };
+            drop(rows);
+
+            // The card lands at the end of its new column. Where inside a
+            // column a card sits is the board's sort control's business, not
+            // the drop's.
+            let mut rows = tx
+                .query(
+                    "SELECT COALESCE(MAX(position), 0) + 1 FROM task \
+                     WHERE column_id = ?1 AND deleted_at IS NULL",
+                    params![to_column_id],
+                )
+                .await?;
+            let landing = match rows.next().await? {
+                Some(row) => row.get::<f64>(0)?,
+                None => 1.0,
+            };
+            drop(rows);
+
+            // Conditional on the column read above, so this is still one
+            // writer even if the IMMEDIATE lock were ever relaxed.
+            let moved = tx
+                .execute(
+                    "UPDATE task SET column_id = ?2, position = ?3, done_at = ?4, updated_at = ?5 \
+                     WHERE id = ?1 AND column_id = ?6 AND deleted_at IS NULL",
+                    params![
+                        task_id,
+                        to_column_id,
+                        landing,
+                        if to_is_done {
+                            Some(stamp.clone())
+                        } else {
+                            None
+                        },
+                        stamp.clone(),
+                        from_column_id
+                    ],
+                )
+                .await?;
+            if moved == 0 {
+                return Ok(Outcome::Stale);
+            }
+
+            tx.execute(
+                "INSERT INTO transition \
+                 (id, task_id, from_column, to_column, actor_id, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    transition_id.clone(),
+                    task_id,
+                    from_column_id,
+                    to_column_id,
+                    actor_id,
+                    stamp.clone()
+                ],
+            )
+            .await?;
+
+            tx.execute(
+                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    task_id,
+                    actor_id,
+                    ActivityKind::Moved.as_str(),
+                    format!("{from_name} to {to_name}"),
+                    stamp.clone()
+                ],
+            )
+            .await?;
+
+            Ok::<_, turso::Error>(Outcome::Wrote)
+        }
+        .await;
+
+        match written {
+            Ok(Outcome::Wrote) => {
+                tx.commit().await.map_err(backend)?;
+                Ok(Moved::Recorded(Transition {
+                    id: transition_id,
+                    task_id: task_id.to_string(),
+                    from_column: from_column_id.to_string(),
+                    to_column: to_column_id.to_string(),
+                    actor_id: actor_id.to_string(),
+                    at,
+                }))
+            }
+            Ok(Outcome::Stale) => {
+                let _ = tx.rollback().await;
+                Ok(Moved::Stale)
+            }
+            Ok(Outcome::Missing) => {
                 let _ = tx.rollback().await;
                 Err(StoreError::NotFound)
             }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::Role;
-use crate::board::{BoardReads, TaskRow};
+use crate::board::{BoardReads, Moved, TaskRow};
 use crate::detail::{ActivityKind, DeletionCost, DetailReads};
 
 pub mod turso_store;
@@ -328,6 +328,33 @@ pub trait Store: BoardReads + DetailReads + 'static {
         actor_id: &str,
         at: OffsetDateTime,
     ) -> Result<()>;
+
+    /// Moves a task into a column and records the crossing, both in one
+    /// transaction, so a transition never exists without the move that caused
+    /// it and a move never happens without leaving the fact behind.
+    ///
+    /// `from_column_id` is the column the caller believed the card was in when
+    /// the drag started, and the update is conditional on it still being true.
+    /// Two people dragging the same card at once therefore produce exactly one
+    /// transition: the loser is told [`Moved::Stale`] and re-reads, rather than
+    /// writing a second crossing out of a column the card had already left.
+    ///
+    /// A card dropped back where it came from answers [`Moved::Unchanged`] and
+    /// writes nothing at all — not the transition, not the activity line, not
+    /// an `updated_at` bump. It did not move.
+    ///
+    /// Moving into a column with `is_done` set stamps `done_at`; moving out of
+    /// one clears it, in the same transaction, because the card's finished
+    /// state is a consequence of where it sits and must not be able to drift
+    /// from it.
+    async fn move_task(
+        &self,
+        task_id: &str,
+        from_column_id: &str,
+        to_column_id: &str,
+        actor_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<Moved>;
 
     /// Removes a task and every dependency edge it stood in. Tasks that were
     /// waiting only on this one become unblocked, and that is recorded in
