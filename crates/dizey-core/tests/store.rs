@@ -88,14 +88,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 5);
+    assert_eq!(first.schema_version().await.unwrap(), 6);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 5);
+    assert_eq!(second.schema_version().await.unwrap(), 6);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -215,42 +215,18 @@ async fn workspace_defaults_match_the_settings_screen() {
         ws.allowed_file_types.is_empty(),
         "every type until narrowed"
     );
-    assert!(ws.smtp_host.is_none());
 }
 
 #[tokio::test]
-async fn smtp_password_is_never_part_of_the_workspace_record() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    scratch
-        .store
-        .set_smtp(
-            &ws_id,
-            "smtp.fastmail.com",
-            465,
-            "dizey",
-            "hunter2",
-            "Dizey",
-            "dizey@dizey.sh",
-        )
-        .await
-        .unwrap();
-
+async fn the_sender_is_not_in_the_workspace_record_at_all() {
+    let (scratch, _, _) = workspace_with_admin().await;
     let ws = scratch.store.workspace().await.unwrap().unwrap();
-    assert_eq!(ws.smtp_host.as_deref(), Some("smtp.fastmail.com"));
-    assert_eq!(ws.smtp_port, Some(465));
-    assert_eq!(ws.smtp_from_address.as_deref(), Some("dizey@dizey.sh"));
-    // The only way to the password is the mailer's own call.
+
+    // Host, port, username, password and from-address come from the
+    // environment. There is no column for any of them, so no response body
+    // that carries a workspace can carry a sender by accident.
     let serialised = serde_json::to_string(&ws).unwrap();
-    assert!(!serialised.contains("hunter2"), "{serialised}");
-    assert_eq!(
-        scratch
-            .store
-            .smtp_password(&ws_id)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("hunter2")
-    );
+    assert!(!serialised.contains("smtp"), "{serialised}");
 }
 
 #[tokio::test]

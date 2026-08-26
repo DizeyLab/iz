@@ -32,6 +32,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../../migrations/0003_transition.sql")),
     (4, include_str!("../../migrations/0004_mail.sql")),
     (5, include_str!("../../migrations/0005_freeing.sql")),
+    (6, include_str!("../../migrations/0006_sender_is_config.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -327,7 +328,7 @@ fn count_of(row: &Row) -> Result<u64> {
 }
 
 fn workspace_from(row: &Row) -> Result<Workspace> {
-    let types_json = text(row, 9)?;
+    let types_json = text(row, 4)?;
     let allowed_file_types: Vec<String> = if types_json.trim().is_empty() {
         Vec::new()
     } else {
@@ -338,20 +339,14 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         id: text(row, 0)?,
         name: text(row, 1)?,
         created_at: parse_stamp(&text(row, 2)?)?,
-        smtp_host: opt_text(row, 3)?,
-        smtp_port: row.get::<Option<u32>>(4).map_err(backend)?,
-        smtp_username: opt_text(row, 5)?,
-        smtp_from_name: opt_text(row, 6)?,
-        smtp_from_address: opt_text(row, 7)?,
-        attachment_limit_bytes: row.get::<i64>(8).map_err(backend)?.max(0) as u64,
+        attachment_limit_bytes: row.get::<i64>(3).map_err(backend)?.max(0) as u64,
         allowed_file_types,
-        photo_limit_bytes: row.get::<i64>(10).map_err(backend)?.max(0) as u64,
+        photo_limit_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
     })
 }
 
-const WORKSPACE_COLUMNS: &str = "id, name, created_at, smtp_host, smtp_port, smtp_username, \
-     smtp_from_name, smtp_from_address, attachment_limit_bytes, allowed_file_types, \
-     photo_limit_bytes";
+const WORKSPACE_COLUMNS: &str =
+    "id, name, created_at, attachment_limit_bytes, allowed_file_types, photo_limit_bytes";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -517,48 +512,6 @@ impl Store for TursoStore {
         match self.one_row(&sql, ()).await? {
             Some(row) => Ok(Some(workspace_from(&row)?)),
             None => Ok(None),
-        }
-    }
-
-    async fn set_smtp(
-        &self,
-        workspace_id: &str,
-        host: &str,
-        port: u32,
-        username: &str,
-        password: &str,
-        from_name: &str,
-        from_address: &str,
-    ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
-                 smtp_password = ?4, smtp_from_name = ?5, smtp_from_address = ?6 WHERE id = ?7",
-                params![
-                    host,
-                    port as i64,
-                    username,
-                    password,
-                    from_name,
-                    from_address,
-                    workspace_id
-                ],
-            )
-            .await
-            .map_err(backend)?;
-        Ok(())
-    }
-
-    async fn smtp_password(&self, workspace_id: &str) -> Result<Option<String>> {
-        match self
-            .one_row(
-                "SELECT smtp_password FROM workspace WHERE id = ?1",
-                params![workspace_id],
-            )
-            .await?
-        {
-            Some(row) => opt_text(&row, 0),
-            None => Err(StoreError::NotFound),
         }
     }
 
@@ -2485,6 +2438,40 @@ mod probe {
         let mut rows = c.query("SELECT COUNT(*) FROM t", ()).await.unwrap();
         let n = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
         assert_eq!(n, 200, "no write lost between two database handles");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sender's columns are gone from the schema, password included. This
+    /// is the property the config-only decision rests on: no handler can be
+    /// made to return a password the table does not have, and a copy of the
+    /// database file carries none.
+    #[tokio::test]
+    async fn the_workspace_table_has_no_sender_columns_left() {
+        let dir = std::env::temp_dir().join(format!("dizey-sender-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
+            .await
+            .unwrap();
+        use crate::store::Store as _;
+
+        let row = store
+            .one_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workspace'",
+                (),
+            )
+            .await
+            .unwrap()
+            .expect("the workspace table exists");
+        let schema = text(&row, 0).unwrap();
+        assert!(!schema.contains("smtp"), "{schema}");
+
+        // The rebuild put the name back, so everything that references the
+        // workspace still lands on this table.
+        store
+            .claim_workspace("Dizey", "ada@dizey.sh", "Ada", "hash")
+            .await
+            .unwrap();
+        assert!(store.workspace().await.unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

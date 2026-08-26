@@ -35,19 +35,15 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// A workspace and the settings that ride on it. The SMTP password is
-/// deliberately absent: it is written through [`Store::set_smtp`] and read only
-/// by the mailer, never returned to a page.
+/// A workspace and the settings that ride on it. The sender is not here at
+/// all: host, port, username, password and from-address come from the
+/// environment, so no query can return them and no backup of this file carries
+/// the password.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
     pub created_at: OffsetDateTime,
-    pub smtp_host: Option<String>,
-    pub smtp_port: Option<u32>,
-    pub smtp_username: Option<String>,
-    pub smtp_from_name: Option<String>,
-    pub smtp_from_address: Option<String>,
     pub attachment_limit_bytes: u64,
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
@@ -287,20 +283,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn owner(&self) -> Result<Option<User>>;
 
     async fn workspace(&self) -> Result<Option<Workspace>>;
-
-    async fn set_smtp(
-        &self,
-        workspace_id: &str,
-        host: &str,
-        port: u32,
-        username: &str,
-        password: &str,
-        from_name: &str,
-        from_address: &str,
-    ) -> Result<()>;
-
-    /// Reads the sender password. Only the mailer calls this.
-    async fn smtp_password(&self, workspace_id: &str) -> Result<Option<String>>;
 
     async fn set_limits(
         &self,
