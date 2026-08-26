@@ -3233,10 +3233,7 @@ async fn a_deleted_blocker_also_says_you_can_start_now() {
     let deletion = store.delete_task(&blocker, &admin, now).await.unwrap();
     assert_eq!(deletion.freed, vec![waiting.clone()]);
     let freeing = deletion.event.clone().expect("the freeing is a fact");
-    let first = engine
-        .on_freeing(&freeing, &deletion.freed)
-        .await
-        .unwrap();
+    let first = engine.on_freeing(&freeing, &deletion.freed).await.unwrap();
     assert_eq!(first.sent, 1);
 
     // And the same freeing processed twice mails once: the unique index is
@@ -3269,7 +3266,15 @@ async fn a_delete_that_leaves_somebody_still_waiting_mails_nobody() {
     let board = store.board(&workspace).await.unwrap().unwrap();
     let waiting = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
     let first = add_task(&store, &workspace, "Backlog", "Signing keys", None, &admin).await;
-    let second = add_task(&store, &workspace, "Backlog", "Install script", None, &admin).await;
+    let second = add_task(
+        &store,
+        &workspace,
+        "Backlog",
+        "Install script",
+        None,
+        &admin,
+    )
+    .await;
     store.assign_task(&waiting, &mate).await.unwrap();
     let now = OffsetDateTime::now_utc();
     store.add_dependency(&waiting, &first, now).await.unwrap();

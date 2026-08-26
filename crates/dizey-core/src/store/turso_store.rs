@@ -88,16 +88,54 @@ impl TursoStore {
             if applied.contains(version) {
                 continue;
             }
-            self.conn.execute_batch(sql).await.map_err(backend)?;
+            self.apply(*version, sql).await?;
+        }
+        Ok(())
+    }
+
+    /// One migration and the row that says it ran, in one transaction.
+    ///
+    /// A migration is not only a thing that can fail — 0005 rebuilds
+    /// `mail_send` to drop a foreign key, and a crash between the DROP and the
+    /// RENAME would leave the mail ledger gone rather than merely unmigrated.
+    /// So the file and its `schema_version` row commit together or not at all,
+    /// and a half-applied migration is a boot that starts over rather than a
+    /// database with a hole in it.
+    ///
+    /// SQLite's DDL is transactional, which is what makes this possible at all.
+    async fn apply(&self, version: i64, sql: &str) -> Result<()> {
+        self.conn
+            .execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(backend)?;
+        let written = async {
+            self.conn.execute_batch(sql).await?;
             self.conn
                 .execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
-                    params![*version, now_text()?],
+                    params![
+                        version,
+                        now_text().map_err(|_| turso::Error::Misuse(
+                            "the clock could not be read".to_string()
+                        ))?
+                    ],
                 )
-                .await
-                .map_err(backend)?;
+                .await?;
+            Ok::<_, turso::Error>(())
         }
-        Ok(())
+        .await;
+        match written {
+            Ok(()) => self
+                .conn
+                .execute("COMMIT", ())
+                .await
+                .map_err(backend)
+                .map(|_| ()),
+            Err(e) => {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                Err(backend(e))
+            }
+        }
     }
 
     async fn applied_versions(&self) -> Result<Vec<i64>> {
@@ -2447,6 +2485,50 @@ mod probe {
         let mut rows = c.query("SELECT COUNT(*) FROM t", ()).await.unwrap();
         let n = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
         assert_eq!(n, 200, "no write lost between two database handles");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod migration {
+    use super::*;
+
+    /// A migration that dies halfway leaves nothing behind — not a table it
+    /// created, and not a version row saying it ran. 0005 drops `mail_send`
+    /// before it renames the rebuilt table into place, so a migration that can
+    /// only half-apply is a migration that can lose the mail ledger.
+    #[tokio::test]
+    async fn a_migration_that_fails_partway_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("dizey-migration-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let before = store.schema_version().await.unwrap();
+
+        let broken = "CREATE TABLE half_applied (id TEXT);\n\
+                      INSERT INTO no_such_table (id) VALUES ('x');";
+        assert!(
+            store.apply(before + 1, broken).await.is_err(),
+            "the second statement cannot succeed"
+        );
+
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            before,
+            "a failed migration is not recorded as applied"
+        );
+        assert!(
+            store
+                .one_row(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'half_applied'",
+                    (),
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "and the table its first statement created is rolled back with it"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
