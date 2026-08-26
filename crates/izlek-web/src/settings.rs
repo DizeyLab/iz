@@ -1024,13 +1024,13 @@ fn MembersPanel(
         .into_iter()
         .map(|member| {
             let account = if member.is_owner {
-                "the first account, administers the workspace".to_string()
+                "owner".to_string()
             } else if !member.has_password {
-                "no password yet".to_string()
+                "invited".to_string()
             } else if let Some(day) = member.last_signed_in.clone() {
-                format!("password set — last signed in {day}")
+                format!("last seen {day}")
             } else {
-                "password set".to_string()
+                "active".to_string()
             };
             let id = member.id.clone();
             view! {

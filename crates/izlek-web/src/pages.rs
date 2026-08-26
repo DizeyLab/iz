@@ -184,8 +184,8 @@ fn JoinCard(token: String, person: Invited) -> impl IntoView {
     // one rather than naming the wrong person: the invitee's own name used to
     // sit here, greeting them with themselves.
     let made_by = match person.invited_by.clone() {
-        Some(admin) => format!("{admin} made you an account. It has no password yet."),
-        None => "An admin made you an account. It has no password yet.".to_string(),
+        Some(admin) => format!("{admin} made you an account."),
+        None => "An admin made you an account.".to_string(),
     };
 
     view! {
