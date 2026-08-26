@@ -612,18 +612,20 @@ fn refused(refusal: impl Fn() -> Option<Refusal> + Copy + Send + Sync + 'static)
     move || refusal().map(|refusal| view! { <p class="modal-problem">{refusal.message()}</p> })
 }
 
+/// The open task's detail as the board fetches it. The resource is created in
+/// `Board`, not in the modal: a resource's hydration id is its creation order,
+/// and only resources created in the same fixed order on the server and the
+/// hydrating client read back their own data.
+pub type DetailFetch =
+    Resource<Option<Result<Result<DetailSnapshot, Refusal>, ServerFnError>>>;
+
 /// The modal. `esc` closes it, as the artboard's chip says.
 #[component]
 pub fn TaskDetailModal(
-    task_id: String,
+    detail: DetailFetch,
     on_close: impl Fn() + Copy + Send + Sync + 'static,
     on_change: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let task_id = StoredValue::new(task_id);
-    let detail = Resource::new(
-        move || task_id.get_value(),
-        |id| async move { fetch_task(id).await },
-    );
     // Every change writes and then re-reads: the modal shows what the store
     // says, not what the browser hoped.
     let changed = move || {
@@ -652,7 +654,7 @@ pub fn TaskDetailModal(
                 }>
                     {move || Suspend::new(async move {
                         match detail.await {
-                            Ok(Ok(snapshot)) => {
+                            Some(Ok(Ok(snapshot))) => {
                                 view! {
                                     <DetailScreen
                                         snapshot=snapshot
@@ -662,15 +664,16 @@ pub fn TaskDetailModal(
                                 }
                                     .into_any()
                             }
-                            Ok(Err(refusal)) => {
+                            Some(Ok(Err(refusal))) => {
                                 view! { <p class="modal-note">{refusal.message()}</p> }.into_any()
                             }
-                            Err(_) => {
+                            Some(Err(_)) => {
                                 view! {
                                     <p class="modal-note">"Something went wrong."</p>
                                 }
                                     .into_any()
                             }
+                            None => ().into_any(),
                         }
                     })}
                 </Transition>

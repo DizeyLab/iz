@@ -192,6 +192,21 @@ pub fn Board() -> impl IntoView {
             .read_untracked()
             .get("task"),
     );
+    // The open task's detail, fetched here rather than inside the modal. A
+    // resource takes its hydration id from creation order, and the server may
+    // run an outer Suspend more times than the hydrating client does — so a
+    // resource born inside one of those re-runs lands on a different id on
+    // each side, and the client deserializes some other resource's data. Out
+    // here the order is fixed: the board, then the detail, every run.
+    let detail = Resource::new(
+        move || opened.get(),
+        |id| async move {
+            match id {
+                Some(id) => Some(crate::detail::fetch_task(id).await),
+                None => None,
+            }
+        },
+    );
 
     view! {
         <Transition fallback=|| {
@@ -204,6 +219,7 @@ pub fn Board() -> impl IntoView {
                             <BoardScreen
                                 snapshot=snapshot
                                 opened=opened
+                                detail=detail
                                 on_change=move || board.refetch()
                             />
                         }
@@ -235,6 +251,7 @@ pub fn Board() -> impl IntoView {
 fn BoardScreen(
     snapshot: BoardSnapshot,
     opened: RwSignal<Option<String>>,
+    detail: crate::detail::DetailFetch,
     on_change: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let BoardSnapshot { view, me, today } = snapshot;
@@ -426,10 +443,10 @@ fn BoardScreen(
             {move || {
                 opened
                     .get()
-                    .map(|task_id| {
+                    .map(|_| {
                         view! {
                             <crate::detail::TaskDetailModal
-                                task_id=task_id
+                                detail=detail
                                 on_close=move || opened.set(None)
                                 on_change=on_change
                             />
