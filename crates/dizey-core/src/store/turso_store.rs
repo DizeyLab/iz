@@ -1968,6 +1968,32 @@ impl Store for TursoStore {
         Ok(())
     }
 
+    async fn defer_send(
+        &self,
+        send_id: &str,
+        reason: &str,
+        retry_at: OffsetDateTime,
+        _at: OffsetDateTime,
+    ) -> Result<()> {
+        // `attempts` is deliberately not touched. Everything else reads like a
+        // refusal that will be retried, because that is what it is — the mail
+        // is owed, it is due again shortly, and the reason says why it waited.
+        let n = self
+            .conn
+            .execute(
+                "UPDATE mail_send \
+                 SET state = 'failed', last_error = ?1, next_attempt_at = ?2 \
+                 WHERE id = ?3",
+                params![reason, stamp(retry_at)?, send_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>> {
         let sql = format!(
             "SELECT {SEND_COLUMNS} FROM mail_send \

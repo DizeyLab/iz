@@ -32,40 +32,23 @@ async fn main() {
     let store: Arc<dyn dizey_core::store::Store> = Arc::new(store);
     let accounts = Accounts::new(store.clone());
 
-    // A workspace without a sender still works: cards move, rules can be
-    // written, nothing goes out. With one, the engine is built once — it holds
-    // a connection pool — and two things use it: every committed crossing, and
-    // the sweep below.
-    let mail = match &config.mail {
-        Some(sender) => {
-            let smtp = dizey_web::smtp::Smtp::new(sender).unwrap_or_else(|problem| {
-                eprintln!("dizey: {problem}");
-                std::process::exit(2);
-            });
-            let engine = Arc::new(dizey_core::MailEngine::new(
-                store.clone(),
-                Arc::new(smtp),
-                config.base_url.clone(),
-            ));
-            tokio::spawn(sweep(engine.clone()));
-            dizey_web::server::Mail::sending(engine)
-        }
-        None => dizey_web::server::Mail::silent(),
-    };
+    // The engine is always built, because a sender can appear at any moment:
+    // an admin fills the panel in and the next sweep sends what was held. It
+    // holds one connection pool, rebuilt only when the settings behind it
+    // change, and two things use it — every committed crossing, and the sweep.
+    let engine = Arc::new(dizey_core::MailEngine::new(
+        store.clone(),
+        Arc::new(dizey_web::smtp::WorkspaceSmtp::new(store.clone())),
+        config.base_url.clone(),
+    ));
+    tokio::spawn(sweep(engine.clone()));
+    let mail = dizey_web::server::Mail::sending(engine);
 
     let conf = get_configuration(None).expect("failed to read leptos configuration");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
 
-    // What the settings screen may show of the sender: host, port, username
-    // and from-address, and nothing else. The password stays in `config.mail`
-    // where the mailer reads it.
-    let sender = config
-        .mail
-        .as_ref()
-        .map(dizey_web::settings::Sender::of);
-
-    let app = dizey_web::server::router(accounts, mail, sender, leptos_options);
+    let app = dizey_web::server::router(accounts, mail, leptos_options);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

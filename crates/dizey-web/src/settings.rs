@@ -11,31 +11,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{Me, Refusal};
 
-/// The sender the process was started with, as a screen may see it.
+/// The sender as the admin's screen may see it.
 ///
 /// The password is not a field here and there is no field it could be put in.
-/// It lives in `DIZEY_SMTP_PASSWORD`, is read once at boot and is held only by
-/// the mailer; the database has no column for it since migration 0006. A
-/// sender is all-or-nothing in configuration — five variables or none — so a
-/// sender that exists is a sender whose password is set, and that is the whole
-/// of what this type can say about it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The store keeps it in a column the workspace read path never selects, and
+/// the only reader is the mailer. What the screen gets instead is
+/// `password_set`: enough to say "set" beside the field, and enough to know
+/// that a save which sends no password is an edit rather than a deletion.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sender {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub from: String,
+    pub from_name: String,
+    pub from_address: String,
+    pub password_set: bool,
+}
+
+impl Sender {
+    /// Whether this is a sender at all, or an empty panel waiting to be filled
+    /// in. Mail waits, rather than fails, until this is true.
+    pub fn is_connected(&self) -> bool {
+        !self.host.trim().is_empty()
+            && !self.username.trim().is_empty()
+            && !self.from_address.trim().is_empty()
+            && self.password_set
+    }
 }
 
 #[cfg(feature = "ssr")]
 impl Sender {
-    /// What the screen may see of the sender the process is running with.
-    pub fn of(config: &dizey_core::config::MailConfig) -> Self {
+    /// What the screen may see of the workspace's sender.
+    pub fn of(workspace: &dizey_core::store::Workspace) -> Self {
         Self {
-            host: config.host.clone(),
-            port: config.port,
-            username: config.username.clone(),
-            from: config.from.clone(),
+            host: workspace.smtp_host.clone().unwrap_or_default(),
+            // 587 is submission with STARTTLS, which is what a new panel should
+            // suggest rather than making somebody look it up.
+            port: workspace.smtp_port.and_then(|p| u16::try_from(p).ok()).unwrap_or(587),
+            username: workspace.smtp_username.clone().unwrap_or_default(),
+            from_name: workspace.smtp_from_name.clone().unwrap_or_default(),
+            from_address: workspace.smtp_from_address.clone().unwrap_or_default(),
+            password_set: workspace.smtp_password_set,
         }
     }
 }
@@ -77,10 +93,10 @@ pub struct Member {
     pub is_owner: bool,
 }
 
-/// One settings screen's worth of state. `sender` is `None` for two different
-/// reasons — no sender configured, or not an admin asking — and neither of
-/// them is a reason to send a host name to somebody who may not have it, so
-/// the two are one answer here.
+/// One settings screen's worth of state. `sender` is `None` for exactly one
+/// reason — the person asking does not administer the workspace — and a
+/// workspace with no sender yet carries an empty one, which is the panel an
+/// admin fills in. Nobody else is told a host name.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SettingsSnapshot {
     pub me: Me,
@@ -121,12 +137,26 @@ pub async fn current_settings() -> Result<Result<SettingsSnapshot, Refusal>, Ser
         },
         administers,
         // Only an admin is told anything about the sender at all.
-        sender: administers
-            .then(|| use_context::<Option<Sender>>().flatten())
-            .flatten(),
+        sender: match administers {
+            true => Some(sender_now().await?),
+            false => None,
+        },
         limits,
         members,
     }))
+}
+
+#[cfg(feature = "ssr")]
+async fn sender_now() -> Result<Sender, ServerFnError> {
+    let store = crate::server::accounts().store().clone();
+    let workspace = store
+        .workspace()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    // A workspace that somehow is not there yet reads as an empty panel rather
+    // than an error: there is nothing to correct and nothing to alarm anyone
+    // with, and the fields are the same ones either way.
+    Ok(workspace.as_ref().map(Sender::of).unwrap_or_default())
 }
 
 #[cfg(feature = "ssr")]
@@ -235,6 +265,106 @@ pub async fn save_limits(
             Ok(Some(Refusal::Unavailable))
         }
     }
+}
+
+/// Writes the workspace's sender. Admin-only, checked here.
+///
+/// `password` is empty when the admin did not type one, and empty means "leave
+/// the stored one alone" rather than "delete it": the field is write-only, so
+/// the form has nothing to send back for a password that already exists, and a
+/// save that took the blank literally would stop the workspace sending mail as
+/// a side effect of fixing a typo in the port.
+///
+/// A sender with no password at all is refused rather than stored, because a
+/// half-filled sender is not a configuration — it is a mail nobody receives and
+/// a ledger nobody reads.
+#[server]
+pub async fn save_sender(
+    host: String,
+    port: u32,
+    username: String,
+    password: String,
+    from_name: String,
+    from_address: String,
+) -> Result<Option<Refusal>, ServerFnError> {
+    use crate::server::{accounts, require_admin};
+    use dizey_core::store::NewSender;
+
+    let admin = match require_admin().await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+
+    let host = host.trim().to_string();
+    let username = username.trim().to_string();
+    let from_name = from_name.trim().to_string();
+    let from_address = from_address.trim().to_string();
+    // Not typed is not the same as blanked. Nothing here can clear a stored
+    // password; replacing it means typing a new one.
+    let password = (!password.is_empty()).then_some(password);
+
+    let store = accounts().store().clone();
+    let known = store
+        .workspace()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .map(|ws| ws.smtp_password_set)
+        .unwrap_or(false);
+
+    let complaint = if host.is_empty() {
+        Some("The SMTP host is the server your mail goes out through — smtp.fastmail.com, for instance.")
+    } else if host.contains(char::is_whitespace) || host.contains('@') || host.contains('/') {
+        Some("The SMTP host is a host name, not an address or a URL.")
+    } else if !(1..=65535).contains(&port) {
+        Some("A port is a number between 1 and 65535. 587 is the usual one; 465 is the other.")
+    } else if username.is_empty() {
+        Some("The username is the account Dizey signs in to the mail server with.")
+    } else if password.is_none() && !known {
+        Some("A password is needed the first time. It is stored so Dizey can sign in on every send, and is never shown again.")
+    } else if !is_address(&from_address) {
+        Some("The from-address is the address people will see this mail come from.")
+    } else {
+        None
+    };
+    if let Some(problem) = complaint {
+        return Ok(Some(Refusal::BadSender(problem.to_string())));
+    }
+
+    match store
+        .set_sender(
+            &admin.workspace_id,
+            NewSender {
+                host,
+                port,
+                username,
+                password,
+                from_name,
+                from_address,
+            },
+        )
+        .await
+    {
+        Ok(()) => Ok(None),
+        Err(problem) => {
+            eprintln!("store error: {problem}");
+            Ok(Some(Refusal::Unavailable))
+        }
+    }
+}
+
+/// The shallowest check that catches a typo without rejecting a real address.
+/// Nothing here is trying to decide what RFC 5322 permits — the mail server
+/// settles that, and a refusal from it lands in the ledger with its own words.
+pub fn is_address(raw: &str) -> bool {
+    let mut halves = raw.split('@');
+    let (Some(local), Some(domain), None) = (halves.next(), halves.next(), halves.next()) else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !raw.contains(char::is_whitespace)
 }
 
 /// The typed list as extensions, or `None` if one of them is not an extension.
@@ -347,7 +477,6 @@ fn SettingsScreen(
     link_refusal: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let me = snapshot.me.clone();
-    let has_sender = snapshot.sender.is_some();
     // Three roles, three true sentences. A Viewer is never mailed by a rule, so
     // the member's line is not merely vague for them, it is wrong.
     let role_note = match me.role {
@@ -396,9 +525,7 @@ fn SettingsScreen(
                 <ProfilePanel me=me.clone()/>
                 {snapshot
                     .sender
-                    .map(|sender| view! { <SenderPanel sender=sender/> })}
-                {(snapshot.administers && !has_sender)
-                    .then(|| view! { <NoSenderPanel/> })}
+                    .map(|sender| view! { <SenderPanel sender=sender on_change=on_change/> })}
                 {snapshot.limits.map(|limits| view! { <LimitsPanel limits=limits/> })}
                 {snapshot
                     .members
@@ -469,77 +596,135 @@ fn ProfilePanel(me: Me) -> impl IntoView {
     }
 }
 
-/// The sender, as the process is running it. Every control is disabled and
-/// says why: none of this is workspace content, so there is nothing here a
-/// save could write.
+/// The sender the whole workspace mails through, as an admin edits it.
+///
+/// The password field is write-only in both directions: it is never filled in,
+/// because the server does not send it, and leaving it empty on a save means
+/// "keep the one you have". The row underneath says which of those is true, so
+/// an empty box is never ambiguous.
 #[component]
-fn SenderPanel(sender: Sender) -> impl IntoView {
+fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
+    let action = ServerAction::<SaveSender>::new();
+    let value = action.value();
+    let saved = move || matches!(value.get(), Some(Ok(None)));
+    let refusal = move || match value.get() {
+        Some(Ok(Some(refusal))) => Some(refusal.message()),
+        Some(Err(_)) => Some(Refusal::Unavailable.message()),
+        _ => None,
+    };
+    // A saved sender changes the chip, the password row and whether mail moves
+    // at all, so the snapshot behind this panel is refetched rather than left
+    // saying what was true before the save.
+    Effect::new(move |_| {
+        if matches!(value.get(), Some(Ok(None))) {
+            on_change.run(());
+        }
+    });
+
+    let connected = sender.is_connected();
+    let password_set = sender.password_set;
+
     view! {
         <section class="panel">
             <div class="panel-head">
                 <h2 class="panel-title">"Outgoing mail"</h2>
                 <span class="chip chip-admin">"Admin only"</span>
-                <span class="chip chip-connected">"Connected"</span>
+                {match connected {
+                    true => view! { <span class="chip chip-connected">"Connected"</span> }.into_any(),
+                    false => view! { <span class="chip chip-off">"Not configured"</span> }.into_any(),
+                }}
             </div>
             <div class="panel-body">
                 <p class="panel-lede">
                     "One sender for the whole workspace. Every mail rule, for every member, sends through this account — nobody sets their own."
                 </p>
-                <div class="field-row">
+                {(!connected)
+                    .then(|| {
+                        view! {
+                            <p class="panel-lede">
+                                "Nothing is sent until this is filled in. Cards still move and rules still fire — what they owe is kept, and goes out on the next sweep after you save."
+                            </p>
+                        }
+                    })}
+                <ActionForm action=action>
+                    <div class="field-row">
+                        <label class="field">
+                            <span class="field-label">"SMTP HOST"</span>
+                            <input
+                                class="field-input"
+                                type="text"
+                                name="host"
+                                value=sender.host
+                                placeholder="smtp.fastmail.com"
+                            />
+                        </label>
+                        <label class="field field-narrow">
+                            <span class="field-label">"PORT"</span>
+                            <input
+                                class="field-input"
+                                type="number"
+                                name="port"
+                                min="1"
+                                max="65535"
+                                value=sender.port.to_string()
+                            />
+                        </label>
+                    </div>
                     <label class="field">
-                        <span class="field-label">"SMTP HOST"</span>
-                        <input class="field-input" type="text" value=sender.host disabled/>
+                        <span class="field-label">"USERNAME"</span>
+                        <input class="field-input" type="text" name="username" value=sender.username/>
                     </label>
-                    <label class="field field-narrow">
-                        <span class="field-label">"PORT"</span>
+                    <label class="field">
+                        <span class="field-label">"PASSWORD"</span>
                         <input
                             class="field-input"
-                            type="text"
-                            value=sender.port.to_string()
-                            disabled
+                            type="password"
+                            name="password"
+                            autocomplete="off"
+                            placeholder=match password_set {
+                                true => "Set — type a new one to replace it",
+                                false => "Needed before anything can be sent",
+                            }
                         />
+                        <span class="field-note">
+                            {match password_set {
+                                true => "A password is stored. It is never shown again — not here, not in any answer this page receives. Leave this empty and the stored one is kept.",
+                                false => "No password is stored yet. It is kept so Dizey can sign in to the mail server on every send, and is never shown again once saved.",
+                            }}
+                        </span>
                     </label>
-                </div>
-                <label class="field">
-                    <span class="field-label">"USERNAME"</span>
-                    <input class="field-input" type="text" value=sender.username disabled/>
-                </label>
-                <label class="field">
-                    <span class="field-label">"PASSWORD"</span>
-                    <div class="field-stated">"Set — in the server's configuration"</div>
-                    <span class="field-note">
-                        "The password is read from DIZEY_SMTP_PASSWORD when the process starts and is never stored, never shown and never sent to this page. Changing it means changing that variable and restarting Dizey."
-                    </span>
-                </label>
-                <label class="field">
-                    <span class="field-label">"FROM ADDRESS"</span>
-                    <input class="field-input" type="text" value=sender.from disabled/>
-                </label>
-                <p class="panel-lede">
-                    "This whole panel is what the running process was configured with. It is read here and changed where it is set — DIZEY_SMTP_HOST, DIZEY_SMTP_PORT, DIZEY_SMTP_USERNAME, DIZEY_SMTP_PASSWORD and DIZEY_MAIL_FROM — followed by a restart."
-                </p>
-            </div>
-        </section>
-    }
-}
-
-/// An admin on a workspace with no sender. Nothing is broken; nothing is sent.
-#[component]
-fn NoSenderPanel() -> impl IntoView {
-    view! {
-        <section class="panel">
-            <div class="panel-head">
-                <h2 class="panel-title">"Outgoing mail"</h2>
-                <span class="chip chip-admin">"Admin only"</span>
-                <span class="chip chip-off">"Not configured"</span>
-            </div>
-            <div class="panel-body">
-                <p class="panel-lede">
-                    "No sender is configured, so Dizey sends nothing. Cards still move and rules can still be written — what they owe is kept and goes out once a sender exists."
-                </p>
-                <p class="panel-lede">
-                    "Set DIZEY_SMTP_HOST, DIZEY_SMTP_PORT, DIZEY_SMTP_USERNAME, DIZEY_SMTP_PASSWORD and DIZEY_MAIL_FROM — all five or none — and restart Dizey."
-                </p>
+                    <div class="field-row">
+                        <label class="field">
+                            <span class="field-label">"FROM NAME"</span>
+                            <input
+                                class="field-input"
+                                type="text"
+                                name="from_name"
+                                value=sender.from_name
+                                placeholder="Dizey"
+                            />
+                        </label>
+                        <label class="field">
+                            <span class="field-label">"FROM ADDRESS"</span>
+                            <input
+                                class="field-input"
+                                type="text"
+                                name="from_address"
+                                value=sender.from_address
+                                placeholder="board@dizey.sh"
+                            />
+                        </label>
+                    </div>
+                    <div class="panel-foot">
+                        <button class="button button-primary" type="submit">"Save"</button>
+                        <Show when=saved>
+                            <span class="field-note">"Saved."</span>
+                        </Show>
+                        <Show when=move || refusal().is_some()>
+                            <span class="field-refusal">{move || refusal()}</span>
+                        </Show>
+                    </div>
+                </ActionForm>
             </div>
         </section>
     }

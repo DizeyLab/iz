@@ -39,6 +39,11 @@ pub enum Refusal {
     BadLimit,
     /// Something in the allowed-types list is not a file extension.
     BadFileType,
+    /// The sender panel was saved with a field it cannot work without, or with
+    /// one that is not what it claims to be. The message names the field: this
+    /// is a form somebody is filling in, not an attacker probing, and "that did
+    /// not work" would send them round the panel guessing.
+    BadSender(String),
     /// A comment with nothing in it.
     EmptyComment,
     /// The date field did not hold a date.
@@ -78,6 +83,7 @@ impl Refusal {
             Refusal::BadFileType => {
                 "File types are extensions — png, pdf, zip — separated by commas.".to_string()
             }
+            Refusal::BadSender(problem) => problem.clone(),
             Refusal::EmptyComment => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -119,6 +125,7 @@ impl Refusal {
             Refusal::EmptyName => "empty-name",
             Refusal::BadLimit => "bad-limit",
             Refusal::BadFileType => "bad-file-type",
+            Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",

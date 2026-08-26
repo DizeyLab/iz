@@ -32,22 +32,6 @@ struct App {
 
 impl App {
     async fn open() -> Self {
-        Self::open_with(None).await
-    }
-
-    /// The same app, started the way a deployment with a sender configured
-    /// starts it. The password is not among what the router is given.
-    async fn with_sender() -> Self {
-        Self::open_with(Some(dizey_web::settings::Sender {
-            host: "smtp.fastmail.com".to_string(),
-            port: 465,
-            username: "dizey".to_string(),
-            from: "dizey@dizey.sh".to_string(),
-        }))
-        .await
-    }
-
-    async fn open_with(sender: Option<dizey_web::settings::Sender>) -> Self {
         let dir = std::env::temp_dir().join(format!("dizey-http-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("dizey.db").to_str().unwrap())
@@ -57,7 +41,6 @@ impl App {
         let router = dizey_web::server::router(
             Accounts::new(Arc::new(store)),
             dizey_web::server::Mail::silent(),
-            sender,
             options,
         );
         Self { dir, router }
@@ -201,6 +184,29 @@ fn encode(raw: &str) -> String {
 
 fn path<F: ServerFn>() -> &'static str {
     F::PATH
+}
+
+/// What the tests type into the password field. It must never come back out.
+const SENDER_PASSWORD: &str = "cavalry-battery-hinge-40";
+
+/// Fills in the sender panel the way an admin would, and reports whether the
+/// server accepted it.
+async fn sender_saved(app: &App, admin: &str) -> bool {
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveSender>(),
+            Some(admin),
+            &[
+                ("host", "smtp.fastmail.com"),
+                ("port", "465"),
+                ("username", "dizey"),
+                ("password", SENDER_PASSWORD),
+                ("from_name", "Dizey"),
+                ("from_address", "dizey@dizey.sh"),
+            ],
+        )
+        .await;
+    answer.status == StatusCode::OK && answer.body == "null"
 }
 
 /// Claims the workspace and returns the admin's session cookie.
@@ -837,8 +843,9 @@ async fn a_card_cannot_be_moved_into_another_boards_column() {
 
 #[tokio::test]
 async fn a_signed_out_browser_is_told_nothing_by_the_settings_call() {
-    let app = App::with_sender().await;
-    let _ = admin(&app).await;
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    assert!(sender_saved(&app, &admin_cookie).await);
 
     let answer = app
         .post(path::<dizey_web::settings::CurrentSettings>(), None, &[])
@@ -854,16 +861,10 @@ async fn a_signed_out_browser_is_told_nothing_by_the_settings_call() {
 /// rather than a hidden panel whose contents rode along in the body.
 #[tokio::test]
 async fn a_member_is_told_nothing_about_the_sender() {
-    let app = App::with_sender().await;
+    let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let member = invited(
-        &app,
-        &admin_cookie,
-        "emre@dizey.sh",
-        "Emre",
-        Role::Member,
-    )
-    .await;
+    assert!(sender_saved(&app, &admin_cookie).await);
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
 
     let answer = app
         .post(
@@ -879,12 +880,13 @@ async fn a_member_is_told_nothing_about_the_sender() {
     assert!(!answer.body.contains("fastmail"), "{}", answer.body);
 }
 
-/// The admin sees what the process is configured with — and the password is
-/// not part of "what": it is never held anywhere this call can reach.
+/// The admin sees the sender they typed — and never the password, which the
+/// answer carries as a boolean and cannot carry as anything else.
 #[tokio::test]
 async fn an_admin_sees_the_sender_and_never_a_password() {
-    let app = App::with_sender().await;
+    let app = App::open().await;
     let admin_cookie = admin(&app).await;
+    assert!(sender_saved(&app, &admin_cookie).await);
 
     let answer = app
         .post(
@@ -895,16 +897,206 @@ async fn an_admin_sees_the_sender_and_never_a_password() {
         .await;
 
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    // The whole of what a screen may know about the sender, exactly: four
-    // fields, and no fifth one a password could be carried in.
     assert!(
         answer.body.contains(
             "\"sender\":{\"host\":\"smtp.fastmail.com\",\"port\":465,\
-             \"username\":\"dizey\",\"from\":\"dizey@dizey.sh\"}"
+             \"username\":\"dizey\",\"from_name\":\"Dizey\",\
+             \"from_address\":\"dizey@dizey.sh\",\"password_set\":true}"
         ),
         "{}",
         answer.body
     );
+    assert!(
+        !answer.body.contains(SENDER_PASSWORD),
+        "the settings answer carried the SMTP password: {}",
+        answer.body
+    );
+}
+
+/// A Member cannot write the sender either. The panel they never received is a
+/// courtesy; this is the guard, and it is in the handler.
+#[tokio::test]
+async fn only_an_admin_may_write_the_sender() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveSender>(),
+            Some(&member),
+            &[
+                ("host", "smtp.attacker.example"),
+                ("port", "587"),
+                ("username", "emre"),
+                ("password", "let-me-in"),
+                ("from_name", "Dizey"),
+                ("from_address", "emre@dizey.sh"),
+            ],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+
+    // And nothing was written: the admin's own view still shows no sender.
+    let seen = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(!seen.body.contains("attacker"), "{}", seen.body);
+}
+
+/// A signed-out browser gets the same refusal, and writes nothing.
+#[tokio::test]
+async fn a_signed_out_browser_may_not_write_the_sender() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveSender>(),
+            None,
+            &[
+                ("host", "smtp.attacker.example"),
+                ("port", "587"),
+                ("username", "nobody"),
+                ("password", "let-me-in"),
+                ("from_name", "Dizey"),
+                ("from_address", "nobody@dizey.sh"),
+            ],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("SignInFirst"), "{}", answer.body);
+
+    let seen = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(!seen.body.contains("attacker"), "{}", seen.body);
+}
+
+/// The password field is write-only, so the form has nothing to send back for
+/// a password that already exists. An edit with the field left empty must keep
+/// the stored password rather than reading the blank as a deletion — otherwise
+/// correcting a port silently stops the workspace sending mail.
+#[tokio::test]
+async fn an_edit_with_no_password_typed_keeps_the_stored_one() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    assert!(sender_saved(&app, &admin_cookie).await);
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveSender>(),
+            Some(&admin_cookie),
+            &[
+                ("host", "smtp.fastmail.com"),
+                ("port", "587"),
+                ("username", "dizey"),
+                ("password", ""),
+                ("from_name", "Dizey"),
+                ("from_address", "dizey@dizey.sh"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let seen = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(seen.body.contains("\"port\":587"), "the edit did not land: {}", seen.body);
+    assert!(
+        seen.body.contains("\"password_set\":true"),
+        "an empty field blanked the password: {}",
+        seen.body
+    );
+}
+
+/// The first save has to carry one, though. A sender with no password is a
+/// sender that cannot sign in, and storing it would turn a form somebody can
+/// fix into a queue of refusals they have to read the ledger to find.
+#[tokio::test]
+async fn a_first_sender_with_no_password_is_refused_and_says_why() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SaveSender>(),
+            Some(&admin_cookie),
+            &[
+                ("host", "smtp.fastmail.com"),
+                ("port", "587"),
+                ("username", "dizey"),
+                ("password", ""),
+                ("from_name", "Dizey"),
+                ("from_address", "dizey@dizey.sh"),
+            ],
+        )
+        .await;
+
+    assert!(answer.body.contains("BadSender"), "{}", answer.body);
+    assert!(answer.body.contains("password"), "{}", answer.body);
+}
+
+/// Each field the sender cannot work without is refused by name. A form that
+/// answers "that did not work" sends somebody round the panel guessing.
+#[tokio::test]
+async fn a_sender_field_that_cannot_work_is_refused_by_name() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let bad: &[(&str, &[(&str, &str)])] = &[
+        ("host", &[("host", "  ")]),
+        ("host", &[("host", "smtp.fastmail.com/inbox")]),
+        ("port", &[("port", "0")]),
+        ("port", &[("port", "99999")]),
+        ("username", &[("username", "")]),
+        ("from_address", &[("from_address", "board-at-dizey")]),
+        ("from_address", &[("from_address", "board@dizey")]),
+    ];
+    for (field, overrides) in bad {
+        let mut form: Vec<(&str, &str)> = vec![
+            ("host", "smtp.fastmail.com"),
+            ("port", "587"),
+            ("username", "dizey"),
+            ("password", SENDER_PASSWORD),
+            ("from_name", "Dizey"),
+            ("from_address", "dizey@dizey.sh"),
+        ];
+        for (key, value) in *overrides {
+            for slot in form.iter_mut() {
+                if slot.0 == *key {
+                    slot.1 = value;
+                }
+            }
+        }
+        let answer = app
+            .post(
+                path::<dizey_web::settings::SaveSender>(),
+                Some(&admin_cookie),
+                &form,
+            )
+            .await;
+        assert!(
+            answer.body.contains("BadSender"),
+            "{field} was accepted with {overrides:?}: {}",
+            answer.body
+        );
+    }
 }
 
 /// The form carries a name and nothing else. Who is renamed comes from the

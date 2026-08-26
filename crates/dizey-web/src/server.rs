@@ -22,17 +22,17 @@ pub fn accounts() -> Accounts {
     expect_context::<Accounts>()
 }
 
-/// The mail engine, or the fact that there is nobody to send through.
+/// The mail engine, or the fact that there is nobody to hand a crossing to.
 ///
-/// A workspace with no sender configured is a working workspace: cards move,
-/// rules can be written, and nothing is mailed. That is a configuration, not a
-/// broken deployment, so it is a `None` here rather than an error at the call
-/// site of every move.
+/// The running server always has an engine: the sender is workspace settings
+/// now, so it can appear at any moment and the engine reads it per send. The
+/// `None` is for tests, which drive the router without one and assert on the
+/// ledger rather than on a mail server.
 #[derive(Clone)]
 pub struct Mail(Option<std::sync::Arc<Engine>>);
 
 impl Mail {
-    /// No sender. Crossings are recorded and nothing goes out.
+    /// No engine at all. Crossings are recorded and nothing is handed on.
     pub fn silent() -> Self {
         Self(None)
     }
@@ -88,7 +88,7 @@ impl Mail {
 }
 
 /// The engine for this request, or a silent one when the router was built
-/// without a sender.
+/// without an engine at all.
 pub fn mail() -> Mail {
     use_context::<Mail>().unwrap_or_else(Mail::silent)
 }
@@ -229,7 +229,6 @@ impl From<AccountError> for Refusal {
 pub fn router(
     accounts: Accounts,
     mail: Mail,
-    sender: Option<crate::settings::Sender>,
     leptos_options: LeptosOptions,
 ) -> axum::Router {
     use axum::Router;
@@ -246,13 +245,9 @@ pub fn router(
                 // `leptos_routes_with_context` registers with the same closure.
                 let accounts = accounts.clone();
                 let mail = mail.clone();
-                let sender = sender.clone();
                 move || {
                     provide_context(accounts.clone());
                     provide_context(mail.clone());
-                    // What a settings screen may say about the sender. The
-                    // password is not in it and has no field to be in.
-                    provide_context(sender.clone());
                 }
             },
             {

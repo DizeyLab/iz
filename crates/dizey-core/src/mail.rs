@@ -34,6 +34,11 @@ pub struct MailError {
     /// A timeout or a host that is down may work in a minute. A refused
     /// address will not, and retrying it forever is noise nobody reads.
     pub retryable: bool,
+    /// Whether a mail server was actually asked. `false` means the mail never
+    /// left the building — there is no sender configured yet — and that must
+    /// not spend one of the five attempts, or a workspace whose admin sets the
+    /// sender up tomorrow finds that today's mail was given up on overnight.
+    pub attempted: bool,
 }
 
 impl MailError {
@@ -41,6 +46,7 @@ impl MailError {
         Self {
             message: message.into(),
             retryable: true,
+            attempted: true,
         }
     }
 
@@ -48,6 +54,18 @@ impl MailError {
         Self {
             message: message.into(),
             retryable: false,
+            attempted: true,
+        }
+    }
+
+    /// Nothing was sent and nothing was asked: the workspace has no sender.
+    /// The mail stays owed, at no cost to its attempts, and goes out when a
+    /// sender exists — which is exactly what the empty-sender panel promises.
+    pub fn unsent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+            attempted: false,
         }
     }
 }
@@ -71,6 +89,11 @@ pub trait Mailer: Send + Sync {
 /// written down as abandoned.
 pub const MAX_ATTEMPTS: u32 = 5;
 
+/// How long a mail with no sender waits before it is looked at again. Short,
+/// because the thing it waits on is an admin finishing a form and then watching
+/// to see whether mail starts moving.
+pub const HOLD: Duration = Duration::minutes(1);
+
 /// The wait before the next attempt, doubling and capped: five minutes, ten,
 /// twenty, forty, an hour.
 pub fn backoff(attempts: u32) -> Duration {
@@ -89,6 +112,9 @@ pub struct Report {
     pub failed: u32,
     /// Refusals that will not.
     pub abandoned: u32,
+    /// Mails held back because there is no sender to send them through. Owed,
+    /// not failed: no attempt was spent and none will be until one exists.
+    pub held: u32,
 }
 
 pub struct Engine {
@@ -283,6 +309,15 @@ impl Engine {
             Ok(()) => {
                 self.store.record_send_accepted(&send.id, now).await?;
                 report.sent += 1;
+            }
+            Err(problem) if !problem.attempted => {
+                // No sender. The mail keeps its place in the ledger and its
+                // attempts, and is looked at again on the next sweep — by then
+                // an admin may have filled the panel in.
+                self.store
+                    .defer_send(&send.id, &problem.message, now + HOLD, now)
+                    .await?;
+                report.held += 1;
             }
             Err(problem) => {
                 let attempts = send.attempts + 1;

@@ -14,34 +14,17 @@
 //!
 //! Whatever is finally resolved is printed once at startup — the database path
 //! absolute, the base URL as it will appear in mail — so "which file are we
-//! on" is answered by the log rather than by someone's memory. Passwords are
-//! never among the things printed.
+//! on" is answered by the log rather than by someone's memory.
+//!
+//! The sender is not here. Host, port, username, password and from-address are
+//! workspace settings an admin writes on the Settings screen, so that changing
+//! where mail goes out through does not need a shell on the box and a restart.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Every variable the app reads, in the order the report prints them.
-pub const VARIABLES: &[&str] = &[
-    "DIZEY_DEV",
-    "DIZEY_DATABASE",
-    "DIZEY_BASE_URL",
-    "DIZEY_SMTP_HOST",
-    "DIZEY_SMTP_PORT",
-    "DIZEY_SMTP_USERNAME",
-    "DIZEY_SMTP_PASSWORD",
-    "DIZEY_MAIL_FROM",
-];
-
-/// The five variables that carry a sender. They are all-or-nothing: a host
-/// without a from-address is not a half-configured sender, it is a mistake
-/// that would be discovered by a mail that never arrives.
-const MAIL_VARIABLES: &[&str] = &[
-    "DIZEY_SMTP_HOST",
-    "DIZEY_SMTP_PORT",
-    "DIZEY_SMTP_USERNAME",
-    "DIZEY_SMTP_PASSWORD",
-    "DIZEY_MAIL_FROM",
-];
+pub const VARIABLES: &[&str] = &["DIZEY_DEV", "DIZEY_DATABASE", "DIZEY_BASE_URL"];
 
 /// What the process needs to know before it opens a socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,33 +33,8 @@ pub struct Config {
     pub database: PathBuf,
     /// The origin links in mail point at, with no trailing slash.
     pub base_url: String,
-    /// The sender, if one is configured. Mail stays quiet without it.
-    pub mail: Option<MailConfig>,
     /// Whether the development defaults were taken.
     pub dev: bool,
-}
-
-/// Where mail goes out through. The password is in here and stays out of every
-/// rendering of it.
-#[derive(Clone, PartialEq, Eq)]
-pub struct MailConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
-    pub from: String,
-}
-
-impl fmt::Debug for MailConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MailConfig")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("username", &self.username)
-            .field("password", &"…")
-            .field("from", &self.from)
-            .finish()
-    }
 }
 
 /// Why the process is not starting.
@@ -86,11 +44,6 @@ pub enum ConfigError {
     Missing(Vec<&'static str>),
     /// A variable is set to something the app cannot use.
     Invalid { variable: &'static str, why: String },
-    /// Some of the sender's variables are set and some are not.
-    PartialMail {
-        set: Vec<&'static str>,
-        missing: Vec<&'static str>,
-    },
 }
 
 impl fmt::Display for ConfigError {
@@ -116,13 +69,6 @@ impl fmt::Display for ConfigError {
                     "not starting: {variable} is set to something unusable — {why}"
                 )
             }
-            ConfigError::PartialMail { set, missing } => write!(
-                f,
-                "not starting: a mail sender is half configured — {} set, {} missing. \
-                 Set all five or none; with none, Dizey sends nothing and says so.",
-                set.join(", "),
-                missing.join(", ")
-            ),
         }
     }
 }
@@ -169,12 +115,9 @@ impl Config {
         }
         let base_url = base_url.trim_end_matches('/').to_string();
 
-        let mail = mail_from(&value)?;
-
         Ok(Config {
             database: absolute(Path::new(&database.expect("checked above"))),
             base_url,
-            mail,
             dev,
         })
     }
@@ -185,13 +128,7 @@ impl Config {
             format!("database  {}", self.database.display()),
             format!("base url  {}", self.base_url),
         ];
-        lines.push(match &self.mail {
-            Some(mail) => format!(
-                "mail      {} via {}:{} as {}",
-                mail.from, mail.host, mail.port, mail.username
-            ),
-            None => "mail      no sender configured — Dizey sends nothing".to_string(),
-        });
+        lines.push("mail      the sender is in Settings, not here".to_string());
         if self.dev {
             lines.push("dev       DIZEY_DEV=1, development defaults taken".to_string());
         }
@@ -199,55 +136,6 @@ impl Config {
     }
 }
 
-fn mail_from(value: &impl Fn(&str) -> Option<String>) -> Result<Option<MailConfig>, ConfigError> {
-    let read: Vec<(&'static str, Option<String>)> = MAIL_VARIABLES
-        .iter()
-        .map(|name| (*name, value(name)))
-        .collect();
-    let set: Vec<&'static str> = read
-        .iter()
-        .filter(|(_, held)| held.is_some())
-        .map(|(name, _)| *name)
-        .collect();
-    if set.is_empty() {
-        return Ok(None);
-    }
-    let missing: Vec<&'static str> = read
-        .iter()
-        .filter(|(_, held)| held.is_none())
-        .map(|(name, _)| *name)
-        .collect();
-    if !missing.is_empty() {
-        return Err(ConfigError::PartialMail { set, missing });
-    }
-
-    let held = |name: &str| {
-        read.iter()
-            .find(|(candidate, _)| *candidate == name)
-            .and_then(|(_, held)| held.clone())
-            .expect("all five are set")
-    };
-    let raw_port = held("DIZEY_SMTP_PORT");
-    let port = raw_port.parse::<u16>().map_err(|_| ConfigError::Invalid {
-        variable: "DIZEY_SMTP_PORT",
-        why: format!("{raw_port:?} is not a port number"),
-    })?;
-    let from = held("DIZEY_MAIL_FROM");
-    if !from.contains('@') {
-        return Err(ConfigError::Invalid {
-            variable: "DIZEY_MAIL_FROM",
-            why: format!("{from:?} is not an address"),
-        });
-    }
-
-    Ok(Some(MailConfig {
-        host: held("DIZEY_SMTP_HOST"),
-        port,
-        username: held("DIZEY_SMTP_USERNAME"),
-        password: held("DIZEY_SMTP_PASSWORD"),
-        from,
-    }))
-}
 
 /// An absolute path for a file that may not exist yet: the directory is
 /// resolved, the file name is kept as written.
@@ -309,7 +197,6 @@ mod tests {
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("dizey.db"));
         assert_eq!(config.base_url, "http://127.0.0.1:3000");
-        assert!(config.mail.is_none());
     }
 
     #[test]
@@ -357,49 +244,13 @@ mod tests {
         assert_eq!(config.base_url, "https://dizey.sh");
     }
 
+    /// The sender used to be five environment variables. It is workspace
+    /// settings now, so a stale `DIZEY_SMTP_PASSWORD` left in a unit file or a
+    /// shell must do nothing at all — not half-configure a sender, not stop the
+    /// boot, and above all not quietly send through an account the Settings
+    /// screen does not show.
     #[test]
-    fn no_sender_is_a_configuration_not_an_error() {
-        let config = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-        ]))
-        .unwrap();
-        assert!(config.mail.is_none());
-        assert!(
-            config
-                .report()
-                .iter()
-                .any(|line| line.contains("no sender configured")),
-            "{:?}",
-            config.report()
-        );
-    }
-
-    #[test]
-    fn half_a_sender_stops_the_boot_and_names_both_halves() {
-        let problem = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-            ("DIZEY_SMTP_HOST", "smtp.example.net"),
-            ("DIZEY_SMTP_PORT", "587"),
-        ]))
-        .unwrap_err();
-        let ConfigError::PartialMail { set, missing } = &problem else {
-            panic!("expected the half-configured sender, got {problem:?}");
-        };
-        assert_eq!(set, &["DIZEY_SMTP_HOST", "DIZEY_SMTP_PORT"]);
-        assert_eq!(
-            missing,
-            &[
-                "DIZEY_SMTP_USERNAME",
-                "DIZEY_SMTP_PASSWORD",
-                "DIZEY_MAIL_FROM"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_whole_sender_is_read_and_its_password_is_never_printed() {
+    fn leftover_sender_variables_are_ignored_entirely() {
         let config = Config::read(env(&[
             ("DIZEY_DATABASE", "/srv/dizey.db"),
             ("DIZEY_BASE_URL", "https://dizey.sh"),
@@ -409,71 +260,22 @@ mod tests {
             ("DIZEY_SMTP_PASSWORD", "hunter2-and-then-some"),
             ("DIZEY_MAIL_FROM", "board@dizey.sh"),
         ]))
-        .unwrap();
-        let mail = config.mail.clone().expect("a sender");
-        assert_eq!(mail.port, 587);
-        assert_eq!(mail.from, "board@dizey.sh");
+        .expect("a stale sender in the environment is not an error");
 
         let report = config.report().join("\n");
-        assert!(report.contains("board@dizey.sh"), "{report}");
-        assert!(!report.contains("hunter2-and-then-some"), "{report}");
-        let debugged = format!("{mail:?}");
-        assert!(!debugged.contains("hunter2-and-then-some"), "{debugged}");
-    }
-
-    #[test]
-    fn a_port_that_is_not_a_port_stops_the_boot() {
-        let problem = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-            ("DIZEY_SMTP_HOST", "smtp.example.net"),
-            ("DIZEY_SMTP_PORT", "not-a-port"),
-            ("DIZEY_SMTP_USERNAME", "dizey"),
-            ("DIZEY_SMTP_PASSWORD", "secret"),
-            ("DIZEY_MAIL_FROM", "board@dizey.sh"),
-        ]))
-        .unwrap_err();
         assert!(
-            matches!(
-                problem,
-                ConfigError::Invalid {
-                    variable: "DIZEY_SMTP_PORT",
-                    ..
-                }
-            ),
-            "{problem:?}"
+            !report.contains("hunter2-and-then-some") && !report.contains("smtp.example.net"),
+            "the report read a variable it no longer honours: {report}"
         );
-    }
-
-    #[test]
-    fn a_from_address_without_an_at_sign_stops_the_boot() {
-        let problem = Config::read(env(&[
-            ("DIZEY_DATABASE", "/srv/dizey.db"),
-            ("DIZEY_BASE_URL", "https://dizey.sh"),
-            ("DIZEY_SMTP_HOST", "smtp.example.net"),
-            ("DIZEY_SMTP_PORT", "587"),
-            ("DIZEY_SMTP_USERNAME", "dizey"),
-            ("DIZEY_SMTP_PASSWORD", "secret"),
-            ("DIZEY_MAIL_FROM", "board-at-dizey"),
-        ]))
-        .unwrap_err();
         assert!(
-            matches!(
-                problem,
-                ConfigError::Invalid {
-                    variable: "DIZEY_MAIL_FROM",
-                    ..
-                }
-            ),
-            "{problem:?}"
+            report.contains("the sender is in Settings"),
+            "the report should say where the sender lives: {report}"
         );
     }
 
     #[test]
     fn every_variable_the_app_reads_is_named_in_one_list() {
-        for name in MAIL_VARIABLES {
-            assert!(VARIABLES.contains(name), "{name} is missing from VARIABLES");
-        }
+        assert_eq!(VARIABLES.len(), 3, "a variable was added without a line here");
         assert!(VARIABLES.contains(&"DIZEY_DEV"));
         assert!(VARIABLES.contains(&"DIZEY_DATABASE"));
         assert!(VARIABLES.contains(&"DIZEY_BASE_URL"));

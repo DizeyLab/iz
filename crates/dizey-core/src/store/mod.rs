@@ -605,6 +605,18 @@ pub trait Store: BoardReads + DetailReads + 'static {
         at: OffsetDateTime,
     ) -> Result<()>;
 
+    /// Holds a send that was never attempted, because the workspace has no
+    /// sender. The reason is written down like any refusal so the ledger does
+    /// not go quiet, but `attempts` is left alone: nothing was spent, so
+    /// nothing is charged, and the mail is still owed when a sender appears.
+    async fn defer_send(
+        &self,
+        send_id: &str,
+        reason: &str,
+        retry_at: OffsetDateTime,
+        at: OffsetDateTime,
+    ) -> Result<()>;
+
     /// Sends owed right now: claimed but never accepted, and due.
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>>;
 
