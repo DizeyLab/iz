@@ -716,13 +716,13 @@ fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
                         </label>
                     </div>
                     <div class="panel-foot">
-                        <button class="button button-primary" type="submit">"Save"</button>
+                        <Show when=move || refusal().is_some()>
+                            <span class="field-error">{move || refusal()}</span>
+                        </Show>
                         <Show when=saved>
                             <span class="field-note">"Saved."</span>
                         </Show>
-                        <Show when=move || refusal().is_some()>
-                            <span class="field-refusal">{move || refusal()}</span>
-                        </Show>
+                        <button class="primary" type="submit">"Save"</button>
                     </div>
                 </ActionForm>
             </div>
