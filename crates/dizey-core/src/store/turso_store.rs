@@ -13,14 +13,28 @@ use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
 use super::{
-    DeletePolicy, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace,
+    DeletePolicy, NewTask, NewUser, Result, Session, SigninLink, Store, StoreError, User, Workspace,
 };
 use crate::Role;
+use crate::board::{BoardMeta, BoardReads, Column, Person, TaskRow};
+use time::Date;
+use time::format_description::BorrowedFormatItem;
+use time::macros::format_description;
 
 /// Every migration, in order. Adding one means appending a file and a line.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_auth.sql")),
+];
+
+/// The board a fresh workspace gets, and its columns. `Done` is the column
+/// that stamps a card finished.
+const DEFAULT_BOARD_NAME: &str = "Board";
+const DEFAULT_COLUMNS: &[(&str, bool)] = &[
+    ("Backlog", false),
+    ("In Progress", false),
+    ("Review", false),
+    ("Done", true),
 ];
 
 pub struct TursoStore {
@@ -142,6 +156,24 @@ fn parse_stamp(raw: &str) -> Result<OffsetDateTime> {
         .map_err(|e| StoreError::Corrupt(format!("timestamp {raw:?}: {e}")))
 }
 
+/// Deadlines are days, not instants: a deadline is the same day wherever the
+/// person reading the card is.
+const DAY: &[BorrowedFormatItem] = format_description!("[year]-[month]-[day]");
+
+fn day_text(day: Date) -> Result<String> {
+    day.format(&DAY)
+        .map_err(|e| StoreError::Corrupt(format!("deadline: {e}")))
+}
+
+fn opt_day(row: &Row, idx: usize) -> Result<Option<Date>> {
+    match row.get::<Option<String>>(idx).map_err(backend)? {
+        Some(raw) => Date::parse(&raw, &DAY)
+            .map(Some)
+            .map_err(|e| StoreError::Corrupt(format!("deadline {raw:?}: {e}"))),
+        None => Ok(None),
+    }
+}
+
 fn opt_stamp(row: &Row, idx: usize) -> Result<Option<OffsetDateTime>> {
     match row.get::<Option<String>>(idx).map_err(backend)? {
         Some(raw) => Ok(Some(parse_stamp(&raw)?)),
@@ -247,6 +279,7 @@ impl Store for TursoStore {
     ) -> Result<(Workspace, User)> {
         let workspace_id = Uuid::new_v4().to_string();
         let admin_id = Uuid::new_v4().to_string();
+        let board_id = Uuid::new_v4().to_string();
         let now = now_text()?;
         let email = fold_email(email);
 
@@ -282,9 +315,36 @@ impl Store for TursoStore {
             tx.execute(
                 "INSERT INTO workspace_owner (singleton, user_id, claimed_at) \
                  VALUES (1, ?1, ?2)",
-                params![admin_id.clone(), now],
+                params![admin_id.clone(), now.clone()],
             )
             .await?;
+            // A claimed workspace is never boardless: the EmptyBoard screen is
+            // four named columns waiting for a first card, not a setup step.
+            tx.execute(
+                "INSERT INTO board (id, workspace_id, name, task_prefix, created_at) \
+                 VALUES (?1, ?2, ?3, 'DZ', ?4)",
+                params![
+                    board_id.clone(),
+                    workspace_id.clone(),
+                    DEFAULT_BOARD_NAME,
+                    now
+                ],
+            )
+            .await?;
+            for (position, (name, is_done)) in DEFAULT_COLUMNS.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO board_column (id, board_id, name, position, is_done) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        board_id.clone(),
+                        *name,
+                        position as i64,
+                        i64::from(*is_done)
+                    ],
+                )
+                .await?;
+            }
             Ok::<_, turso::Error>(())
         }
         .await;
@@ -702,6 +762,340 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)
+    }
+
+    // -- board -------------------------------------------------------------
+
+    async fn create_column(
+        &self,
+        board_id: &str,
+        name: &str,
+        position: i64,
+        is_done: bool,
+    ) -> Result<Column> {
+        let id = Uuid::new_v4().to_string();
+        self.conn
+            .execute(
+                "INSERT INTO board_column (id, board_id, name, position, is_done) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.clone(), board_id, name, position, i64::from(is_done)],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(Column {
+            id,
+            name: name.to_string(),
+            position,
+            is_done,
+        })
+    }
+
+    async fn create_task(&self, new: NewTask<'_>) -> Result<TaskRow> {
+        let id = Uuid::new_v4().to_string();
+        let now = now_text()?;
+        let deadline = new.deadline.map(day_text).transpose()?;
+
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the key comes off a counter, so the read of next_task_no
+        // and the write that bumps it must not be interleaved with another
+        // writer's pair.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        let written = async {
+            let mut rows = tx
+                .query(
+                    "SELECT task_prefix, next_task_no FROM board WHERE id = ?1",
+                    params![new.board_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(None);
+            };
+            let prefix = row.get::<String>(0)?;
+            let number = row.get::<i64>(1)?;
+            drop(rows);
+            tx.execute(
+                "UPDATE board SET next_task_no = ?1 WHERE id = ?2",
+                params![number + 1, new.board_id],
+            )
+            .await?;
+
+            // New cards land at the end of their column.
+            let mut rows = tx
+                .query(
+                    "SELECT COALESCE(MAX(position), 0) FROM task WHERE column_id = ?1",
+                    params![new.column_id],
+                )
+                .await?;
+            let last = match rows.next().await? {
+                Some(row) => row.get::<f64>(0).unwrap_or(0.0),
+                None => 0.0,
+            };
+            drop(rows);
+            let position = last + 1.0;
+
+            let task_key = format!("{prefix}-{number:02}");
+            tx.execute(
+                "INSERT INTO task (id, board_id, task_key, title, description, column_id, \
+                 deadline, position, created_by, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                params![
+                    id.clone(),
+                    new.board_id,
+                    task_key.clone(),
+                    new.title,
+                    new.description,
+                    new.column_id,
+                    deadline.clone(),
+                    position,
+                    new.created_by,
+                    now.clone()
+                ],
+            )
+            .await?;
+            Ok::<_, turso::Error>(Some((task_key, position)))
+        }
+        .await;
+
+        let written = match written {
+            Ok(Some(written)) => written,
+            Ok(None) => {
+                let _ = tx.rollback().await;
+                return Err(StoreError::NotFound);
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(backend(e));
+            }
+        };
+        tx.commit().await.map_err(backend)?;
+
+        let (task_key, position) = written;
+        Ok(TaskRow {
+            id,
+            task_key,
+            title: new.title.to_string(),
+            column_id: new.column_id.to_string(),
+            deadline: new.deadline,
+            position,
+            done_at: None,
+        })
+    }
+
+    async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO task_assignee (task_id, user_id) VALUES (?1, ?2)",
+                params![task_id, user_id],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM task_assignee WHERE task_id = ?1 AND user_id = ?2",
+                params![task_id, user_id],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn add_dependency(
+        &self,
+        blocked_task_id: &str,
+        blocking_task_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<()> {
+        // Re-adding a dependency that was cleared puts it back in force rather
+        // than leaving the cleared row to hide it.
+        self.conn
+            .execute(
+                "INSERT INTO task_dependency (blocked_task_id, blocking_task_id, created_at) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT (blocked_task_id, blocking_task_id) \
+                 DO UPDATE SET created_at = ?3, cleared_at = NULL",
+                params![blocked_task_id, blocking_task_id, stamp(at)?],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn clear_dependency(
+        &self,
+        blocked_task_id: &str,
+        blocking_task_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE task_dependency SET cleared_at = ?3 \
+                 WHERE blocked_task_id = ?1 AND blocking_task_id = ?2 AND cleared_at IS NULL",
+                params![blocked_task_id, blocking_task_id, stamp(at)?],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn add_comment(
+        &self,
+        task_id: &str,
+        author_id: &str,
+        body: &str,
+        at: OffsetDateTime,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        self.conn
+            .execute(
+                "INSERT INTO comment (id, task_id, author_id, body, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.clone(), task_id, author_id, body, stamp(at)?],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(id)
+    }
+}
+
+#[async_trait]
+impl BoardReads for TursoStore {
+    async fn board(&self, workspace_id: &str) -> Result<Option<BoardMeta>> {
+        let row = self
+            .one_row(
+                "SELECT id, name, task_prefix FROM board WHERE workspace_id = ?1 \
+                 ORDER BY created_at LIMIT 1",
+                params![workspace_id],
+            )
+            .await?;
+        match row {
+            Some(row) => Ok(Some(BoardMeta {
+                id: text(&row, 0)?,
+                name: text(&row, 1)?,
+                task_prefix: text(&row, 2)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn columns(&self, board_id: &str) -> Result<Vec<Column>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, name, position, is_done FROM board_column WHERE board_id = ?1 \
+                 ORDER BY position",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(Column {
+                id: text(&row, 0)?,
+                name: text(&row, 1)?,
+                position: row.get::<i64>(2).map_err(backend)?,
+                is_done: row.get::<i64>(3).map_err(backend)? != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn tasks_for_board(&self, board_id: &str) -> Result<Vec<TaskRow>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, task_key, title, column_id, deadline, position, done_at \
+                 FROM task WHERE board_id = ?1 AND deleted_at IS NULL",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(TaskRow {
+                id: text(&row, 0)?,
+                task_key: text(&row, 1)?,
+                title: text(&row, 2)?,
+                column_id: text(&row, 3)?,
+                deadline: opt_day(&row, 4)?,
+                position: row.get::<f64>(5).map_err(backend)?,
+                done_at: opt_stamp(&row, 6)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn assignees_for_board(&self, board_id: &str) -> Result<Vec<(String, Person)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT a.task_id, u.id, u.display_name, u.photo_path \
+                 FROM task_assignee a \
+                 JOIN task t ON t.id = a.task_id \
+                 JOIN user u ON u.id = a.user_id \
+                 WHERE t.board_id = ?1 AND t.deleted_at IS NULL \
+                 ORDER BY u.display_name",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push((
+                text(&row, 0)?,
+                Person {
+                    id: text(&row, 1)?,
+                    display_name: text(&row, 2)?,
+                    photo_path: opt_text(&row, 3)?,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn comment_counts_for_board(&self, board_id: &str) -> Result<Vec<(String, u32)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT c.task_id, COUNT(*) FROM comment c \
+                 JOIN task t ON t.id = c.task_id \
+                 WHERE t.board_id = ?1 AND t.deleted_at IS NULL \
+                 GROUP BY c.task_id",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let count = row.get::<i64>(1).map_err(backend)?.max(0) as u32;
+            out.push((text(&row, 0)?, count));
+        }
+        Ok(out)
+    }
+
+    async fn dependencies_for_board(&self, board_id: &str) -> Result<Vec<(String, String)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT d.blocked_task_id, d.blocking_task_id FROM task_dependency d \
+                 JOIN task t ON t.id = d.blocked_task_id \
+                 WHERE t.board_id = ?1 AND d.cleared_at IS NULL AND t.deleted_at IS NULL",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push((text(&row, 0)?, text(&row, 1)?));
+        }
+        Ok(out)
     }
 }
 

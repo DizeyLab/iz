@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::board::{BoardReads, TaskRow};
 use crate::Role;
 
 pub mod turso_store;
@@ -139,9 +140,23 @@ impl Session {
     }
 }
 
+/// A task as it is written. The key (`DZ-14`) is not here: the store hands it
+/// out from the board's counter, so two tasks created at once cannot collide.
+pub struct NewTask<'a> {
+    pub board_id: &'a str,
+    pub column_id: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub deadline: Option<time::Date>,
+    pub created_by: &'a str,
+}
+
 /// The storage boundary. Dyn-safe on purpose: handlers hold `Arc<dyn Store>`.
+///
+/// The board's reads live in [`BoardReads`], so the sweep-per-board shape is a
+/// trait a test can wrap and count.
 #[async_trait]
-pub trait Store: Send + Sync + 'static {
+pub trait Store: BoardReads + 'static {
     // -- workspace ---------------------------------------------------------
 
     /// Claims an empty database: writes the workspace, its first account and
@@ -275,4 +290,47 @@ pub trait Store: Send + Sync + 'static {
     /// Drops attempt rows older than `before`, so the ledger does not grow
     /// without bound.
     async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64>;
+
+    // -- board -------------------------------------------------------------
+
+    /// Adds a column to the end of a board.
+    async fn create_column(
+        &self,
+        board_id: &str,
+        name: &str,
+        position: i64,
+        is_done: bool,
+    ) -> Result<crate::board::Column>;
+
+    /// Writes a task and hands it the next key on its board, in one
+    /// transaction, so two writers cannot both take `DZ-14`.
+    async fn create_task(&self, new: NewTask<'_>) -> Result<TaskRow>;
+
+    /// Idempotent: assigning someone twice is not an error.
+    async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()>;
+
+    async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()>;
+
+    /// `blocked` cannot start until `blocking` is finished.
+    async fn add_dependency(
+        &self,
+        blocked_task_id: &str,
+        blocking_task_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<()>;
+
+    async fn clear_dependency(
+        &self,
+        blocked_task_id: &str,
+        blocking_task_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<()>;
+
+    async fn add_comment(
+        &self,
+        task_id: &str,
+        author_id: &str,
+        body: &str,
+        at: OffsetDateTime,
+    ) -> Result<String>;
 }

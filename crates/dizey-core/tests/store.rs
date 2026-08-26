@@ -1200,3 +1200,345 @@ async fn an_address_can_only_be_invited_once() {
         Err(AccountError::AddressTaken)
     ));
 }
+
+// -- board ------------------------------------------------------------------
+
+use dizey_core::board::{BoardReads, BoardView, Person, load};
+use dizey_core::store::NewTask;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use time::Date;
+use time::macros::date;
+
+/// Wraps the real store and counts the round trips a board costs.
+///
+/// This is the whole point of [`BoardReads`] being its own trait: the guard
+/// against N+1 is tested by its effect — the count does not move when the board
+/// gets bigger — rather than by reading the queries and taking their word.
+struct CountingReads<'a> {
+    inner: &'a TursoStore,
+    calls: AtomicUsize,
+}
+
+impl<'a> CountingReads<'a> {
+    fn new(inner: &'a TursoStore) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    fn tick(&self) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[async_trait::async_trait]
+impl BoardReads for CountingReads<'_> {
+    async fn board(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<dizey_core::board::BoardMeta>, StoreError> {
+        self.tick();
+        self.inner.board(workspace_id).await
+    }
+
+    async fn columns(&self, board_id: &str) -> Result<Vec<dizey_core::board::Column>, StoreError> {
+        self.tick();
+        self.inner.columns(board_id).await
+    }
+
+    async fn tasks_for_board(
+        &self,
+        board_id: &str,
+    ) -> Result<Vec<dizey_core::board::TaskRow>, StoreError> {
+        self.tick();
+        self.inner.tasks_for_board(board_id).await
+    }
+
+    async fn assignees_for_board(
+        &self,
+        board_id: &str,
+    ) -> Result<Vec<(String, Person)>, StoreError> {
+        self.tick();
+        self.inner.assignees_for_board(board_id).await
+    }
+
+    async fn comment_counts_for_board(
+        &self,
+        board_id: &str,
+    ) -> Result<Vec<(String, u32)>, StoreError> {
+        self.tick();
+        self.inner.comment_counts_for_board(board_id).await
+    }
+
+    async fn dependencies_for_board(
+        &self,
+        board_id: &str,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        self.tick();
+        self.inner.dependencies_for_board(board_id).await
+    }
+}
+
+async fn board_of(store: &TursoStore, workspace_id: &str) -> BoardView {
+    load(store, workspace_id)
+        .await
+        .unwrap()
+        .expect("a claimed workspace has a board")
+}
+
+async fn column_named(store: &TursoStore, workspace_id: &str, name: &str) -> String {
+    let board = board_of(store, workspace_id).await;
+    board
+        .columns
+        .iter()
+        .find(|column| column.column.name == name)
+        .unwrap_or_else(|| panic!("no column named {name}"))
+        .column
+        .id
+        .clone()
+}
+
+async fn add_task(
+    store: &TursoStore,
+    workspace_id: &str,
+    column: &str,
+    title: &str,
+    deadline: Option<Date>,
+    author: &str,
+) -> String {
+    let board = store.board(workspace_id).await.unwrap().unwrap();
+    let column_id = column_named(store, workspace_id, column).await;
+    store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            title,
+            description: "",
+            deadline,
+            created_by: author,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn a_claimed_workspace_starts_with_four_named_columns() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let board = board_of(&scratch.store, &workspace).await;
+
+    let names: Vec<&str> = board
+        .columns
+        .iter()
+        .map(|column| column.column.name.as_str())
+        .collect();
+    assert_eq!(names, ["Backlog", "In Progress", "Review", "Done"]);
+    assert!(board.is_empty(), "a fresh board has no cards");
+    // Only the last column finishes a task.
+    let done: Vec<bool> = board
+        .columns
+        .iter()
+        .map(|column| column.column.is_done)
+        .collect();
+    assert_eq!(done, [false, false, false, true]);
+}
+
+#[tokio::test]
+async fn tasks_get_consecutive_keys_off_the_board_counter() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    for title in ["Pricing page draft", "Choose analytics stack"] {
+        add_task(store, &workspace, "Backlog", title, None, &admin).await;
+    }
+
+    let board = board_of(store, &workspace).await;
+    let keys: Vec<&str> = board.cards().map(|card| card.task_key.as_str()).collect();
+    assert_eq!(keys, ["DZ-01", "DZ-02"]);
+}
+
+#[tokio::test]
+async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let mel = store
+        .create_user(NewUser {
+            workspace_id: workspace.clone(),
+            email: "mel@dizey.sh".into(),
+            display_name: "Mel Duarte".into(),
+            role: Role::Member,
+        })
+        .await
+        .unwrap();
+
+    let blocking = add_task(
+        store,
+        &workspace,
+        "In Progress",
+        "CLI install script (curl | sh)",
+        Some(date!(2026 - 08 - 21)),
+        &admin,
+    )
+    .await;
+    let blocked = add_task(
+        store,
+        &workspace,
+        "Backlog",
+        "Onboarding email sequence",
+        Some(date!(2026 - 10 - 06)),
+        &admin,
+    )
+    .await;
+
+    store.assign_task(&blocking, &admin).await.unwrap();
+    store.assign_task(&blocking, &mel.id).await.unwrap();
+    // Assigning twice is the same as assigning once.
+    store.assign_task(&blocking, &mel.id).await.unwrap();
+    store
+        .add_dependency(&blocked, &blocking, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    for body in ["needs a checksum", "and a version pin", "ready for review"] {
+        store
+            .add_comment(&blocking, &admin, body, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+    }
+
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == blocking).unwrap();
+    assert_eq!(card.assignees.len(), 2);
+    assert_eq!(card.comment_count, 3);
+    assert_eq!(card.blocks, ["DZ-02"]);
+    assert!(card.blocked_by.is_empty());
+    assert!(!card.is_blocked());
+
+    let waiting = board.cards().find(|card| card.id == blocked).unwrap();
+    assert_eq!(waiting.blocked_by, ["DZ-01"]);
+    assert!(waiting.is_blocked());
+    assert_eq!(waiting.comment_count, 0);
+    assert!(waiting.assignees.is_empty());
+
+    let today = date!(2026 - 08 - 26);
+    assert_eq!(card.deadline_label(today), "Aug 21 · overdue");
+    assert_eq!(waiting.deadline_label(today), "Oct 06");
+    assert_eq!(board.overdue_count(today), 1);
+    assert_eq!(board.blocked_count(), 1);
+}
+
+#[tokio::test]
+async fn a_cleared_dependency_stops_showing_on_the_card() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let blocking = add_task(store, &workspace, "In Progress", "Invite flow", None, &admin).await;
+    let blocked = add_task(store, &workspace, "Backlog", "Terms of service", None, &admin).await;
+    let now = OffsetDateTime::now_utc();
+    store.add_dependency(&blocked, &blocking, now).await.unwrap();
+
+    let board = board_of(store, &workspace).await;
+    assert!(
+        board
+            .cards()
+            .find(|card| card.id == blocked)
+            .unwrap()
+            .is_blocked()
+    );
+
+    store
+        .clear_dependency(&blocked, &blocking, now)
+        .await
+        .unwrap();
+    let board = board_of(store, &workspace).await;
+    let card = board.cards().find(|card| card.id == blocked).unwrap();
+    assert!(card.blocked_by.is_empty());
+    assert!(!card.is_blocked());
+}
+
+#[tokio::test]
+async fn cards_sort_by_deadline_with_the_undated_last() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    for (title, deadline) in [
+        ("Choose analytics stack", None),
+        ("Terms of service review", Some(date!(2026 - 09 - 30))),
+        ("Pricing page draft", Some(date!(2026 - 09 - 12))),
+    ] {
+        add_task(store, &workspace, "Backlog", title, deadline, &admin).await;
+    }
+
+    let board = board_of(store, &workspace).await;
+    let titles: Vec<&str> = board.columns[0]
+        .cards
+        .iter()
+        .map(|card| card.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Pricing page draft",
+            "Terms of service review",
+            "Choose analytics stack"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_board_costs_six_queries_whatever_its_size() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+
+    let small = CountingReads::new(store);
+    load(&small, &workspace).await.unwrap();
+    assert_eq!(small.count(), 6, "an empty board");
+
+    // Forty tasks, each with an assignee, a comment and a dependency — the
+    // three things a naive card query fans out on.
+    let mut previous: Option<String> = None;
+    for n in 0..40 {
+        let id = add_task(
+            store,
+            &workspace,
+            "Backlog",
+            &format!("task {n}"),
+            Some(date!(2026 - 09 - 12)),
+            &admin,
+        )
+        .await;
+        store.assign_task(&id, &admin).await.unwrap();
+        store
+            .add_comment(&id, &admin, "a note", OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        if let Some(previous) = previous.replace(id.clone()) {
+            store
+                .add_dependency(&id, &previous, OffsetDateTime::now_utc())
+                .await
+                .unwrap();
+        }
+    }
+
+    let big = CountingReads::new(store);
+    let board = load(&big, &workspace).await.unwrap().unwrap();
+    assert_eq!(board.task_count(), 40);
+    assert_eq!(
+        big.count(),
+        6,
+        "the round trips a board costs must not follow the number of tasks"
+    );
+}
+
+#[test]
+fn initials_fall_back_to_two_letters() {
+    let person = |name: &str| Person {
+        id: "u".into(),
+        display_name: name.into(),
+        photo_path: None,
+    };
+    assert_eq!(person("Mel Duarte").initials(), "MD");
+    assert_eq!(person("Ada").initials(), "A");
+    assert_eq!(person("  ").initials(), "?");
+}
