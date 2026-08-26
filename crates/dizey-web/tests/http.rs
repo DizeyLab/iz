@@ -901,7 +901,8 @@ async fn an_admin_sees_the_sender_and_never_a_password() {
         answer.body.contains(
             "\"sender\":{\"host\":\"smtp.fastmail.com\",\"port\":465,\
              \"username\":\"dizey\",\"from_name\":\"Dizey\",\
-             \"from_address\":\"dizey@dizey.sh\",\"password_set\":true}"
+             \"from_address\":\"dizey@dizey.sh\",\"password_set\":true,\
+             \"test\":null}"
         ),
         "{}",
         answer.body
@@ -1565,4 +1566,80 @@ async fn signing_out_leaves_every_other_session_alone() {
         )
         .await;
     assert!(still.body.contains("administers"), "{}", still.body);
+}
+
+#[tokio::test]
+async fn a_member_may_not_press_the_test_button() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@dizey.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SendTestMail>(),
+            Some(&member),
+            &[],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn a_viewer_may_not_press_the_test_button() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let viewer = invited(&app, &admin_cookie, "pinar@dizey.sh", "Pinar", Role::Viewer).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SendTestMail>(),
+            Some(&viewer),
+            &[],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn a_signed_out_browser_may_not_press_the_test_button() {
+    let app = App::open().await;
+
+    let answer = app
+        .post(path::<dizey_web::settings::SendTestMail>(), None, &[])
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("SignInFirst"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn testing_a_sender_that_was_never_filled_in_says_so_rather_than_sending() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            path::<dizey_web::settings::SendTestMail>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert!(answer.body.contains("BadSender"), "{}", answer.body);
+    assert!(answer.body.contains("save it first"), "{}", answer.body);
+
+    // Nothing was recorded either: the panel still has no test line to show.
+    let seen = app
+        .post(
+            path::<dizey_web::settings::CurrentSettings>(),
+            Some(&admin_cookie),
+            &[],
+        )
+        .await;
+    assert!(!seen.body.contains("\"test\":{"), "{}", seen.body);
 }

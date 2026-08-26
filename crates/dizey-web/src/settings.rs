@@ -26,6 +26,20 @@ pub struct Sender {
     pub from_name: String,
     pub from_address: String,
     pub password_set: bool,
+    /// The last test result, as the panel prints it, or nothing when the button
+    /// has not been pressed since the sender was last edited.
+    pub test: Option<TestResult>,
+}
+
+/// What the row under the test button says.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestResult {
+    /// `Aug 25 10:41`, in UTC, the same stamp the activity strip uses.
+    pub moment: String,
+    /// `1.2 s`, or nothing when the send never got as far as being timed.
+    pub took: Option<String>,
+    /// What the mail server said, if it refused.
+    pub error: Option<String>,
 }
 
 impl Sender {
@@ -52,7 +66,24 @@ impl Sender {
             from_name: workspace.smtp_from_name.clone().unwrap_or_default(),
             from_address: workspace.smtp_from_address.clone().unwrap_or_default(),
             password_set: workspace.smtp_password_set,
+            test: workspace.sender_test.as_ref().map(|test| TestResult {
+                moment: dizey_core::detail::moment_label(test.at),
+                took: test.error.is_none().then(|| took_label(test.took_ms)),
+                error: test.error.clone(),
+            }),
         }
+    }
+}
+
+/// `1.2 s` for anything over a second, `840 ms` below it. A mail server that
+/// answered in under a second is worth saying so precisely; one that took eight
+/// is worth a number somebody can compare to the last one.
+#[cfg(feature = "ssr")]
+fn took_label(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms} ms")
     }
 }
 
@@ -352,6 +383,62 @@ pub async fn save_sender(
     }
 }
 
+/// Sends one mail to the admin who pressed the button, and writes down how it
+/// went so the answer survives a reload.
+///
+/// It goes to their own address and nowhere else. A test that could be pointed
+/// at an address somebody typed would be a way to make Dizey mail a stranger
+/// on demand, which is a thing worth not building.
+#[server]
+pub async fn send_test_mail() -> Result<Option<Refusal>, ServerFnError> {
+    use crate::server::{accounts, mail, require_admin};
+    use dizey_core::store::SenderTest;
+
+    let admin = match require_admin().await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+
+    let store = accounts().store().clone();
+    let configured = store
+        .workspace()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .is_some_and(|ws| ws.smtp_password_set && ws.smtp_host.is_some());
+    if !configured {
+        return Ok(Some(Refusal::BadSender(
+            "Fill the sender in and save it first — there is nothing to test yet.".to_string(),
+        )));
+    }
+
+    let Some(outcome) = mail().test(&admin.email).await else {
+        // No engine in this process at all. Nothing sends here, and saying so
+        // beats writing down a failure the settings did not cause.
+        return Ok(Some(Refusal::Unavailable));
+    };
+
+    let at = time::OffsetDateTime::now_utc();
+    let test = match outcome {
+        Ok(took) => SenderTest {
+            at,
+            took_ms: took.whole_milliseconds().max(0) as u64,
+            error: None,
+        },
+        Err(problem) => SenderTest {
+            at,
+            took_ms: 0,
+            // The mailer builds this from what the server said, never from the
+            // credentials it sent, so it is safe to store and to show.
+            error: Some(problem.message.clone()),
+        },
+    };
+    if let Err(problem) = store.record_sender_test(&admin.workspace_id, test).await {
+        eprintln!("store error: {problem}");
+        return Ok(Some(Refusal::Unavailable));
+    }
+    Ok(None)
+}
+
 /// The shallowest check that catches a typo without rejecting a real address.
 /// Nothing here is trying to decide what RFC 5322 permits — the mail server
 /// settles that, and a refusal from it lands in the ledger with its own words.
@@ -632,8 +719,53 @@ fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
         }
     });
 
+    // The test writes down what happened, so the panel is refetched after it
+    // for the same reason it is after a save: what is on screen should be the
+    // stored answer, not this browser's memory of one.
+    let test = ServerAction::<SendTestMail>::new();
+    let tested = test.value();
+    Effect::new(move |_| {
+        if matches!(tested.get(), Some(Ok(None))) {
+            on_change.run(());
+        }
+    });
+    let test_refusal = move || match tested.get() {
+        Some(Ok(Some(refusal))) => Some(refusal.message()),
+        Some(Err(_)) => Some(Refusal::Unavailable.message()),
+        _ => None,
+    };
+
     let connected = sender.is_connected();
     let password_set = sender.password_set;
+    // What the row says: a refusal from the call itself if there was one, and
+    // otherwise the stored result of the last test — which outlives the reload,
+    // because "did this ever work" is a question asked the next morning.
+    let last = sender.test.clone();
+    let test_line = move || match (test_refusal(), last.clone()) {
+        (Some(message), _) => {
+            view! { <span class="field-error">{message}</span> }.into_any()
+        }
+        (None, Some(result)) => match (result.error, result.took) {
+            (Some(problem), _) => {
+                view! {
+                    <span class="field-error">
+                        {format!("not delivered, {} — {problem}", result.moment)}
+                    </span>
+                }
+                    .into_any()
+            }
+            (None, Some(took)) => {
+                view! {
+                    <span class="field-note">
+                        {format!("delivered in {took} — {}", result.moment)}
+                    </span>
+                }
+                    .into_any()
+            }
+            (None, None) => ().into_any(),
+        },
+        (None, None) => ().into_any(),
+    };
 
     view! {
         <section class="panel">
@@ -657,7 +789,7 @@ fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
                             </p>
                         }
                     })}
-                <ActionForm action=action>
+                <ActionForm action=action attr:id="sender-settings">
                     <div class="field-row">
                         <label class="field">
                             <span class="field-label">"SMTP HOST"</span>
@@ -726,16 +858,37 @@ fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
                             />
                         </label>
                     </div>
-                    <div class="panel-foot">
+                </ActionForm>
+                // The test lives outside the settings form because it is its
+                // own call, and a form cannot hold another. Save reaches back
+                // into that form by name, which is what the `form` attribute is
+                // for, and works in a browser with no script as well as one
+                // with.
+                <div class="panel-foot panel-foot-split">
+                    <div class="foot-side">
+                        <ActionForm action=test>
+                            <button
+                                class="quiet"
+                                type="submit"
+                                disabled=move || test.pending().get()
+                            >
+                                "Send test mail to myself"
+                            </button>
+                        </ActionForm>
+                        {test_line}
+                    </div>
+                    <div class="foot-side">
                         <Show when=move || refusal().is_some()>
                             <span class="field-error">{move || refusal()}</span>
                         </Show>
                         <Show when=saved>
                             <span class="field-note">"Saved."</span>
                         </Show>
-                        <button class="primary" type="submit">"Save"</button>
+                        <button class="primary" type="submit" form="sender-settings">
+                            "Save"
+                        </button>
                     </div>
-                </ActionForm>
+                </div>
             </div>
         </section>
     }
@@ -1030,5 +1183,20 @@ fn MembersPanel(
                 </div>
             </div>
         </section>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::took_label;
+
+    #[test]
+    fn a_send_is_timed_the_way_the_artboard_writes_it() {
+        // The artboard's own line reads `delivered in 1.2 s`.
+        assert_eq!(took_label(1234), "1.2 s");
+        assert_eq!(took_label(1000), "1.0 s");
+        // Under a second the seconds reading would be all zeroes, so say milliseconds.
+        assert_eq!(took_label(999), "999 ms");
+        assert_eq!(took_label(0), "0 ms");
     }
 }

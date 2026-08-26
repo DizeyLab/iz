@@ -56,6 +56,9 @@ pub struct Workspace {
     /// Whether a password is stored, never the password. Derived in the query
     /// so that the value itself does not travel even this far.
     pub smtp_password_set: bool,
+    /// How the last "send test mail to myself" went, if one has been pressed
+    /// since the sender was last edited.
+    pub sender_test: Option<SenderTest>,
     pub attachment_limit_bytes: u64,
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
@@ -67,6 +70,19 @@ pub struct Workspace {
 /// the screen sends when a password is already stored: the field is write-only,
 /// so an edit to the port must not blank the password just because the form had
 /// nothing to put in it.
+/// What came of pressing the test button: when, how long the mail server took,
+/// and what it said if it refused.
+///
+/// `error` is `None` for a mail that was accepted. It holds the mail server's
+/// own words otherwise, because "it did not work" is not something an admin can
+/// act on and "535 authentication failed" is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderTest {
+    pub at: OffsetDateTime,
+    pub took_ms: u64,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewSender {
     pub host: String,
@@ -321,6 +337,10 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// which is how an admin changes the port without retyping a secret the
     /// screen was never allowed to show them.
     async fn set_sender(&self, workspace_id: &str, sender: NewSender) -> Result<()>;
+
+    /// Writes down how the last test send went. Editing the sender clears it,
+    /// so what is stored is always about the settings that are stored.
+    async fn record_sender_test(&self, workspace_id: &str, test: SenderTest) -> Result<()>;
 
     /// Reads the sender's password. Only the mailer calls this, and nothing it
     /// returns reaches a response body.

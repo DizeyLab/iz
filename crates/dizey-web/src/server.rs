@@ -73,6 +73,14 @@ impl Mail {
         });
     }
 
+    /// Sends one test mail and waits for the answer, because the answer is the
+    /// whole point of pressing the button. `None` means this process has no
+    /// engine at all, which happens only in tests.
+    pub async fn test(&self, to: &str) -> Option<Result<time::Duration, dizey_core::MailError>> {
+        let engine = self.0.clone()?;
+        Some(engine.send_test(to).await)
+    }
+
     fn log(report: dizey_core::store::Result<dizey_core::mail::Report>) {
         match report {
             Ok(report) if report.sent + report.failed + report.abandoned > 0 => {

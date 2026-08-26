@@ -89,14 +89,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("dizey.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 8);
+    assert_eq!(first.schema_version().await.unwrap(), 9);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 8);
+    assert_eq!(second.schema_version().await.unwrap(), 9);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Dizey");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);

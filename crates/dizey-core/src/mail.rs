@@ -137,6 +137,29 @@ impl Engine {
         }
     }
 
+    /// Sends one mail to the address given, right now, and says how long the
+    /// mail server took to accept it.
+    ///
+    /// This is the only send that does not go through the ledger, and that is
+    /// deliberate: a test mail is owed to nobody. If it fails there is nothing
+    /// to retry and nothing to abandon — the person who pressed the button is
+    /// watching, and the answer is for them.
+    pub async fn send_test(&self, to: &str) -> std::result::Result<Duration, MailError> {
+        let mail = Outgoing {
+            to: to.to_string(),
+            subject: "Dizey test mail".to_string(),
+            body: "Somebody pressed the test button in Dizey's settings, and this \
+                   is what came out. Nothing else was sent, and nobody else was \
+                   written to.\n"
+                .to_string(),
+        };
+        let started = std::time::Instant::now();
+        self.mailer.send(&mail).await?;
+        Ok(Duration::milliseconds(
+            started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        ))
+    }
+
     /// Everything one crossing owes. Called after the move has committed, never
     /// inside it.
     pub async fn on_transition(&self, transition: &Transition) -> crate::store::Result<Report> {

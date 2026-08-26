@@ -15,7 +15,7 @@ use uuid::Uuid;
 use super::{
     Audience, Deletion, Event, Freeing, MailRule, MailSend, NewSender, NewTask, NewUser, Recipient,
     Result,
-    SendState, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
+    SendState, SenderTest, Session, SigninLink, Store, StoreError, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -36,6 +36,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("../../migrations/0006_sender_is_config.sql")),
     (7, include_str!("../../migrations/0007_who_invited.sql")),
     (8, include_str!("../../migrations/0008_sender_is_settings.sql")),
+    (9, include_str!("../../migrations/0009_sender_test.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -351,6 +352,14 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         smtp_from_name: opt_text(row, 9)?,
         smtp_from_address: opt_text(row, 10)?,
         smtp_password_set: row.get::<i64>(11).map_err(backend)? != 0,
+        sender_test: match opt_stamp(row, 12)? {
+            Some(at) => Some(SenderTest {
+                at,
+                took_ms: row.get::<i64>(13).map_err(backend)?.max(0) as u64,
+                error: opt_text(row, 14)?,
+            }),
+            None => None,
+        },
     })
 }
 
@@ -360,7 +369,8 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
 const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
      allowed_file_types, photo_limit_bytes, smtp_host, smtp_port, smtp_username, \
      smtp_from_name, smtp_from_address, \
-     (smtp_password IS NOT NULL AND smtp_password <> '')";
+     (smtp_password IS NOT NULL AND smtp_password <> ''), \
+     smtp_test_at, smtp_test_ms, smtp_test_error";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -535,11 +545,16 @@ impl Store for TursoStore {
         // screen sends no password when the admin did not type one, and the
         // stored secret survives an edit to the port. Passing an empty string
         // is not a way to blank it either — the form sends `None` for empty.
+        //
+        // The last test result is cleared by the same statement. It was about
+        // the settings that have just been replaced, and a green "delivered"
+        // line under a host nobody has tried yet is worse than no line at all.
         self.conn
             .execute(
                 "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
                  smtp_password = COALESCE(?4, smtp_password), smtp_from_name = ?5, \
-                 smtp_from_address = ?6 WHERE id = ?7",
+                 smtp_from_address = ?6, smtp_test_at = NULL, smtp_test_ms = NULL, \
+                 smtp_test_error = NULL WHERE id = ?7",
                 params![
                     sender.host,
                     sender.port as i64,
@@ -547,6 +562,23 @@ impl Store for TursoStore {
                     sender.password,
                     sender.from_name,
                     sender.from_address,
+                    workspace_id
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn record_sender_test(&self, workspace_id: &str, test: SenderTest) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE workspace SET smtp_test_at = ?1, smtp_test_ms = ?2, \
+                 smtp_test_error = ?3 WHERE id = ?4",
+                params![
+                    stamp(test.at)?,
+                    test.took_ms as i64,
+                    test.error,
                     workspace_id
                 ],
             )

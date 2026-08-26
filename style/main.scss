@@ -1572,12 +1572,23 @@ a {
 
 .panel-foot {
   display: flex;
+  // A foot inside a `.panel-body` would inherit that column, and a foot is a row.
+  flex-direction: row;
   align-items: center;
   gap: 12px;
   justify-content: flex-end;
 
   // A foot with something to say on the left and the button on the right.
   &-split { justify-content: space-between; }
+
+}
+
+// One end of a split foot: its own controls, kept together.
+.foot-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
 // The quiet counterpart of `.primary`, for an action that is real but is not
