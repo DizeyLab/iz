@@ -29,6 +29,9 @@ pub struct RuleLine {
     /// `Aug 24 14:02`, or nothing when no mail from this rule has ever been
     /// accepted by the mail server.
     pub last_sent: Option<String>,
+    /// `Aug 24 14:02` of the rule's last decision, sent or not, or nothing
+    /// when the rule has never been evaluated.
+    pub last_fired: Option<String>,
 }
 
 /// A column, for the composer's status list.
@@ -79,6 +82,7 @@ pub async fn current_rules() -> Result<Result<RulesSnapshot, Refusal>, ServerFnE
     let columns = store.columns(&board.id).await.map_err(fail)?;
     let rules = store.mail_rules(&board.id).await.map_err(fail)?;
     let last_sent = store.mail_rule_last_sent(&board.id).await.map_err(fail)?;
+    let last_decision = store.mail_rule_last_decision().await.map_err(fail)?;
     let sender_connected = store
         .workspace()
         .await
@@ -113,6 +117,10 @@ pub async fn current_rules() -> Result<Result<RulesSnapshot, Refusal>, ServerFnE
                 audience: audience_word(rule.audience).to_string(),
                 enabled: rule.enabled,
                 last_sent: last_sent
+                    .iter()
+                    .find(|(id, _)| id == &rule.id)
+                    .map(|(_, at)| izlek_core::detail::moment_label(*at)),
+                last_fired: last_decision
                     .iter()
                     .find(|(id, _)| id == &rule.id)
                     .map(|(_, at)| izlek_core::detail::moment_label(*at)),
@@ -335,6 +343,9 @@ fn RulesScreen(snapshot: RulesSnapshot, on_change: Callback<()>) -> impl IntoVie
                 <a class="sidenav-item sidenav-item-on" href="/rules">
                     "Mail rules"
                 </a>
+                <a class="sidenav-item" href="/logs">
+                    "Logs"
+                </a>
                 <a class="sidenav-item" href="/settings">
                     "Settings"
                 </a>
@@ -474,10 +485,11 @@ fn RuleRow(rule: RuleLine, on_change: Callback<()>) -> impl IntoView {
         }
     });
 
-    let RuleLine { id, when, what, subject, audience, enabled, last_sent } = rule;
+    let RuleLine { id, when, what, subject, audience, enabled, last_sent, last_fired } = rule;
     let stamp = last_sent
         .map(|moment| format!("last sent {moment}"))
-        .unwrap_or_else(|| "never sent".to_string());
+        .or_else(|| last_fired.map(|moment| format!("last fired {moment}")))
+        .unwrap_or_else(|| "never fired".to_string());
     let row_class = if enabled { "rule-row" } else { "rule-row rule-row-off" };
     let switch_class = if enabled { "rule-switch rule-switch-on" } else { "rule-switch" };
     let switch_label = if enabled { "Switch this rule off" } else { "Switch this rule on" };
