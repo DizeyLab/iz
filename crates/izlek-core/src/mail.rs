@@ -29,8 +29,10 @@ use async_trait::async_trait;
 use time::{Duration, OffsetDateTime};
 
 use crate::board::Transition;
+use crate::detail::ActivityKind;
 use crate::store::{
-    Audience, Event, Freeing, MailOutcome, MailRule, MailSend, SendKind, Store, Trigger,
+    ActivityEvent, Audience, Event, Freeing, MailOutcome, MailRule, MailSend, SendKind, Store,
+    Trigger,
 };
 
 /// Why the mail server would not take it, and whether that can change.
@@ -246,18 +248,10 @@ impl Engine {
                         )
                         .await?;
                 }
-                // A crossing does not fire any trigger below — the engine for
-                // these is S4's work.
-                Trigger::Created
-                | Trigger::Assigned
-                | Trigger::Unassigned
-                | Trigger::Commented
-                | Trigger::DeadlineSet
-                | Trigger::DeadlineCleared
-                | Trigger::Retitled
-                | Trigger::Linked
-                | Trigger::Unlinked
-                | Trigger::Deleted => {
+                // Every trigger left is activity-shaped — `activity_kind_for`
+                // is the one place that says so — and a crossing never fires
+                // one of those.
+                _ => {
                     self.store
                         .record_mail_decision(
                             &rule.id,
@@ -334,17 +328,10 @@ impl Engine {
                             )
                             .await?;
                     }
-                    // A freeing does not fire any trigger below — S4's work.
-                    Trigger::Created
-                    | Trigger::Assigned
-                    | Trigger::Unassigned
-                    | Trigger::Commented
-                    | Trigger::DeadlineSet
-                    | Trigger::DeadlineCleared
-                    | Trigger::Retitled
-                    | Trigger::Linked
-                    | Trigger::Unlinked
-                    | Trigger::Deleted => {
+                    // Every trigger left is activity-shaped — `activity_kind_for`
+                    // is the one place that says so — and a freeing never
+                    // fires one of those.
+                    _ => {
                         self.store
                             .record_mail_decision(
                                 &rule.id,
@@ -403,6 +390,87 @@ impl Engine {
             }
         }
         Ok(freed)
+    }
+
+    /// Everything one activity row owes — everything that is not a crossing
+    /// or a freeing: a create, an assignment made or taken back, a comment, a
+    /// deadline set or cleared, a rename, a link made or broken, a delete.
+    /// Called after the write has committed, never inside it.
+    pub async fn on_activity(&self, event: &ActivityEvent) -> crate::store::Result<Report> {
+        let mut report = Report::default();
+        let Some(facts) = self.store.task(&event.task_id).await? else {
+            // A task deleted between the write and this run has no facts left
+            // to read a board from `store.task`, but its rules still get a
+            // `task_gone` row each — `board_of_task` reads through the soft
+            // delete to find them.
+            let Some(board_id) = self.store.board_of_task(&event.task_id).await? else {
+                return Ok(report);
+            };
+            let happened = Event::Happened(event.clone());
+            for rule in self.store.mail_rules(&board_id).await? {
+                self.store
+                    .record_mail_decision(
+                        &rule.id,
+                        happened.id(),
+                        &event.task_id,
+                        MailOutcome::TaskGone,
+                        "task was deleted before the mail ran",
+                        happened.at(),
+                    )
+                    .await?;
+            }
+            return Ok(report);
+        };
+        let rules = self.store.mail_rules(&facts.board_id).await?;
+        let happened = Event::Happened(event.clone());
+        let columns = self.store.columns_for_board(&facts.board_id).await?;
+        let column_name = |id: &str| {
+            columns
+                .iter()
+                .find(|column| column.id == id)
+                .map(|column| column.name.clone())
+                .unwrap_or_else(|| "a column".to_string())
+        };
+
+        for rule in &rules {
+            if !rule.enabled {
+                self.store
+                    .record_mail_decision(
+                        &rule.id,
+                        happened.id(),
+                        &event.task_id,
+                        MailOutcome::Disabled,
+                        "",
+                        happened.at(),
+                    )
+                    .await?;
+                continue;
+            }
+            if activity_kind_for(&rule.trigger).as_ref() == Some(&event.kind) {
+                self.owe(rule, &happened, &event.task_id, &mut report)
+                    .await?;
+                continue;
+            }
+            let watches = match &rule.trigger {
+                Trigger::StatusBecomes(column) => format!("a move to {}", column_name(column)),
+                Trigger::Unblocked => "its last blocker clearing".to_string(),
+                other => activity_kind_for(other)
+                    .map(|kind| kind.as_str().to_string())
+                    .unwrap_or_default(),
+            };
+            let detail = format!("{}, rule watches {}", event.kind.as_str(), watches);
+            self.store
+                .record_mail_decision(
+                    &rule.id,
+                    happened.id(),
+                    &event.task_id,
+                    MailOutcome::NotMatched,
+                    &detail,
+                    happened.at(),
+                )
+                .await?;
+        }
+        Ok(report)
     }
 
     /// Claims one mail per recipient and tries each one it owns.
@@ -611,9 +679,29 @@ impl Engine {
                 "{} deleted {} — {}, the last task it was waiting on.",
                 actor, freeing.cause_key, freeing.cause_title
             ),
-            // Not a wired path yet — S4's work — so this only needs to be
-            // exhaustive, not right.
-            (Event::Happened(_), _) => format!("{} touched it.", actor),
+            (Event::Happened(activity), _) => match &activity.kind {
+                ActivityKind::Created => format!("{} created it.", actor),
+                ActivityKind::Assigned => format!("{} assigned {}.", actor, activity.detail),
+                ActivityKind::Unassigned => {
+                    format!("{} unassigned {}.", actor, activity.detail)
+                }
+                ActivityKind::Commented => format!("{} commented.", actor),
+                ActivityKind::DeadlineSet => {
+                    format!("{} set the deadline to {}.", actor, activity.detail)
+                }
+                ActivityKind::DeadlineCleared => format!("{} removed the deadline.", actor),
+                ActivityKind::Retitled => format!("{} renamed it.", actor),
+                ActivityKind::Linked => format!("{} linked {}.", actor, activity.detail),
+                ActivityKind::Unlinked => format!("{} unlinked {}.", actor, activity.detail),
+                ActivityKind::Deleted => format!("{} deleted it.", actor),
+                // Never a wired trigger — `activity_kind_for` never maps to
+                // these — but `compose` still has to say something if one
+                // ever reaches it.
+                ActivityKind::Described
+                | ActivityKind::Moved
+                | ActivityKind::Unblocked
+                | ActivityKind::Other(_) => format!("{} touched it.", actor),
+            },
         };
         let body = format!(
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",
@@ -628,6 +716,27 @@ impl Engine {
             subject: rule.subject.clone(),
             body,
         }))
+    }
+}
+
+/// The `ActivityKind` a trigger fires on. `StatusBecomes`/`Unblocked` fire on
+/// a crossing or a freeing instead and never on an activity row, so they
+/// answer `None` — this is the one place a new `Trigger` variant has to be
+/// taught what it means, for `on_transition`, `on_freeing` and `on_activity`
+/// alike.
+fn activity_kind_for(trigger: &Trigger) -> Option<ActivityKind> {
+    match trigger {
+        Trigger::Created => Some(ActivityKind::Created),
+        Trigger::Assigned => Some(ActivityKind::Assigned),
+        Trigger::Unassigned => Some(ActivityKind::Unassigned),
+        Trigger::Commented => Some(ActivityKind::Commented),
+        Trigger::DeadlineSet => Some(ActivityKind::DeadlineSet),
+        Trigger::DeadlineCleared => Some(ActivityKind::DeadlineCleared),
+        Trigger::Retitled => Some(ActivityKind::Retitled),
+        Trigger::Linked => Some(ActivityKind::Linked),
+        Trigger::Unlinked => Some(ActivityKind::Unlinked),
+        Trigger::Deleted => Some(ActivityKind::Deleted),
+        Trigger::StatusBecomes(_) | Trigger::Unblocked => None,
     }
 }
 

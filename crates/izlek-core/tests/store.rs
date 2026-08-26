@@ -4441,3 +4441,161 @@ async fn a_created_task_s_activity_id_resolves_as_an_event() {
         other => panic!("expected Event::Happened, got {other:?}"),
     }
 }
+
+// -- the engine hears activity ----------------------------------------------
+
+/// Reads an activity row back as the event the engine takes.
+async fn activity_event(store: &TursoStore, activity_id: &str) -> izlek_core::store::ActivityEvent {
+    match store.event(activity_id).await.unwrap() {
+        Some(Event::Happened(event)) => event,
+        other => panic!("expected Event::Happened, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_assignment_mails_the_assignees_minus_the_actor() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Assigned,
+            "You were assigned",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // Ada assigned Emre; Ada is not on the assignee list to begin with, so
+    // the audience is Emre alone.
+    let activity_id = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            &ActivityKind::Assigned,
+            "Emre",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &activity_id).await;
+
+    let first = engine.on_activity(&event).await.unwrap();
+    assert_eq!(first.sent, 1);
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@izlek.sh");
+
+    // The same activity replayed — a restart, a second worker — owns nothing
+    // and sends nothing more. The unique index decided, not a read.
+    let second = engine.on_activity(&event).await.unwrap();
+    assert_eq!(second.sent, 0);
+    assert_eq!(second.already_owned, 1);
+    assert_eq!(mailer.sent().len(), 1, "still exactly one mail out");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_commented() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Commented,
+            "A comment landed",
+            Audience::Creator,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+
+    // Emre comments on Ada's task: Ada, the creator, gets mailed.
+    let commented_by_mate = store
+        .record_activity(
+            &task,
+            Some(&mate),
+            &ActivityKind::Commented,
+            "",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &commented_by_mate).await;
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 1);
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "ada@izlek.sh");
+
+    // Ada comments on her own task: the audience is only the actor, so
+    // nobody is mailed and the ledger says why rather than looking silent.
+    let commented_by_creator = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            &ActivityKind::Commented,
+            "",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &commented_by_creator).await;
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report, Default::default());
+    assert_eq!(mailer.sent().len(), 1, "no second mail went out");
+
+    let decisions = store.recent_mail_decisions(10).await.unwrap();
+    let row = decisions
+        .iter()
+        .find(|d| d.event_id == commented_by_creator)
+        .expect("the creator-only audience left a row");
+    assert_eq!(row.outcome, MailOutcome::NoRecipients);
+    assert_eq!(row.detail, "audience was only the actor");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_created_activity_does_not_fire_a_status_rule() {
+    let (dir, store, workspace, admin) = shared().await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let activity_id = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            &ActivityKind::Created,
+            "",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &activity_id).await;
+
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report, Default::default());
+    assert!(mailer.sent().is_empty());
+
+    let decisions = store.recent_mail_decisions(10).await.unwrap();
+    let row = decisions
+        .iter()
+        .find(|d| d.rule_id == rule.id && d.task_id == task)
+        .expect("the mismatched trigger left a row");
+    assert_eq!(row.outcome, MailOutcome::NotMatched);
+    assert!(!row.detail.is_empty(), "the reason is not left blank");
+    let _ = std::fs::remove_dir_all(&dir);
+}
