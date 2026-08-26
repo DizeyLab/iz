@@ -3,6 +3,8 @@ use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
+use crate::pages::{Join, Landing};
+
 /// The HTML document the server streams. `cargo-leptos` writes the bundle to
 /// `/pkg/dizey.{js,wasm,css}`, which is what the tags below point at.
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -38,28 +40,10 @@ pub fn App() -> impl IntoView {
         <Title text="Dizey"/>
         <Router>
             <Routes fallback=NotFound>
-                <Route path=path!("/") view=BoardPlaceholder/>
+                <Route path=path!("/") view=Landing/>
+                <Route path=path!("/join/:token") view=Join/>
             </Routes>
         </Router>
-    }
-}
-
-/// The top bar from the Main artboard. The board itself lands in a later slice;
-/// this exists so the scaffold renders something real rather than "hello".
-#[component]
-fn BoardPlaceholder() -> impl IntoView {
-    view! {
-        <header class="topbar">
-            <div class="wordmark">
-                <span class="wordmark-text">"dizey"</span>
-                <span class="wordmark-dot"></span>
-            </div>
-            <div class="topbar-divider"></div>
-            <span class="board-name">"Launch — Q3"</span>
-        </header>
-        <main class="scaffold-note">
-            <p>"The board is not wired up yet."</p>
-        </main>
     }
 }
 

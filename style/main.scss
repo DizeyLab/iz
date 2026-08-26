@@ -79,3 +79,184 @@ a {
   padding: 32px 24px;
   color: var(--muted);
 }
+
+// --- Account screens (FirstLogin artboard) ---------------------------------
+
+.auth-stage {
+  min-height: calc(100vh - var(--topbar-height));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 40px 40px;
+}
+
+.auth-column {
+  width: 520px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-kicker {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--muted-soft);
+}
+
+.auth-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  box-shadow: 0 4px 16px rgba(28, 27, 24, 0.04);
+
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+}
+
+.auth-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-title {
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.auth-sub {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--muted-soft);
+}
+
+.auth-input {
+  height: 40px;
+  padding: 0 12px;
+  background: #faf9f6;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--ink);
+
+  &:focus {
+    outline: none;
+    background: var(--surface);
+    border-color: var(--accent);
+  }
+}
+
+.auth-input-mono {
+  font-family: var(--font-mono);
+}
+
+// The address an invited member signs in as: shown, never edited.
+.auth-locked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  background: #f2f0ea;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.auth-locked-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--muted);
+  flex-grow: 1;
+}
+
+.auth-locked-note {
+  font-size: 12px;
+  color: var(--muted-soft);
+}
+
+.auth-rules {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #5c7b46;
+}
+
+.auth-submit {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--accent);
+  color: var(--surface);
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font-sans);
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+}
+
+.auth-submit-text {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.auth-key {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: #5a6a94;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.auth-warn {
+  font-size: 12px;
+  color: #a04a24;
+}
+
+.auth-problem {
+  font-size: 13px;
+  color: #a04a24;
+  background: #fbf1ec;
+  border: 1px solid #eddcd3;
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.auth-foot {
+  font-size: 12px;
+  color: var(--muted-soft);
+  line-height: 1.5;
+  border-top: 1px solid #f0eee7;
+  padding-top: 12px;
+}
