@@ -220,7 +220,7 @@ pub fn Board() -> impl IntoView {
                     Err(_) => {
                         view! {
                             <main class="scaffold-note">
-                                <p>"Something went wrong. Reload the page."</p>
+                                <p>"Something went wrong."</p>
                             </main>
                         }
                             .into_any()
@@ -423,9 +423,6 @@ fn BoardScreen(
                     view! {
                         <div class="board-empty">
                     <div class="board-empty-title">"This board is empty"</div>
-                            <div class="board-empty-sub">
-                                "Create the first task with the New task button."
-                            </div>
                         </div>
                     }
                 })}

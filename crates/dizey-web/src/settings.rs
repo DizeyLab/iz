@@ -343,17 +343,17 @@ pub async fn save_sender(
         .unwrap_or(false);
 
     let complaint = if host.is_empty() {
-        Some("The SMTP host is the server your mail goes out through — smtp.fastmail.com, for instance.")
+        Some("Give the SMTP host.")
     } else if host.contains(char::is_whitespace) || host.contains('@') || host.contains('/') {
         Some("The SMTP host is a host name, not an address or a URL.")
     } else if !(1..=65535).contains(&port) {
-        Some("A port is a number between 1 and 65535. 587 is the usual one; 465 is the other.")
+        Some("A port is a number between 1 and 65535.")
     } else if username.is_empty() {
-        Some("The username is the account Dizey signs in to the mail server with.")
+        Some("Give the SMTP username.")
     } else if password.is_none() && !known {
-        Some("A password is needed the first time. It is stored so Dizey can sign in on every send, and is never shown again.")
+        Some("A password is needed the first time.")
     } else if !is_address(&from_address) {
-        Some("The from-address is the address people will see this mail come from.")
+        Some("That is not a from-address.")
     } else {
         None
     };
@@ -545,7 +545,7 @@ pub fn SettingsPage() -> impl IntoView {
                     Err(_) => {
                         view! {
                             <main class="scaffold-note">
-                                <p>"Something went wrong. Reload the page."</p>
+                                <p>"Something went wrong."</p>
                             </main>
                         }
                             .into_any()
@@ -564,19 +564,6 @@ fn SettingsScreen(
     link_refusal: RwSignal<Option<String>>,
 ) -> impl IntoView {
     let me = snapshot.me.clone();
-    // Three roles, three true sentences. A Viewer is never mailed by a rule, so
-    // the member's line is not merely vague for them, it is wrong.
-    let role_note = match me.role {
-        dizey_core::Role::Admin => {
-            "First account in this workspace. Only you see the sender, limits and member panels."
-        }
-        dizey_core::Role::Member => {
-            "You work the board and the rules mail you. The sender, the limits and the member list are the admin's."
-        }
-        dizey_core::Role::Viewer => {
-            "You read and export the board. No rule ever mails you, and the sender, the limits and the member list are the admin's."
-        }
-    };
 
     view! {
         <header class="topbar">
@@ -609,7 +596,6 @@ fn SettingsScreen(
                 <div class="settings-head">
                     <h1 class="settings-title">"Settings"</h1>
                     <span class="chip chip-role">{me.role.as_str().to_string()}</span>
-                    <span class="settings-note">{role_note}</span>
                 </div>
 
                 <ProfilePanel me=me.clone()/>
@@ -664,11 +650,8 @@ fn ProfilePanel(me: Me) -> impl IntoView {
                     />
                 </label>
                 <label class="field">
-                    <span class="field-label">"EMAIL — WHERE YOUR NOTIFICATIONS GO"</span>
+                    <span class="field-label">"EMAIL"</span>
                     <input class="field-input" type="email" value=me.email.clone() disabled/>
-                    <span class="field-note">
-                        "Your address is the account. The admin changes it from the member list."
-                    </span>
                 </label>
                 <div class="panel-foot">
                     {move || {
@@ -684,9 +667,6 @@ fn ProfilePanel(me: Me) -> impl IntoView {
                 </div>
             </ActionForm>
             <div class="panel-body panel-foot panel-foot-split">
-                <span class="field-note">
-                    "Signing out ends this browser's session. Anywhere else you are signed in stays signed in."
-                </span>
                 <ActionForm action=out>
                     <button class="quiet" type="submit">
                         "Sign out"
@@ -781,14 +761,11 @@ fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
                 }}
             </div>
             <div class="panel-body">
-                <p class="panel-lede">
-                    "One sender for the whole workspace. Every mail rule, for every member, sends through this account — nobody sets their own."
-                </p>
                 {(!connected)
                     .then(|| {
                         view! {
                             <p class="panel-lede">
-                                "Nothing is sent until this is filled in. Cards still move and rules still fire — what they owe is kept, and goes out on the next sweep after you save."
+                                "Not connected — mail queues until you save."
                             </p>
                         }
                     })}
@@ -832,12 +809,6 @@ fn SenderPanel(sender: Sender, on_change: Callback<()>) -> impl IntoView {
                                 false => "Needed before anything can be sent",
                             }
                         />
-                        <span class="field-note">
-                            {match password_set {
-                                true => "A password is stored. It is never shown again — not here, not in any answer this page receives. Leave this empty and the stored one is kept.",
-                                false => "No password is stored yet. It is kept so Dizey can sign in to the mail server on every send, and is never shown again once saved.",
-                            }}
-                        </span>
                     </label>
                     <div class="field-row">
                         <label class="field">
@@ -919,7 +890,7 @@ fn LimitsPanel(limits: Limits) -> impl IntoView {
             <ActionForm action=action attr:class="panel-body">
                 <div class="field-row">
                     <label class="field">
-                        <span class="field-label">"ATTACHMENT SIZE LIMIT"</span>
+                        <span class="field-label">"ATTACHMENT LIMIT (MB)"</span>
                         <input
                             class="field-input"
                             type="number"
@@ -929,12 +900,9 @@ fn LimitsPanel(limits: Limits) -> impl IntoView {
                             value=limits.attachment_limit_mb.to_string()
                             required
                         />
-                        <span class="field-note">
-                            "Megabytes per file, for task attachments and comment files. The limit is enforced when the file arrives, not only in the picker."
-                        </span>
                     </label>
                     <label class="field">
-                        <span class="field-label">"PROFILE PHOTO LIMIT"</span>
+                        <span class="field-label">"PHOTO LIMIT (MB)"</span>
                         <input
                             class="field-input"
                             type="number"
@@ -944,7 +912,6 @@ fn LimitsPanel(limits: Limits) -> impl IntoView {
                             value=limits.photo_limit_mb.to_string()
                             required
                         />
-                        <span class="field-note">"Megabytes per photo."</span>
                     </label>
                 </div>
                 <label class="field">
@@ -956,9 +923,6 @@ fn LimitsPanel(limits: Limits) -> impl IntoView {
                         value=limits.allowed_file_types.join(", ")
                         placeholder="png, jpg, pdf, zip"
                     />
-                    <span class="field-note">
-                        "Extensions, separated by commas. An empty list means every type is allowed."
-                    </span>
                 </label>
                 <p class="panel-lede">
                     "A lower limit never touches files already uploaded."
@@ -1146,10 +1110,6 @@ fn MembersPanel(
                     </button>
                 </ActionForm>
 
-                <p class="panel-lede">
-                    "You create the account with a name and an address. No password is set — the person picks one the first time they sign in."
-                </p>
-
                 {move || {
                     refusal
                         .get()
@@ -1160,10 +1120,10 @@ fn MembersPanel(
                         .map(|path| {
                             view! {
                                 <div class="member-link">
-                                    <span class="field-label">"SIGN-IN LINK — SHOWN ONCE"</span>
+                                    <span class="field-label">"SIGN-IN LINK"</span>
                                     <code class="member-link-value">{path}</code>
                                     <span class="field-note">
-                                        "Pass it on now. Dizey keeps only its hash, so nothing can show it again — send another link instead. Links expire after 7 days, and an expired link is not a dead account: resending opens the same one."
+                                        "Shown once. Expires in 7 days."
                                     </span>
                                 </div>
                             }
@@ -1173,15 +1133,15 @@ fn MembersPanel(
                 <div class="role-note">
                     <p class="panel-lede">
                         <b>"Admin"</b>
-                        " holds the sender, the limits and this list."
+                        " — sender, limits, members."
                     </p>
                     <p class="panel-lede">
                         <b>"Member"</b>
-                        " works the board and is mailed by the rules."
+                        " — board and rule mail."
                     </p>
                     <p class="panel-lede">
                         <b>"Viewer"</b>
-                        " reads and exports — cannot be assigned a task, cannot comment, and no rule ever mails them."
+                        " — read and export only."
                     </p>
                 </div>
             </div>

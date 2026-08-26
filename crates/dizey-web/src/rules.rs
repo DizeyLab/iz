@@ -291,7 +291,7 @@ pub fn RulesPage() -> impl IntoView {
                     Err(_) => {
                         view! {
                             <main class="scaffold-note">
-                                <p>"Something went wrong. Reload the page."</p>
+                                <p>"Something went wrong."</p>
                             </main>
                         }
                             .into_any()
@@ -344,16 +344,13 @@ fn RulesScreen(snapshot: RulesSnapshot, on_change: Callback<()>) -> impl IntoVie
                 <div class="settings-head">
                     <h1 class="settings-title">"Mail rules"</h1>
                     <span class="chip chip-admin">"Admin only"</span>
-                    <span class="settings-note">
-                        "One sentence per rule. A rule fires when a task on this board matches it. Only the admin writes them — a rule sends mail on everyone's behalf, from the one workspace sender."
-                    </span>
                 </div>
 
                 {(!sender_connected)
                     .then(|| {
                         view! {
                             <p class="rules-quiet">
-                                "No sender is connected yet, so nothing leaves the machine. Rules still fire and the mail they owe waits in the queue until you connect one in "
+                                "No sender connected — mail waits in the queue until you set one in "
                                 <a href="/settings">"Settings"</a>
                                 "."
                             </p>
@@ -364,14 +361,7 @@ fn RulesScreen(snapshot: RulesSnapshot, on_change: Callback<()>) -> impl IntoVie
 
                 <div class="rule-list">
                     {rows}
-                    {empty
-                        .then(|| {
-                            view! {
-                                <p class="rules-quiet">
-                                    "No rules yet. Nothing on this board sends mail until you write one."
-                                </p>
-                            }
-                        })}
+                    {empty.then(|| view! { <p class="rules-quiet">"No rules yet."</p> })}
                 </div>
             </main>
         </div>
@@ -462,9 +452,6 @@ fn Composer(columns: Vec<ColumnChoice>, on_change: Callback<()>) -> impl IntoVie
                         "Add rule"
                     </button>
                 </div>
-                <span class="field-note">
-                    "A Viewer is never mailed by a rule, on any audience, and neither is whoever caused the event."
-                </span>
             </ActionForm>
         </details>
     }

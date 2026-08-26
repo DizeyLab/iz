@@ -79,9 +79,7 @@ impl Refusal {
             Refusal::SignInFirst => "Sign in first.".to_string(),
             Refusal::AlreadyClaimed => "This workspace already has an owner.".to_string(),
             Refusal::AddressTaken => "That address already has an account.".to_string(),
-            Refusal::LinkNotUsable => {
-                "This link no longer works. Ask the admin to send another.".to_string()
-            }
+            Refusal::LinkNotUsable => "This link no longer works.".to_string(),
             Refusal::EmptyTitle => "Give the task a title.".to_string(),
             Refusal::EmptyName => "Give yourself a name.".to_string(),
             Refusal::BadLimit => {
@@ -94,21 +92,16 @@ impl Refusal {
             Refusal::BadSender(problem) => problem.clone(),
             Refusal::EmptyComment => "Write something first.".to_string(),
             Refusal::NoFile => "Choose a file first.".to_string(),
-            Refusal::FileTooBig => {
-                "That file is bigger than this workspace allows. The limit is in Settings."
-                    .to_string()
-            }
+            Refusal::FileTooBig => "Too big for this workspace.".to_string(),
             Refusal::FileTypeNotAllowed => {
                 "That kind of file is not on this workspace's allowed list.".to_string()
             }
             Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
-            Refusal::MovedAlready => {
-                "Somebody moved this card first. This is where it is now.".to_string()
-            }
+            Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
             Refusal::NotFound => "No such task.".to_string(),
-            Refusal::Unavailable => "Something went wrong. Try again.".to_string(),
+            Refusal::Unavailable => "Something went wrong.".to_string(),
         }
     }
 

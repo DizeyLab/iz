@@ -1729,6 +1729,19 @@ a {
   }
 }
 
+// A <select> wearing the field-input box still shows the browser's own
+// arrow unless told otherwise. This draws the same chevron the rest of the
+// app uses, so a dropdown looks like a field, not an OS control.
+select.field-input {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16' fill='none' stroke='%238a8578' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+
 // A row that states a fact instead of pretending to be an editable field. An
 // empty box that silently does nothing is worse than a sentence.
 .field-stated {

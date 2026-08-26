@@ -39,7 +39,7 @@ pub fn Landing() -> impl IntoView {
                         view! {
                             <Topbar/>
                             <main class="scaffold-note">
-                                <p>"Something went wrong. Reload the page."</p>
+                                <p>"Something went wrong."</p>
                             </main>
                         }
                             .into_any()
@@ -150,9 +150,7 @@ pub fn Join() -> impl IntoView {
                                 <div class="auth-column">
                                     <div class="auth-card">
                                         <div class="auth-title">"This link no longer works"</div>
-                                        <div class="auth-sub">
-                                            "Sign-in links last seven days. Ask the admin to send another — it opens the same account, with the same history."
-                                        </div>
+                                        <div class="auth-sub">"Sign-in links last seven days."</div>
                                     </div>
                                 </div>
                             </main>

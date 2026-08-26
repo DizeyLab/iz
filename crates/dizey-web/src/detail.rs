@@ -667,7 +667,7 @@ pub fn TaskDetailModal(
                             }
                             Err(_) => {
                                 view! {
-                                    <p class="modal-note">"Something went wrong. Reload the page."</p>
+                                    <p class="modal-note">"Something went wrong."</p>
                                 }
                                     .into_any()
                             }
@@ -1212,7 +1212,7 @@ fn DetailScreen(
         may_comment,
         may_delete,
         allowed_file_types,
-        attachment_limit_mb,
+        attachment_limit_mb: _,
     } = snapshot;
 
     let id = StoredValue::new(detail.id.clone());
@@ -1449,9 +1449,6 @@ fn DetailScreen(
                             <button class="file-upload-submit" type="submit">
                                 "Upload"
                             </button>
-                            <span class="detail-quiet">
-                                {format!("Up to {attachment_limit_mb} MB.")}
-                            </span>
                         </form>
                         {refused(upload_refusal)}
                     }
