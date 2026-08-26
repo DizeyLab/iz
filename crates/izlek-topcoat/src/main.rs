@@ -4,7 +4,7 @@ use std::sync::Arc;
 use topcoat::Result;
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
-use topcoat::router::{Router, RouterBuilderDiscoverExt, route};
+use topcoat::router::{BodyLimit, Router, RouterBuilderDiscoverExt, route};
 
 #[route(GET "/healthz")]
 async fn healthz() -> Result<&'static str> {
@@ -53,6 +53,7 @@ async fn main() {
 
     let router = Router::builder()
         .discover()
+        .layer(BodyLimit::max(izlek_topcoat::files::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
         .cookies()
         .assets(AssetBundle::load().expect("failed to load the asset bundle"))
         .app_context(accounts)
