@@ -367,14 +367,18 @@ a {
 
 .board-stage {
   position: relative;
+  display: flex;
+  flex-direction: column;
   min-height: calc(100vh - var(--topbar-height) - 52px);
   padding: 20px 24px 24px 24px;
 }
 
 .board-columns {
+  flex: 1;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
+  align-items: stretch;
 }
 
 .column {
