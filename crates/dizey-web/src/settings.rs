@@ -291,6 +291,13 @@ pub async fn save_profile(display_name: String) -> Result<Option<Refusal>, Serve
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let settings = Resource::new(|| (), |_| async move { current_settings().await });
+    // The link a call hands back, and the word for a call that was refused.
+    // They live here, above the Suspense, because a successful call refetches
+    // the snapshot: signals owned by the members panel would be dropped with it
+    // and the link — which the store keeps only as a hash — would be gone for
+    // good before anyone could read it.
+    let link = RwSignal::new(None::<String>);
+    let link_refusal = RwSignal::new(None::<String>);
 
     view! {
         <Suspense fallback=|| view! { <main class="settings-stage"></main> }>
@@ -301,6 +308,8 @@ pub fn SettingsPage() -> impl IntoView {
                             <SettingsScreen
                                 snapshot=snapshot
                                 on_change=Callback::new(move |()| settings.refetch())
+                                link=link
+                                link_refusal=link_refusal
                             />
                         }
                             .into_any()
@@ -331,7 +340,12 @@ pub fn SettingsPage() -> impl IntoView {
 }
 
 #[component]
-fn SettingsScreen(snapshot: SettingsSnapshot, on_change: Callback<()>) -> impl IntoView {
+fn SettingsScreen(
+    snapshot: SettingsSnapshot,
+    on_change: Callback<()>,
+    link: RwSignal<Option<String>>,
+    link_refusal: RwSignal<Option<String>>,
+) -> impl IntoView {
     let me = snapshot.me.clone();
     let has_sender = snapshot.sender.is_some();
     let role_note = if snapshot.administers {
@@ -381,7 +395,14 @@ fn SettingsScreen(snapshot: SettingsSnapshot, on_change: Callback<()>) -> impl I
                 {snapshot
                     .members
                     .map(|members| {
-                        view! { <MembersPanel members=members on_change=on_change/> }
+                        view! {
+                            <MembersPanel
+                                members=members
+                                on_change=on_change
+                                link=link
+                                refusal=link_refusal
+                            />
+                        }
                     })}
             </main>
         </div>
@@ -628,13 +649,17 @@ mod file_type_tests {
 /// The member list, the invitation form, and the sentence about the roles that
 /// the artboard puts under it.
 #[component]
-fn MembersPanel(members: Vec<Member>, on_change: Callback<()>) -> impl IntoView {
+fn MembersPanel(
+    members: Vec<Member>,
+    on_change: Callback<()>,
+    /// The link a call handed back, kept only until the next call. It is shown
+    /// once because it exists once: what the store holds is its hash. Owned by
+    /// the page, not by this panel, so a refetch does not take it away.
+    link: RwSignal<Option<String>>,
+    refusal: RwSignal<Option<String>>,
+) -> impl IntoView {
     let invite = ServerAction::<crate::auth::InviteMember>::new();
     let resend = ServerAction::<ResendLink>::new();
-    // The link a call handed back, kept only until the next call. It is shown
-    // once because it exists once: what the store holds is its hash.
-    let link = RwSignal::new(None::<String>);
-    let refusal = RwSignal::new(None::<String>);
 
     let carry = move |value: Option<Result<Result<String, Refusal>, ServerFnError>>| {
         match value {
@@ -658,6 +683,17 @@ fn MembersPanel(members: Vec<Member>, on_change: Callback<()>) -> impl IntoView 
     Effect::new(move |_| carry(invited.get()));
     let resent = resend.value();
     Effect::new(move |_| carry(resent.get()));
+
+    // An invite that went through leaves its fields filled otherwise, and the
+    // next click on Add member would try to create the same person again.
+    let invite_form: NodeRef<leptos::html::Form> = NodeRef::new();
+    Effect::new(move |_| {
+        if matches!(invited.get(), Some(Ok(Ok(_)))) {
+            if let Some(form) = invite_form.get() {
+                form.reset();
+            }
+        }
+    });
 
     let rows = members
         .into_iter()
@@ -722,7 +758,7 @@ fn MembersPanel(members: Vec<Member>, on_change: Callback<()>) -> impl IntoView 
                     <tbody>{rows}</tbody>
                 </table>
 
-                <ActionForm action=invite attr:class="member-invite">
+                <ActionForm action=invite node_ref=invite_form attr:class="member-invite">
                     <label class="field">
                         <span class="field-label">"NAME"</span>
                         <input
