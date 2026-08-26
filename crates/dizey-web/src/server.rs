@@ -243,9 +243,15 @@ fn carrying(location: &str, code: &str, called: &str) -> Option<String> {
     if called.is_empty() {
         return None;
     }
-    let (path, query) = match location.split_once('?') {
+    // The Location we are rewriting came from the form post's Referer, and on a
+    // cross-origin post the Referer is whatever the other site is. Sending the
+    // browser back there would make Dizey an open redirect, so the address is
+    // rebuilt from its path and query alone and anything that is not a plain
+    // absolute path is answered with the board.
+    let here = same_origin(location);
+    let (path, query) = match here.split_once('?') {
         Some((path, query)) => (path, query),
-        None => (location, ""),
+        None => (here, ""),
     };
     let mut pairs: Vec<String> = query
         .split('&')
@@ -258,6 +264,26 @@ fn carrying(location: &str, code: &str, called: &str) -> Option<String> {
     Some(format!("{path}?{}", pairs.join("&")))
 }
 
+/// The path and query of `location`, with scheme and authority dropped. A
+/// protocol-relative address (`//elsewhere.example/`) is another host wearing a
+/// path's clothes, and a browser reads a backslash there as a slash, so both
+/// are answered with the board rather than trusted.
+fn same_origin(location: &str) -> &str {
+    let rest = match location.split_once("://") {
+        Some((_scheme, rest)) => match rest.find(['/', '?']) {
+            Some(at) => &rest[at..],
+            None => "/",
+        },
+        None => location,
+    };
+    let mut characters = rest.chars();
+    match (characters.next(), characters.next()) {
+        (Some('/'), Some('/' | '\\')) => "/",
+        (Some('/'), _) => rest,
+        _ => "/",
+    }
+}
+
 #[cfg(test)]
 mod refusal_redirect_tests {
     use super::carrying;
@@ -266,7 +292,7 @@ mod refusal_redirect_tests {
     fn a_bare_address_gains_a_query() {
         assert_eq!(
             carrying("http://dizey.sh/", "cycle", "link_tasks").as_deref(),
-            Some("http://dizey.sh/?refusal=cycle&on=link_tasks")
+            Some("/?refusal=cycle&on=link_tasks")
         );
     }
 
@@ -274,7 +300,7 @@ mod refusal_redirect_tests {
     fn an_open_modal_stays_open() {
         assert_eq!(
             carrying("http://dizey.sh/?task=DZ-01", "cycle", "link_tasks").as_deref(),
-            Some("http://dizey.sh/?task=DZ-01&refusal=cycle&on=link_tasks")
+            Some("/?task=DZ-01&refusal=cycle&on=link_tasks")
         );
     }
 
@@ -287,7 +313,47 @@ mod refusal_redirect_tests {
                 "link_tasks"
             )
             .as_deref(),
-            Some("http://dizey.sh/?task=DZ-01&refusal=not-found&on=link_tasks")
+            Some("/?task=DZ-01&refusal=not-found&on=link_tasks")
+        );
+    }
+
+    // The Referer of a cross-origin post is the other site's address, and it
+    // reaches this function as the Location. Dizey answers on its own ground or
+    // not at all.
+    #[test]
+    fn another_site_cannot_be_redirected_to() {
+        for elsewhere in [
+            "https://elsewhere.example",
+            "//elsewhere.example/steal",
+            "/\\elsewhere.example/steal",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert_eq!(
+                carrying(elsewhere, "cycle", "link_tasks").as_deref(),
+                Some("/?refusal=cycle&on=link_tasks"),
+                "{elsewhere} was not brought home"
+            );
+        }
+        // An address with a path keeps the path — it is read as a path on this
+        // site, which is the point: whatever the Referer claimed, the browser
+        // is sent somewhere on Dizey.
+        let carried = carrying(
+            "http://elsewhere.example/steal?task=DZ-01",
+            "cycle",
+            "link_tasks",
+        );
+        assert_eq!(
+            carried.as_deref(),
+            Some("/steal?task=DZ-01&refusal=cycle&on=link_tasks")
+        );
+    }
+
+    #[test]
+    fn a_path_on_this_site_is_kept() {
+        assert_eq!(
+            carrying("/board?task=DZ-01", "cycle", "link_tasks").as_deref(),
+            Some("/board?task=DZ-01&refusal=cycle&on=link_tasks")
         );
     }
 
