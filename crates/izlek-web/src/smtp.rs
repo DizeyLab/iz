@@ -196,9 +196,7 @@ impl Mailer for WorkspaceSmtp {
         let Some(want) = self.sending().await? else {
             // Not a failure, and pointedly not an attempt: the mail is owed
             // until somebody fills the sender in.
-            return Err(MailError::unsent(
-                "no sender is configured, so this is waiting rather than failing",
-            ));
+            return Err(MailError::unsent("no sender configured"));
         };
         self.transport(&want).await?.send(mail).await
     }
