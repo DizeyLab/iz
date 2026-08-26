@@ -24,6 +24,7 @@ tokio = { workspace = true, optional = true }
 tower = { version = "0.5.2", optional = true }
 tower-http = { version = "0.7.0", features = ["fs", "compression-gzip"], optional = true }
 turso = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 console_error_panic_hook = { version = "0.1.7", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -46,6 +47,7 @@ ssr = [
   "dep:tower-http",
   "dizey-core/server",
   "dep:turso",
+  "dep:serde_json",
 ]
 
 # The HTTP test drives the real router, so it needs the server side of the app.

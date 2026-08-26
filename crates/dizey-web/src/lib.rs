@@ -1,3 +1,7 @@
+// The view tree in `pages` nests deeply enough that the type of one rendered
+// page overflows the default query depth when the crate is built with tests.
+#![recursion_limit = "256"]
+
 pub mod app;
 pub mod auth;
 pub mod board;

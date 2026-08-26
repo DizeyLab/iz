@@ -175,5 +175,124 @@ pub fn router(accounts: Accounts, leptos_options: LeptosOptions) -> axum::Router
             },
         )
         .fallback(leptos_axum::file_and_error_handler(crate::app::shell))
+        .layer(axum::middleware::from_fn(carry_refusal_on_redirect))
         .with_state(leptos_options)
+}
+
+/// Puts a refusal on the redirect a browser without script follows.
+///
+/// A hydrated page reads the call's return value straight off the action. A
+/// browser without script has no such thing: it posts the form, the server
+/// function handler answers `302` back to the page it came from, and the value
+/// — the whole refusal — sits in a body nobody will ever look at. The click
+/// then looks like nothing happening, which is the worst answer Dizey can give.
+///
+/// So the refusal is copied onto the `Location`, as `?refusal=<code>&on=<call>`,
+/// and the page renders it from the query. This is one place rather than
+/// thirty-eight because the shape is the same for every refusing call, present
+/// and future: nothing here knows what any of them do.
+///
+/// Requests carrying script are untouched — they are answered with the value
+/// itself and never see a redirect.
+async fn carry_refusal_on_redirect(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use crate::auth::{Refusal, call_id};
+    use axum::http::StatusCode;
+    use axum::http::header::{ACCEPT, LOCATION, REFERER};
+
+    // A form post from a browser asks for a page back. A server-function call
+    // from the hydrated bundle does not.
+    let wants_page = request
+        .headers()
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"));
+    let called = call_id(request.uri().path());
+    let has_referer = request.headers().contains_key(REFERER);
+    let response = next.run(request).await;
+    if !wants_page || !has_referer || response.status() != StatusCode::FOUND {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    // The body of one of these redirects is a serialised `Option<Refusal>` and
+    // nothing else; the cap is there so a response that is something else
+    // entirely cannot be read into memory whole.
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::empty());
+    };
+    if let Ok(Some(refusal)) = serde_json::from_slice::<Option<Refusal>>(&bytes)
+        && let Some(location) = parts.headers.get(LOCATION).and_then(|v| v.to_str().ok())
+        && let Some(carried) = carrying(location, refusal.code(), &called)
+        && let Ok(value) = HeaderValue::from_str(&carried)
+    {
+        parts.headers.insert(LOCATION, value);
+    }
+    axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
+}
+
+/// `location` with the refusal in its query.
+///
+/// The redirect goes back to the page the form was posted from, and that page
+/// may already carry a query — `?task=DZ-01` is how a browser without script
+/// opens the modal at all — so the two pairs are merged in, and the pair from
+/// any earlier refusal is dropped rather than stacked on top of.
+fn carrying(location: &str, code: &str, called: &str) -> Option<String> {
+    if called.is_empty() {
+        return None;
+    }
+    let (path, query) = match location.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (location, ""),
+    };
+    let mut pairs: Vec<String> = query
+        .split('&')
+        .filter(|pair| {
+            !pair.is_empty() && !pair.starts_with("refusal=") && !pair.starts_with("on=")
+        })
+        .map(str::to_string)
+        .collect();
+    pairs.push(format!("refusal={code}&on={called}"));
+    Some(format!("{path}?{}", pairs.join("&")))
+}
+
+#[cfg(test)]
+mod refusal_redirect_tests {
+    use super::carrying;
+
+    #[test]
+    fn a_bare_address_gains_a_query() {
+        assert_eq!(
+            carrying("http://dizey.sh/", "cycle", "link_tasks").as_deref(),
+            Some("http://dizey.sh/?refusal=cycle&on=link_tasks")
+        );
+    }
+
+    #[test]
+    fn an_open_modal_stays_open() {
+        assert_eq!(
+            carrying("http://dizey.sh/?task=DZ-01", "cycle", "link_tasks").as_deref(),
+            Some("http://dizey.sh/?task=DZ-01&refusal=cycle&on=link_tasks")
+        );
+    }
+
+    #[test]
+    fn a_second_refusal_replaces_the_first() {
+        assert_eq!(
+            carrying(
+                "http://dizey.sh/?task=DZ-01&refusal=cycle&on=link_tasks",
+                "not-found",
+                "link_tasks"
+            )
+            .as_deref(),
+            Some("http://dizey.sh/?task=DZ-01&refusal=not-found&on=link_tasks")
+        );
+    }
+
+    #[test]
+    fn a_call_with_no_name_carries_nothing() {
+        assert_eq!(carrying("http://dizey.sh/", "cycle", ""), None);
+    }
 }

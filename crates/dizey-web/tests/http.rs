@@ -68,6 +68,11 @@ impl App {
             .await
             .unwrap();
         let status = response.status();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let session = response
             .headers()
             .get_all(header::SET_COOKIE)
@@ -81,6 +86,57 @@ impl App {
             status,
             session,
             body: String::from_utf8(bytes.to_vec()).unwrap(),
+            location,
+        }
+    }
+
+    /// Posts the same form the way a browser with no script posts it: asking
+    /// for a page back, from a page it names. The answer is a redirect, and the
+    /// redirect is the whole of what the person will be shown.
+    async fn post_without_script(
+        &self,
+        path: &str,
+        cookie: Option<&str>,
+        referer: &str,
+        form: &[(&str, &str)],
+    ) -> Answer {
+        let body = form
+            .iter()
+            .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::ACCEPT, "text/html")
+            .header(header::REFERER, referer)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if let Some(cookie) = cookie {
+            request = request.header(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
+            );
+        }
+        let response = self
+            .router
+            .clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        Answer {
+            status,
+            session: None,
+            body: String::from_utf8(bytes.to_vec()).unwrap(),
+            location,
         }
     }
 }
@@ -95,6 +151,9 @@ struct Answer {
     status: StatusCode,
     session: Option<String>,
     body: String,
+    /// Where a browser without script is sent next. The only place such a
+    /// browser can be told anything.
+    location: Option<String>,
 }
 
 /// The `Set-Cookie` value's session token, if that header carries a live one.
@@ -422,6 +481,79 @@ async fn a_link_that_would_close_a_circle_is_refused_at_the_endpoint() {
         )
         .await;
     assert_eq!(answer.body, "\"Cycle\"");
+}
+
+#[tokio::test]
+async fn a_refusal_reaches_a_browser_with_no_script() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app, &admin).await;
+    let first = a_task(&app, &admin, &column, "Lay the cable").await;
+    let second = a_task(&app, &admin, &column, "Light the cable").await;
+
+    app.post(
+        path::<dizey_web::detail::LinkTasks>(),
+        Some(&admin),
+        &[
+            ("task_id", &second),
+            ("other_id", &first),
+            ("direction", "blocked_by"),
+        ],
+    )
+    .await;
+
+    // The same link back the other way, asked for by a browser that has no way
+    // to read the answer's body.
+    let answer = app
+        .post_without_script(
+            path::<dizey_web::detail::LinkTasks>(),
+            Some(&admin),
+            &format!("http://dizey.test/?task={first}"),
+            &[
+                ("task_id", &first),
+                ("other_id", &second),
+                ("direction", "blocked_by"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::FOUND);
+    let location = answer.location.expect("a redirect with nowhere to go");
+    assert!(
+        location.contains("refusal=cycle") && location.contains("on=link_tasks"),
+        "the refusal did not ride back on the redirect: {location}"
+    );
+    assert!(
+        location.contains(&format!("task={first}")),
+        "the modal was closed on the way back: {location}"
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_was_not_refused_carries_nothing_back() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app, &admin).await;
+    let first = a_task(&app, &admin, &column, "Lay the cable").await;
+    let second = a_task(&app, &admin, &column, "Light the cable").await;
+
+    let answer = app
+        .post_without_script(
+            path::<dizey_web::detail::LinkTasks>(),
+            Some(&admin),
+            "http://dizey.test/",
+            &[
+                ("task_id", &second),
+                ("other_id", &first),
+                ("direction", "blocked_by"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::FOUND);
+    let location = answer.location.expect("a redirect with nowhere to go");
+    assert!(
+        !location.contains("refusal="),
+        "a link that was made said it was refused: {location}"
+    );
 }
 
 #[tokio::test]

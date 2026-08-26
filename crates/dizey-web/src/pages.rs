@@ -121,7 +121,7 @@ fn SetupCard(on_done: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView
                             <span class="auth-key">"↵"</span>
                         </button>
                     </ActionForm>
-                    <Problem value=value/>
+                    {problem(action)}
                     <div class="auth-foot">
                         "Mail rules stay quiet until you connect a sender in Settings. Nothing leaves the machine before that."
                     </div>
@@ -239,7 +239,7 @@ fn JoinCard(token: String, person: Invited) -> impl IntoView {
                             <div class="auth-warn">"Waiting for the repeated password to match."</div>
                         </Show>
                     </ActionForm>
-                    <Problem value=value/>
+                    {problem(action)}
                     <div class="auth-foot">
                         "Name and photo can wait — you land on the board straight after this. The admin cannot see or set your password."
                     </div>
@@ -299,7 +299,7 @@ fn SignInCard(on_done: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoVie
                             <span class="auth-key">"↵"</span>
                         </button>
                     </ActionForm>
-                    <Problem value=value/>
+                    {problem(action)}
                 </div>
             </div>
         </main>
@@ -318,16 +318,16 @@ fn PasswordRules() -> impl IntoView {
     }
 }
 
-/// Whatever the server refused with, in its own words.
-#[component]
-fn Problem(
-    #[prop(into)] value: Signal<Option<Result<Option<Refusal>, ServerFnError>>>,
-) -> impl IntoView {
-    let message = move || match value.get() {
-        Some(Ok(Some(refusal))) => Some(refusal.message()),
-        Some(Err(_)) => Some(Refusal::Unavailable.message()),
-        _ => None,
-    };
+/// Whatever the server refused with, in its own words — from the action when
+/// the page has script, and from the address it was redirected to when it does
+/// not.
+fn problem<S>(action: ServerAction<S>) -> impl IntoView
+where
+    S: leptos::server_fn::ServerFn<Output = Option<Refusal>> + Send + Sync + Clone + 'static,
+    S::Error: Clone + Send + Sync + 'static,
+{
+    let refusal = crate::auth::refusal_of(action);
+    let message = move || refusal().map(|refusal| refusal.message());
     view! {
         <Show when=move || message().is_some()>
             <div class="auth-problem">{move || message().unwrap_or_default()}</div>

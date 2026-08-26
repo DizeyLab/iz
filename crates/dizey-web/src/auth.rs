@@ -7,6 +7,13 @@
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// The two password wordings, as the store states them. They are repeated here
+/// because a password problem has to be named on the client — which has no
+/// `dizey_core::auth` — and `the_password_wordings_match_the_store` below fails
+/// the build if the two ever drift apart.
+const TOO_SHORT: &str = "at least 10 characters";
+const LOOKS_LIKE_YOU: &str = "not your address or your name";
+
 /// Everything a refused call is allowed to say.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal {
@@ -66,6 +73,165 @@ impl Refusal {
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::Unavailable => "Something went wrong. Try again.".to_string(),
         }
+    }
+
+    /// The refusal as a short word, for the address bar.
+    ///
+    /// A browser without script never sees a call's return value: it posts the
+    /// form, follows the redirect, and the page it lands on has to be told what
+    /// happened. That telling goes through the query, so every refusal needs a
+    /// name that survives a round trip through a URL.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Refusal::Rejected => "rejected",
+            Refusal::RateLimited => "rate-limited",
+            // The problem itself, not the wording, so the sentence is built
+            // here on the way back rather than reflected out of the address.
+            Refusal::Password(problem) => {
+                if problem == TOO_SHORT {
+                    "password-short"
+                } else if problem == LOOKS_LIKE_YOU {
+                    "password-you"
+                } else {
+                    "rejected"
+                }
+            }
+            Refusal::Forbidden => "forbidden",
+            Refusal::SignInFirst => "sign-in-first",
+            Refusal::AlreadyClaimed => "already-claimed",
+            Refusal::AddressTaken => "address-taken",
+            Refusal::LinkNotUsable => "link-not-usable",
+            Refusal::EmptyTitle => "empty-title",
+            Refusal::EmptyComment => "empty-comment",
+            Refusal::BadDeadline => "bad-deadline",
+            Refusal::Cycle => "cycle",
+            Refusal::MovedAlready => "moved-already",
+            Refusal::NotFound => "not-found",
+            Refusal::Unavailable => "unavailable",
+        }
+    }
+
+    /// The refusal a `code` names, or nothing. Nothing for an unknown word: the
+    /// query is whatever the address bar holds, so a code that is not one of
+    /// ours says nothing at all rather than something invented.
+    pub fn from_code(code: &str) -> Option<Refusal> {
+        Some(match code {
+            "rejected" => Refusal::Rejected,
+            "rate-limited" => Refusal::RateLimited,
+            "password-short" => Refusal::Password(TOO_SHORT.to_string()),
+            "password-you" => Refusal::Password(LOOKS_LIKE_YOU.to_string()),
+            "forbidden" => Refusal::Forbidden,
+            "sign-in-first" => Refusal::SignInFirst,
+            "already-claimed" => Refusal::AlreadyClaimed,
+            "address-taken" => Refusal::AddressTaken,
+            "link-not-usable" => Refusal::LinkNotUsable,
+            "empty-title" => Refusal::EmptyTitle,
+            "empty-comment" => Refusal::EmptyComment,
+            "bad-deadline" => Refusal::BadDeadline,
+            "cycle" => Refusal::Cycle,
+            "moved-already" => Refusal::MovedAlready,
+            "not-found" => Refusal::NotFound,
+            "unavailable" => Refusal::Unavailable,
+            _ => return None,
+        })
+    }
+}
+
+/// Which call a carried refusal belongs to. Two forms on one page must not both
+/// claim the same sentence, so the redirect names the call and this is the name:
+/// the last piece of the server function's path, with anything that is not a
+/// plain word dropped so it can only ever be compared, never rendered.
+pub fn call_id(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
+/// What a call refused with, however the answer came back.
+///
+/// With script the answer is the action's value. Without it there is no value —
+/// the browser posted a form and followed a redirect — so the refusal rides
+/// back in the address as `?refusal=<code>&on=<call>` and is read from there.
+/// The `on` is checked against this call, so the composer does not show the
+/// link picker's refusal.
+pub fn refusal_of<S>(action: ServerAction<S>) -> impl Fn() -> Option<Refusal> + Copy + Send + Sync
+where
+    S: leptos::server_fn::ServerFn<Output = Option<Refusal>> + Send + Sync + Clone + 'static,
+    S::Error: Clone + Send + Sync + 'static,
+{
+    let query = leptos_router::hooks::use_query_map();
+    move || {
+        if let Some(answer) = action.value().get() {
+            return match answer {
+                Ok(refusal) => refusal,
+                // The call never arrived, which is not the person's mistake and
+                // is not a sentence about what they asked for.
+                Err(_) => Some(Refusal::Unavailable),
+            };
+        }
+        let query = query.read();
+        if query.get("on")? != call_id(S::PATH) {
+            return None;
+        }
+        Refusal::from_code(&query.get("refusal")?)
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn every_refusal_survives_the_address_bar() {
+        let all = [
+            Refusal::Rejected,
+            Refusal::RateLimited,
+            Refusal::Password(TOO_SHORT.to_string()),
+            Refusal::Password(LOOKS_LIKE_YOU.to_string()),
+            Refusal::Forbidden,
+            Refusal::SignInFirst,
+            Refusal::AlreadyClaimed,
+            Refusal::AddressTaken,
+            Refusal::LinkNotUsable,
+            Refusal::EmptyTitle,
+            Refusal::EmptyComment,
+            Refusal::BadDeadline,
+            Refusal::Cycle,
+            Refusal::MovedAlready,
+            Refusal::NotFound,
+            Refusal::Unavailable,
+        ];
+        for refusal in all {
+            assert_eq!(
+                Refusal::from_code(refusal.code()).as_ref(),
+                Some(&refusal),
+                "{} did not come back as itself",
+                refusal.code()
+            );
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn the_password_wordings_match_the_store() {
+        use dizey_core::auth::PasswordProblem;
+        assert_eq!(PasswordProblem::TooShort.to_string(), TOO_SHORT);
+        assert_eq!(PasswordProblem::LooksLikeYou.to_string(), LOOKS_LIKE_YOU);
+    }
+
+    #[test]
+    fn an_unknown_code_says_nothing() {
+        assert_eq!(Refusal::from_code("not-a-refusal"), None);
+        assert_eq!(Refusal::from_code(""), None);
+    }
+
+    #[test]
+    fn a_call_is_named_by_its_last_path_piece() {
+        assert_eq!(call_id("/api/link_tasks"), "link_tasks");
+        assert_eq!(call_id("/api/link_tasks?x=1"), "link_tasksx1");
     }
 }
 

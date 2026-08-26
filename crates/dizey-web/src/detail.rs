@@ -541,23 +541,8 @@ fn StatusControl(
 /// A refusal shown at the far end of a scrolling modal is a refusal nobody
 /// reads: the person clicked "Link a task" and the sentence has to land under
 /// that button, not under the activity trail.
-fn refused<S>(action: ServerAction<S>) -> impl IntoView
-where
-    S: leptos::server_fn::ServerFn<Output = Option<Refusal>> + Send + Sync + Clone + 'static,
-    S::Error: Clone + Send + Sync + 'static,
-{
-    move || {
-        action
-            .value()
-            .get()
-            .and_then(|answer| match answer {
-                Ok(refusal) => refusal,
-                // The call never arrived, which is not the person's mistake and
-                // is not a sentence about their task.
-                Err(_) => Some(Refusal::Unavailable),
-            })
-            .map(|refusal| view! { <p class="modal-problem">{refusal.message()}</p> })
-    }
+fn refused(refusal: impl Fn() -> Option<Refusal> + Copy + Send + Sync + 'static) -> impl IntoView {
+    move || refusal().map(|refusal| view! { <p class="modal-problem">{refusal.message()}</p> })
 }
 
 /// The modal. `esc` closes it, as the artboard's chip says.
@@ -783,6 +768,7 @@ fn TitleControl(
         return Either::Left(view! { <h2 class="detail-title">{title}</h2> });
     }
     let action = ServerAction::<SaveTask>::new();
+    let refusal = crate::auth::refusal_of(action);
     let value = action.value();
     Effect::new(move |_| {
         if matches!(value.get(), Some(Ok(None))) {
@@ -796,6 +782,10 @@ fn TitleControl(
         <div class="edit">
             <input
                 class="edit-toggle"
+                // Open, if the page was landed on carrying this call's refusal.
+                // Without script the sentence is rendered inside this region,
+                // and a region that is closed says nothing at all.
+                checked=move || refusal().is_some()
                 type="checkbox"
                 id=toggle.clone()
                 aria-label="Rename this task"
@@ -822,7 +812,7 @@ fn TitleControl(
                     "Cancel"
                 </label>
             </ActionForm>
-            {refused(action)}
+            {refused(refusal)}
         </div>
     })
 }
@@ -852,6 +842,7 @@ fn DescriptionControl(
         );
     }
     let action = ServerAction::<SaveTask>::new();
+    let refusal = crate::auth::refusal_of(action);
     let value = action.value();
     Effect::new(move |_| {
         if matches!(value.get(), Some(Ok(None))) {
@@ -865,6 +856,10 @@ fn DescriptionControl(
         <div class="edit">
             <input
                 class="edit-toggle"
+                // Open, if the page was landed on carrying this call's refusal.
+                // Without script the sentence is rendered inside this region,
+                // and a region that is closed says nothing at all.
+                checked=move || refusal().is_some()
                 type="checkbox"
                 id=toggle.clone()
                 aria-label="Edit the description"
@@ -886,7 +881,7 @@ fn DescriptionControl(
                     </label>
                 </div>
             </ActionForm>
-            {refused(action)}
+            {refused(refusal)}
         </div>
     })
 }
@@ -904,16 +899,15 @@ fn DeadlineControl(
     on_change: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     if !may_write {
-        return Either::Left(
-            view! {
-                <span class="field-box" class:detail-overdue=overdue>
-                    {glyph::calendar()}
-                    <span class="field-text">{deadline_label}</span>
-                </span>
-            },
-        );
+        return Either::Left(view! {
+            <span class="field-box" class:detail-overdue=overdue>
+                {glyph::calendar()}
+                <span class="field-text">{deadline_label}</span>
+            </span>
+        });
     }
     let action = ServerAction::<SaveTask>::new();
+    let refusal = crate::auth::refusal_of(action);
     let value = action.value();
     Effect::new(move |_| {
         if matches!(value.get(), Some(Ok(None))) {
@@ -926,6 +920,10 @@ fn DeadlineControl(
         <div class="edit edit-pop">
             <input
                 class="edit-toggle"
+                // Open, if the page was landed on carrying this call's refusal.
+                // Without script the sentence is rendered inside this region,
+                // and a region that is closed says nothing at all.
+                checked=move || refusal().is_some()
                 type="checkbox"
                 id=toggle.clone()
                 aria-label="Change the deadline"
@@ -956,7 +954,7 @@ fn DeadlineControl(
                         </label>
                     </div>
                 </ActionForm>
-                {refused(action)}
+                {refused(refusal)}
             </div>
         </div>
     })
@@ -977,6 +975,7 @@ fn AssigneePicker(
         return None;
     }
     let action = ServerAction::<Assign>::new();
+    let refusal = crate::auth::refusal_of(action);
     let value = action.value();
     Effect::new(move |_| {
         if matches!(value.get(), Some(Ok(None))) {
@@ -989,6 +988,10 @@ fn AssigneePicker(
         <div class="edit edit-pop assignee-pop">
             <input
                 class="edit-toggle"
+                // Open, if the page was landed on carrying this call's refusal.
+                // Without script the sentence is rendered inside this region,
+                // and a region that is closed says nothing at all.
+                checked=move || refusal().is_some()
                 type="checkbox"
                 id=toggle.clone()
                 aria-label="Put someone on this task"
@@ -1019,7 +1022,7 @@ fn AssigneePicker(
                         })
                         .collect_view()}
                 </div>
-                {refused(action)}
+                {refused(refusal)}
             </div>
         </div>
     })
@@ -1037,6 +1040,7 @@ fn LinkPicker(
         return None;
     }
     let action = ServerAction::<LinkTasks>::new();
+    let refusal = crate::auth::refusal_of(action);
     let value = action.value();
     Effect::new(move |_| {
         if matches!(value.get(), Some(Ok(None))) {
@@ -1050,6 +1054,10 @@ fn LinkPicker(
         <div class="edit edit-pop link-pop">
             <input
                 class="edit-toggle"
+                // Open, if the page was landed on carrying this call's refusal.
+                // Without script the sentence is rendered inside this region,
+                // and a region that is closed says nothing at all.
+                checked=move || refusal().is_some()
                 type="checkbox"
                 id=toggle.clone()
                 aria-label="Link another task"
@@ -1117,7 +1125,7 @@ fn LinkPicker(
                         </label>
                     </div>
                 </ActionForm>
-                {refused(action)}
+                {refused(refusal)}
             </div>
         </div>
     })
@@ -1156,6 +1164,9 @@ fn DetailScreen(
     let comment = ServerAction::<PostComment>::new();
     let remove = ServerAction::<DeleteTask>::new();
     let move_to = ServerAction::<crate::board::MoveCard>::new();
+    let comment_refusal = crate::auth::refusal_of(comment);
+    let remove_refusal = crate::auth::refusal_of(remove);
+    let move_refusal = crate::auth::refusal_of(move_to);
     // Deleting is two steps: ask what it would cost, then say it out loud and
     // let the person decide. The artboard's red button had no confirmation and
     // this action reaches other people's tasks.
@@ -1223,7 +1234,7 @@ fn DetailScreen(
                         },
                     )
                 }}
-                {refused(move_to)}
+                {refused(move_refusal)}
             </div>
             <div class="detail-field">
                 <span class="detail-label">
@@ -1358,7 +1369,7 @@ fn DetailScreen(
                                     </button>
                                 </div>
                             </ActionForm>
-                            {refused(comment)}
+                            {refused(comment_refusal)}
                         }
                     })}
             </div>
@@ -1386,7 +1397,7 @@ fn DetailScreen(
                 .collect_view()}
         </section>
 
-        {refused(remove)}
+        {refused(remove_refusal)}
 
         {move || {
             ask.value()

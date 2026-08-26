@@ -571,6 +571,7 @@ fn Composer(
 ) -> impl IntoView {
     let action = ServerAction::<CreateTask>::new();
     let value = action.value();
+    let refusal = crate::auth::refusal_of(action);
     Effect::new(move |_| {
         if matches!(value.get(), Some(Ok(None))) {
             on_done();
@@ -601,12 +602,7 @@ fn Composer(
                     "Cancel"
                 </button>
             </div>
-            {move || {
-                value
-                    .get()
-                    .and_then(|answer| answer.ok().flatten())
-                    .map(|refusal| view! { <p class="auth-problem">{refusal.message()}</p> })
-            }}
+            {move || refusal().map(|refusal| view! { <p class="auth-problem">{refusal.message()}</p> })}
         </ActionForm>
     }
 }
