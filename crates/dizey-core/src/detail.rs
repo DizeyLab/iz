@@ -24,8 +24,9 @@ pub struct TaskFacts {
 
 /// One end of a dependency, seen from the task being looked at.
 ///
-/// `cleared_at` is set when the blocking task finished; the row stays so the
-/// history — and the "you can start now" rule — has something to read.
+/// `cleared_at` is set when a person unlinked the edge, and `done_at` when the
+/// blocking task finished. The row stays either way, so the history — and the
+/// "you can start now" rule — has something to read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DependencyEdge {
     pub task_id: String,
