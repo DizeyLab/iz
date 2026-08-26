@@ -683,7 +683,7 @@ a {
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
-  padding: 4px 0 0;
+  padding: 0;
   outline: none;
 }
 
@@ -845,7 +845,9 @@ a {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 24px 24px 0;
+  // Measured against the artboard: the key sits 26px below the modal's own top
+  // edge, and every row under it inherits that.
+  padding: 22px 24px 0;
 }
 
 .detail-headline {
@@ -918,7 +920,7 @@ a {
   display: grid;
   grid-template-columns: 1fr 1.5fr 1fr;
   gap: 12px;
-  padding: 20px 24px 0;
+  padding: 18px 24px 0;
   margin-top: 2px;
 }
 
@@ -1051,9 +1053,11 @@ a {
   border-radius: var(--radius);
 }
 
+// Chips never shrink and never truncate: the row gives up labels instead, and
+// what is left is a whole first name or an avatar on its own.
 .assignee-chip {
   display: inline-flex;
-  min-width: 0;
+  flex: none;
   align-items: center;
   gap: 5px;
   white-space: nowrap;
@@ -1064,11 +1068,19 @@ a {
 }
 
 .assignee-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   font-size: 12px;
   color: var(--ink);
+}
+
+// Three people is the whole company here, and three first names fit. Past that
+// the labels go, in order, and the chips read as avatars — legible where a
+// clipped name is not. The round "+" keeps its size either way.
+.detail-assignees:has(.assignee-chip:nth-child(4)) {
+  .assignee-chip:nth-child(-n + 2) .assignee-name { display: none; }
+}
+
+.detail-assignees:has(.assignee-chip:nth-child(5)) {
+  .assignee-name { display: none; }
 }
 
 .assignee-drop { display: inline-flex; }
