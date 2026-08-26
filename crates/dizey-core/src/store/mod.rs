@@ -12,6 +12,8 @@ use crate::Role;
 use crate::board::{BoardReads, Moved, TaskRow};
 use crate::detail::{ActivityKind, DeletionCost, DetailReads};
 
+#[cfg(feature = "server")]
+pub mod secret;
 pub mod turso_store;
 
 pub use turso_store::TursoStore;

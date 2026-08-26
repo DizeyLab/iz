@@ -33,6 +33,17 @@ impl Scratch {
     }
 }
 
+/// A second, independent connection to the scratch database, for tests that
+/// need to see a column the way it actually sits on disk rather than through
+/// [`Store`]'s API.
+async fn raw_conn(scratch: &Scratch) -> turso::Connection {
+    let db = turso::Builder::new_local(scratch.dir.join("dizey.db").to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    db.connect().unwrap()
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -310,6 +321,130 @@ async fn a_typed_password_replaces_the_stored_one() {
         scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
         Some("the-new-one")
     );
+}
+
+/// The point of encrypting the column: what actually sits on disk is not the
+/// password. A raw read of the row must not turn it up even in ciphertext
+/// form recognisable as the plaintext.
+#[tokio::test]
+async fn the_stored_password_is_not_the_plaintext_on_disk() {
+    let (scratch, ws_id, _) = workspace_with_admin().await;
+    scratch
+        .store
+        .set_sender(
+            &ws_id,
+            NewSender {
+                host: "smtp.fastmail.com".into(),
+                port: 587,
+                username: "dizey".into(),
+                password: Some("a-very-secret-string".into()),
+                from_name: "Dizey".into(),
+                from_address: "dizey@dizey.sh".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let conn = raw_conn(&scratch).await;
+    let mut rows = conn
+        .query("SELECT smtp_password FROM workspace WHERE id = ?1", turso::params![ws_id.clone()])
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let column: String = row.get(0).unwrap();
+    assert!(
+        !column.contains("a-very-secret-string"),
+        "the plaintext is sitting in the column: {column}"
+    );
+    assert!(column.starts_with("v1:"), "expected the sealed envelope, got: {column}");
+
+    // And the read path still gets the real password back.
+    assert_eq!(
+        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        Some("a-very-secret-string")
+    );
+}
+
+/// A backup restored without its sibling `dizey.key`, or a key file damaged
+/// in place, must not crash mail sending or the settings screen — it has to
+/// degrade to "no password set", exactly like a workspace that never had a
+/// sender, so the admin can heal it by retyping the password once.
+#[tokio::test]
+async fn a_password_that_will_not_decrypt_reads_back_as_none() {
+    let (scratch, ws_id, _) = workspace_with_admin().await;
+    scratch
+        .store
+        .set_sender(
+            &ws_id,
+            NewSender {
+                host: "smtp.fastmail.com".into(),
+                port: 587,
+                username: "dizey".into(),
+                password: Some("a-very-secret-string".into()),
+                from_name: "Dizey".into(),
+                from_address: "dizey@dizey.sh".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Simulate a lost key / corrupted ciphertext: overwrite the column with
+    // garbage that still carries the envelope prefix, the way a truncated or
+    // bit-flipped backup would.
+    let conn = raw_conn(&scratch).await;
+    conn.execute(
+        "UPDATE workspace SET smtp_password = 'v1:not-actually-sealed' WHERE id = ?1",
+        turso::params![ws_id.clone()],
+    )
+    .await
+    .unwrap();
+
+    // Reading degrades to None, not an error.
+    assert_eq!(scratch.store.smtp_password(&ws_id).await.unwrap(), None);
+
+    // The screen still says "set" — a value is present — but retyping heals it.
+    let ws = scratch.store.workspace().await.unwrap().unwrap();
+    assert!(ws.smtp_password_set);
+
+    scratch
+        .store
+        .set_sender(
+            &ws_id,
+            NewSender {
+                host: "smtp.fastmail.com".into(),
+                port: 587,
+                username: "dizey".into(),
+                password: Some("a-fresh-password".into()),
+                from_name: "Dizey".into(),
+                from_address: "dizey@dizey.sh".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        Some("a-fresh-password"),
+        "retyping the password heals a store that could not decrypt it"
+    );
+}
+
+/// `TursoStore::open` closes the world-readable window: the database file and
+/// its key file come out at 0600, not whatever umask the process inherited.
+#[tokio::test]
+#[cfg(unix)]
+async fn the_database_and_key_file_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::open().await;
+    let db_path = scratch.dir.join("dizey.db");
+    let key_path = scratch.dir.join("dizey.key");
+    for path in [&db_path, &key_path] {
+        let mode = std::fs::metadata(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{} is not owner-only: {mode:o}", path.display());
+    }
 }
 
 #[tokio::test]

@@ -6,12 +6,14 @@
 //! `crates/dizey-core/migrations` at boot and records the version.
 
 use async_trait::async_trait;
+use rand::Rng;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use turso::transaction::TransactionBehavior;
 use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
+use super::secret;
 use super::{
     Attachment, Audience, Deletion, Event, Freeing, MailRule, MailSend, NewAttachment, NewSender,
     NewTask, NewUser, Recipient, Result,
@@ -60,12 +62,17 @@ pub struct TursoStore {
     /// connection of their own.
     conn: Connection,
     db: turso::Database,
+    /// Seals and opens `smtp_password`; see [`crate::store::secret`]. Never
+    /// exposed through the `Store` trait — callers keep passing and receiving
+    /// plaintext, this field is the detail that makes the row not be one.
+    key: secret::Key,
 }
 
 impl TursoStore {
     /// Opens (creating if needed) the database at `path` and brings the schema
     /// up to date. `:memory:` gives a throwaway database for tests.
     pub async fn open(path: &str) -> Result<Self> {
+        let existed = path != ":memory:" && std::path::Path::new(path).exists();
         let db = Builder::new_local(path).build().await.map_err(backend)?;
         let conn = db.connect().map_err(backend)?;
         // Turso is a single-writer engine. Two connections on one Database
@@ -76,9 +83,63 @@ impl TursoStore {
         for pragma in ["PRAGMA foreign_keys = ON", "PRAGMA busy_timeout = 5000"] {
             conn.execute(pragma, ()).await.map_err(backend)?;
         }
-        let store = Self { conn, db };
+        // The database file holds a live SMTP credential (encrypted below, but
+        // still worth not handing to every local user via umask default). 0600
+        // right after creation closes the window between "file exists" and
+        // "file is ours alone" — a WAL file, if this engine leaves one beside
+        // the main file, gets the same restriction while it's still there to
+        // restrict; if it does not exist yet, there is nothing to chmod and
+        // nothing unprotected either, since it does not hold rows until a
+        // write happens on a connection that already applied this.
+        if !existed && path != ":memory:" {
+            restrict_if_present(std::path::Path::new(path))?;
+            restrict_if_present(&sibling(path, "-wal"))?;
+            restrict_if_present(&sibling(path, "-shm"))?;
+        }
+        let key = load_key(path)?;
+        let store = Self { conn, db, key };
         store.migrate().await?;
+        store.encrypt_plaintext_passwords().await?;
         Ok(store)
+    }
+
+    /// Migration 0011 could not live in `migrations/`: encrypting a column in
+    /// place needs the key, and the key is application state, not something
+    /// SQL can reach. So the upgrade happens here instead, once per boot,
+    /// idempotently — a value already carrying [`secret::is_sealed`]'s prefix
+    /// is left alone, which is what makes running this every boot free after
+    /// the first one. A deployment that predates this module has a plaintext
+    /// password sitting in `workspace.smtp_password`; this is the one time it
+    /// is read as plaintext, and only to seal it before anything else touches
+    /// the row.
+    async fn encrypt_plaintext_passwords(&self) -> Result<()> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, smtp_password FROM workspace WHERE smtp_password IS NOT NULL AND smtp_password <> ''",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        let mut pending = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let id = text(&row, 0)?;
+            let password = text(&row, 1)?;
+            if !secret::is_sealed(&password) {
+                pending.push((id, password));
+            }
+        }
+        for (id, plaintext) in pending {
+            let sealed = secret::seal(&self.key, &plaintext);
+            self.conn
+                .execute(
+                    "UPDATE workspace SET smtp_password = ?1 WHERE id = ?2",
+                    params![sealed, id],
+                )
+                .await
+                .map_err(backend)?;
+        }
+        Ok(())
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -264,6 +325,45 @@ async fn recipients_from(rows: &mut turso::Rows) -> Result<Vec<Recipient>> {
         });
     }
     Ok(out)
+}
+
+/// `path` with its file name suffixed, for the WAL/SHM files Turso may leave
+/// beside the main one (`dizey.db-wal`, `dizey.db-shm`).
+fn sibling(path: &str, suffix: &str) -> std::path::PathBuf {
+    let mut name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(suffix);
+    std::path::Path::new(path).with_file_name(name)
+}
+
+/// 0600 on `path` if it exists, a no-op if it does not — chmodding a file
+/// into existence would be worse than leaving it be, since it would exist
+/// with no rows in it yet regardless.
+fn restrict_if_present(path: &std::path::Path) -> Result<()> {
+    if path.exists() {
+        secret::restrict(path).map_err(backend)?;
+    }
+    Ok(())
+}
+
+/// The key for `path`'s database. `:memory:` has no directory to anchor a
+/// sibling file to and does not survive the process anyway, so it gets a
+/// key generated fresh in memory — every in-memory store in the test suite
+/// is its own, unrelated encryption domain, which is exactly right for a
+/// database that is gone the moment the handle is dropped.
+fn load_key(path: &str) -> Result<secret::Key> {
+    if path == ":memory:" {
+        let mut key = [0u8; secret::KEY_BYTES];
+        rand::rng().fill_bytes(&mut key);
+        return Ok(key);
+    }
+    let dir = std::path::Path::new(path)
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    secret::load_or_create_key(&dir.join("dizey.key")).map_err(backend)
 }
 
 fn backend<E: std::fmt::Display>(e: E) -> StoreError {
@@ -568,6 +668,10 @@ impl Store for TursoStore {
         // The last test result is cleared by the same statement. It was about
         // the settings that have just been replaced, and a green "delivered"
         // line under a host nobody has tried yet is worse than no line at all.
+        // Sealed here, not by the caller — the `Store` trait keeps passing
+        // plaintext so nothing outside this file needs to know a cipher
+        // exists. See `crate::store::secret`.
+        let sealed_password = sender.password.as_deref().map(|p| secret::seal(&self.key, p));
         self.conn
             .execute(
                 "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
@@ -578,7 +682,7 @@ impl Store for TursoStore {
                     sender.host,
                     sender.port as i64,
                     sender.username,
-                    sender.password,
+                    sealed_password,
                     sender.from_name,
                     sender.from_address,
                     workspace_id
@@ -607,16 +711,24 @@ impl Store for TursoStore {
     }
 
     async fn smtp_password(&self, workspace_id: &str) -> Result<Option<String>> {
-        match self
+        let sealed = match self
             .one_row(
                 "SELECT smtp_password FROM workspace WHERE id = ?1",
                 params![workspace_id],
             )
             .await?
         {
-            Some(row) => opt_text(&row, 0),
-            None => Err(StoreError::NotFound),
-        }
+            Some(row) => opt_text(&row, 0)?,
+            None => return Err(StoreError::NotFound),
+        };
+        // A decrypt failure — wrong key, damaged ciphertext, a restored
+        // backup missing its `dizey.key` — comes back as `None` rather than
+        // an error. To every caller that is indistinguishable from a
+        // workspace that never had a sender, which is the intended
+        // degradation: mail send falls back to the no-sender path instead of
+        // crashing or poisoning the settings screen, and the admin retypes
+        // the password once through the existing write-only field to heal it.
+        Ok(sealed.as_deref().and_then(|s| secret::open(&self.key, s)))
     }
 
     async fn set_limits(
