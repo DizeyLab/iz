@@ -6,18 +6,33 @@ license.workspace = true
 repository.workspace = true
 description = "Domain model and storage for Dizey"
 
+[features]
+# The domain vocabulary (roles, record shapes) compiles anywhere, including the
+# wasm bundle. Everything that touches a database, a password or a CSPRNG lives
+# behind `server` so none of it is shipped to the browser.
+default = ["server"]
+server = [
+  "dep:argon2",
+  "dep:async-trait",
+  "dep:rand",
+  "dep:sha2",
+  "dep:subtle",
+  "dep:turso",
+  "dep:uuid",
+]
+
 [dependencies]
-argon2.workspace = true
-async-trait = "0.1.92"
-rand.workspace = true
-sha2.workspace = true
-subtle.workspace = true
+argon2 = { workspace = true, optional = true }
+async-trait = { version = "0.1.92", optional = true }
+rand = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
-turso.workspace = true
-uuid.workspace = true
+turso = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -9,7 +9,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/DizeyLab/izlek"
 
 [workspace.dependencies]
-dizey-core = { path = "crates/dizey-core" }
+dizey-core = { path = "crates/dizey-core", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.20"
