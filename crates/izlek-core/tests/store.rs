@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use izlek_core::Role;
 use izlek_core::auth::{Token, hash_password};
 use izlek_core::store::{
-    Audience, MailRule, NewAttachment, NewSender, NewUser, SendState, Store, StoreError, Trigger,
-    TursoStore, User,
+    Audience, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendState, Store,
+    StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -3648,6 +3648,51 @@ async fn nobody_is_mailed_about_what_they_did_themselves() {
     // And nothing is owed: an audience that empties out leaves no ledger row,
     // so the admin's trail does not show a send that never was.
     assert!(store.sends_for_rule(&rule.id, 10).await.unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rule_that_owed_nobody_still_says_so() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
+    engine.on_transition(&transition).await.unwrap();
+
+    let decisions = store.recent_mail_decisions(10).await.unwrap();
+    let row = decisions
+        .iter()
+        .find(|d| d.rule_id == rule.id && d.task_id == task)
+        .expect("the empty audience left a row");
+    assert_eq!(row.outcome, MailOutcome::NoRecipients);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rule_that_did_not_match_leaves_a_reason() {
+    let (dir, store, workspace, admin) = shared().await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // Rule watches "Done"; this crossing lands in "Review", so the rule never
+    // fires for it.
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Review", &admin).await;
+    engine.on_transition(&transition).await.unwrap();
+
+    let decisions = store.recent_mail_decisions(10).await.unwrap();
+    let row = decisions
+        .iter()
+        .find(|d| d.rule_id == rule.id && d.task_id == task)
+        .expect("the mismatched trigger left a row");
+    assert_eq!(row.outcome, MailOutcome::NotMatched);
+    assert!(!row.detail.is_empty(), "the reason is not left blank");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

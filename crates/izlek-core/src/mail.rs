@@ -13,6 +13,11 @@
 //! themselves just did. A rule whose audience is only the actor sends nothing
 //! and owes nothing — that is not a failure and does not appear as one.
 //!
+//! None of that silence is undocumented any more: every rule an event touches
+//! leaves a `mail_decision` row, win or not — disabled, not matched, an empty
+//! audience, already owed, or freshly owed — so "why did nobody get mailed"
+//! has a row to read instead of a log to search.
+//!
 //! Sending is deliberately outside the move's transaction. The crossing has to
 //! commit whether or not a mail server is reachable, and a board that hangs for
 //! thirty seconds because somebody's SMTP host is down is a board broken by its
@@ -24,7 +29,7 @@ use async_trait::async_trait;
 use time::{Duration, OffsetDateTime};
 
 use crate::board::Transition;
-use crate::store::{Audience, Event, Freeing, MailRule, MailSend, Store, Trigger};
+use crate::store::{Audience, Event, Freeing, MailOutcome, MailRule, MailSend, Store, Trigger};
 
 /// Why the mail server would not take it, and whether that can change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,14 +170,40 @@ impl Engine {
     pub async fn on_transition(&self, transition: &Transition) -> crate::store::Result<Report> {
         let mut report = Report::default();
         let Some(facts) = self.store.task(&transition.task_id).await? else {
-            // The card was deleted between the move and this run. There is
-            // nothing left to say about it and nothing to apologise for.
+            // corner-cut: a task deleted between the move and this run leaves
+            // no board to look its rules up by — `store.task` filters the
+            // soft delete away, and nothing else maps a column back to a
+            // board. No `task_gone` rows are written here for lack of a
+            // rule_id to write them against; ceiling: a board_id lookup that
+            // reads through the delete, which needs a new store method and is
+            // outside this slice's files (mail.rs, tests/store.rs).
             return Ok(report);
         };
         let rules = self.store.mail_rules(&facts.board_id).await?;
         let event = Event::Moved(transition.clone());
+        let columns = self.store.columns_for_board(&facts.board_id).await?;
+        let column_name = |id: &str| {
+            columns
+                .iter()
+                .find(|column| column.id == id)
+                .map(|column| column.name.clone())
+                .unwrap_or_else(|| "a column".to_string())
+        };
 
-        for rule in rules.iter().filter(|rule| rule.enabled) {
+        for rule in &rules {
+            if !rule.enabled {
+                self.store
+                    .record_mail_decision(
+                        &rule.id,
+                        event.id(),
+                        &transition.task_id,
+                        MailOutcome::Disabled,
+                        "",
+                        event.at(),
+                    )
+                    .await?;
+                continue;
+            }
             match &rule.trigger {
                 Trigger::StatusBecomes(column) if *column == transition.to_column => {
                     self.owe(rule, &event, &transition.task_id, &mut report)
@@ -183,7 +214,23 @@ impl Engine {
                         self.owe(rule, &event, &freed, &mut report).await?;
                     }
                 }
-                Trigger::StatusBecomes(_) => {}
+                Trigger::StatusBecomes(watched) => {
+                    let detail = format!(
+                        "moved to {}, rule watches {}",
+                        column_name(&transition.to_column),
+                        column_name(watched)
+                    );
+                    self.store
+                        .record_mail_decision(
+                            &rule.id,
+                            event.id(),
+                            &transition.task_id,
+                            MailOutcome::NotMatched,
+                            &detail,
+                            event.at(),
+                        )
+                        .await?;
+                }
             }
         }
         Ok(report)
@@ -207,13 +254,49 @@ impl Engine {
         }
         let rules = self.store.mail_rules(&freeing.board_id).await?;
         let event = Event::Freed(freeing.clone());
+        let columns = self.store.columns_for_board(&freeing.board_id).await?;
+        let column_name = |id: &str| {
+            columns
+                .iter()
+                .find(|column| column.id == id)
+                .map(|column| column.name.clone())
+                .unwrap_or_else(|| "a column".to_string())
+        };
 
-        for rule in rules
-            .iter()
-            .filter(|rule| rule.enabled && rule.trigger == Trigger::Unblocked)
-        {
+        for rule in &rules {
             for task_id in freed {
-                self.owe(rule, &event, task_id, &mut report).await?;
+                if !rule.enabled {
+                    self.store
+                        .record_mail_decision(
+                            &rule.id,
+                            event.id(),
+                            task_id,
+                            MailOutcome::Disabled,
+                            "",
+                            event.at(),
+                        )
+                        .await?;
+                    continue;
+                }
+                match &rule.trigger {
+                    Trigger::Unblocked => {
+                        self.owe(rule, &event, task_id, &mut report).await?;
+                    }
+                    Trigger::StatusBecomes(watched) => {
+                        let detail =
+                            format!("freed a task, rule watches a move to {}", column_name(watched));
+                        self.store
+                            .record_mail_decision(
+                                &rule.id,
+                                event.id(),
+                                task_id,
+                                MailOutcome::NotMatched,
+                                &detail,
+                                event.at(),
+                            )
+                            .await?;
+                    }
+                }
             }
         }
         Ok(report)
@@ -279,18 +362,62 @@ impl Engine {
             Audience::Assignees => self.store.recipients_for_task(task_id).await?,
             Audience::Board => self.store.recipients_for_board(&rule.board_id).await?,
         };
+        let resolved_nobody = recipients.is_empty();
         let now = OffsetDateTime::now_utc();
-        for recipient in recipients
+        let audience: Vec<_> = recipients
             .into_iter()
             .filter(|recipient| recipient.user_id != event.actor_id())
-        {
+            .collect();
+        if audience.is_empty() {
+            let detail = if resolved_nobody {
+                "audience is empty"
+            } else {
+                "audience was only the actor"
+            };
+            self.store
+                .record_mail_decision(
+                    &rule.id,
+                    event.id(),
+                    task_id,
+                    MailOutcome::NoRecipients,
+                    detail,
+                    now,
+                )
+                .await?;
+            return Ok(());
+        }
+        for recipient in audience {
             let claimed = self
                 .store
                 .claim_send(&rule.id, event.id(), task_id, &recipient.email, now)
                 .await?;
             match claimed {
-                Some(send) => self.attempt(&send, rule, event, report).await?,
-                None => report.already_owned += 1,
+                Some(send) => {
+                    self.store
+                        .record_mail_decision(
+                            &rule.id,
+                            event.id(),
+                            task_id,
+                            MailOutcome::Owed,
+                            "",
+                            now,
+                        )
+                        .await?;
+                    self.attempt(&send, rule, event, report).await?;
+                }
+                None => {
+                    self.store
+                        .record_mail_decision(
+                            &rule.id,
+                            event.id(),
+                            task_id,
+                            MailOutcome::AlreadyOwed,
+                            "",
+                            now,
+                        )
+                        .await?;
+                    report.already_owned += 1;
+                }
             }
         }
         Ok(())
