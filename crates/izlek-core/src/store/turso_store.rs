@@ -57,6 +57,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         13,
         include_str!("../../migrations/0013_more_than_a_move.sql"),
     ),
+    (
+        14,
+        include_str!("../../migrations/0014_created_into_a_column_is_a_transition.sql"),
+    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -1199,7 +1203,9 @@ impl Store for TursoStore {
     async fn create_task(&self, new: NewTask<'_>) -> Result<TaskCreated> {
         let id = Ulid::new().to_string();
         let activity_id = Ulid::new().to_string();
-        let now = now_text()?;
+        let transition_id = Ulid::new().to_string();
+        let at = OffsetDateTime::now_utc();
+        let now = stamp(at)?;
         let deadline = new.deadline.map(day_text).transpose()?;
 
         let mut conn = self.tx_conn().await?;
@@ -1275,6 +1281,19 @@ impl Store for TursoStore {
                 ],
             )
             .await?;
+            tx.execute(
+                "INSERT INTO transition \
+                 (id, task_id, from_column, to_column, actor_id, created_at) \
+                 VALUES (?1, ?2, '', ?3, ?4, ?5)",
+                params![
+                    transition_id.clone(),
+                    id.clone(),
+                    new.column_id,
+                    new.created_by,
+                    now.clone()
+                ],
+            )
+            .await?;
             Ok::<_, turso::Error>(Some((task_key, position)))
         }
         .await;
@@ -1295,7 +1314,7 @@ impl Store for TursoStore {
         let (task_key, position) = written;
         Ok(TaskCreated {
             row: TaskRow {
-                id,
+                id: id.clone(),
                 task_key,
                 title: new.title.to_string(),
                 column_id: new.column_id.to_string(),
@@ -1304,6 +1323,14 @@ impl Store for TursoStore {
                 done_at: None,
             },
             activity_id,
+            transition: Transition {
+                id: transition_id,
+                task_id: id.clone(),
+                from_column: String::new(),
+                to_column: new.column_id.to_string(),
+                actor_id: new.created_by.to_string(),
+                at,
+            },
         })
     }
 

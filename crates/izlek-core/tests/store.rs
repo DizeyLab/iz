@@ -236,14 +236,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 13);
+    assert_eq!(first.schema_version().await.unwrap(), 14);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 13);
+    assert_eq!(second.schema_version().await.unwrap(), 14);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -260,7 +260,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
         a_pre_0013_store_with_a_rule_send_and_decision().await;
 
     let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 13);
+    assert_eq!(store.schema_version().await.unwrap(), 14);
     assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
 
     let rules = store.mail_rules(&board).await.unwrap();
@@ -3485,6 +3485,43 @@ async fn a_crossing_mails_the_people_on_the_card_once() {
         "the mail links back to the task: {}",
         sent[0].body
     );
+    assert_eq!(store.sends_for_rule(&rule.id, 10).await.unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_task_created_straight_into_a_watched_column_mails_too() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let rule = a_rule(&store, &workspace, "In Progress", "Work started").await;
+
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let column_id = column_named(&store, &workspace, "In Progress").await;
+    let created = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            title: "Wire the exporter",
+            description: "",
+            deadline: None,
+            created_by: &admin,
+        })
+        .await
+        .unwrap();
+    store.assign_task(&created.row.id, &mate).await.unwrap();
+
+    assert_eq!(created.transition.from_column, "");
+    assert_eq!(created.transition.to_column, column_id);
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let report = engine.on_transition(&created.transition).await.unwrap();
+    assert_eq!(report.sent, 1);
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@izlek.sh");
+    assert_eq!(sent[0].subject, "Work started");
     assert_eq!(store.sends_for_rule(&rule.id, 10).await.unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

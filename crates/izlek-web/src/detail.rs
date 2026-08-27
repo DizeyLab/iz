@@ -490,7 +490,9 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
         mail(cx).after_freeing(freeing, deletion.freed);
     }
     mail(cx).after_activity(store, deletion.activity_id);
-    redirect(cx, None)
+    // Deleted; the referring `/?task=<id>` no longer names anything, so land
+    // on the board itself rather than reopening a dead modal.
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/".to_string())], Json(None)))
 }
 
 /// Deletes an attachment's row and its bytes. A hard delete, unlike
@@ -1064,8 +1066,11 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                     if may_comment {
                         <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
                             <input type="hidden" name="task_id" value=(detail.id.clone())>
-                            <input class="field-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
-                            <button class="file-upload-submit" type="submit">"Attach"</button>
+                            <label class="field-box file-upload-box">
+                                <span class="field-text">"File"</span>
+                                <input class="file-upload-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
+                            </label>
+                            <button class="quiet" type="submit">"Attach"</button>
                         </form>
                         (refused(cx, "upload_file").await?)
                     }
@@ -1129,7 +1134,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                                                 <li>(format!("{freed} stops being blocked"))</li>
                                             }
                                         </ul>
-                                        <div class="confirm-note">"The task keeps its record in the database, but nothing in Izlek brings it back."</div>
                                         <form class="detail-delete-form" method="post" action="/api/delete_task">
                                             <input type="hidden" name="task_id" value=(detail.id.clone())>
                                             <button class="detail-delete detail-delete-sure" type="submit">(format!("Delete {}", cost.task_key))</button>

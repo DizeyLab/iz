@@ -682,10 +682,10 @@ async fn settings_page(cx: &Cx) -> Result {
     view! {
         cx =>
         <header class="topbar">
-            <div class="wordmark">
+            <a class="wordmark" href="/">
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
-            </div>
+            </a>
             <div class="topbar-divider"></div>
             <span class="board-name">"Settings"</span>
             <div class="spacer"></div>

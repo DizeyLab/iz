@@ -841,6 +841,25 @@ async fn a_viewer_who_posts_a_delete_anyway_is_refused() {
 }
 
 #[tokio::test]
+async fn deleting_the_task_the_modal_came_from_lands_on_the_board_not_the_dead_modal() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin, &column, "Delete me from my own modal").await;
+
+    let answer = app
+        .post_without_script(
+            "/api/delete_task",
+            Some(&admin),
+            &format!("http://izlek.test/?task={task}"),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(answer.location.as_deref(), Some("/"), "a deleted task's modal should not reopen");
+}
+
+#[tokio::test]
 async fn a_member_may_delete_and_the_delete_is_soft() {
     let app = App::open().await;
     let admin = admin(&app).await;
@@ -2152,6 +2171,37 @@ async fn an_admin_reads_the_logs() {
     let snapshot = until_logs_contains(&app, &admin_cookie, "\"recipient\":\"emre@izlek.sh\"").await;
     assert!(snapshot.contains("\"state\":\"held\""), "{}", snapshot);
     assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
+}
+
+/// Creating a task files its own Created activity, but the column it lands
+/// in also fires a `Transition` the way a drop does — a `StatusBecomes` rule
+/// armed on that column must owe mail on creation, not only on a later move.
+#[tokio::test]
+async fn creating_a_task_into_a_ruled_column_owes_mail() {
+    let app = App::open_with_mail().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let column = first_column(&app).await;
+
+    let written = app
+        .post(
+            "/api/create_rule",
+            Some(&admin_cookie),
+            &[("trigger", "status"), ("column_id", &column), ("subject", "New card"), ("audience", "board")],
+        )
+        .await;
+    assert_eq!(written.body, "null", "{}", written.body);
+    let rule = only_rule(&app, &admin_cookie).await;
+
+    // Deniz creates the card, so the board audience (which excludes the
+    // actor) resolves to the admin — the only other person on the board.
+    let created = app
+        .post("/api/create_task", Some(&member), &[("title", "Ship it"), ("column_id", &column)])
+        .await;
+    assert_eq!(created.body, "", "the task was refused: {}", created.body);
+
+    let send = until_rule_send_to(&app, &rule, "ada@izlek.sh", 0).await;
+    assert_eq!(send.recipient, "ada@izlek.sh");
 }
 
 #[tokio::test]

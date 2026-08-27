@@ -676,10 +676,10 @@ async fn rules_page(cx: &Cx) -> Result {
 
     view! {
         <header class="topbar">
-            <div class="wordmark">
+            <a class="wordmark" href="/">
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
-            </div>
+            </a>
             <div class="topbar-divider"></div>
             <span class="board-name">"Mail rules"</span>
             <div class="spacer"></div>

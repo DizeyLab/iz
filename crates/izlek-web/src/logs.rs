@@ -276,10 +276,10 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
     view! {
         cx =>
         <header class="topbar">
-            <div class="wordmark">
+            <a class="wordmark" href="/">
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
-            </div>
+            </a>
             <div class="topbar-divider"></div>
             <span class="board-name">"Logs"</span>
             <div class="spacer"></div>

@@ -663,6 +663,11 @@ impl Engine {
                 .unwrap_or_else(|| "a column".to_string())
         };
         let happened = match (event, &rule.trigger) {
+            (Event::Moved(transition), Trigger::StatusBecomes(_))
+                if transition.from_column.is_empty() =>
+            {
+                format!("{} created it in {}.", actor, named(&transition.to_column))
+            }
             (Event::Moved(transition), Trigger::StatusBecomes(_)) => format!(
                 "{} moved it from {} to {}.",
                 actor,

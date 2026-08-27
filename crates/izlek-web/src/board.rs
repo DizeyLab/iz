@@ -96,6 +96,7 @@ async fn create_task_shared(cx: &Cx, title: &str, column_id: &str) -> Result<Opt
         })
         .await?;
     mail(cx).after_activity(store, created.activity_id);
+    mail(cx).after(created.transition);
     Ok(None)
 }
 
@@ -198,9 +199,11 @@ async fn board_columns(cx: &Cx, version: f64) -> Result {
     let may_write = user.role.can_write_tasks();
     let empty = view_data.is_empty();
 
+    let all_columns: Vec<(String, String)> =
+        view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
     let mut columns = Vec::new();
     for column in view_data.columns {
-        columns.push(render_column(cx, column, today, may_write).await?);
+        columns.push(render_column(cx, column, today, may_write, &all_columns).await?);
     }
 
     view! {
@@ -219,6 +222,7 @@ async fn render_column(
     column: izlek_core::board::ColumnView,
     today: Date,
     may_write: bool,
+    all_columns: &[(String, String)],
 ) -> Result {
     let column_id = column.column.id;
     let name = column.column.name;
@@ -226,7 +230,7 @@ async fn render_column(
     let count = column.cards.len();
     let mut cards = Vec::new();
     for card in column.cards {
-        cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write).await?);
+        cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write, all_columns).await?);
     }
 
     view! {
@@ -262,9 +266,10 @@ async fn render_column(
     }
 }
 
-// The `@dragstart` handler below never reads `e` as ordinary Rust — the
-// `raw!` macro resolves `${e}` through its own name table, keyed on the
-// closure param's identifier text, not through the generated closure body.
+// The `@dragstart`/`@contextmenu` handlers below never read `e` as ordinary
+// Rust — the `raw!` macro resolves `${e}` through its own name table, keyed
+// on the closure param's identifier text, not through the generated closure
+// body.
 #[allow(unused_variables)]
 async fn render_card(
     cx: &Cx,
@@ -272,7 +277,8 @@ async fn render_card(
     today: Date,
     done_column: bool,
     column_id: &str,
-    draggable: bool,
+    may_write: bool,
+    all_columns: &[(String, String)],
 ) -> Result {
     let blocks = card.blocks.len();
     let blocked_by = card.blocked_by.join(", ");
@@ -288,15 +294,30 @@ async fn render_card(
     let task_id = card.id.clone();
     let from_column = column_id.to_string();
     let href = format!("/?task={}", card.id);
+    let menu_id = format!("card-menu-{}", card.id);
+    let move_targets: Vec<(String, String)> =
+        all_columns.iter().filter(|(id, _)| id != column_id).cloned().collect();
+    // `raw!` interpolation only takes a bare identifier, and it moves what it
+    // takes — one clone per site that also needs the value afterward.
+    let drag_task_id = task_id.clone();
+    let drag_from_column = from_column.clone();
+    let open_menu_id = menu_id.clone();
 
     view! {
         cx =>
-        <a class="card" id=(column_id.to_string()) class:card-done=(done_column) href=(href)
-            draggable=(if draggable { "true" } else { "false" })
+        <a class="card" id=(column_id.to_string()) class:card-done=(done_column) href=(href.clone())
+            draggable=(if may_write { "true" } else { "false" })
             @dragstart=$(|e: Event| raw!(
-                "(() => { ${e}.inner.dataTransfer.setData('izlek-task', ${task_id}); ${e}.inner.dataTransfer.setData('izlek-from', ${from_column}); })()",
+                "(() => { ${e}.inner.dataTransfer.setData('izlek-task', ${drag_task_id}); ${e}.inner.dataTransfer.setData('izlek-from', ${drag_from_column}); })()",
                 ()
             ))
+            @contextmenu=$(|e: Event| {
+                e.prevent_default();
+                raw!(
+                    "(() => { window.__izlekOpenCardMenu(${e}.inner, ${open_menu_id}); })()",
+                    ()
+                )
+            })
         >
             <div class="card-keys">
                 <span class="card-key">(card.task_key.clone())</span>
@@ -320,7 +341,54 @@ async fn render_card(
                 </div>
             </div>
         </a>
+        <div class="card-menu pop-panel" id=(menu_id.clone())>
+            <div class="pop-list">
+                <a class="pop-row" href=(href.clone())>"Open"</a>
+                if may_write && !move_targets.is_empty() {
+                    <div class="card-menu-move">
+                        <button class="pop-row card-menu-move-trigger" type="button">"Move"</button>
+                        <div class="card-menu-submenu pop-panel">
+                            <div class="pop-list">
+                                for target in move_targets.iter() {
+                                    <form class="pop-row-form" method="post" action="/api/move_card">
+                                        <input type="hidden" name="task_id" value=(task_id.clone())>
+                                        <input type="hidden" name="from_column_id" value=(from_column.clone())>
+                                        <input type="hidden" name="to_column_id" value=(target.0.clone())>
+                                        <button class="pop-row" type="submit">(target.1.clone())</button>
+                                    </form>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+                if may_write {
+                    <form class="pop-row-form" method="post" action="/api/delete_task">
+                        <input type="hidden" name="task_id" value=(task_id.clone())>
+                        <button class="pop-row card-menu-danger" type="submit">"Delete"</button>
+                    </form>
+                }
+            </div>
+        </div>
     }
+}
+
+/// Opens a card's context menu at the cursor and closes whichever one was
+/// open; a plain document click closes it again. Rendered once — every
+/// card's `@contextmenu` calls into this same global, by the menu's id.
+async fn card_menu_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        function closeCardMenus() { document.querySelectorAll('.card-menu-open').forEach(function (el) { el.classList.remove('card-menu-open'); }); } \
+        window.__izlekOpenCardMenu = function (e, id) { \
+            closeCardMenus(); \
+            var menu = document.getElementById(id); \
+            if (!menu) { return; } \
+            menu.style.left = e.clientX + 'px'; \
+            menu.style.top = e.clientY + 'px'; \
+            menu.classList.add('card-menu-open'); \
+        }; \
+        document.addEventListener('click', closeCardMenus);";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
 pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
@@ -363,7 +431,6 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let today = OffsetDateTime::now_utc().date();
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
-    let may_write = user.role.can_write_tasks();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
@@ -374,16 +441,13 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     view! {
         cx =>
         <header class="topbar">
-            <div class="wordmark">
+            <a class="wordmark" href="/">
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
-            </div>
+            </a>
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
             <a class="topbar-link" href="/settings">"Settings"</a>
-            if may_write {
-                <button class="new-task">"New task"</button>
-            }
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>
@@ -416,5 +480,6 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         if let Some(task_id) = &open_task {
             (crate::detail::task_modal(cx, task_id).await?)
         }
+        (card_menu_script(cx).await?)
     }
 }

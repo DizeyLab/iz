@@ -47,6 +47,10 @@ a {
   display: flex;
   align-items: baseline;
   gap: 1px;
+  text-decoration: none;
+  color: inherit;
+
+  &:hover { color: inherit; }
 
   &-text {
     font-size: 18px;
@@ -273,24 +277,6 @@ a {
 .topbar-who {
   font-size: 13px;
   color: var(--muted);
-}
-
-.new-task {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 14px;
-  background: var(--accent);
-  color: var(--surface);
-  border: none;
-  border-radius: var(--radius);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-
-  &:hover { background: var(--accent-ink); }
 }
 
 .filterbar {
@@ -581,6 +567,38 @@ a {
   &-tone-4 { background: #46707b; }
 }
 
+// -- the card context menu ---------------------------------------------------
+//
+// A right-click opens this at the cursor; `card_menu_script` (board.rs) sets
+// its position and the `card-menu-open` class, and a document click closes
+// whichever one is open. The panel and its rows wear the same floating-list
+// chrome as the assignee and link pickers (`.pop-panel`/`.pop-list`/`.pop-row`).
+
+.card-menu {
+  display: none;
+  position: fixed;
+  z-index: 25;
+  min-width: 160px;
+
+  &-open { display: block; }
+}
+
+.card-menu-move { position: relative; }
+
+.card-menu-submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: 0;
+  margin-left: 4px;
+  min-width: 140px;
+}
+
+.card-menu-move:hover > .card-menu-submenu,
+.card-menu-move-trigger:focus + .card-menu-submenu { display: block; }
+
+.card-menu-danger { color: #a04a24; }
+
 .board-empty {
   position: absolute;
   left: 50%;
@@ -617,6 +635,8 @@ a {
   display: flex;
   flex-direction: column;
   gap: 8px;
+
+  &[hidden] { display: none; }
 }
 
 .composer-input {
@@ -1424,21 +1444,19 @@ a {
   margin-top: 10px;
 }
 
-.file-upload-submit {
-  display: inline-flex;
-  align-items: center;
-  height: 26px;
-  padding: 0 9px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--muted);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
+.file-upload-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
 
-  &:hover { color: #a04a24; border-color: #a04a24; }
-  &:disabled { opacity: 0.5; cursor: default; }
+.file-upload-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
 }
 
 // -- comments ---------------------------------------------------------------
@@ -1590,13 +1608,40 @@ a {
 }
 
 // -- the delete confirmation ------------------------------------------------
+//
+// The open `<details>` becomes a scrim + centered panel, the same shape as
+// the task modal's `.modal-scrim`/`.modal` (main.scss above), with no script:
+// the backdrop is the open details' own `::before`, and clicking the
+// "Delete task" summary again (still reachable, raised above the backdrop)
+// is what closes it.
+
+.confirm-details[open] {
+  position: relative;
+  z-index: 21;
+}
+
+.confirm-details[open]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 27, 24, 0.28);
+  z-index: 20;
+}
 
 .confirm {
-  margin: 16px 24px 0;
-  padding: 14px 16px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 21;
+  width: 420px;
+  max-width: calc(100% - 48px);
+  margin: 0;
+  padding: 18px 20px;
   border: 1px solid #e8c9b8;
-  border-radius: 8px;
+  border-radius: 12px;
   background: #fdf6f2;
+  box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
 }
 
 .confirm-title {
@@ -1610,12 +1655,6 @@ a {
   padding-left: 18px;
   font-size: 13px;
   color: #3d3a34;
-}
-
-.confirm-note {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--muted);
 }
 
 .confirm-row {

@@ -65,10 +65,10 @@ async fn topbar(cx: &Cx) -> Result {
     view! {
         cx =>
         <header class="topbar">
-            <div class="wordmark">
+            <a class="wordmark" href="/">
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
-            </div>
+            </a>
         </header>
     }
 }

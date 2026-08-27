@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::Role;
-use crate::board::{BoardReads, Moved, TaskRow};
+use crate::board::{BoardReads, Moved, TaskRow, Transition};
 use crate::detail::{ActivityKind, DeletionCost, DetailReads};
 
 #[cfg(feature = "server")]
@@ -206,13 +206,16 @@ pub struct NewTask<'a> {
     pub created_by: &'a str,
 }
 
-/// What `create_task` wrote: the task, and the id of the Created activity row
+/// What `create_task` wrote: the task, the id of the Created activity row
 /// it filed alongside it, so a caller that needs to name the event — a mail
-/// retry, one day — does not have to go read the trail back.
+/// retry, one day — does not have to go read the trail back, and the
+/// transition into its starting column, so a rule watching that column
+/// fires the same as it would for a card dropped into it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskCreated {
     pub row: TaskRow,
     pub activity_id: String,
+    pub transition: Transition,
 }
 
 /// What `add_comment` wrote: the comment's id, and the id of the Commented
