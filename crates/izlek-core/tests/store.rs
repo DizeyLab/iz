@@ -379,6 +379,47 @@ async fn concurrent_claims_produce_exactly_one_admin() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The store's connection is not concurrent-safe on its own (turso's
+/// `TursoError::Misuse("concurrent use forbidden")` fires the moment two
+/// queries overlap on it); this drives reads and writes against one shared
+/// [`TursoStore`] from many tasks at once and expects every one of them to
+/// come back `Ok`, never that error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn many_concurrent_callers_never_see_concurrent_use_forbidden() {
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("izlek.db").to_string_lossy().into_owned();
+    let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
+    let (workspace_id, _) = claim(&store).await;
+
+    let mut tasks = Vec::new();
+    for i in 0..16 {
+        let store = store.clone();
+        let workspace_id = workspace_id.clone();
+        tasks.push(tokio::spawn(async move {
+            if i % 2 == 0 {
+                // A write: inserts into auth_attempt on the shared connection.
+                store
+                    .record_auth_attempt(&format!("bucket-{i}"), OffsetDateTime::now_utc())
+                    .await
+                    .map(|_| ())
+            } else {
+                // A multi-row read that steps a statement in a loop.
+                store.users(&workspace_id).await.map(|_| ())
+            }
+        }));
+    }
+
+    for task in tasks {
+        task.await
+            .unwrap()
+            .expect("concurrent store access must never surface Misuse(\"concurrent use forbidden\")");
+    }
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn workspace_defaults_match_the_settings_screen() {
     let scratch = Scratch::open().await;

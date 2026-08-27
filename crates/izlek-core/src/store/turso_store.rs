@@ -73,7 +73,7 @@ pub struct TursoStore {
     /// Shared by every single-statement call. Turso serialises statements on a
     /// connection, so this is safe; transactions are the exception and take a
     /// connection of their own.
-    conn: Connection,
+    conn: tokio::sync::Mutex<Connection>,
     db: turso::Database,
     /// Seals and opens `smtp_password`; see [`crate::store::secret`]. Never
     /// exposed through the `Store` trait — callers keep passing and receiving
@@ -110,7 +110,7 @@ impl TursoStore {
             restrict_if_present(&sibling(path, "-shm"))?;
         }
         let key = load_key(path)?;
-        let store = Self { conn, db, key };
+        let store = Self { conn: tokio::sync::Mutex::new(conn), db, key };
         store.migrate().await?;
         store.encrypt_plaintext_passwords().await?;
         Ok(store)
@@ -126,8 +126,8 @@ impl TursoStore {
     /// is read as plaintext, and only to seal it before anything else touches
     /// the row.
     async fn encrypt_plaintext_passwords(&self) -> Result<()> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT id, smtp_password FROM workspace WHERE smtp_password IS NOT NULL AND smtp_password <> ''",
                 (),
@@ -144,7 +144,7 @@ impl TursoStore {
         }
         for (id, plaintext) in pending {
             let sealed = secret::seal(&self.key, &plaintext);
-            self.conn
+            conn
                 .execute(
                     "UPDATE workspace SET smtp_password = ?1 WHERE id = ?2",
                     params![sealed, id],
@@ -157,6 +157,8 @@ impl TursoStore {
 
     async fn migrate(&self) -> Result<()> {
         self.conn
+            .lock()
+            .await
             .execute(
                 "CREATE TABLE IF NOT EXISTS schema_version (
                      version    INTEGER PRIMARY KEY,
@@ -188,13 +190,14 @@ impl TursoStore {
     ///
     /// SQLite's DDL is transactional, which is what makes this possible at all.
     async fn apply(&self, version: i64, sql: &str) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(backend)?;
         let written = async {
-            self.conn.execute_batch(sql).await?;
-            self.conn
+            conn.execute_batch(sql).await?;
+            conn
                 .execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
                     params![
@@ -209,22 +212,21 @@ impl TursoStore {
         }
         .await;
         match written {
-            Ok(()) => self
-                .conn
+            Ok(()) => conn
                 .execute("COMMIT", ())
                 .await
                 .map_err(backend)
                 .map(|_| ()),
             Err(e) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = conn.execute("ROLLBACK", ()).await;
                 Err(backend(e))
             }
         }
     }
 
     async fn applied_versions(&self) -> Result<Vec<i64>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query("SELECT version FROM schema_version", ())
             .await
             .map_err(backend)?;
@@ -257,7 +259,8 @@ impl TursoStore {
     }
 
     async fn one_row(&self, sql: &str, args: impl turso::IntoParams) -> Result<Option<Row>> {
-        let mut rows = self.conn.query(sql, args).await.map_err(backend)?;
+        let conn = self.conn.lock().await;
+        let mut rows = conn.query(sql, args).await.map_err(backend)?;
         rows.next().await.map_err(backend)
     }
 }
@@ -721,6 +724,7 @@ impl Store for TursoStore {
     }
 
     async fn set_sender(&self, workspace_id: &str, sender: NewSender) -> Result<()> {
+        let conn = self.conn.lock().await;
         // `COALESCE(?4, smtp_password)` is the write-only field made real: the
         // screen sends no password when the admin did not type one, and the
         // stored secret survives an edit to the port. Passing an empty string
@@ -733,7 +737,7 @@ impl Store for TursoStore {
         // plaintext so nothing outside this file needs to know a cipher
         // exists. See `crate::store::secret`.
         let sealed_password = sender.password.as_deref().map(|p| secret::seal(&self.key, p));
-        self.conn
+        conn
             .execute(
                 "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
                  smtp_password = COALESCE(?4, smtp_password), smtp_from_name = ?5, \
@@ -755,7 +759,8 @@ impl Store for TursoStore {
     }
 
     async fn record_sender_test(&self, workspace_id: &str, test: SenderTest) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "UPDATE workspace SET smtp_test_at = ?1, smtp_test_ms = ?2, \
                  smtp_test_error = ?3 WHERE id = ?4",
@@ -799,9 +804,10 @@ impl Store for TursoStore {
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
     ) -> Result<()> {
+        let conn = self.conn.lock().await;
         let types = serde_json::to_string(allowed_file_types)
             .map_err(|e| StoreError::Corrupt(format!("allowed_file_types: {e}")))?;
-        self.conn
+        conn
             .execute(
                 "UPDATE workspace SET attachment_limit_bytes = ?1, photo_limit_bytes = ?2, \
                  allowed_file_types = ?3 WHERE id = ?4",
@@ -828,6 +834,8 @@ impl Store for TursoStore {
         }
         let id = Uuid::new_v4().to_string();
         self.conn
+            .lock()
+            .await
             .execute(
                 "INSERT INTO user \
                  (id, workspace_id, email, display_name, role, created_at, invited_by) \
@@ -867,11 +875,11 @@ impl Store for TursoStore {
     }
 
     async fn users(&self, workspace_id: &str) -> Result<Vec<User>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 ORDER BY created_at, id"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![workspace_id])
             .await
             .map_err(backend)?;
@@ -896,8 +904,8 @@ impl Store for TursoStore {
     }
 
     async fn set_password_hash(&self, user_id: &str, hash: &str) -> Result<()> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().await;
+        let n = conn
             .execute(
                 "UPDATE user SET password_hash = ?1 WHERE id = ?2",
                 params![hash, user_id],
@@ -917,12 +925,12 @@ impl Store for TursoStore {
         display_name: &str,
         photo_path: Option<&str>,
     ) -> Result<()> {
+        let conn = self.conn.lock().await;
         let photo = match photo_path {
             Some(p) => Value::from(p.to_string()),
             None => Value::Null,
         };
-        let n = self
-            .conn
+        let n = conn
             .execute(
                 "UPDATE user SET display_name = ?1, photo_path = ?2 WHERE id = ?3",
                 params![display_name, photo, user_id],
@@ -937,8 +945,8 @@ impl Store for TursoStore {
     }
 
     async fn set_role(&self, user_id: &str, role: Role) -> Result<()> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().await;
+        let n = conn
             .execute(
                 "UPDATE user SET role = ?1 WHERE id = ?2",
                 params![role.as_str(), user_id],
@@ -953,8 +961,8 @@ impl Store for TursoStore {
     }
 
     async fn mark_signed_in(&self, user_id: &str, at: OffsetDateTime) -> Result<()> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().await;
+        let n = conn
             .execute(
                 "UPDATE user SET last_signed_in_at = ?1 WHERE id = ?2",
                 params![stamp(at)?, user_id],
@@ -976,6 +984,8 @@ impl Store for TursoStore {
     ) -> Result<SigninLink> {
         let id = Uuid::new_v4().to_string();
         self.conn
+            .lock()
+            .await
             .execute(
                 "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1042,6 +1052,8 @@ impl Store for TursoStore {
     ) -> Result<Session> {
         let id = Uuid::new_v4().to_string();
         self.conn
+            .lock()
+            .await
             .execute(
                 "INSERT INTO session (id, user_id, token_hash, created_at, expires_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1081,8 +1093,8 @@ impl Store for TursoStore {
     }
 
     async fn revoke_session(&self, id: &str, at: OffsetDateTime) -> Result<()> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().await;
+        let n = conn
             .execute(
                 "UPDATE session SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
                 params![stamp(at)?, id],
@@ -1097,7 +1109,8 @@ impl Store for TursoStore {
     }
 
     async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "UPDATE session SET revoked_at = ?1 WHERE user_id = ?2 AND revoked_at IS NULL",
                 params![stamp(at)?, user_id],
@@ -1107,7 +1120,8 @@ impl Store for TursoStore {
     }
 
     async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES (?1, ?2, ?3)",
                 params![Uuid::new_v4().to_string(), bucket, stamp(at)?],
@@ -1133,7 +1147,8 @@ impl Store for TursoStore {
     }
 
     async fn clear_auth_attempts(&self, bucket: &str) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "DELETE FROM auth_attempt WHERE bucket = ?1",
                 params![bucket],
@@ -1144,7 +1159,8 @@ impl Store for TursoStore {
     }
 
     async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "DELETE FROM auth_attempt WHERE attempted_at < ?1",
                 params![stamp(before)?],
@@ -1162,8 +1178,9 @@ impl Store for TursoStore {
         position: i64,
         is_done: bool,
     ) -> Result<Column> {
+        let conn = self.conn.lock().await;
         let id = Uuid::new_v4().to_string();
-        self.conn
+        conn
             .execute(
                 "INSERT INTO board_column (id, board_id, name, position, is_done) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1291,7 +1308,8 @@ impl Store for TursoStore {
     }
 
     async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "INSERT OR IGNORE INTO task_assignee (task_id, user_id) VALUES (?1, ?2)",
                 params![task_id, user_id],
@@ -1302,7 +1320,8 @@ impl Store for TursoStore {
     }
 
     async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "DELETE FROM task_assignee WHERE task_id = ?1 AND user_id = ?2",
                 params![task_id, user_id],
@@ -1410,7 +1429,8 @@ impl Store for TursoStore {
         blocking_task_id: &str,
         at: OffsetDateTime,
     ) -> Result<()> {
-        self.conn
+        let conn = self.conn.lock().await;
+        conn
             .execute(
                 "UPDATE task_dependency SET cleared_at = ?3 \
                  WHERE blocked_task_id = ?1 AND blocking_task_id = ?2 AND cleared_at IS NULL",
@@ -1474,9 +1494,10 @@ impl Store for TursoStore {
     }
 
     async fn add_attachment(&self, new: NewAttachment<'_>) -> Result<String> {
+        let conn = self.conn.lock().await;
         let id = Uuid::new_v4().to_string();
         let size = new.bytes.len() as i64;
-        self.conn
+        conn
             .execute(
                 "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
                  size_bytes, bytes, uploaded_by, created_at) \
@@ -1499,8 +1520,8 @@ impl Store for TursoStore {
     }
 
     async fn attachments(&self, task_id: &str) -> Result<Vec<Attachment>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
                  uploaded_by, created_at FROM attachment \
@@ -1517,8 +1538,8 @@ impl Store for TursoStore {
     }
 
     async fn attachment(&self, id: &str) -> Result<Option<Attachment>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
                  uploaded_by, created_at FROM attachment WHERE id = ?1",
@@ -1533,8 +1554,8 @@ impl Store for TursoStore {
     }
 
     async fn attachment_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query("SELECT bytes FROM attachment WHERE id = ?1", params![id])
             .await
             .map_err(backend)?;
@@ -1545,8 +1566,8 @@ impl Store for TursoStore {
     }
 
     async fn delete_attachment(&self, id: &str) -> Result<bool> {
-        let gone = self
-            .conn
+        let conn = self.conn.lock().await;
+        let gone = conn
             .execute("DELETE FROM attachment WHERE id = ?1", params![id])
             .await
             .map_err(backend)?;
@@ -1970,8 +1991,8 @@ impl Store for TursoStore {
     }
 
     async fn deletion_cost(&self, task_id: &str) -> Result<Option<DeletionCost>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT task_key, title FROM task WHERE id = ?1 AND deleted_at IS NULL",
                 params![task_id],
@@ -1987,8 +2008,7 @@ impl Store for TursoStore {
 
         // Both counts in one sweep: the confirmation says what goes, and it
         // should not cost three round trips to say it.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT (SELECT COUNT(*) FROM comment WHERE task_id = ?1), \
                  (SELECT COUNT(*) FROM task_dependency d JOIN task t \
@@ -2011,8 +2031,7 @@ impl Store for TursoStore {
 
         // Who would be left with nothing in front of them. The same reading the
         // delete itself uses: an uncleared edge to a live task is what counts.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT t.task_key FROM task_dependency d \
                  JOIN task t ON t.id = d.blocked_task_id \
@@ -2049,8 +2068,9 @@ impl Store for TursoStore {
         detail: &str,
         at: OffsetDateTime,
     ) -> Result<String> {
+        let conn = self.conn.lock().await;
         let id = Uuid::new_v4().to_string();
-        self.conn
+        conn
             .execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -2081,6 +2101,8 @@ impl Store for TursoStore {
         let id = Uuid::new_v4().to_string();
         let (kind, column) = trigger_parts(trigger);
         self.conn
+            .lock()
+            .await
             .execute(
                 "INSERT INTO mail_rule \
                  (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, \
@@ -2106,11 +2128,11 @@ impl Store for TursoStore {
     }
 
     async fn mail_rules(&self, board_id: &str) -> Result<Vec<MailRule>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {RULE_COLUMNS} FROM mail_rule WHERE board_id = ?1 ORDER BY created_at, rowid"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![board_id])
             .await
             .map_err(backend)?;
@@ -2128,9 +2150,9 @@ impl Store for TursoStore {
         subject: &str,
         audience: Audience,
     ) -> Result<()> {
+        let conn = self.conn.lock().await;
         let (kind, column) = trigger_parts(trigger);
-        let n = self
-            .conn
+        let n = conn
             .execute(
                 "UPDATE mail_rule SET trigger_kind = ?1, trigger_column = ?2, subject = ?3, \
                  audience = ?4 WHERE id = ?5",
@@ -2224,8 +2246,8 @@ impl Store for TursoStore {
     }
 
     async fn set_mail_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().await;
+        let n = conn
             .execute(
                 "UPDATE mail_rule SET enabled = ?1 WHERE id = ?2",
                 params![i64::from(enabled), rule_id],
@@ -2239,10 +2261,10 @@ impl Store for TursoStore {
     }
 
     async fn delete_mail_rule(&self, rule_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
         // The ledger goes with the rule — ON DELETE CASCADE on `mail_send`,
         // which the foreign-keys pragma makes real.
-        let n = self
-            .conn
+        let n = conn
             .execute("DELETE FROM mail_rule WHERE id = ?1", params![rule_id])
             .await
             .map_err(backend)?;
@@ -2253,8 +2275,8 @@ impl Store for TursoStore {
     }
 
     async fn mail_rule_last_sent(&self, board_id: &str) -> Result<Vec<(String, OffsetDateTime)>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT s.rule_id, MAX(s.sent_at) FROM mail_send s \
                  JOIN mail_rule r ON r.id = s.rule_id \
@@ -2287,6 +2309,8 @@ impl Store for TursoStore {
         // caller that gets `None` sends nothing.
         let n = self
             .conn
+            .lock()
+            .await
             .execute(
                 "INSERT INTO mail_send \
                  (id, rule_id, event_id, task_id, recipient, state, attempts, claimed_at, \
@@ -2323,6 +2347,8 @@ impl Store for TursoStore {
     ) -> Result<MailSend> {
         let id = Uuid::new_v4().to_string();
         self.conn
+            .lock()
+            .await
             .execute(
                 "INSERT INTO mail_send \
                  (id, recipient, state, attempts, claimed_at, next_attempt_at, kind, subject, \
@@ -2340,8 +2366,8 @@ impl Store for TursoStore {
     }
 
     async fn record_send_accepted(&self, send_id: &str, at: OffsetDateTime) -> Result<()> {
-        let n = self
-            .conn
+        let conn = self.conn.lock().await;
+        let n = conn
             .execute(
                 "UPDATE mail_send \
                  SET state = 'sent', attempts = attempts + 1, sent_at = ?1, \
@@ -2364,6 +2390,7 @@ impl Store for TursoStore {
         retry_at: Option<OffsetDateTime>,
         _at: OffsetDateTime,
     ) -> Result<()> {
+        let conn = self.conn.lock().await;
         // A refusal is written whether or not it will be retried: a mail that
         // never arrived and left no trace is the failure that makes people stop
         // trusting the tool.
@@ -2376,8 +2403,7 @@ impl Store for TursoStore {
             Some(at) => Some(stamp(at)?),
             None => None,
         };
-        let n = self
-            .conn
+        let n = conn
             .execute(
                 "UPDATE mail_send \
                  SET state = ?1, attempts = attempts + 1, last_error = ?2, next_attempt_at = ?3 \
@@ -2399,11 +2425,11 @@ impl Store for TursoStore {
         retry_at: OffsetDateTime,
         _at: OffsetDateTime,
     ) -> Result<()> {
+        let conn = self.conn.lock().await;
         // `attempts` is deliberately not touched. Everything else reads like a
         // refusal that will be retried, because that is what it is — the mail
         // is owed, it is due again shortly, and the reason says why it waited.
-        let n = self
-            .conn
+        let n = conn
             .execute(
                 "UPDATE mail_send \
                  SET state = 'failed', last_error = ?1, next_attempt_at = ?2 \
@@ -2419,13 +2445,13 @@ impl Store for TursoStore {
     }
 
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {SEND_COLUMNS} FROM mail_send \
              WHERE next_attempt_at IS NOT NULL AND next_attempt_at <= ?1 \
              ORDER BY next_attempt_at LIMIT ?2"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![stamp(now)?, i64::from(limit)])
             .await
             .map_err(backend)?;
@@ -2437,12 +2463,12 @@ impl Store for TursoStore {
     }
 
     async fn sends_for_rule(&self, rule_id: &str, limit: u32) -> Result<Vec<MailSend>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {SEND_COLUMNS} FROM mail_send WHERE rule_id = ?1 \
              ORDER BY claimed_at DESC, rowid DESC LIMIT ?2"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![rule_id, i64::from(limit)])
             .await
             .map_err(backend)?;
@@ -2464,8 +2490,9 @@ impl Store for TursoStore {
         detail: &str,
         at: OffsetDateTime,
     ) -> Result<()> {
+        let conn = self.conn.lock().await;
         let id = Uuid::new_v4().to_string();
-        self.conn
+        conn
             .execute(
                 "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
                  created_at) \
@@ -2479,12 +2506,12 @@ impl Store for TursoStore {
     }
 
     async fn recent_mail_decisions(&self, limit: u32) -> Result<Vec<MailDecision>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {DECISION_COLUMNS} FROM mail_decision \
              ORDER BY created_at DESC, rowid DESC LIMIT ?1"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![i64::from(limit)])
             .await
             .map_err(backend)?;
@@ -2496,8 +2523,8 @@ impl Store for TursoStore {
     }
 
     async fn mail_rule_last_decision(&self) -> Result<Vec<(String, OffsetDateTime)>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT rule_id, MAX(created_at) FROM mail_decision GROUP BY rule_id",
                 (),
@@ -2512,12 +2539,12 @@ impl Store for TursoStore {
     }
 
     async fn mail_queue(&self, limit: u32) -> Result<Vec<MailSend>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
              ORDER BY next_attempt_at LIMIT ?1"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![i64::from(limit)])
             .await
             .map_err(backend)?;
@@ -2529,11 +2556,11 @@ impl Store for TursoStore {
     }
 
     async fn recent_sends(&self, limit: u32) -> Result<Vec<MailSend>> {
+        let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {SEND_COLUMNS} FROM mail_send ORDER BY claimed_at DESC, rowid DESC LIMIT ?1"
         );
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(&sql, params![i64::from(limit)])
             .await
             .map_err(backend)?;
@@ -2545,8 +2572,8 @@ impl Store for TursoStore {
     }
 
     async fn recent_activity(&self, limit: u32) -> Result<Vec<ActivityLine>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT a.task_id, t.title, u.display_name, a.kind, a.detail, a.created_at \
                  FROM activity a \
@@ -2574,11 +2601,11 @@ impl Store for TursoStore {
     // -- who gets mailed ---------------------------------------------------
 
     async fn recipients_for_task(&self, task_id: &str) -> Result<Vec<Recipient>> {
+        let conn = self.conn.lock().await;
         // The role filter is belt as well as braces: a Viewer cannot be
         // assigned in the first place, and if one ever were, no mail would go
         // out to them from here.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT u.id, u.email, u.display_name FROM task_assignee a \
                  JOIN user u ON u.id = a.user_id \
@@ -2591,8 +2618,8 @@ impl Store for TursoStore {
     }
 
     async fn recipients_for_board(&self, board_id: &str) -> Result<Vec<Recipient>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT u.id, u.email, u.display_name FROM user u \
                  JOIN board b ON b.workspace_id = u.workspace_id \
@@ -2605,8 +2632,8 @@ impl Store for TursoStore {
     }
 
     async fn recipients_for_task_creator(&self, task_id: &str) -> Result<Vec<Recipient>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT u.id, u.email, u.display_name FROM task t \
                  JOIN user u ON u.id = t.created_by \
@@ -2653,8 +2680,8 @@ impl DetailReads for TursoStore {
     }
 
     async fn assignees_for_task(&self, task_id: &str) -> Result<Vec<Person>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT u.id, u.display_name, u.photo_path FROM task_assignee a \
                  JOIN user u ON u.id = a.user_id \
@@ -2675,10 +2702,10 @@ impl DetailReads for TursoStore {
     }
 
     async fn assignable_people(&self, workspace_id: &str) -> Result<Vec<Person>> {
+        let conn = self.conn.lock().await;
         // Id, name and photo only: the picker shows no addresses and no roles,
         // so neither leaves the server for this screen.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT id, display_name, photo_path FROM user \
                  WHERE workspace_id = ?1 AND role <> ?2 ORDER BY display_name",
@@ -2698,12 +2725,12 @@ impl DetailReads for TursoStore {
     }
 
     async fn dependencies_for_task(&self, task_id: &str) -> Result<Vec<(bool, DependencyEdge)>> {
+        let conn = self.conn.lock().await;
         // Both directions in one round trip: the leading column says which.
         // `cleared_at` is only ever set by an unlink, so a cleared row is not a
         // link any more and does not belong on the screen. A link whose blocker
         // is finished still shows — that is `done_at`, and it reads as cleared.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT 1, t.id, t.task_key, t.title, d.cleared_at, t.done_at \
                  FROM task_dependency d JOIN task t ON t.id = d.blocking_task_id \
@@ -2736,8 +2763,8 @@ impl DetailReads for TursoStore {
     }
 
     async fn comments_for_task(&self, task_id: &str) -> Result<Vec<Comment>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT c.id, c.body, c.created_at, u.id, u.display_name, u.photo_path \
                  FROM comment c JOIN user u ON u.id = c.author_id \
@@ -2763,10 +2790,10 @@ impl DetailReads for TursoStore {
     }
 
     async fn files_for_task(&self, task_id: &str) -> Result<Vec<FileLine>> {
+        let conn = self.conn.lock().await;
         // `bytes` is not in the SELECT on purpose: a screen listing five files
         // must not drag five files through memory to print their names.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT id, file_name, size_bytes, comment_id, uploaded_by \
                  FROM attachment WHERE task_id = ?1 ORDER BY created_at, rowid",
@@ -2788,10 +2815,10 @@ impl DetailReads for TursoStore {
     }
 
     async fn activity_for_task(&self, task_id: &str) -> Result<Vec<ActivityEntry>> {
+        let conn = self.conn.lock().await;
         // LEFT JOIN: a line the system wrote has no actor, and dropping it
         // would hide exactly the events the rules engine causes.
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
                  u.photo_path \
@@ -2844,8 +2871,8 @@ impl BoardReads for TursoStore {
     }
 
     async fn columns(&self, board_id: &str) -> Result<Vec<Column>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT id, name, position, is_done FROM board_column WHERE board_id = ?1 \
                  ORDER BY position",
@@ -2866,8 +2893,8 @@ impl BoardReads for TursoStore {
     }
 
     async fn tasks_for_board(&self, board_id: &str) -> Result<Vec<TaskRow>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT id, task_key, title, column_id, deadline, position, done_at \
                  FROM task WHERE board_id = ?1 AND deleted_at IS NULL",
@@ -2891,8 +2918,8 @@ impl BoardReads for TursoStore {
     }
 
     async fn assignees_for_board(&self, board_id: &str) -> Result<Vec<(String, Person)>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT a.task_id, u.id, u.display_name, u.photo_path \
                  FROM task_assignee a \
@@ -2919,8 +2946,8 @@ impl BoardReads for TursoStore {
     }
 
     async fn comment_counts_for_board(&self, board_id: &str) -> Result<Vec<(String, u32)>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT c.task_id, COUNT(*) FROM comment c \
                  JOIN task t ON t.id = c.task_id \
@@ -2939,8 +2966,8 @@ impl BoardReads for TursoStore {
     }
 
     async fn dependencies_for_board(&self, board_id: &str) -> Result<Vec<(String, String)>> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "SELECT d.blocked_task_id, d.blocking_task_id FROM task_dependency d \
                  JOIN task t ON t.id = d.blocked_task_id \

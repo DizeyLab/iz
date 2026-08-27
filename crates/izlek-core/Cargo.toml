@@ -19,6 +19,7 @@ server = [
   "dep:rand",
   "dep:sha2",
   "dep:subtle",
+  "dep:tokio",
   "dep:turso",
   "dep:uuid",
 ]
@@ -36,6 +37,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 toml.workspace = true
+tokio = { workspace = true, optional = true }
 turso = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
