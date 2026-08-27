@@ -1,25 +1,16 @@
-// The view tree in `pages` nests deeply enough that the type of one rendered
-// page overflows the default query depth when the crate is built with tests.
+// topcoat's `view!` nests as deeply as the old UI's did for the same pages, so
+// the raised limit carries over from day one rather than waiting for the
+// first overflow.
 #![recursion_limit = "256"]
 
-pub mod app;
 pub mod auth;
 pub mod board;
 pub mod detail;
+pub mod files;
+pub mod layout;
 pub mod logs;
-pub mod pages;
 pub mod rules;
 pub mod settings;
-#[cfg(feature = "ssr")]
-pub mod files;
-#[cfg(feature = "ssr")]
+pub mod pages;
 pub mod server;
-#[cfg(feature = "ssr")]
 pub mod smtp;
-
-#[cfg(feature = "hydrate")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub fn hydrate() {
-    console_error_panic_hook::set_once();
-    leptos::mount::hydrate_body(crate::app::App);
-}

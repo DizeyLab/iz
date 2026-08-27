@@ -1,155 +1,62 @@
-//! The board, from the Main and EmptyBoard artboards.
+//! The board, from the Main artboard.
 //!
-//! The whole screen is one server call: the columns, the cards and everything
-//! hanging off them arrive together, already joined. What a Viewer may not do
-//! is refused in the server functions below — the missing button is a courtesy,
-//! not the guard.
+//! The whole column list is one shard: the server renders every column and
+//! card, and a drop re-runs it in place. There is no client board state to
+//! keep in sync with the server — a drag's only client-side memory is the
+//! browser's own drag session (`dataTransfer`), read back by the column that
+//! catches the drop.
 
-use izlek_core::board::{BoardView, Person, TaskCard};
-use leptos::prelude::*;
-use serde::{Deserialize, Serialize};
-use time::Date;
+use izlek_core::board::{Moved, Person, TaskCard};
+use izlek_core::store::{NewTask, User};
+use time::{Date, OffsetDateTime};
+use topcoat::Result;
+use topcoat::context::Cx;
+use topcoat::router::content::Form;
+use topcoat::router::request::headers;
+use topcoat::router::{HeaderName, StatusCode, header, route};
+use topcoat::runtime::{Event, procedure, shard};
+use topcoat::view::view;
 
-use crate::auth::{Me, Refusal};
+use crate::server::{Refusal, accounts, mail, require_user, require_writer};
 
-/// One board screen's worth of state.
-///
-/// `today` comes from the server: whether a deadline has passed is not left to
-/// whatever the browser's clock says.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct BoardSnapshot {
-    pub view: BoardView,
-    pub me: Me,
-    pub today: Date,
+/// The board a task belongs to, checked against this person's workspace
+/// before anything trusts an id the browser sent.
+async fn task_board_id(cx: &Cx, user: &User, task_id: &str) -> Result<Option<String>> {
+    let store = accounts(cx).store().clone();
+    match store.task(task_id).await? {
+        Some(facts) if facts.workspace_id == user.workspace_id => Ok(Some(facts.board_id)),
+        _ => Ok(None),
+    }
 }
 
-/// The board this browser may see. (The `#[server]` macro names a struct after
-/// the function, so the call is `current_board` and the answer is a
-/// `BoardSnapshot`.)
-#[server]
-pub async fn current_board() -> Result<Result<BoardSnapshot, Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_user};
-    use izlek_core::board::load;
-    use time::OffsetDateTime;
-
-    let user = match require_user().await {
-        Ok(user) => user,
-        Err(refusal) => return Ok(Err(refusal)),
-    };
-    let store = accounts().store().clone();
-    let Some(view) = load(store.as_ref(), &user.workspace_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-    else {
-        return Ok(Err(Refusal::Unavailable));
-    };
-    Ok(Ok(BoardSnapshot {
-        view,
-        me: Me {
-            id: user.id,
-            display_name: user.display_name,
-            email: user.email,
-            role: user.role,
-        },
-        today: OffsetDateTime::now_utc().date(),
-    }))
-}
-
-/// Adds a card to a column. A Viewer is refused here, in the handler.
-#[server]
-pub async fn create_task(
-    title: String,
-    column_id: String,
-) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_writer};
-    use izlek_core::store::NewTask;
-
-    let user = match require_writer().await {
+/// Moves a card. The one path `/api/move_card` and the drop procedure both
+/// call, so the two cannot drift.
+async fn move_card_shared(
+    cx: &Cx,
+    task_id: &str,
+    from_column_id: &str,
+    to_column_id: &str,
+) -> Result<Option<Refusal>> {
+    let user = match require_writer(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let title = title.trim().to_string();
-    if title.is_empty() {
-        return Ok(Some(Refusal::EmptyTitle));
-    }
-
-    let store = accounts().store().clone();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
-    let Some(board) = store.board(&user.workspace_id).await.map_err(fail)? else {
-        return Ok(Some(Refusal::Unavailable));
+    let Some(board_id) = task_board_id(cx, &user, task_id).await? else {
+        return Ok(Some(Refusal::NotFound));
     };
-    // The column id arrives from the browser, so it is checked against this
-    // workspace's board rather than trusted.
-    let columns = store.columns(&board.id).await.map_err(fail)?;
-    if !columns.iter().any(|column| column.id == column_id) {
-        return Ok(Some(Refusal::Forbidden));
-    }
-
-    let created = store
-        .create_task(NewTask {
-            board_id: &board.id,
-            column_id: &column_id,
-            title: &title,
-            description: "",
-            deadline: None,
-            created_by: &user.id,
-        })
-        .await
-        .map_err(fail)?;
-    crate::server::mail().after_activity(store, created.activity_id);
-    Ok(None)
-}
-
-/// Moves a card into a column and, with it, records the crossing.
-///
-/// `from_column_id` is the column the browser had the card in when the drag
-/// started or the status control was opened. It travels with the request so
-/// the store can refuse a drop that was decided against a board somebody else
-/// has already changed, rather than silently overwriting their move.
-#[server]
-pub async fn move_card(
-    task_id: String,
-    from_column_id: String,
-    to_column_id: String,
-) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::detail::guard::writer_and_task;
-    use crate::server::accounts;
-    use izlek_core::board::Moved;
-    use time::OffsetDateTime;
-
-    let (user, facts) = match writer_and_task(&task_id).await {
-        Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
-    };
-    // The destination is checked against this task's own board before the
-    // store is asked, so a column id from another board is refused by the
-    // handler and not merely by a foreign key.
-    let store = accounts().store().clone();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
-    let columns = store.columns(&facts.board_id).await.map_err(fail)?;
+    let store = accounts(cx).store().clone();
+    let columns = store.columns(&board_id).await?;
     if !columns.iter().any(|column| column.id == to_column_id) {
         return Ok(Some(Refusal::Forbidden));
     }
-
     match store
-        .move_task(
-            &task_id,
-            &from_column_id,
-            &to_column_id,
-            &user.id,
-            OffsetDateTime::now_utc(),
-        )
+        .move_task(task_id, from_column_id, to_column_id, &user.id, OffsetDateTime::now_utc())
         .await
     {
-        // The crossing is committed by now. The rules read it afterwards and
-        // send outside this call: the move has to stand whether or not a mail
-        // server is reachable.
         Ok(Moved::Recorded(transition)) => {
-            crate::server::mail().after(transition);
+            mail(cx).after(transition);
             Ok(None)
         }
-        // A card dropped back where it came from is not news and is not an
-        // error: the board simply re-reads and looks the same.
         Ok(Moved::Unchanged) => Ok(None),
         Ok(Moved::Stale) => Ok(Some(Refusal::MovedAlready)),
         Err(izlek_core::store::StoreError::NotFound) => Ok(Some(Refusal::NotFound)),
@@ -160,479 +67,311 @@ pub async fn move_card(
     }
 }
 
-/// Which cards the filter row is showing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Filter {
-    All,
-    Mine,
-    Blocked,
-}
-
-impl Filter {
-    fn keeps(self, card: &TaskCard, me: &str) -> bool {
-        match self {
-            Filter::All => true,
-            Filter::Mine => card.is_assigned_to(me),
-            Filter::Blocked => card.is_blocked(),
-        }
+/// Adds a card to a column. A Viewer is refused here, in the handler.
+async fn create_task_shared(cx: &Cx, title: &str, column_id: &str) -> Result<Option<Refusal>> {
+    let user = match require_writer(cx).await {
+        Ok(user) => user,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(Some(Refusal::EmptyTitle));
     }
-}
-
-#[component]
-pub fn Board() -> impl IntoView {
-    let board = Resource::new(|| (), |_| async move { current_board().await });
-    // Which card is open in the detail modal, if any. It lives out here, above
-    // the transition boundary: a refetch rebuilds `BoardScreen` from scratch, and
-    // a signal owned by that component would be born empty again — closing the
-    // modal every time something inside it saved.
-    // Seeded from `?task=`, so a card is a link and the modal has an address. A
-    // browser without script lands here with the modal already open; with script
-    // the card's click handler wins and nothing navigates.
-    let opened = RwSignal::new(
-        leptos_router::hooks::use_query_map()
-            .read_untracked()
-            .get("task"),
-    );
-    // The open task's detail, fetched here rather than inside the modal. A
-    // resource takes its hydration id from creation order, and the server may
-    // run an outer Suspend more times than the hydrating client does — so a
-    // resource born inside one of those re-runs lands on a different id on
-    // each side, and the client deserializes some other resource's data. Out
-    // here the order is fixed: the board, then the detail, every run.
-    let detail = Resource::new(
-        move || opened.get(),
-        |id| async move {
-            match id {
-                Some(id) => Some(crate::detail::fetch_task(id).await),
-                None => None,
-            }
-        },
-    );
-
-    view! {
-        <Transition fallback=|| {
-            view! { <main class="board-stage"></main> }
-        }>
-            {move || Suspend::new(async move {
-                match board.await {
-                    Ok(Ok(snapshot)) => {
-                        view! {
-                            <BoardScreen
-                                snapshot=snapshot
-                                opened=opened
-                                detail=detail
-                                on_change=move || board.refetch()
-                            />
-                        }
-                            .into_any()
-                    }
-                    Ok(Err(refusal)) => {
-                        view! {
-                            <main class="scaffold-note">
-                                <p>{refusal.message()}</p>
-                            </main>
-                        }
-                            .into_any()
-                    }
-                    Err(_) => {
-                        view! {
-                            <main class="scaffold-note">
-                                <p>"Something went wrong."</p>
-                            </main>
-                        }
-                            .into_any()
-                    }
-                }
-            })}
-        </Transition>
+    let store = accounts(cx).store().clone();
+    let Some(board) = store.board(&user.workspace_id).await? else {
+        return Ok(Some(Refusal::Unavailable));
+    };
+    let columns = store.columns(&board.id).await?;
+    if !columns.iter().any(|column| column.id == column_id) {
+        return Ok(Some(Refusal::Forbidden));
     }
-}
-
-#[component]
-fn BoardScreen(
-    snapshot: BoardSnapshot,
-    opened: RwSignal<Option<String>>,
-    detail: crate::detail::DetailFetch,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let BoardSnapshot { view, me, today } = snapshot;
-    let filter = RwSignal::new(Filter::All);
-    // Which column has its composer open, if any.
-    let composing = RwSignal::new(None::<String>);
-    // The card currently in the air, and the column it was picked up from.
-    // The column it came from is the drag's claim about the board it started
-    // on, and it travels with the drop so a move decided against a stale board
-    // is refused rather than applied.
-    let dragging = RwSignal::new(None::<(String, String)>);
-    let moving = ServerAction::<MoveCard>::new();
-    let moved = moving.value();
-    Effect::new(move |_| {
-        // `Ok(Some(refusal))` is a *refused* move — nothing on the board
-        // changed. Refetching on a refusal anyway means a stale-cookie or
-        // stale-column refusal (a session that lapsed while this tab sat
-        // open, a card someone else already moved) immediately re-runs
-        // `current_board`, which is refused the same way and replaces the
-        // whole board with a dead-end refusal screen that only a manual
-        // reload escapes. Only a move that actually went through earns a
-        // refetch.
-        if matches!(moved.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let may_write = me.role.can_write_tasks();
-    let my_id = StoredValue::new(me.id.clone());
-
-    // The New task button opens the composer in the first column, which is
-    // where a new card belongs when nobody has said otherwise.
-    let first_column_id =
-        StoredValue::new(view.columns.first().map(|column| column.column.id.clone()));
-
-    let overdue = view.overdue_count(today);
-    let blocked = view.blocked_count();
-    let empty = view.is_empty();
-
-    let columns = view
-        .columns
-        .into_iter()
-        .map(|column| {
-            // Both live in stored values so the closures below stay `Copy`:
-            // a column's cards and its id are read by the count, the list, the
-            // composer and the empty-column button.
-            let cards = StoredValue::new(column.cards);
-            let column_id = StoredValue::new(column.column.id.clone());
-            let name = column.column.name.clone();
-            let is_done_column = column.column.is_done;
-            let shown = Memo::new(move |_| {
-                let filter = filter.get();
-                let me = my_id.read_value().clone();
-                cards
-                    .read_value()
-                    .iter()
-                    .filter(|card| filter.keeps(card, &me))
-                    .cloned()
-                    .collect::<Vec<TaskCard>>()
-            });
-            let open_composer = move |_| composing.set(Some(column_id.read_value().clone()));
-            let is_composing =
-                move || composing.get().as_deref() == Some(column_id.read_value().as_str());
-
-            view! {
-                <section
-                    class="column"
-                    class:column-drop=move || {
-                        dragging
-                            .get()
-                            .is_some_and(|(_, from)| from != *column_id.read_value())
-                    }
-                    on:dragover=move |event| {
-                        // Saying "yes, you may drop here" is what
-                        // preventing the default on dragover means.
-                        if dragging.get().is_some() {
-                            event.prevent_default();
-                        }
-                    }
-                    on:drop=move |event| {
-                        event.prevent_default();
-                        if let Some((task_id, from)) = dragging.get() {
-                            dragging.set(None);
-                            let to = column_id.read_value().clone();
-                            if from != to {
-                                moving
-                                    .dispatch(MoveCard {
-                                        task_id,
-                                        from_column_id: from,
-                                        to_column_id: to,
-                                    });
-                            }
-                        }
-                    }
-                >
-                    <header class="column-head">
-                        <span class="column-name">{name}</span>
-                        <span class="column-count">{move || shown.get().len()}</span>
-                        <div class="spacer"></div>
-                        {may_write
-                            .then(|| {
-                                view! {
-                                    <button
-                                        class="column-add"
-                                        title="Add a task"
-                                        on:click=open_composer
-                                    >
-                                        "+"
-                                    </button>
-                                }
-                            })}
-                    </header>
-                    <div class="column-cards">
-                        <For each=move || shown.get() key=|card: &TaskCard| card.id.clone() let:card>
-                            <Card
-                                card=card
-                                today=today
-                                done_column=is_done_column
-                                draggable=may_write
-                                dragging=dragging
-                                on_open=move |task_id| opened.set(Some(task_id))
-                            />
-                        </For>
-                        <Show when=move || may_write && is_composing()>
-                            <Composer
-                                column_id=column_id
-                                on_done=move || {
-                                    composing.set(None);
-                                    on_change();
-                                }
-                                on_cancel=move || composing.set(None)
-                            />
-                        </Show>
-                        <Show when=move || {
-                            may_write && !is_composing() && shown.get().is_empty()
-                        }>
-                            <button class="column-empty-add" on:click=open_composer>
-                                "+ Add a task"
-                            </button>
-                        </Show>
-                    </div>
-                </section>
-            }
+    let created = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id,
+            title,
+            description: "",
+            deadline: None,
+            created_by: &user.id,
         })
-        .collect_view();
+        .await?;
+    mail(cx).after_activity(store, created.activity_id);
+    Ok(None)
+}
+
+type Redirect = Result<(StatusCode, [(HeaderName, String); 1])>;
+
+fn redirect(cx: &Cx) -> Redirect {
+    let back = headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("/")
+        .to_string();
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, back)]))
+}
+
+#[derive(serde::Deserialize)]
+struct CreateTaskForm {
+    title: String,
+    column_id: String,
+}
+
+/// A browser without script's way onto the board: a real form post, same
+/// fields the procedure below trades over the wire.
+#[route(POST "/api/create_task")]
+async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
+    let _ = create_task_shared(cx, &input.title, &input.column_id).await?;
+    redirect(cx)
+}
+
+#[derive(serde::Deserialize)]
+struct MoveCardForm {
+    task_id: String,
+    from_column_id: String,
+    to_column_id: String,
+}
+
+/// The same move the drop procedure performs, reachable without script.
+#[route(POST "/api/move_card")]
+async fn move_card(cx: &Cx, Form(input): Form<MoveCardForm>) -> Redirect {
+    let _ = move_card_shared(cx, &input.task_id, &input.from_column_id, &input.to_column_id).await?;
+    redirect(cx)
+}
+
+/// What a drop calls: performs the move and hands back a refusal code, if
+/// any, for the drop handler to leave alone. Callable with any arguments —
+/// the checks above are what actually guard it.
+#[procedure]
+async fn move_card_procedure(
+    cx: &Cx,
+    task_id: String,
+    from_column_id: String,
+    to_column_id: String,
+) -> Result<Result<bool, String>> {
+    match move_card_shared(cx, &task_id, &from_column_id, &to_column_id).await? {
+        Some(refusal) => Ok(Err(refusal.code().to_string())),
+        None => Ok(Ok(true)),
+    }
+}
+
+/// The whole column list. `version` carries no meaning of its own — bumping
+/// it is what tells the browser to ask for this again after a drop lands.
+#[shard]
+async fn board_columns(cx: &Cx, version: f64) -> Result {
+    let _ = version;
+    let user = match require_user(cx).await {
+        Ok(user) => user,
+        Err(refusal) => {
+            return view! {
+                cx =>
+                <div class="scaffold-note"><p>(refusal.message())</p></div>
+            };
+        }
+    };
+    let store = accounts(cx).store().clone();
+    let Some(view_data) = izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
+    else {
+        return view! {
+            cx =>
+            <div class="scaffold-note"><p>"Something went wrong."</p></div>
+        };
+    };
+    let today = OffsetDateTime::now_utc().date();
+    let may_write = user.role.can_write_tasks();
+    let empty = view_data.is_empty();
+
+    let mut columns = Vec::new();
+    for column in view_data.columns {
+        columns.push(render_column(cx, column, today, may_write).await?);
+    }
 
     view! {
-        <header class="topbar">
-            <div class="wordmark">
-                <span class="wordmark-text">"izlek"</span>
-                <span class="wordmark-dot"></span>
+        cx =>
+        for column in (columns) { (column) }
+        if (empty) {
+            <div class="board-empty">
+                <div class="board-empty-title">"This board is empty"</div>
             </div>
-            <div class="spacer"></div>
-            <span class="topbar-who" title=me.email.clone()>
-                {me.display_name.clone()}
-            </span>
-            <a class="topbar-link" href="/settings">
-                "Settings"
-            </a>
-            {may_write
-                .then(|| {
-                    view! {
-                        <button
-                            class="new-task"
-                            on:click=move |_| composing.set(first_column_id.get_value())
-                        >
-                            "New task"
-                        </button>
-                    }
-                })}
-        </header>
+        }
+    }
+}
 
-        <div class="filterbar">
-            <div class="segmented">
-                <FilterTab filter=filter this=Filter::All label="All tasks"/>
-                <FilterTab filter=filter this=Filter::Mine label="Mine"/>
-                <FilterTab filter=filter this=Filter::Blocked label="Blocked"/>
-            </div>
-            <div class="topbar-divider"></div>
-            <span class="sort-note">"Sort: deadline"</span>
-            <div class="spacer"></div>
-            {(overdue > 0)
-                .then(|| view! { <span class="chip chip-overdue">{format!("{overdue} overdue")}</span> })}
-            {(blocked > 0)
-                .then(|| view! { <span class="chip chip-blocked">{format!("{blocked} blocked")}</span> })}
-        </div>
+async fn render_column(
+    cx: &Cx,
+    column: izlek_core::board::ColumnView,
+    today: Date,
+    may_write: bool,
+) -> Result {
+    let column_id = column.column.id;
+    let name = column.column.name;
+    let is_done_column = column.column.is_done;
+    let count = column.cards.len();
+    let mut cards = Vec::new();
+    for card in column.cards {
+        cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write).await?);
+    }
 
-        <main class="board-stage">
-            <div class="board-columns">{columns}</div>
-            {empty
-                .then(|| {
-                    view! {
-                        <div class="board-empty">
-                    <div class="board-empty-title">"This board is empty"</div>
+    view! {
+        cx =>
+        signal composing = false;
+        <section class="column" id=(column_id.clone())>
+            <header class="column-head">
+                <span class="column-name">(name)</span>
+                <span class="column-count">(count)</span>
+                <div class="spacer"></div>
+                if (may_write) {
+                    <button class="column-add" title="Add a task" @click=$(|_e: Event| composing.set(true))>
+                        "+"
+                    </button>
+                }
+            </header>
+            <div class="column-cards" id=(column_id.clone())>
+                for card in (cards) { (card) }
+                if (may_write) {
+                    <form method="post" action="/api/create_task" class="composer" :hidden=$(!composing.get())>
+                        <input type="hidden" name="column_id" value=(column_id.clone())>
+                        <input class="composer-input" type="text" name="title" placeholder="What needs doing?" required="">
+                        <div class="composer-row">
+                            <button class="composer-add" type="submit">"Add"</button>
+                            <button class="composer-cancel" type="button" @click=$(|_e: Event| composing.set(false))>
+                                "Cancel"
+                            </button>
                         </div>
-                    }
-                })}
-            {move || {
-                opened
-                    .get()
-                    .map(|_| {
-                        view! {
-                            <crate::detail::TaskDetailModal
-                                detail=detail
-                                on_close=move || opened.set(None)
-                                on_change=on_change
-                            />
-                        }
-                    })
-            }}
-        </main>
+                    </form>
+                }
+            </div>
+        </section>
     }
 }
 
-#[component]
-fn FilterTab(filter: RwSignal<Filter>, this: Filter, label: &'static str) -> impl IntoView {
-    view! {
-        <button
-            class="segment"
-            class:segment-on=move || filter.get() == this
-            on:click=move |_| filter.set(this)
-        >
-            {label}
-        </button>
-    }
-}
-
-#[component]
-fn Card(
+async fn render_card(
+    cx: &Cx,
     card: TaskCard,
     today: Date,
     done_column: bool,
-    /// A viewer cannot move work, so a viewer's cards do not lift.
+    column_id: &str,
     draggable: bool,
-    dragging: RwSignal<Option<(String, String)>>,
-    on_open: impl Fn(String) + Copy + Send + Sync + 'static,
-) -> impl IntoView {
+) -> Result {
     let blocks = card.blocks.len();
     let blocked_by = card.blocked_by.join(", ");
     let deadline = card.deadline_label(today);
     let overdue = card.is_overdue(today);
     let dated = card.deadline.is_some() || card.is_done();
     let comments = card.comment_count;
-    let assignees = card.assignees.clone();
-    let id = StoredValue::new(card.id.clone());
-    let from_column = StoredValue::new(card.column_id.clone());
-    let open = move || on_open(id.get_value());
+    let mut assignees = Vec::new();
+    for person in card.assignees.iter() {
+        assignees.push(avatar(cx, person, "").await?);
+    }
+    let has_assignees = !card.assignees.is_empty();
+    let task_id = card.id.clone();
+    let from_column = column_id.to_string();
+    let href = format!("/?task={}", card.id);
 
     view! {
-        // The whole card is the way in: the artboard has no separate control,
-        // so the card itself carries the role and answers the keyboard.
-        <a
-            class="card"
-            class:card-done=done_column
-            href=format!("/?task={}", card.id)
-            draggable=draggable.then_some("true")
-            on:dragstart=move |_| {
-                dragging.set(Some((id.get_value(), from_column.get_value())));
-            }
-            on:dragend=move |_| dragging.set(None)
-            on:click=move |event| {
-                event.prevent_default();
-                open();
-            }
-            on:keydown=move |event| {
-                if event.key() == " " {
-                    event.prevent_default();
-                    open();
-                }
-            }
+        cx =>
+        <a class="card" id=(column_id.to_string()) class:card-done=(done_column) href=(href)
+            draggable=(if draggable { "true" } else { "false" })
+            @dragstart=$(|e: Event| raw!(
+                "(() => { ${e}.inner.dataTransfer.setData('izlek-task', ${task_id}); ${e}.inner.dataTransfer.setData('izlek-from', ${from_column}); })()",
+                ()
+            ))
         >
             <div class="card-keys">
-                <span class="card-key">{card.task_key.clone()}</span>
-                {(blocks > 0)
-                    .then(|| view! { <span class="card-blocks">{format!("blocks {blocks}")}</span> })}
-                {(!blocked_by.is_empty())
-                    .then(|| {
-                        view! {
-                            <span class="card-blocked-by">{format!("blocked by {blocked_by}")}</span>
-                        }
-                    })}
+                <span class="card-key">(card.task_key.clone())</span>
+                if (blocks > 0) { <span class="card-blocks">(format!("blocks {blocks}"))</span> }
+                if (!blocked_by.is_empty()) {
+                    <span class="card-blocked-by">(format!("blocked by {blocked_by}"))</span>
+                }
             </div>
-            <div class="card-title">{card.title.clone()}</div>
+            <div class="card-title">(card.title.clone())</div>
             <div class="card-foot">
-                <span
-                    class="card-deadline"
-                    class:card-deadline-overdue=overdue
-                    class:card-deadline-none=!dated
-                >
-                    {deadline}
+                <span class="card-deadline" class:card-deadline-overdue=(overdue) class:card-deadline-none=(!dated)>
+                    (deadline)
                 </span>
-                {(comments > 0)
-                    .then(|| view! { <span class="card-comments">{format!("{comments} ✎")}</span> })}
+                if (comments > 0) { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
                 <div class="spacer"></div>
                 <div class="avatars">
-                    {assignees
-                        .iter()
-                        .map(|person| view! { <Avatar person=person.clone()/> })
-                        .collect_view()}
-                    {assignees
-                        .is_empty()
-                        .then(|| {
-                            view! {
-                                // An empty circle, the avatar's size, in the
-                                // avatar's place: the card's bottom row does
-                                // not reflow when someone is assigned.
-                                <span
-                                    class="avatar avatar-none"
-                                    role="img"
-                                    aria-label="nobody assigned"
-                                    title="Nobody assigned"
-                                ></span>
-                            }
-                        })}
+                    for person in (assignees) { (person) }
+                    if (!has_assignees) {
+                        <span class="avatar avatar-none" role="img" aria-label="nobody assigned" title="Nobody assigned"></span>
+                    }
                 </div>
             </div>
         </a>
     }
 }
 
-/// A person as a circle. `extra` carries the size the surface wants — the
-/// board's own 22px is the default, the modal asks for its 18px and 28px.
-#[component]
-pub(crate) fn Avatar(person: Person, #[prop(optional)] extra: &'static str) -> impl IntoView {
+pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     let initials = person.initials();
-    // Five tones from the mockups' palette, picked from the id so a person
-    // keeps the same one wherever they appear.
     let tone = person
         .id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
         % 5;
+    let class = format!("avatar avatar-tone-{tone} {extra}");
+    let title = person.display_name.clone();
     view! {
-        <span class=format!("avatar avatar-tone-{tone} {extra}") title=person.display_name.clone()>
-            {initials}
-        </span>
+        cx =>
+        <span class=(class) title=(title)>(initials)</span>
     }
 }
 
-/// The inline "Add a task" input. It is a real form, so it still works with the
-/// wasm bundle blocked.
-#[component]
-fn Composer(
-    column_id: StoredValue<String>,
-    on_done: impl Fn() + Copy + Send + Sync + 'static,
-    on_cancel: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let action = ServerAction::<CreateTask>::new();
-    let value = action.value();
-    let refusal = crate::auth::refusal_of(action);
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_done();
-        }
-    });
+/// The signed-in board: the topbar, the filter chips and the shard that owns
+/// every column and card.
+pub async fn board_page(cx: &Cx, user: &User) -> Result {
+    let view_data = {
+        let store = accounts(cx).store().clone();
+        izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
+    };
+    let Some(view_data) = view_data else {
+        return view! {
+            cx =>
+            <main class="scaffold-note"><p>"Something went wrong."</p></main>
+        };
+    };
+    let today = OffsetDateTime::now_utc().date();
+    let overdue = view_data.overdue_count(today);
+    let blocked = view_data.blocked_count();
+    let may_write = user.role.can_write_tasks();
 
     view! {
-        <ActionForm action=action attr:class="composer">
-            <input type="hidden" name="column_id" value=move || column_id.get_value()/>
-            <input
-                class="composer-input"
-                type="text"
-                name="title"
-                placeholder="What needs doing?"
-                autofocus
-                required
-                on:keydown=move |event| {
-                    if event.key() == "Escape" {
-                        on_cancel();
-                    }
-                }
-            />
-            <div class="composer-row">
-                <button class="composer-add" type="submit" disabled=move || action.pending().get()>
-                    "Add"
-                </button>
-                <button class="composer-cancel" type="button" on:click=move |_| on_cancel()>
-                    "Cancel"
-                </button>
+        cx =>
+        <header class="topbar">
+            <div class="wordmark">
+                <span class="wordmark-text">"izlek"</span>
+                <span class="wordmark-dot"></span>
             </div>
-            {move || refusal().map(|refusal| view! { <p class="auth-problem">{refusal.message()}</p> })}
-        </ActionForm>
+            <div class="spacer"></div>
+            <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
+            <a class="topbar-link" href="/settings">"Settings"</a>
+            if (may_write) {
+                <button class="new-task">"New task"</button>
+            }
+        </header>
+        <div class="filterbar">
+            <div class="topbar-divider"></div>
+            <span class="sort-note">"Sort: deadline"</span>
+            <div class="spacer"></div>
+            if (overdue > 0) { <span class="chip chip-overdue">(format!("{overdue} overdue"))</span> }
+            if (blocked > 0) { <span class="chip chip-blocked">(format!("{blocked} blocked"))</span> }
+        </div>
+        <main class="board-stage">
+            signal version = 0.0;
+            <div class="board-columns"
+                @dragover=$(|e: Event| e.prevent_default())
+                @drop=$(async move |e: Event| {
+                    e.prevent_default();
+                    let to = e.target.id.clone();
+                    let task_id = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-task'))", "".to_owned());
+                    let from = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-from'))", "".to_owned());
+                    if !task_id.is_empty() {
+                        let result = move_card_procedure(task_id, from, to).await;
+                        version.set(version.get() + 1.0);
+                    }
+                })
+            >
+                board_columns(version: $(version.get()))
+            </div>
+        </main>
     }
 }

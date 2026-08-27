@@ -2,72 +2,89 @@
 //! what happened across the workspace. Read-only — nothing here is written
 //! back, so unlike Mail rules there is no action to guard beyond the read
 //! itself.
+//!
+//! Ported from the old UI's `logs.rs`. That version read through a
+//! server fn behind a `Resource`; here the page is rendered server-side on
+//! every request, so `snapshot` — the shared read — backs both the page and
+//! the JSON route `tests/http.rs` polls.
 
-use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
+use topcoat::Result;
+use topcoat::context::Cx;
+use topcoat::router::content::Json;
+use topcoat::router::{page, route};
+use topcoat::view::view;
 
-use crate::auth::{Me, Refusal};
+use crate::server::{Refusal, accounts, require_admin};
+
+/// The person the current browser is signed in as. Mirrors
+/// `crate::auth::Me` (not yet ported); the two will merge once auth lands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Me {
+    id: String,
+    display_name: String,
+    email: String,
+    role: izlek_core::Role,
+}
 
 /// One send still owed or refused, as the queue panel reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueueLine {
-    pub recipient: String,
-    pub subject: String,
+struct QueueLine {
+    recipient: String,
+    subject: String,
     /// "pending" or "failed".
-    pub state: String,
-    pub attempts: u32,
-    pub last_error: Option<String>,
-    pub next_attempt: Option<String>,
+    state: String,
+    attempts: u32,
+    last_error: Option<String>,
+    next_attempt: Option<String>,
 }
 
 /// One rule's verdict inside a decision block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuleVerdict {
-    pub rule: String,
-    pub outcome: String,
-    pub detail: String,
+struct RuleVerdict {
+    rule: String,
+    outcome: String,
+    detail: String,
 }
 
 /// Every rule's verdict on one event, so the task and moment are said once
 /// rather than repeated per rule.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecisionGroup {
-    pub event_id: String,
-    pub task: String,
+struct DecisionGroup {
+    event_id: String,
+    task: String,
     /// What the event did — "moved to Review" — when the event and its
     /// destination column are both still there; absent rather than guessed
     /// at otherwise.
-    pub happened: Option<String>,
-    pub at: String,
-    pub verdicts: Vec<RuleVerdict>,
+    happened: Option<String>,
+    at: String,
+    verdicts: Vec<RuleVerdict>,
 }
 
 /// One line of the workspace activity feed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivityRow {
-    pub at: String,
-    pub actor: String,
-    pub sentence: String,
-    pub title: String,
+struct ActivityRow {
+    at: String,
+    actor: String,
+    sentence: String,
+    title: String,
 }
 
 /// The screen in one answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LogsSnapshot {
-    pub me: Me,
-    pub queue: Vec<QueueLine>,
-    pub decisions: Vec<DecisionGroup>,
-    pub activity: Vec<ActivityRow>,
+struct LogsSnapshot {
+    me: Me,
+    queue: Vec<QueueLine>,
+    decisions: Vec<DecisionGroup>,
+    activity: Vec<ActivityRow>,
 }
 
 /// How many mail is owed, what the rules decided, and what happened, all
 /// capped so the screen stays a read a person can finish.
-#[cfg(feature = "ssr")]
 const LIMIT: u32 = 50;
 
 /// The word the decisions panel prints for an outcome. Terse: the panel is
 /// read, not explained.
-#[cfg(feature = "ssr")]
 fn outcome_word(outcome: izlek_core::store::MailOutcome) -> &'static str {
     use izlek_core::store::MailOutcome;
     match outcome {
@@ -83,7 +100,6 @@ fn outcome_word(outcome: izlek_core::store::MailOutcome) -> &'static str {
 /// The sentence after a task's name, mirroring `ActivityEntry::sentence` —
 /// the per-task strip on the detail screen — since the workspace feed carries
 /// the same kind and detail but no `Person` to build an `ActivityEntry` from.
-#[cfg(feature = "ssr")]
 fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str) -> String {
     use izlek_core::detail::ActivityKind;
     let detail = detail.trim();
@@ -108,11 +124,10 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str) -> S
 /// What an event did, in the decisions panel's own words — "moved to
 /// Review" — or nothing when the event or its destination column is gone:
 /// the panel names what it can still read, never a guess.
-#[cfg(feature = "ssr")]
 async fn event_happened(
     store: &std::sync::Arc<dyn izlek_core::store::Store>,
     event_id: &str,
-) -> Result<Option<String>, izlek_core::store::StoreError> {
+) -> std::result::Result<Option<String>, izlek_core::store::StoreError> {
     use izlek_core::store::Event;
 
     let Some(event) = store.event(event_id).await? else {
@@ -136,20 +151,19 @@ async fn event_happened(
     }
 }
 
-/// The queue, the decisions, and the activity, admin only.
-#[server]
-pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_admin};
+/// The queue, the decisions, and the activity, admin only. Shared by the
+/// `/logs` page and the `/api/current_logs` route so both answer the same
+/// read the same way.
+async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>> {
     use izlek_core::store::SendState;
 
-    let user = match require_admin().await {
+    let user = match require_admin(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(Err(refusal)),
     };
-    let store = accounts().store().clone();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
+    let store = accounts(cx).store().clone();
 
-    let sends = store.mail_queue(LIMIT).await.map_err(fail)?;
+    let sends = store.mail_queue(LIMIT).await?;
     let mut queue = Vec::with_capacity(sends.len());
     for send in sends {
         let subject = match &send.subject {
@@ -157,8 +171,7 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
             None => match &send.rule_id {
                 Some(id) => store
                     .mail_rule(id)
-                    .await
-                    .map_err(fail)?
+                    .await?
                     .map(|rule| rule.subject)
                     .unwrap_or_else(|| "a rule that is gone".to_string()),
                 None => "a rule that is gone".to_string(),
@@ -182,13 +195,12 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
         });
     }
 
-    let raw_decisions = store.recent_mail_decisions(LIMIT).await.map_err(fail)?;
+    let raw_decisions = store.recent_mail_decisions(LIMIT).await?;
     let mut decisions: Vec<DecisionGroup> = Vec::new();
     for decision in raw_decisions {
         let rule = store
             .mail_rule(&decision.rule_id)
-            .await
-            .map_err(fail)?
+            .await?
             .map(|rule| rule.subject)
             .unwrap_or_else(|| "a rule that is gone".to_string());
         let verdict = RuleVerdict {
@@ -202,11 +214,10 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
         }
         let task = store
             .task(&decision.task_id)
-            .await
-            .map_err(fail)?
+            .await?
             .map(|facts| format!("{} {}", facts.row.task_key, facts.row.title))
             .unwrap_or_else(|| "a task that is gone".to_string());
-        let happened = event_happened(&store, &decision.event_id).await.map_err(fail)?;
+        let happened = event_happened(&store, &decision.event_id).await?;
         decisions.push(DecisionGroup {
             event_id: decision.event_id,
             task,
@@ -218,8 +229,7 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
 
     let activity = store
         .recent_activity(LIMIT)
-        .await
-        .map_err(fail)?
+        .await?
         .into_iter()
         .map(|line| ActivityRow {
             at: izlek_core::detail::moment_label(line.at),
@@ -242,128 +252,43 @@ pub async fn current_logs() -> Result<Result<LogsSnapshot, Refusal>, ServerFnErr
     }))
 }
 
-#[component]
-pub fn LogsPage() -> impl IntoView {
-    let logs = Resource::new(|| (), |_| async move { current_logs().await });
+/// The same read the page renders, as JSON — polled by `tests/http.rs`.
+#[route(POST "/api/current_logs")]
+async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, Refusal>>> {
+    Ok(Json(snapshot(cx).await?))
+}
 
-    view! {
-        <Transition fallback=|| view! { <main class="settings-stage"></main> }>
-            {move || Suspend::new(async move {
-                match logs.await {
-                    Ok(Ok(snapshot)) => view! { <LogsScreen snapshot=snapshot/> }.into_any(),
-                    Ok(Err(refusal)) => {
-                        view! {
-                            <main class="scaffold-note">
-                                <p>{refusal.message()}</p>
-                                <p>
-                                    <a href="/">"Back to the board"</a>
-                                </p>
-                            </main>
-                        }
-                            .into_any()
-                    }
-                    Err(_) => {
-                        view! {
-                            <main class="scaffold-note">
-                                <p>"Something went wrong."</p>
-                            </main>
-                        }
-                            .into_any()
-                    }
-                }
-            })}
-        </Transition>
+#[page("/logs")]
+async fn logs_page(cx: &Cx) -> Result {
+    match snapshot(cx).await {
+        Ok(Ok(snapshot)) => logs_screen(cx, snapshot).await,
+        Ok(Err(refusal)) => view! {
+            cx =>
+            <main class="scaffold-note">
+                <p>(refusal.message())</p>
+                <p><a href="/">"Back to the board"</a></p>
+            </main>
+        },
+        Err(_) => view! {
+            cx =>
+            <main class="scaffold-note">
+                <p>"Something went wrong."</p>
+            </main>
+        },
     }
 }
 
-#[component]
-fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
-    let me = snapshot.me.clone();
-
-    let queue_empty = snapshot.queue.is_empty();
-    let queue_rows = snapshot
-        .queue
-        .into_iter()
-        .map(|line| {
-            let state_note = if line.state == "failed" || line.state == "held" {
-                line.last_error.unwrap_or_else(|| line.state.clone())
-            } else {
-                line.state.clone()
-            };
-            view! {
-                <div class="rule-row">
-                    <div class="rule-sentence">
-                        <span class="rule-term">{line.recipient}</span>
-                        <span>{line.subject}</span>
-                        <span class="rule-term">{state_note}</span>
-                        <span>{format!("attempt {}", line.attempts)}</span>
-                    </div>
-                    <span class="rule-stamp">
-                        {line.next_attempt.unwrap_or_else(|| "no retry".to_string())}
-                    </span>
-                </div>
-            }
-        })
-        .collect_view();
-
-    let decisions_empty = snapshot.decisions.is_empty();
-    let decision_rows = snapshot
-        .decisions
-        .into_iter()
-        .map(|group| {
-            let header = match group.happened {
-                Some(happened) => format!("{} · {}", group.task, happened),
-                None => group.task,
-            };
-            let verdict_rows = group
-                .verdicts
-                .into_iter()
-                .map(|verdict| {
-                    let chip_class = if verdict.outcome == "queued" {
-                        "rule-term rule-term-queued"
-                    } else {
-                        "rule-term"
-                    };
-                    view! {
-                        <div class="decision-verdict">
-                            <span class="rule-term">{verdict.rule}</span>
-                            <span class=chip_class>{verdict.outcome}</span>
-                            <span>{verdict.detail}</span>
-                        </div>
-                    }
-                })
-                .collect_view();
-            view! {
-                <div class="decision-block">
-                    <div class="decision-head">
-                        <span class="decision-title">{header}</span>
-                        <span class="rule-stamp">{group.at}</span>
-                    </div>
-                    <div class="decision-verdicts">{verdict_rows}</div>
-                </div>
-            }
-        })
-        .collect_view();
-
-    let activity_empty = snapshot.activity.is_empty();
-    let activity_rows = snapshot
-        .activity
-        .into_iter()
-        .map(|line| {
-            view! {
-                <div class="rule-row">
-                    <div class="rule-sentence">
-                        <span class="rule-term">{line.actor}</span>
-                        <span>{line.sentence}</span>
-                        <span>{line.title}</span>
-                    </div>
-                    <span class="rule-stamp">{line.at}</span>
-                </div>
-            }
-        })
-        .collect_view();
+async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
+    let me = snapshot.me;
+    let queue = snapshot.queue;
+    let decisions = snapshot.decisions;
+    let activity = snapshot.activity;
+    let queue_empty = queue.is_empty();
+    let decisions_empty = decisions.is_empty();
+    let activity_empty = activity.is_empty();
 
     view! {
+        cx =>
         <header class="topbar">
             <div class="wordmark">
                 <span class="wordmark-text">"izlek"</span>
@@ -372,25 +297,15 @@ fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
             <div class="topbar-divider"></div>
             <span class="board-name">"Logs"</span>
             <div class="spacer"></div>
-            <span class="topbar-who" title=me.email.clone()>
-                {me.display_name.clone()}
-            </span>
+            <span class="topbar-who" title=(me.email)>(me.display_name)</span>
         </header>
 
         <div class="settings-shell">
             <nav class="sidenav">
-                <a class="sidenav-item" href="/">
-                    "Board"
-                </a>
-                <a class="sidenav-item" href="/rules">
-                    "Mail rules"
-                </a>
-                <a class="sidenav-item sidenav-item-on" href="/logs">
-                    "Logs"
-                </a>
-                <a class="sidenav-item" href="/settings">
-                    "Settings"
-                </a>
+                <a class="sidenav-item" href="/">"Board"</a>
+                <a class="sidenav-item" href="/rules">"Mail rules"</a>
+                <a class="sidenav-item sidenav-item-on" href="/logs">"Logs"</a>
+                <a class="sidenav-item" href="/settings">"Settings"</a>
             </nav>
 
             <main class="settings-stage">
@@ -405,8 +320,26 @@ fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
                     </div>
                     <div class="panel-body">
                         <div class="rule-list">
-                            {queue_rows}
-                            {queue_empty.then(|| view! { <p class="rules-quiet">"Nothing owed."</p> })}
+                            for line in queue {
+                                let state_note = if line.state == "failed" || line.state == "held" {
+                                    line.last_error.unwrap_or_else(|| line.state.clone())
+                                } else {
+                                    line.state.clone()
+                                };
+                                let next_attempt = line.next_attempt.unwrap_or_else(|| "no retry".to_string());
+                                <div class="rule-row">
+                                    <div class="rule-sentence">
+                                        <span class="rule-term">(line.recipient)</span>
+                                        <span>(line.subject)</span>
+                                        <span class="rule-term">(state_note)</span>
+                                        <span>(format!("attempt {}", line.attempts))</span>
+                                    </div>
+                                    <span class="rule-stamp">(next_attempt)</span>
+                                </div>
+                            }
+                            if queue_empty {
+                                <p class="rules-quiet">"Nothing owed."</p>
+                            }
                         </div>
                     </div>
                 </section>
@@ -417,9 +350,35 @@ fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
                     </div>
                     <div class="panel-body">
                         <div class="rule-list">
-                            {decision_rows}
-                            {decisions_empty
-                                .then(|| view! { <p class="rules-quiet">"No decisions yet."</p> })}
+                            for group in decisions {
+                                let header = match group.happened {
+                                    Some(happened) => format!("{} · {}", group.task, happened),
+                                    None => group.task,
+                                };
+                                <div class="decision-block">
+                                    <div class="decision-head">
+                                        <span class="decision-title">(header)</span>
+                                        <span class="rule-stamp">(group.at)</span>
+                                    </div>
+                                    <div class="decision-verdicts">
+                                        for verdict in group.verdicts {
+                                            let chip_class = if verdict.outcome == "queued" {
+                                                "rule-term rule-term-queued"
+                                            } else {
+                                                "rule-term"
+                                            };
+                                            <div class="decision-verdict">
+                                                <span class="rule-term">(verdict.rule)</span>
+                                                <span class=(chip_class)>(verdict.outcome)</span>
+                                                <span>(verdict.detail)</span>
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                            if decisions_empty {
+                                <p class="rules-quiet">"No decisions yet."</p>
+                            }
                         </div>
                     </div>
                 </section>
@@ -430,8 +389,19 @@ fn LogsScreen(snapshot: LogsSnapshot) -> impl IntoView {
                     </div>
                     <div class="panel-body">
                         <div class="rule-list">
-                            {activity_rows}
-                            {activity_empty.then(|| view! { <p class="rules-quiet">"Nothing yet."</p> })}
+                            for line in activity {
+                                <div class="rule-row">
+                                    <div class="rule-sentence">
+                                        <span class="rule-term">(line.actor)</span>
+                                        <span>(line.sentence)</span>
+                                        <span>(line.title)</span>
+                                    </div>
+                                    <span class="rule-stamp">(line.at)</span>
+                                </div>
+                            }
+                            if activity_empty {
+                                <p class="rules-quiet">"Nothing yet."</p>
+                            }
                         </div>
                     </div>
                 </section>

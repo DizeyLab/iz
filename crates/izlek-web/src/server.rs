@@ -3,23 +3,26 @@
 //!
 //! Every guard here is the real one. The UI hides what a role may not do, but
 //! the answer that matters is the one given in this module, on the server.
+//!
+//! Ported from `izlek-web/src/server.rs` and the `Refusal`/`call_id` pieces of
+//! `izlek-web/src/auth.rs`, onto topcoat's context/cookie/layer primitives.
 
-use axum::http::HeaderValue;
-use axum::http::header::{COOKIE, SET_COOKIE};
-use axum::http::request::Parts;
 use izlek_core::accounts::{AccountError, Accounts};
 use izlek_core::board::Transition;
 use izlek_core::mail::Engine;
 use izlek_core::store::{Freeing, User};
-use leptos::prelude::*;
-use leptos_axum::ResponseOptions;
+use serde::{Deserialize, Serialize};
+use topcoat::context::{Cx, app_context, memoize, try_app_context};
+use topcoat::cookie::{Cookie, Cookies, SameSite, cookie, cookies};
+use topcoat::router::request::headers;
+use topcoat::router::{Body, HeaderValue, Next, StatusCode, header, response::Response, to_bytes};
 
 /// The session cookie's name. One cookie, one browser, one session row.
 pub const SESSION_COOKIE: &str = "izlek_session";
 
 /// The workspace's account service, put into context by the router.
-pub fn accounts() -> Accounts {
-    expect_context::<Accounts>()
+pub fn accounts(cx: &Cx) -> Accounts {
+    app_context::<Accounts>(cx).clone()
 }
 
 /// The mail engine, or the fact that there is nobody to hand a crossing to.
@@ -145,86 +148,60 @@ impl Mail {
 
 /// The engine for this request, or a silent one when the router was built
 /// without an engine at all.
-pub fn mail() -> Mail {
-    use_context::<Mail>().unwrap_or_else(Mail::silent)
+pub fn mail(cx: &Cx) -> Mail {
+    try_app_context::<Mail>(cx).cloned().unwrap_or_else(Mail::silent)
+}
+
+/// The application cookie jar, with the attributes every Izlek cookie wants.
+fn app_cookies(cx: &Cx) -> impl Cookies {
+    cookies(cx)
+        .default_secure(true)
+        .default_http_only(true)
+        .default_same_site(SameSite::Lax)
+        .default_path("/")
 }
 
 /// The cookie value this request presented, if it presented one.
-pub fn presented_session() -> Option<String> {
-    session_in(&use_context::<Parts>()?.headers)
-}
-
-/// The same scan as `presented_session`, off a plain `HeaderMap` rather than
-/// the leptos request context — for handlers axum calls directly, which have
-/// no such context to read.
-pub fn session_in(headers: &axum::http::HeaderMap) -> Option<String> {
-    for header in headers.get_all(COOKIE) {
-        let Ok(raw) = header.to_str() else { continue };
-        for pair in raw.split(';') {
-            let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix(SESSION_COOKIE)
-                && let Some(value) = value.strip_prefix('=')
-            {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+pub fn presented_session(cx: &Cx) -> Option<String> {
+    cookies(cx).get(SESSION_COOKIE).map(|c| c.value().to_string())
 }
 
 /// A stable-enough label for the client, for rate limiting. A proxy header is
 /// only trusted because Izlek is meant to sit behind one; the address bucket is
 /// the limit that actually protects the Argon2 work either way.
-pub fn client_label() -> String {
-    let Some(parts) = use_context::<Parts>() else {
+///
+/// topcoat 0.6.2 exposes no peer address; x-forwarded-for or nothing.
+pub fn client_label(cx: &Cx) -> String {
+    let Some(forwarded) = headers(cx).get("x-forwarded-for") else {
         return "unknown".to_string();
     };
-    if let Some(forwarded) = parts.headers.get("x-forwarded-for")
-        && let Ok(raw) = forwarded.to_str()
-        && let Some(first) = raw.split(',').next()
-        && !first.trim().is_empty()
-    {
-        return first.trim().to_string();
+    let Ok(raw) = forwarded.to_str() else {
+        return "unknown".to_string();
+    };
+    match raw.split(',').next() {
+        Some(first) if !first.trim().is_empty() => first.trim().to_string(),
+        _ => "unknown".to_string(),
     }
-    parts
-        .extensions
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|info| info.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Writes the session cookie. `HttpOnly` so script cannot read it, `Secure` so
 /// it never crosses plain HTTP, `SameSite=Lax` so another site's form cannot
 /// post with it.
-pub fn set_session_cookie(token: &str, lifetime: time::Duration) {
-    let value = format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
-        lifetime.whole_seconds().max(0)
-    );
-    write_cookie(&value);
+pub fn set_session_cookie(cx: &Cx, token: &str, lifetime: time::Duration) {
+    app_cookies(cx).add(cookie! {
+        SESSION_COOKIE = token.to_owned();
+        Path = "/";
+        Secure;
+        HttpOnly;
+        SameSite = Lax;
+        MaxAge = lifetime
+    });
 }
 
 /// Removes the session cookie from this browser. The server-side revocation is
 /// what actually ends the session; this only tidies the client.
-pub fn clear_session_cookie() {
-    write_cookie(&format!(
-        "{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
-    ));
-}
-
-fn write_cookie(value: &str) {
-    let Some(response) = use_context::<ResponseOptions>() else {
-        return;
-    };
-    match HeaderValue::from_str(value) {
-        Ok(header) => response.append_header(SET_COOKIE, header),
-        Err(_) => {
-            // A token is hex, and the rest is a literal, so this cannot happen
-            // from user input; refusing to send a malformed header is still the
-            // right failure.
-            eprintln!("refusing to set a malformed session cookie");
-        }
-    }
+pub fn clear_session_cookie(cx: &Cx) {
+    app_cookies(cx).remove(Cookie::build((SESSION_COOKIE, "")).path("/").build());
 }
 
 /// The person behind this request, or nobody, or the store failing to say.
@@ -233,31 +210,32 @@ fn write_cookie(value: &str) {
 /// the database, not about whether this browser is signed in, and a caller
 /// that folded the two together would send a signed-in person to a sign-in
 /// screen because a write elsewhere held a lock for a moment.
-pub async fn current_user() -> Result<Option<User>, AccountError> {
-    let Some(presented) = presented_session() else {
+#[memoize(as_ref)]
+pub async fn current_user(cx: &Cx) -> Result<Option<User>, AccountError> {
+    let Some(presented) = presented_session(cx) else {
         return Ok(None);
     };
-    accounts().authenticate(&presented).await
+    accounts(cx).authenticate(&presented).await
 }
 
 /// The person behind this request, or a refusal the caller can return as-is.
 ///
 /// A store error becomes `Refusal::Unavailable` — the same place every other
-/// account error already lands, via `From<AccountError> for Refusal` below —
-/// rather than `SignInFirst`, which would tell a signed-in person to sign in
-/// again over what was only a database hiccup.
-pub async fn require_user() -> Result<User, Refusal> {
-    match current_user().await {
-        Ok(Some(user)) => Ok(user),
+/// account error already lands, via `refusal_for` below — rather than
+/// `SignInFirst`, which would tell a signed-in person to sign in again over
+/// what was only a database hiccup.
+pub async fn require_user(cx: &Cx) -> Result<User, Refusal> {
+    match current_user(cx).await {
+        Ok(Some(user)) => Ok(user.clone()),
         Ok(None) => Err(Refusal::SignInFirst),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(refusal_for(error)),
     }
 }
 
 /// The admin behind this request. A member or a viewer is refused *here*, not
 /// merely hidden from in the UI.
-pub async fn require_admin() -> Result<User, Refusal> {
-    let user = require_user().await?;
+pub async fn require_admin(cx: &Cx) -> Result<User, Refusal> {
+    let user = require_user(cx).await?;
     if user.role.can_administer() {
         Ok(user)
     } else {
@@ -266,8 +244,8 @@ pub async fn require_admin() -> Result<User, Refusal> {
 }
 
 /// The person behind this request if they may change the board.
-pub async fn require_writer() -> Result<User, Refusal> {
-    let user = require_user().await?;
+pub async fn require_writer(cx: &Cx) -> Result<User, Refusal> {
+    let user = require_user(cx).await?;
     if user.role.can_write_tasks() {
         Ok(user)
     } else {
@@ -275,86 +253,250 @@ pub async fn require_writer() -> Result<User, Refusal> {
     }
 }
 
-use crate::auth::Refusal;
-
-impl From<AccountError> for Refusal {
-    fn from(error: AccountError) -> Self {
-        match error {
-            AccountError::Rejected => Refusal::Rejected,
-            AccountError::RateLimited => Refusal::RateLimited,
-            AccountError::Password(problem) => Refusal::Password(problem.to_string()),
-            AccountError::Forbidden => Refusal::Forbidden,
-            AccountError::AlreadyClaimed => Refusal::AlreadyClaimed,
-            AccountError::AddressTaken => Refusal::AddressTaken,
-            AccountError::Store(error) => {
-                eprintln!("store error: {error}");
-                Refusal::Unavailable
-            }
-            AccountError::Auth(error) => {
-                eprintln!("auth error: {error}");
-                Refusal::Unavailable
-            }
+/// Shared by `From<AccountError>` and the `&AccountError` `current_user`
+/// hands back once memoized, so both paths land on the exact same wording.
+fn refusal_for(error: &AccountError) -> Refusal {
+    match error {
+        AccountError::Rejected => Refusal::Rejected,
+        AccountError::RateLimited => Refusal::RateLimited,
+        AccountError::Password(problem) => Refusal::Password(problem.to_string()),
+        AccountError::Forbidden => Refusal::Forbidden,
+        AccountError::AlreadyClaimed => Refusal::AlreadyClaimed,
+        AccountError::AddressTaken => Refusal::AddressTaken,
+        AccountError::Store(error) => {
+            eprintln!("store error: {error}");
+            Refusal::Unavailable
+        }
+        AccountError::Auth(error) => {
+            eprintln!("auth error: {error}");
+            Refusal::Unavailable
         }
     }
 }
 
-/// The whole application as an axum `Router`: the server functions, the
-/// rendered routes and the static files.
-///
-/// It lives here rather than in `main` so a test can drive the real handlers —
-/// the guards above are only worth anything if something calls them the way a
-/// browser does.
-pub fn router(
-    accounts: Accounts,
-    mail: Mail,
-    leptos_options: LeptosOptions,
-) -> axum::Router {
-    use axum::Router;
-    use leptos_axum::{LeptosRoutes, generate_route_list};
+impl From<AccountError> for Refusal {
+    fn from(error: AccountError) -> Self {
+        refusal_for(&error)
+    }
+}
 
-    let routes = generate_route_list(crate::app::App);
-    Router::new()
-        .route("/healthz", axum::routing::get(|| async { "ok" }))
-        .route(
-            "/files",
-            axum::routing::post(crate::files::upload).layer(
-                axum::extract::DefaultBodyLimit::max(
-                    crate::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024,
-                ),
-            ),
-        )
-        .route("/files/{id}", axum::routing::get(crate::files::download))
-        .leptos_routes_with_context(
-            &leptos_options,
-            routes,
-            {
-                // Provided here *and* to the server-function handler, which
-                // `leptos_routes_with_context` registers with the same closure.
-                let accounts = accounts.clone();
-                let mail = mail.clone();
-                move || {
-                    provide_context(accounts.clone());
-                    provide_context(mail.clone());
+/// Everything a refused call is allowed to say.
+///
+/// Ported from `izlek-web/src/auth.rs`; the auth pages that construct most of
+/// these variants land in a later slice, but the server plumbing above needs
+/// the type now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Refusal {
+    /// Wrong address, wrong password, or no account at all — deliberately one
+    /// answer for all three.
+    Rejected,
+    RateLimited,
+    /// A password broke a stated rule. Only reachable once we know who the
+    /// person is, so it gives nothing away.
+    Password(String),
+    Forbidden,
+    SignInFirst,
+    AlreadyClaimed,
+    /// Admin-side wording, shown on the member list and nowhere public.
+    AddressTaken,
+    /// The link is spent, expired, or was never real.
+    LinkNotUsable,
+    /// A card with no title is not a card.
+    EmptyTitle,
+    /// A person with no name is not a person the board can show.
+    EmptyName,
+    /// A limit of nothing, or a limit wider than the disk should promise.
+    BadLimit,
+    /// Something in the allowed-types list is not a file extension.
+    BadFileType,
+    /// The sender panel was saved with a field it cannot work without, or with
+    /// one that is not what it claims to be. The message names the field: this
+    /// is a form somebody is filling in, not an attacker probing, and "that did
+    /// not work" would send them round the panel guessing.
+    BadSender(String),
+    /// A comment with nothing in it.
+    EmptyComment,
+    /// The upload arrived without a file in it.
+    NoFile,
+    /// The bytes kept coming past what this workspace allows per file.
+    FileTooBig,
+    /// The name does not end in one of the extensions the admin allows.
+    FileTypeNotAllowed,
+    /// A rule with no subject line: the mail it sends would arrive blank.
+    EmptySubject,
+    /// The date field did not hold a date.
+    BadDeadline,
+    /// The link asked for would put a task behind itself.
+    Cycle,
+    /// The card was already moved out of the column this request thought it
+    /// was in, by somebody else, while this person was deciding.
+    MovedAlready,
+    /// No such task — or none this account may see. Deliberately one answer for
+    /// both.
+    NotFound,
+    Unavailable,
+}
+
+impl Refusal {
+    /// The refusal in words, ported verbatim from `izlek-web/src/auth.rs`.
+    pub fn message(&self) -> String {
+        match self {
+            Refusal::Rejected => "That did not work.".to_string(),
+            Refusal::RateLimited => {
+                "Too many attempts — wait a few minutes and try again.".to_string()
+            }
+            Refusal::Password(problem) => problem.clone(),
+            Refusal::Forbidden => "Not permitted.".to_string(),
+            Refusal::SignInFirst => "Sign in first.".to_string(),
+            Refusal::AlreadyClaimed => "This workspace already has an owner.".to_string(),
+            Refusal::AddressTaken => "That address already has an account.".to_string(),
+            Refusal::LinkNotUsable => "This link no longer works.".to_string(),
+            Refusal::EmptyTitle => "Give the task a title.".to_string(),
+            Refusal::EmptyName => "Give yourself a name.".to_string(),
+            Refusal::BadLimit => {
+                "A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."
+                    .to_string()
+            }
+            Refusal::BadFileType => {
+                "File types are extensions — png, pdf, zip — separated by commas.".to_string()
+            }
+            Refusal::BadSender(problem) => problem.clone(),
+            Refusal::EmptyComment => "Write something first.".to_string(),
+            Refusal::NoFile => "Choose a file first.".to_string(),
+            Refusal::FileTooBig => "Too big for this workspace.".to_string(),
+            Refusal::FileTypeNotAllowed => {
+                "That kind of file is not on this workspace's allowed list.".to_string()
+            }
+            Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
+            Refusal::BadDeadline => "That is not a date.".to_string(),
+            Refusal::Cycle => "That link would put this task behind itself.".to_string(),
+            Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
+            Refusal::NotFound => "No such task.".to_string(),
+            Refusal::Unavailable => "Something went wrong.".to_string(),
+        }
+    }
+
+    /// The refusal a `code` names, or nothing. Nothing for an unknown word: the
+    /// query is whatever the address bar holds, so a code that is not one of
+    /// ours says nothing at all rather than something invented.
+    pub fn from_code(code: &str) -> Option<Refusal> {
+        Some(match code {
+            "rejected" => Refusal::Rejected,
+            "rate-limited" => Refusal::RateLimited,
+            "password-short" => Refusal::Password("at least 10 characters".to_string()),
+            "password-you" => Refusal::Password("not your address or your name".to_string()),
+            "forbidden" => Refusal::Forbidden,
+            "sign-in-first" => Refusal::SignInFirst,
+            "already-claimed" => Refusal::AlreadyClaimed,
+            "address-taken" => Refusal::AddressTaken,
+            "link-not-usable" => Refusal::LinkNotUsable,
+            "empty-title" => Refusal::EmptyTitle,
+            "empty-comment" => Refusal::EmptyComment,
+            "no-file" => Refusal::NoFile,
+            "file-too-big" => Refusal::FileTooBig,
+            "file-type" => Refusal::FileTypeNotAllowed,
+            "empty-subject" => Refusal::EmptySubject,
+            "bad-deadline" => Refusal::BadDeadline,
+            "cycle" => Refusal::Cycle,
+            "moved-already" => Refusal::MovedAlready,
+            "not-found" => Refusal::NotFound,
+            "unavailable" => Refusal::Unavailable,
+            _ => return None,
+        })
+    }
+
+    /// The refusal as a short word, for the address bar.
+    ///
+    /// A browser without script never sees a call's return value: it posts the
+    /// form, follows the redirect, and the page it lands on has to be told what
+    /// happened. That telling goes through the query, so every refusal needs a
+    /// name that survives a round trip through a URL.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Refusal::Rejected => "rejected",
+            Refusal::RateLimited => "rate-limited",
+            // The problem itself, not the wording, so the sentence is built
+            // here on the way back rather than reflected out of the address.
+            Refusal::Password(problem) => {
+                if problem == "at least 10 characters" {
+                    "password-short"
+                } else if problem == "not your address or your name" {
+                    "password-you"
+                } else {
+                    "rejected"
                 }
-            },
-            {
-                let leptos_options = leptos_options.clone();
-                move || crate::app::shell(leptos_options.clone())
-            },
-        )
-        .fallback(leptos_axum::file_and_error_handler(crate::app::shell))
-        .layer(axum::middleware::from_fn(carry_refusal_on_redirect))
-        .layer(axum::Extension(accounts))
-        .with_state(leptos_options)
+            }
+            Refusal::Forbidden => "forbidden",
+            Refusal::SignInFirst => "sign-in-first",
+            Refusal::AlreadyClaimed => "already-claimed",
+            Refusal::AddressTaken => "address-taken",
+            Refusal::LinkNotUsable => "link-not-usable",
+            Refusal::EmptyTitle => "empty-title",
+            Refusal::EmptyName => "empty-name",
+            Refusal::BadLimit => "bad-limit",
+            Refusal::BadFileType => "bad-file-type",
+            Refusal::BadSender(_) => "bad-sender",
+            Refusal::EmptyComment => "empty-comment",
+            Refusal::NoFile => "no-file",
+            Refusal::FileTooBig => "file-too-big",
+            Refusal::FileTypeNotAllowed => "file-type",
+            Refusal::EmptySubject => "empty-subject",
+            Refusal::BadDeadline => "bad-deadline",
+            Refusal::Cycle => "cycle",
+            Refusal::MovedAlready => "moved-already",
+            Refusal::NotFound => "not-found",
+            Refusal::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Which call a carried refusal belongs to. Two forms on one page must not both
+/// claim the same sentence, so the redirect names the call and this is the name:
+/// the last piece of the server function's path, with anything that is not a
+/// plain word dropped so it can only ever be compared, never rendered.
+pub fn call_id(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
+/// What a call refused with, however the browser without script carried it
+/// back — read straight off the query, since there is no client-side action
+/// value to check first the way a hydrated page in the old UI had.
+///
+/// Ported from the old UI's `auth.rs` `refusal_of`/`refusal_from_query`,
+/// collapsed into one function: every topcoat page is rendered server-side on
+/// every request, so there is only ever the query to read.
+pub fn refusal_of(cx: &Cx, call: &str) -> Option<Refusal> {
+    let query = topcoat::router::request::uri(cx).query()?;
+    let mut code = None;
+    let mut on = None;
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            match key {
+                "refusal" => code = Some(value),
+                "on" => on = Some(value),
+                _ => {}
+            }
+        }
+    }
+    if on? != call {
+        return None;
+    }
+    Refusal::from_code(code?)
 }
 
 /// Puts a refusal on the redirect a browser without script follows.
 ///
 /// A hydrated page reads the call's return value straight off the action. A
 /// browser without script has no such thing: it posts the form, the server
-/// function handler answers `302` back to the page it came from, and the value
-/// — the whole refusal — sits in a body nobody will ever look at. The click
-/// then looks like nothing happening, which is the worst answer Izlek can give.
+/// function handler answers with a redirect back to the page it came from, and
+/// the value — the whole refusal — sits in a body nobody will ever look at.
+/// The click then looks like nothing happening, which is the worst answer
+/// Izlek can give.
 ///
 /// So the refusal is copied onto the `Location`, as `?refusal=<code>&on=<call>`,
 /// and the page renders it from the query. This is one place rather than
@@ -363,43 +505,42 @@ pub fn router(
 ///
 /// Requests carrying script are untouched — they are answered with the value
 /// itself and never see a redirect.
-async fn carry_refusal_on_redirect(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use crate::auth::{Refusal, call_id};
-    use axum::http::StatusCode;
-    use axum::http::header::{ACCEPT, LOCATION, REFERER};
-
+///
+/// Ported from axum's `middleware::from_fn` onto a topcoat `#[layer]`. topcoat's
+/// Post/Redirect/Get helper (`error::see_other`) answers with `303 See Other`,
+/// not the `302 Found` axum's server-function redirect used, so the status this
+/// checks for is `SEE_OTHER` — the guard's three conditions are otherwise
+/// unchanged.
+#[topcoat::router::layer("/api")]
+async fn carry_refusal_on_redirect(cx: &Cx, body: Body, next: Next<'_>) -> topcoat::Result<Response> {
     // A form post from a browser asks for a page back. A server-function call
     // from the hydrated bundle does not.
-    let wants_page = request
-        .headers()
-        .get(ACCEPT)
+    let wants_page = headers(cx)
+        .get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.contains("text/html"));
-    let called = call_id(request.uri().path());
-    let has_referer = request.headers().contains_key(REFERER);
-    let response = next.run(request).await;
-    if !wants_page || !has_referer || response.status() != StatusCode::FOUND {
-        return response;
+    let called = call_id(topcoat::router::request::uri(cx).path());
+    let has_referer = headers(cx).contains_key(header::REFERER);
+    let response = next.run(cx, body).await?;
+    if !wants_page || !has_referer || response.status() != StatusCode::SEE_OTHER {
+        return Ok(response);
     }
 
     let (mut parts, body) = response.into_parts();
     // The body of one of these redirects is a serialised `Option<Refusal>` and
     // nothing else; the cap is there so a response that is something else
     // entirely cannot be read into memory whole.
-    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
-        return axum::response::Response::from_parts(parts, axum::body::Body::empty());
+    let Ok(bytes) = to_bytes(body, 64 * 1024).await else {
+        return Ok(Response::from_parts(parts, Body::empty()));
     };
     if let Ok(Some(refusal)) = serde_json::from_slice::<Option<Refusal>>(&bytes)
-        && let Some(location) = parts.headers.get(LOCATION).and_then(|v| v.to_str().ok())
+        && let Some(location) = parts.headers.get(header::LOCATION).and_then(|v| v.to_str().ok())
         && let Some(carried) = carrying(location, refusal.code(), &called)
         && let Ok(value) = HeaderValue::from_str(&carried)
     {
-        parts.headers.insert(LOCATION, value);
+        parts.headers.insert(header::LOCATION, value);
     }
-    axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
+    Ok(Response::from_parts(parts, Body::from(bytes)))
 }
 
 /// `location` with the refusal in its query.
@@ -529,5 +670,166 @@ mod refusal_redirect_tests {
     #[test]
     fn a_call_with_no_name_carries_nothing() {
         assert_eq!(carrying("http://izlek.sh/", "cycle", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod refusal_message_tests {
+    use super::Refusal;
+
+    #[test]
+    fn every_refusal_survives_the_address_bar() {
+        let all = [
+            Refusal::Rejected,
+            Refusal::RateLimited,
+            Refusal::Password("at least 10 characters".to_string()),
+            Refusal::Password("not your address or your name".to_string()),
+            Refusal::Forbidden,
+            Refusal::SignInFirst,
+            Refusal::AlreadyClaimed,
+            Refusal::AddressTaken,
+            Refusal::LinkNotUsable,
+            Refusal::EmptyTitle,
+            Refusal::EmptyComment,
+            Refusal::NoFile,
+            Refusal::FileTooBig,
+            Refusal::FileTypeNotAllowed,
+            Refusal::BadDeadline,
+            Refusal::Cycle,
+            Refusal::MovedAlready,
+            Refusal::NotFound,
+            Refusal::Unavailable,
+        ];
+        for refusal in all {
+            assert_eq!(
+                Refusal::from_code(refusal.code()).as_ref(),
+                Some(&refusal),
+                "{} did not come back as itself",
+                refusal.code()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_code_says_nothing() {
+        assert_eq!(Refusal::from_code("not-a-refusal"), None);
+        assert_eq!(Refusal::from_code(""), None);
+    }
+}
+
+#[cfg(test)]
+mod refusal_of_tests {
+    use super::{Cx, Refusal, refusal_of};
+    use topcoat::context::CxTestBuilder;
+
+    fn cx_at(uri: &str) -> Cx {
+        let (parts, ()) = http::Request::builder().uri(uri).body(()).unwrap().into_parts();
+        CxTestBuilder::new().request_context(parts).build()
+    }
+
+    #[test]
+    fn reads_a_matching_refusal_off_the_query() {
+        let cx = cx_at("/?refusal=cycle&on=sign_in");
+        assert_eq!(refusal_of(&cx, "sign_in"), Some(Refusal::Cycle));
+    }
+
+    #[test]
+    fn a_refusal_for_another_call_is_not_this_one() {
+        let cx = cx_at("/?refusal=cycle&on=link_tasks");
+        assert_eq!(refusal_of(&cx, "sign_in"), None);
+    }
+
+    #[test]
+    fn no_query_carries_nothing() {
+        let cx = cx_at("/");
+        assert_eq!(refusal_of(&cx, "sign_in"), None);
+    }
+}
+
+#[cfg(test)]
+mod call_id_tests {
+    use super::call_id;
+
+    #[test]
+    fn a_call_is_named_by_its_last_path_piece() {
+        assert_eq!(call_id("/api/link_tasks"), "link_tasks");
+        assert_eq!(call_id("/api/link_tasks?x=1"), "link_tasksx1");
+    }
+}
+
+#[cfg(test)]
+mod session_cookie_tests {
+    use super::{SESSION_COOKIE, clear_session_cookie, presented_session, set_session_cookie};
+    use topcoat::context::{Cx, CxTestBuilder};
+    use topcoat::cookie::{CookieJarCell, write_cookies};
+
+    /// A `Cx` whose request carried the given `Cookie` header, ready for
+    /// `set_session_cookie`/`presented_session`/`clear_session_cookie` to read
+    /// and write through.
+    fn cx_with(cookie_header: Option<&str>) -> Cx {
+        let mut builder = http::Request::builder();
+        if let Some(value) = cookie_header {
+            builder = builder.header(http::header::COOKIE, value);
+        }
+        let (parts, ()) = builder.body(()).unwrap().into_parts();
+        CxTestBuilder::new()
+            .request_context(parts)
+            .request_context(CookieJarCell::new())
+            .build()
+    }
+
+    fn set_cookie_headers(cx: &Cx) -> Vec<String> {
+        let mut headers = http::HeaderMap::new();
+        write_cookies(cx, &mut headers);
+        headers
+            .get_all(http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// The cookie name is a wire contract: every existing browser's `Cookie`
+    /// header still says "izlek_session", and it must stay byte-identical or
+    /// every one of them is signed out at once.
+    #[test]
+    fn the_cookie_name_stayed_byte_identical() {
+        assert_eq!(SESSION_COOKIE, "izlek_session");
+    }
+
+    #[test]
+    fn setting_writes_the_session_cookie_with_the_right_attributes() {
+        let cx = cx_with(None);
+        set_session_cookie(&cx, "tok123", time::Duration::days(14));
+
+        let set = set_cookie_headers(&cx);
+        assert_eq!(set.len(), 1);
+        assert!(set[0].starts_with("izlek_session=tok123;"), "{}", set[0]);
+        for attr in ["Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age=1209600"] {
+            assert!(set[0].contains(attr), "{} missing {attr}", set[0]);
+        }
+    }
+
+    #[test]
+    fn presented_session_reads_the_cookie_the_browser_sent() {
+        let cx = cx_with(Some("izlek_session=tok123"));
+        assert_eq!(presented_session(&cx).as_deref(), Some("tok123"));
+    }
+
+    #[test]
+    fn absent_cookie_presents_nothing() {
+        let cx = cx_with(None);
+        assert_eq!(presented_session(&cx), None);
+    }
+
+    #[test]
+    fn clearing_expires_the_cookie_at_the_same_path() {
+        let cx = cx_with(Some("izlek_session=tok123"));
+        clear_session_cookie(&cx);
+
+        let set = set_cookie_headers(&cx);
+        assert_eq!(set.len(), 1);
+        assert!(set[0].starts_with("izlek_session="), "{}", set[0]);
+        assert!(set[0].contains("Max-Age=0"), "{}", set[0]);
+        assert!(set[0].contains("Path=/"), "{}", set[0]);
     }
 }

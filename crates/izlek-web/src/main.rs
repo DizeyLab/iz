@@ -1,11 +1,18 @@
-#[cfg(feature = "ssr")]
+use izlek_core::accounts::Accounts;
+use izlek_core::store::TursoStore;
+use std::sync::Arc;
+use topcoat::Result;
+use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
+use topcoat::cookie::RouterBuilderCookieExt;
+use topcoat::router::{BodyLimit, Router, RouterBuilderDiscoverExt, route};
+
+#[route(GET "/healthz")]
+async fn healthz() -> Result<&'static str> {
+    Ok("ok")
+}
+
 #[tokio::main]
 async fn main() {
-    use izlek_core::accounts::Accounts;
-    use izlek_core::store::TursoStore;
-    use leptos::prelude::*;
-    use std::sync::Arc;
-
     // config/izlek.toml is read here, before anything is opened, and written with
     // development defaults if it is not there yet. A broken key stops the
     // boot with its name in the message: the failure this prevents is not an
@@ -43,24 +50,17 @@ async fn main() {
         config.base_url.clone(),
     ));
     tokio::spawn(sweep(engine.clone()));
-    let mail = izlek_web::server::Mail::sending(engine);
 
-    let conf = get_configuration(None).expect("failed to read leptos configuration");
-    let leptos_options = conf.leptos_options;
-    let addr = leptos_options.site_addr;
+    let router = Router::builder()
+        .discover()
+        .layer(BodyLimit::max(izlek_web::files::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
+        .cookies()
+        .assets(AssetBundle::load().expect("failed to load the asset bundle"))
+        .app_context(accounts)
+        .app_context(izlek_web::server::Mail::sending(engine.clone()))
+        .build();
 
-    let app = izlek_web::server::router(accounts, mail, leptos_options);
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("failed to bind");
-    println!("izlek listening on http://{addr}");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await
-    .expect("server error");
+    topcoat::start(router).await.expect("server error");
 }
 
 /// Retries what a mail server refused earlier and picks up anything a crash
@@ -71,7 +71,6 @@ async fn main() {
 /// which is properly down is not hammered — the wait per send widens on its
 /// own, and a send that has used its attempts is written off rather than
 /// carried forever.
-#[cfg(feature = "ssr")]
 async fn sweep(engine: std::sync::Arc<izlek_core::MailEngine>) {
     /// Enough that a morning's backlog clears in a few passes, few enough that
     /// one pass cannot sit on the mail server for minutes.
@@ -92,10 +91,4 @@ async fn sweep(engine: std::sync::Arc<izlek_core::MailEngine>) {
             Err(problem) => eprintln!("izlek mail  sweep could not read the ledger: {problem}"),
         }
     }
-}
-
-#[cfg(not(feature = "ssr"))]
-fn main() {
-    // The wasm bundle enters through `lib.rs::hydrate`; this target is only
-    // built with `ssr`.
 }

@@ -1,20 +1,34 @@
-//! The task detail modal, from the TaskDetail artboard.
+//! The task detail modal, ported from the old UI's TaskDetail
+//! artboard.
 //!
-//! One server call brings the whole screen: the task, its assignees, both
-//! directions of its dependencies, its comments and its activity. Every change
-//! is its own call, and every one of them checks the task belongs to the
-//! asker's workspace before it does anything — a task id in a form is an
-//! authorization question, not a validation one.
+//! The old UI rendered this once and patched it in the browser from a resource;
+//! topcoat has no browser bundle at all, so every one of the ten calls below
+//! answers a plain form post with a 303 back to the page it came from —
+//! [`crate::server::carry_refusal_on_redirect`] carries the refusal (if any)
+//! onto that redirect's query the same way `crate::auth`'s calls do — and the
+//! page it lands on reads the fresh task straight off the store. There is no
+//! resource to refetch and no action to hold a pending state: a reload *is*
+//! the refresh.
+//!
+//! Every mutating call still checks the task belongs to the asker's workspace
+//! before it does anything — a task id in a form is an authorization
+//! question, not a validation one — and every mail-rule wiring point
+//! (`after_activity`/`after_freeing`) from the old version is carried over
+//! unchanged.
 
 use izlek_core::board::Person;
-use izlek_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail};
-use leptos::either::Either;
-use leptos::prelude::*;
+use izlek_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label};
+use izlek_core::store::{Store, StoreError, User};
 use serde::{Deserialize, Serialize};
 use time::Date;
+use topcoat::Result;
+use topcoat::context::Cx;
+use topcoat::router::content::{Form, Json};
+use topcoat::router::request::headers;
+use topcoat::router::{HeaderName, StatusCode, header, route};
+use topcoat::view::{class, view};
 
-use crate::auth::{Me, Refusal};
-use crate::board::Avatar;
+use crate::server::{Refusal, accounts, mail, refusal_of, require_user, require_writer};
 
 /// A task this board could be linked to: enough to name it in the picker and
 /// nothing more.
@@ -25,21 +39,37 @@ pub struct LinkTarget {
     pub title: String,
 }
 
-/// One task detail's worth of state.
+/// The person the current browser is signed in as, wired the same as
+/// `izlek-web/src/auth.rs`'s `Me` so [`fetch_task`]'s answer keeps its shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Me {
+    pub id: String,
+    pub display_name: String,
+    pub email: String,
+    pub role: izlek_core::Role,
+}
+
+impl From<&User> for Me {
+    fn from(user: &User) -> Self {
+        Me {
+            id: user.id.clone(),
+            display_name: user.display_name.clone(),
+            email: user.email.clone(),
+            role: user.role,
+        }
+    }
+}
+
+/// One task detail's worth of state — the [`fetch_task`] answer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DetailSnapshot {
     pub detail: TaskDetail,
     pub me: Me,
     pub today: Date,
-    /// What the "Link a task" picker may offer — never this task, never one it
-    /// is already linked to.
     pub linkable: Vec<LinkTarget>,
     pub may_write: bool,
     pub may_comment: bool,
-    /// Whether this person may delete the task. A writer may.
     pub may_delete: bool,
-    /// Extensions the upload form's `accept` attribute may offer. Empty means
-    /// every type — the same "empty means everything" the store's limits use.
     pub allowed_file_types: Vec<String>,
     pub attachment_limit_mb: u64,
 }
@@ -48,77 +78,149 @@ pub struct DetailSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
-    /// The other task must finish before this one can start.
     BlockedBy,
-    /// The other task is waiting on this one.
     Blocks,
 }
 
-#[cfg(feature = "ssr")]
-pub(crate) mod guard {
-    use crate::auth::Refusal;
-    use izlek_core::detail::TaskFacts;
-    use izlek_core::store::{Store, User};
-
-    /// The task, if this person's workspace is the one holding it. A task in
-    /// another workspace is not found rather than forbidden: the answer says
-    /// nothing about whether the id is real.
-    ///
-    /// Takes the store rather than reading it off leptos context, so a plain
-    /// axum handler with no leptos owner tree — `crate::files`'s upload and
-    /// download routes — can call this the same way a server function does.
-    pub async fn task_of(
-        store: &dyn Store,
-        user: &User,
-        task_id: &str,
-    ) -> Result<TaskFacts, Refusal> {
-        match store.task(task_id).await {
-            Ok(Some(facts)) if facts.workspace_id == user.workspace_id => Ok(facts),
-            Ok(_) => Err(Refusal::NotFound),
-            Err(error) => {
-                eprintln!("store error: {error}");
-                Err(Refusal::Unavailable)
-            }
-        }
-    }
-
-    /// The writer behind this request and the task they named.
-    pub async fn writer_and_task(task_id: &str) -> Result<(User, TaskFacts), Refusal> {
-        let user = crate::server::require_writer().await?;
-        let store = crate::server::accounts().store().clone();
-        let facts = task_of(store.as_ref(), &user, task_id).await?;
-        Ok((user, facts))
+/// Which task is `blocked` and which is `blocking`, from the task the modal
+/// is open on, the other task it names, and which way the form said the link
+/// runs.
+fn resolve_direction(task_id: &str, other_id: &str, direction: Direction) -> (String, String) {
+    match direction {
+        Direction::BlockedBy => (task_id.to_string(), other_id.to_string()),
+        Direction::Blocks => (other_id.to_string(), task_id.to_string()),
     }
 }
 
-/// Everything one task detail shows. A Viewer may read it; what they may not do
-/// is refused in the calls below, not merely hidden from them here.
-#[server]
-pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_user};
+#[cfg(test)]
+mod resolve_direction_tests {
+    use super::{Direction, resolve_direction};
+
+    #[test]
+    fn blocked_by_puts_this_task_first() {
+        assert_eq!(
+            resolve_direction("this", "other", Direction::BlockedBy),
+            ("this".to_string(), "other".to_string())
+        );
+    }
+
+    #[test]
+    fn blocks_puts_the_other_task_first() {
+        assert_eq!(
+            resolve_direction("this", "other", Direction::Blocks),
+            ("other".to_string(), "this".to_string())
+        );
+    }
+}
+
+// -- guards -------------------------------------------------------------
+
+/// The task, if this person's workspace is the one holding it. A task in
+/// another workspace is not found rather than forbidden: the answer says
+/// nothing about whether the id is real.
+async fn task_of(store: &dyn Store, user: &User, task_id: &str) -> std::result::Result<TaskFacts, Refusal> {
+    match store.task(task_id).await {
+        Ok(Some(facts)) if facts.workspace_id == user.workspace_id => Ok(facts),
+        Ok(_) => Err(Refusal::NotFound),
+        Err(error) => {
+            eprintln!("store error: {error}");
+            Err(Refusal::Unavailable)
+        }
+    }
+}
+
+/// The writer behind this request and the task they named.
+async fn writer_and_task(cx: &Cx, task_id: &str) -> std::result::Result<(User, TaskFacts), Refusal> {
+    let user = require_writer(cx).await?;
+    let store = accounts(cx).store().clone();
+    let facts = task_of(store.as_ref(), &user, task_id).await?;
+    Ok((user, facts))
+}
+
+/// A 303 back to wherever the form was posted from, carrying `refusal` as the
+/// body for `carry_refusal_on_redirect` to read — the same shape `auth.rs`
+/// uses for every one of its mutating calls.
+type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
+
+fn back_to(cx: &Cx) -> String {
+    headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("/")
+        .to_string()
+}
+
+fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, back_to(cx))], Json(refusal)))
+}
+
+// -- the ten calls --------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TaskIdForm {
+    task_id: String,
+}
+
+#[derive(Deserialize)]
+struct SaveTaskForm {
+    task_id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    deadline: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PersonForm {
+    task_id: String,
+    user_id: String,
+}
+
+#[derive(Deserialize)]
+struct LinkForm {
+    task_id: String,
+    other_id: String,
+    direction: Direction,
+}
+
+#[derive(Deserialize)]
+struct CommentForm {
+    task_id: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct FileIdForm {
+    file_id: String,
+}
+
+/// Everything one task detail shows. A Viewer may read it; what they may not
+/// do is refused in the calls below, not merely hidden from them here.
+///
+/// Shared by the route and [`task_modal`], which calls it directly rather
+/// than going back through its own HTTP endpoint — the same shape `pages.rs`
+/// reads the store straight through for its own screens.
+async fn load_snapshot(cx: &Cx, task_id: &str) -> Result<std::result::Result<DetailSnapshot, Refusal>> {
     use izlek_core::detail::load;
     use time::OffsetDateTime;
 
-    let user = match require_user().await {
+    let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(Err(refusal)),
     };
-    let store = accounts().store().clone();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
+    let store = accounts(cx).store().clone();
 
-    let Some(detail) = load(store.as_ref(), &user.workspace_id, &task_id)
-        .await
-        .map_err(fail)?
-    else {
+    let Some(detail) = load(store.as_ref(), &user.workspace_id, task_id).await? else {
         return Ok(Err(Refusal::NotFound));
     };
 
     // What the picker may offer: this board's other tasks, minus the ones
     // already on either end of a live link with this one. A cleared edge is
-    // not a link any more, so its task comes back to the picker — the store's
-    // upsert revives that row rather than duplicating it.
+    // not a link any more, so its task comes back to the picker.
     let mut linkable = Vec::new();
-    if let Some(board) = store.board(&user.workspace_id).await.map_err(fail)? {
+    if let Some(board) = store.board(&user.workspace_id).await? {
         let taken: Vec<&str> = detail
             .blocked_by
             .iter()
@@ -126,7 +228,7 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
             .filter(|edge| edge.cleared_at.is_none())
             .map(|edge| edge.task_id.as_str())
             .collect();
-        for task in store.tasks_for_board(&board.id).await.map_err(fail)? {
+        for task in store.tasks_for_board(&board.id).await? {
             if task.id == detail.id || taken.contains(&task.id.as_str()) {
                 continue;
             }
@@ -139,21 +241,15 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
         linkable.sort_by(|a, b| a.task_key.cmp(&b.task_key));
     }
 
-    // A writer may delete. The delete is soft and the confirmation says what
-    // goes with it, which is what makes that safe — not a role.
     let may_write = user.role.can_write_tasks();
 
-    // The upload form's own limits, read the same way Settings reads them —
-    // megabytes on the screen, bytes in the store.
     const MB: u64 = 1024 * 1024;
-    let workspace = store.workspace().await.map_err(fail)?;
+    let workspace = store.workspace().await?;
     let allowed_file_types = workspace
         .as_ref()
         .map(|workspace| workspace.allowed_file_types.clone())
         .unwrap_or_default();
-    let attachment_limit_mb = workspace
-        .map(|workspace| workspace.attachment_limit_bytes / MB)
-        .unwrap_or(0);
+    let attachment_limit_mb = workspace.map(|workspace| workspace.attachment_limit_bytes / MB).unwrap_or(0);
 
     Ok(Ok(DetailSnapshot {
         detail,
@@ -163,1229 +259,570 @@ pub async fn fetch_task(task_id: String) -> Result<Result<DetailSnapshot, Refusa
         may_delete: may_write,
         allowed_file_types,
         attachment_limit_mb,
-        me: Me {
-            id: user.id,
-            display_name: user.display_name,
-            email: user.email,
-            role: user.role,
-        },
+        me: Me::from(&user),
         today: OffsetDateTime::now_utc().date(),
     }))
 }
 
+#[route(POST "/api/fetch_task")]
+async fn fetch_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Result<Json<std::result::Result<DetailSnapshot, Refusal>>> {
+    Ok(Json(load_snapshot(cx, &input.task_id).await?))
+}
+
 /// Saves the title, the description and the deadline. Status is not here: the
-/// column a task sits in is changed by moving it, which is the next slice.
-/// Saves one region of the task, and leaves the rest of it alone.
-///
-/// Each field arrives only from the editor that was open, so a person fixing
-/// a deadline cannot silently write back the description as it looked when
-/// they opened the modal — the fields nobody edited are read from the store,
-/// not from a hidden input carrying a stale copy.
-#[server]
-pub async fn save_task(
-    task_id: String,
-    title: Option<String>,
-    description: Option<String>,
-    deadline: Option<String>,
-) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::accounts;
+/// column a task sits in is changed by moving it, a call `board.rs` owns.
+#[route(POST "/api/save_task")]
+async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
     use time::OffsetDateTime;
     use time::macros::format_description;
 
-    let (user, facts) = match guard::writer_and_task(&task_id).await {
+    let (user, facts) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let title = match title {
+    let title = match input.title {
         Some(given) => {
             let trimmed = given.trim().to_string();
             if trimmed.is_empty() {
-                return Ok(Some(Refusal::EmptyTitle));
+                return redirect(cx, Some(Refusal::EmptyTitle));
             }
             trimmed
         }
         None => facts.row.title.clone(),
     };
-    let description = match &description {
+    let description = match &input.description {
         Some(given) => given.trim().to_string(),
         None => facts.description.clone(),
     };
-    let deadline = match deadline.as_deref() {
+    let deadline = match input.deadline.as_deref() {
         None => facts.row.deadline,
         Some(raw) => match raw.trim() {
             "" => None,
             day => match Date::parse(day, format_description!("[year]-[month]-[day]")) {
                 Ok(day) => Some(day),
-                Err(_) => return Ok(Some(Refusal::BadDeadline)),
+                Err(_) => return redirect(cx, Some(Refusal::BadDeadline)),
             },
         },
     };
 
-    let store = accounts().store().clone();
+    let store = accounts(cx).store().clone();
     let activity_ids = store
-        .save_task(
-            &task_id,
-            &title,
-            &description,
-            deadline,
-            &user.id,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .save_task(&input.task_id, &title, &description, deadline, &user.id, OffsetDateTime::now_utc())
+        .await?;
     for activity_id in activity_ids {
-        crate::server::mail().after_activity(store.clone(), activity_id);
+        mail(cx).after_activity(store.clone(), activity_id);
     }
-    Ok(None)
+    redirect(cx, None)
 }
 
-/// Puts someone on a task. A Viewer can neither do this nor be the target: a
-/// viewer cannot be given work.
-#[server]
-pub async fn assign(task_id: String, user_id: String) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::accounts;
+/// Puts someone on a task. A Viewer can neither do this nor be the target.
+#[route(POST "/api/assign")]
+async fn assign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
     use izlek_core::detail::ActivityKind;
     use time::OffsetDateTime;
 
-    let (actor, _) = match guard::writer_and_task(&task_id).await {
+    let (actor, _) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
+    let store = accounts(cx).store().clone();
 
-    // The person named in the form is checked against this workspace, not
-    // trusted, and a viewer is refused here rather than left out of the picker.
-    let Some(person) = store.user(&user_id).await.map_err(fail)? else {
-        return Ok(Some(Refusal::NotFound));
+    let Some(person) = store.user(&input.user_id).await? else {
+        return redirect(cx, Some(Refusal::NotFound));
     };
     if person.workspace_id != actor.workspace_id {
-        return Ok(Some(Refusal::NotFound));
+        return redirect(cx, Some(Refusal::NotFound));
     }
     if !person.role.can_be_assigned() {
-        return Ok(Some(Refusal::Forbidden));
+        return redirect(cx, Some(Refusal::Forbidden));
     }
 
-    store
-        .assign_task(&task_id, &person.id)
-        .await
-        .map_err(fail)?;
+    store.assign_task(&input.task_id, &person.id).await?;
     let activity_id = store
-        .record_activity(
-            &task_id,
-            Some(&actor.id),
-            &ActivityKind::Assigned,
-            &person.display_name,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-        .map_err(fail)?;
-    crate::server::mail().after_activity(store, activity_id);
-    Ok(None)
+        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Assigned, &person.display_name, OffsetDateTime::now_utc())
+        .await?;
+    mail(cx).after_activity(store, activity_id);
+    redirect(cx, None)
 }
 
-#[server]
-pub async fn unassign(task_id: String, user_id: String) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::accounts;
+#[route(POST "/api/unassign")]
+async fn unassign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
     use izlek_core::detail::ActivityKind;
     use time::OffsetDateTime;
 
-    let (actor, _) = match guard::writer_and_task(&task_id).await {
+    let (actor, _) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
+    let store = accounts(cx).store().clone();
 
-    let Some(person) = store.user(&user_id).await.map_err(fail)? else {
-        return Ok(Some(Refusal::NotFound));
+    let Some(person) = store.user(&input.user_id).await? else {
+        return redirect(cx, Some(Refusal::NotFound));
     };
     if person.workspace_id != actor.workspace_id {
-        return Ok(Some(Refusal::NotFound));
+        return redirect(cx, Some(Refusal::NotFound));
     }
-    store
-        .unassign_task(&task_id, &person.id)
-        .await
-        .map_err(fail)?;
+    store.unassign_task(&input.task_id, &person.id).await?;
     let activity_id = store
-        .record_activity(
-            &task_id,
-            Some(&actor.id),
-            &ActivityKind::Unassigned,
-            &person.display_name,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-        .map_err(fail)?;
-    crate::server::mail().after_activity(store, activity_id);
-    Ok(None)
+        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Unassigned, &person.display_name, OffsetDateTime::now_utc())
+        .await?;
+    mail(cx).after_activity(store, activity_id);
+    redirect(cx, None)
 }
 
-/// Links two tasks. Both ends are checked against the asker's workspace, and a
-/// link that would close a circle is refused by the store, inside the
+/// Links two tasks. Both ends are checked against the asker's workspace, and
+/// a link that would close a circle is refused by the store, inside the
 /// transaction that would have written it.
-#[server]
-pub async fn link_tasks(
-    task_id: String,
-    other_id: String,
-    direction: Direction,
-) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::accounts;
+#[route(POST "/api/link_tasks")]
+async fn link_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
     use izlek_core::detail::ActivityKind;
-    use izlek_core::store::StoreError;
     use time::OffsetDateTime;
 
-    let (actor, _) = match guard::writer_and_task(&task_id).await {
+    let (actor, _) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let other = match guard::task_of(store.as_ref(), &actor, &other_id).await {
+    let store = accounts(cx).store().clone();
+    let other = match task_of(store.as_ref(), &actor, &input.other_id).await {
         Ok(facts) => facts,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let (blocked, blocking) = match direction {
-        Direction::BlockedBy => (task_id.clone(), other_id.clone()),
-        Direction::Blocks => (other_id.clone(), task_id.clone()),
-    };
+    let (blocked, blocking) = resolve_direction(&input.task_id, &input.other_id, input.direction);
     let now = OffsetDateTime::now_utc();
     match store.add_dependency(&blocked, &blocking, now).await {
         Ok(()) => {}
-        Err(StoreError::Cycle) => return Ok(Some(Refusal::Cycle)),
-        Err(error) => return Err(ServerFnError::new(error.to_string())),
+        Err(StoreError::Cycle) => return redirect(cx, Some(Refusal::Cycle)),
+        Err(error) => return Err(error.into()),
     }
     let activity_id = store
-        .record_activity(
-            &task_id,
-            Some(&actor.id),
-            &ActivityKind::Linked,
-            &other.row.task_key,
-            now,
-        )
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    crate::server::mail().after_activity(store, activity_id);
-    Ok(None)
+        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Linked, &other.row.task_key, now)
+        .await?;
+    mail(cx).after_activity(store, activity_id);
+    redirect(cx, None)
 }
 
 /// Clears a link. The row stays, marked cleared, so the history — and the
 /// rules engine — still has something to read.
-#[server]
-pub async fn unlink_tasks(
-    task_id: String,
-    other_id: String,
-    direction: Direction,
-) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::accounts;
+#[route(POST "/api/unlink_tasks")]
+async fn unlink_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
     use izlek_core::detail::ActivityKind;
     use time::OffsetDateTime;
 
-    let (actor, _) = match guard::writer_and_task(&task_id).await {
+    let (actor, _) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let other = match guard::task_of(store.as_ref(), &actor, &other_id).await {
+    let store = accounts(cx).store().clone();
+    let other = match task_of(store.as_ref(), &actor, &input.other_id).await {
         Ok(facts) => facts,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let (blocked, blocking) = match direction {
-        Direction::BlockedBy => (task_id.clone(), other_id.clone()),
-        Direction::Blocks => (other_id.clone(), task_id.clone()),
-    };
+    let (blocked, blocking) = resolve_direction(&input.task_id, &input.other_id, input.direction);
     let now = OffsetDateTime::now_utc();
-    let fail = |e: izlek_core::store::StoreError| ServerFnError::new(e.to_string());
-    store
-        .clear_dependency(&blocked, &blocking, now)
-        .await
-        .map_err(fail)?;
+    store.clear_dependency(&blocked, &blocking, now).await?;
     let activity_id = store
-        .record_activity(
-            &task_id,
-            Some(&actor.id),
-            &ActivityKind::Unlinked,
-            &other.row.task_key,
-            now,
-        )
-        .await
-        .map_err(fail)?;
-    crate::server::mail().after_activity(store, activity_id);
-    Ok(None)
+        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Unlinked, &other.row.task_key, now)
+        .await?;
+    mail(cx).after_activity(store, activity_id);
+    redirect(cx, None)
 }
 
-/// Writes a comment. The author is the session's user; there is no author field
-/// on the form. A Viewer is refused here, not merely shown no textarea.
-#[server]
-pub async fn post_comment(task_id: String, body: String) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_user};
+/// Writes a comment. The author is the session's user; there is no author
+/// field on the form. A Viewer is refused here, not merely shown no textarea.
+#[route(POST "/api/post_comment")]
+async fn post_comment(cx: &Cx, Form(input): Form<CommentForm>) -> Redirect {
     use time::OffsetDateTime;
 
-    let user = match require_user().await {
+    let user = match require_user(cx).await {
         Ok(user) => user,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
     if !user.role.can_comment() {
-        return Ok(Some(Refusal::Forbidden));
+        return redirect(cx, Some(Refusal::Forbidden));
     }
-    let store = accounts().store().clone();
-    if let Err(refusal) = guard::task_of(store.as_ref(), &user, &task_id).await {
-        return Ok(Some(refusal));
+    let store = accounts(cx).store().clone();
+    if let Err(refusal) = task_of(store.as_ref(), &user, &input.task_id).await {
+        return redirect(cx, Some(refusal));
     }
-    let body = body.trim();
+    let body = input.body.trim();
     if body.is_empty() {
-        return Ok(Some(Refusal::EmptyComment));
+        return redirect(cx, Some(Refusal::EmptyComment));
     }
 
-    let written = store
-        .add_comment(&task_id, &user.id, body, OffsetDateTime::now_utc())
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    crate::server::mail().after_activity(store, written.activity_id);
-    Ok(None)
+    let written = store.add_comment(&input.task_id, &user.id, body, OffsetDateTime::now_utc()).await?;
+    mail(cx).after_activity(store, written.activity_id);
+    redirect(cx, None)
 }
 
 /// What a delete would take with it, for the confirmation step. Reads only.
-#[server]
-pub async fn what_delete_costs(
-    task_id: String,
-) -> Result<Result<DeletionCost, Refusal>, ServerFnError> {
-    use crate::server::accounts;
-
-    if let Err(refusal) = guard::writer_and_task(&task_id).await {
-        return Ok(Err(refusal));
+#[route(POST "/api/what_delete_costs")]
+async fn what_delete_costs(cx: &Cx, Form(input): Form<TaskIdForm>) -> Result<Json<std::result::Result<DeletionCost, Refusal>>> {
+    if let Err(refusal) = writer_and_task(cx, &input.task_id).await {
+        return Ok(Json(Err(refusal)));
     }
-    match accounts()
-        .store()
-        .deletion_cost(&task_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-    {
-        Some(cost) => Ok(Ok(cost)),
-        None => Ok(Err(Refusal::NotFound)),
+    match accounts(cx).store().deletion_cost(&input.task_id).await? {
+        Some(cost) => Ok(Json(Ok(cost))),
+        None => Ok(Json(Err(Refusal::NotFound))),
     }
 }
 
-/// Deletes a task. A writer may: the delete is soft — the row keeps a
-/// `deleted_at`, its comments and its edges stay in the table — so a mistake is
-/// recoverable by hand. Whatever was waiting only on it becomes unblocked, the
-/// store records that as an event, and the unblocked rules fire on it.
-#[server]
-pub async fn delete_task(task_id: String) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::accounts;
+/// Deletes a task. A writer may: the delete is soft, so a mistake is
+/// recoverable by hand. Whatever was waiting only on it becomes unblocked,
+/// the store records that as an event, and the unblocked rules fire on it.
+#[route(POST "/api/delete_task")]
+async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
     use time::OffsetDateTime;
 
-    let (user, _) = match guard::writer_and_task(&task_id).await {
+    let (user, _) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let deletion = store
-        .delete_task(&task_id, &user.id, OffsetDateTime::now_utc())
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let store = accounts(cx).store().clone();
+    let deletion = store.delete_task(&input.task_id, &user.id, OffsetDateTime::now_utc()).await?;
     // A blocker being deleted unblocks whatever was waiting only on it, which
-    // is the same news as the blocker finishing. The freeing is committed; the
-    // send is a separate step, off the request.
+    // is the same news as the blocker finishing. The freeing is committed;
+    // the send is a separate step, off the request.
     if let Some(freeing) = deletion.event {
-        crate::server::mail().after_freeing(freeing, deletion.freed);
+        mail(cx).after_freeing(freeing, deletion.freed);
     }
-    crate::server::mail().after_activity(store, deletion.activity_id);
-    Ok(None)
+    mail(cx).after_activity(store, deletion.activity_id);
+    redirect(cx, None)
 }
 
-/// Deletes an attachment's row and its bytes. This is a hard delete, unlike
-/// [`delete_task`]'s soft one: a file is a blob on disk, not a fact worth
-/// keeping around for the audit trail, so there is nothing to undo by hand.
-/// That is also why the gate is narrower than a writer's — only the person who
-/// put the file there, or an admin cleaning up after them, may take it away.
-#[server]
-pub async fn delete_file(file_id: String) -> Result<Option<Refusal>, ServerFnError> {
-    use crate::server::{accounts, require_user};
-
-    let user = match require_user().await {
+/// Deletes an attachment's row and its bytes. A hard delete, unlike
+/// [`delete_task`]'s soft one — a file is a blob on disk, not a fact worth an
+/// audit trail. Only the person who put it there, or an admin, may take it
+/// away.
+#[route(POST "/api/delete_file")]
+async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
+    let user = match require_user(cx).await {
         Ok(user) => user,
-        Err(refusal) => return Ok(Some(refusal)),
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts().store().clone();
-    let Some(attachment) = store
-        .attachment(&file_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-    else {
-        return Ok(Some(Refusal::NotFound));
+    let store = accounts(cx).store().clone();
+    let Some(attachment) = store.attachment(&input.file_id).await? else {
+        return redirect(cx, Some(Refusal::NotFound));
     };
-    if let Err(refusal) = guard::task_of(store.as_ref(), &user, &attachment.task_id).await {
-        return Ok(Some(refusal));
+    if let Err(refusal) = task_of(store.as_ref(), &user, &attachment.task_id).await {
+        return redirect(cx, Some(refusal));
     }
     if user.id != attachment.uploaded_by && !user.role.can_administer() {
-        return Ok(Some(Refusal::Forbidden));
+        return redirect(cx, Some(Refusal::Forbidden));
     }
 
-    store
-        .delete_attachment(&file_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(None)
+    store.delete_attachment(&input.file_id).await?;
+    redirect(cx, None)
 }
 
 // -- the screen -------------------------------------------------------------
+//
+// Wasm-escapes from the old version, each simplified to a plain form post
+// rather than ported to a runtime signal (noted at each site below):
+//
+// - StatusControl's `on:change` auto-submit (dyn_into the `<select>`, call
+//   `request_submit()`) is dropped; the "Move" button is always shown rather
+//   than only when script is not running.
+// - The modal scrim's click-to-close and the window `Escape` listener are
+//   dropped; the X glyph and the footer "Close" button (plain links/buttons,
+//   no script) are the only ways to close.
+// - DeadlineControl's hand-built calendar grid (`js_sys::Date` for "today",
+//   month navigation, per-day buttons) is replaced with a native
+//   `<input type="date">` inside the same CSS-only edit-toggle popover —
+//   the toggle itself needed no script in the old version either.
+// - The file input's `on:change` auto-submit is dropped; an explicit
+//   "Upload" submit button is added next to the file picker.
+// - The two-step delete confirmation (an `ask` action fetching the cost,
+//   then a second click) is collapsed into one eager read: the cost is
+//   computed while the screen renders, and a native `<details>` disclosure —
+//   no script — holds the confirmation and the real delete button.
 
-/// The artboard's STATUS control: the column the card sits in, and the way to
-/// put it in another one.
-///
-/// It is a real `<form>` with a real `<select>`, so it works with wasm blocked
-/// — that is what the submit button is for. When wasm is running, the change
-/// event submits the form itself and the button is not drawn: picking a column
-/// from a menu and then pressing a second control to confirm it is not what
-/// the design draws, and not what anyone expects from a status field.
-///
-/// The column the card was in travels in a hidden field. It is the request's
-/// claim about the board it was looking at, and the store refuses the move if
-/// that claim has gone stale.
-#[component]
-fn StatusControl(
-    task_id: StoredValue<String>,
-    column_id: String,
-    columns: Vec<izlek_core::board::Column>,
-    action: ServerAction<crate::board::MoveCard>,
-) -> impl IntoView {
-    // An effect never runs on the server, so this is false through SSR and
-    // true once — and only if — hydration happens. It is the honest answer to
-    // "is script running here", which is the question the button depends on.
-    let live = RwSignal::new(false);
-    Effect::new(move |_| live.set(true));
-
-    let here = column_id.clone();
-    let done_column = columns
-        .iter()
-        .find(|column| column.id == column_id)
-        .map(|column| column.is_done)
-        .unwrap_or(false);
-
+/// A person as a circle. Ported from `izlek-web/src/board.rs`'s `Avatar`; that
+/// component has not crossed over into this crate yet, so this is a private
+/// copy rather than a shared one.
+async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
+    let initials = person.initials();
+    let tone = person.id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)) % 5;
     view! {
-        <ActionForm action=action attr:class="status-form">
-            <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-            <input type="hidden" name="from_column_id" value=column_id.clone()/>
-            <span class="status-dot" class:status-dot-done=done_column></span>
-            <select
-                class="status-select"
-                name="to_column_id"
-                on:change=move |event| {
-                    let _ = &event;
-                    #[cfg(feature = "hydrate")]
-                    {
-                        use leptos::wasm_bindgen::JsCast;
-                        if let Some(select) = event
-                            .target()
-                            .and_then(|target| {
-                                target.dyn_into::<leptos::web_sys::HtmlSelectElement>().ok()
-                            })
-                        {
-                            if let Some(form) = select.form() {
-                                let _ = form.request_submit();
-                            }
-                        }
-                    }
-                }
-            >
-                {columns
-                    .iter()
-                    .map(|column| {
-                        let selected = column.id == here;
-                        view! {
-                            <option value=column.id.clone() selected=selected>
-                                {column.name.clone()}
-                            </option>
-                        }
-                    })
-                    .collect_view()}
-            </select>
-            {glyph::chevron()}
-            <Show when=move || !live.get()>
-                <button class="status-go" type="submit">
-                    "Move"
-                </button>
-            </Show>
-        </ActionForm>
+        cx =>
+        <span class=(class!("avatar", format!("avatar-tone-{tone}"), extra)) title=(person.display_name.clone())>
+            (initials)
+        </span>
     }
 }
 
-/// Whatever a refused call said, rendered where the form that asked for it is.
-/// A refusal shown at the far end of a scrolling modal is a refusal nobody
-/// reads: the person clicked "Link a task" and the sentence has to land under
-/// that button, not under the activity trail.
-fn refused(refusal: impl Fn() -> Option<Refusal> + Copy + Send + Sync + 'static) -> impl IntoView {
-    move || refusal().map(|refusal| view! { <p class="modal-problem">{refusal.message()}</p> })
-}
-
-/// The open task's detail as the board fetches it. The resource is created in
-/// `Board`, not in the modal: a resource's hydration id is its creation order,
-/// and only resources created in the same fixed order on the server and the
-/// hydrating client read back their own data.
-pub type DetailFetch =
-    Resource<Option<Result<Result<DetailSnapshot, Refusal>, ServerFnError>>>;
-
-/// The modal. `esc` closes it, as the artboard's chip says.
-#[component]
-pub fn TaskDetailModal(
-    detail: DetailFetch,
-    on_close: impl Fn() + Copy + Send + Sync + 'static,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    // Every change writes and then re-reads: the modal shows what the store
-    // says, not what the browser hoped.
-    let changed = move || {
-        detail.refetch();
-        on_change();
-    };
-
-    // Escape listens on the window, not on the modal. The modal is inserted
-    // after the click that opened it, so focus is still on the card behind the
-    // scrim and a listener bound to this element would never hear the key.
-    #[cfg(feature = "hydrate")]
-    {
-        let handle = window_event_listener(leptos::ev::keydown, move |event| {
-            if event.key() == "Escape" {
-                on_close();
-            }
-        });
-        on_cleanup(move || handle.remove());
-    }
-
-    view! {
-        <div class="modal-scrim" on:click=move |_| on_close()>
-            <div class="modal" tabindex="-1" on:click=move |event| event.stop_propagation()>
-                <Transition fallback=|| {
-                    view! { <div class="modal-loading"></div> }
-                }>
-                    {move || Suspend::new(async move {
-                        match detail.await {
-                            Some(Ok(Ok(snapshot))) => {
-                                view! {
-                                    <DetailScreen
-                                        snapshot=snapshot
-                                        on_close=on_close
-                                        on_change=changed
-                                    />
-                                }
-                                    .into_any()
-                            }
-                            Some(Ok(Err(refusal))) => {
-                                view! { <p class="modal-note">{refusal.message()}</p> }.into_any()
-                            }
-                            Some(Err(_)) => {
-                                view! {
-                                    <p class="modal-note">"Something went wrong."</p>
-                                }
-                                    .into_any()
-                            }
-                            None => ().into_any(),
-                        }
-                    })}
-                </Transition>
-            </div>
-        </div>
+async fn refused(cx: &Cx, call: &str) -> Result {
+    match refusal_of(cx, call) {
+        Some(refusal) => view! { cx => <p class="modal-problem">(refusal.message())</p> },
+        None => view! { cx => },
     }
 }
 
-/// The artboard's glyphs, drawn rather than typed. A missing character in a
-/// font is a hole in the design; an inline path is the same shape everywhere.
-mod glyph {
-    use leptos::prelude::*;
-
-    pub fn chevron() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph"
-                width="14"
-                height="14"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-            >
-                <path d="M4 6l4 4 4-4"></path>
-            </svg>
-        }
-    }
-
-    pub fn calendar() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph"
-                width="13"
-                height="13"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                aria-hidden="true"
-            >
-                <rect x="2.5" y="3.5" width="11" height="10" rx="1.5"></rect>
-                <path d="M2.5 6.5h11M5.5 2v2.5M10.5 2v2.5"></path>
-            </svg>
-        }
-    }
-
-    pub fn plus() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph"
-                width="12"
-                height="12"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                aria-hidden="true"
-            >
-                <path d="M8 3v10M3 8h10"></path>
-            </svg>
-        }
-    }
-
-    pub fn cross() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph"
-                width="13"
-                height="13"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                aria-hidden="true"
-            >
-                <path d="M4 4l8 8M12 4l-8 8"></path>
-            </svg>
-        }
-    }
-
-    pub fn tick() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph dep-tick"
-                width="14"
-                height="14"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-            >
-                <path d="M3 8.5l3.5 3.5L13 5"></path>
-            </svg>
-        }
-    }
-
-    pub fn lock() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph"
-                width="14"
-                height="14"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-            >
-                <rect x="3.5" y="7" width="9" height="6.5" rx="1.5"></rect>
-                <path d="M5.5 7V5a2.5 2.5 0 015 0v2"></path>
-            </svg>
-        }
-    }
-
-    pub fn bin() -> impl IntoView {
-        view! {
-            <svg
-                class="glyph"
-                width="14"
-                height="14"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-            >
-                <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l0.7 8.5a1 1 0 001 0.9h3.6a1 1 0 001-0.9l0.7-8.5"></path>
-            </svg>
-        }
-    }
-}
-
-/// The title, as the artboard draws it: the heading itself, with the rename
-/// hidden behind it.
-///
-/// Editing is a state the screen enters, not a second field sitting beside the
-/// first. The checkbox is the state — it is what a click on the heading flips,
-/// what Cancel flips back, and it needs no script to do either. The heading and
-/// the input are never on screen together.
-#[component]
-fn TitleControl(
-    task_id: StoredValue<String>,
-    title: String,
-    may_write: bool,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
+async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool) -> Result {
     if !may_write {
-        return Either::Left(view! { <h2 class="detail-title">{title}</h2> });
+        return view! { cx => <h2 class="detail-title">(task.title.clone())</h2> };
     }
-    let action = ServerAction::<SaveTask>::new();
-    let refusal = crate::auth::refusal_of(action);
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let toggle = format!("rename-{}", task_id.get_value());
-    let field = title.clone();
-
-    Either::Right(view! {
+    let toggle = format!("rename-{}", task.id);
+    view! {
+        cx =>
         <div class="edit">
-            <input
-                class="edit-toggle"
-                // Open, if the page was landed on carrying this call's refusal.
-                // Without script the sentence is rendered inside this region,
-                // and a region that is closed says nothing at all.
-                checked=move || refusal().is_some()
-                type="checkbox"
-                id=toggle.clone()
-                aria-label="Rename this task"
-            />
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Rename this task">
             <h2 class="detail-title edit-view">
-                <label class="edit-hit" for=toggle.clone()>
-                    {title}
-                </label>
+                <label class="edit-hit" for=(toggle.clone())>(task.title.clone())</label>
             </h2>
-            <ActionForm action=action attr:class="edit-form title-form">
-                <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                <input
-                    class="title-input"
-                    type="text"
-                    name="title"
-                    value=field
-                    autocomplete="off"
-                    required
-                />
-                <button class="edit-save" type="submit" disabled=move || action.pending().get()>
-                    "Save"
-                </button>
-                <label class="edit-cancel" for=toggle>
-                    "Cancel"
-                </label>
-            </ActionForm>
-            {refused(refusal)}
+            <form class="edit-form title-form" method="post" action="/api/save_task">
+                <input type="hidden" name="task_id" value=(task.id.clone())>
+                <input class="title-input" type="text" name="title" value=(task.title.clone()) autocomplete="off" required="">
+                <button class="edit-save" type="submit">"Save"</button>
+                <label class="edit-cancel" for=(toggle)>"Cancel"</label>
+            </form>
+            (refused(cx, "save_task").await?)
         </div>
-    })
+    }
 }
 
-/// The description as prose, with the textarea behind it.
-///
-/// Clicking the prose swaps this region and only this region. Nothing else on
-/// the screen moves, and the rest of the task is not carried along in hidden
-/// inputs — the save names the description alone.
-#[component]
-fn DescriptionControl(
-    task_id: StoredValue<String>,
-    description: String,
-    may_write: bool,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let empty = description.trim().is_empty();
-    let prose = if empty {
-        "No description yet.".to_string()
-    } else {
-        description.clone()
-    };
+async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool) -> Result {
+    let empty = task.description.trim().is_empty();
+    let prose = if empty { "No description yet.".to_string() } else { task.description.clone() };
 
     if !may_write {
-        return Either::Left(
-            view! { <p class="detail-prose" class:detail-prose-empty=empty>{prose}</p> },
-        );
+        return view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> };
     }
-    let action = ServerAction::<SaveTask>::new();
-    let refusal = crate::auth::refusal_of(action);
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let toggle = format!("describe-{}", task_id.get_value());
-    let field = description.clone();
-
-    Either::Right(view! {
+    let toggle = format!("describe-{}", task.id);
+    view! {
+        cx =>
         <div class="edit">
-            <input
-                class="edit-toggle"
-                // Open, if the page was landed on carrying this call's refusal.
-                // Without script the sentence is rendered inside this region,
-                // and a region that is closed says nothing at all.
-                checked=move || refusal().is_some()
-                type="checkbox"
-                id=toggle.clone()
-                aria-label="Edit the description"
-            />
-            <label class="detail-prose edit-view edit-hit" class:detail-prose-empty=empty for=toggle.clone()>
-                {prose}
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Edit the description">
+            <label class=(class!("detail-prose", "edit-view", "edit-hit", "detail-prose-empty" if empty)) for=(toggle.clone())>
+                (prose)
             </label>
-            <ActionForm action=action attr:class="edit-form describe-form">
-                <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                <textarea class="detail-textarea" name="description" rows="5" prop:value=field.clone()>
-                    {field.clone()}
-                </textarea>
+            <form class="edit-form describe-form" method="post" action="/api/save_task">
+                <input type="hidden" name="task_id" value=(task.id.clone())>
+                <textarea class="detail-textarea" name="description" rows="5">(task.description.clone())</textarea>
                 <div class="edit-row">
-                    <button class="edit-save" type="submit" disabled=move || action.pending().get()>
-                        "Save"
-                    </button>
-                    <label class="edit-cancel" for=toggle>
-                        "Cancel"
-                    </label>
+                    <button class="edit-save" type="submit">"Save"</button>
+                    <label class="edit-cancel" for=(toggle)>"Cancel"</label>
                 </div>
-            </ActionForm>
-            {refused(refusal)}
+            </form>
+            (refused(cx, "save_task").await?)
         </div>
-    })
+    }
 }
 
-/// One deadline control: the artboard's calendar glyph, the date as a person
-/// reads it, and the chevron. The picker is what opens when it is clicked —
-/// there is no second DEADLINE row further down the screen.
-#[component]
-fn DeadlineControl(
-    task_id: StoredValue<String>,
-    deadline_label: String,
-    deadline_input: String,
-    overdue: bool,
-    may_write: bool,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
+async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bool) -> Result {
+    let overdue = task.is_overdue(today);
+    let label = task.deadline_label(today);
     if !may_write {
-        return Either::Left(view! {
-            <span class="field-box" class:detail-overdue=overdue>
-                {glyph::calendar()}
-                <span class="field-text">{deadline_label}</span>
+        return view! {
+            cx =>
+            <span class=(class!("field-box", "detail-overdue" if overdue))>
+                <span class="field-text">(label)</span>
             </span>
-        });
+        };
     }
-    let action = ServerAction::<SaveTask>::new();
-    let refusal = crate::auth::refusal_of(action);
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let toggle = format!("deadline-{}", task_id.get_value());
-
-    let initial = parse_ymd(&deadline_input);
-    let chosen = RwSignal::new(deadline_input);
-    let view_pos = RwSignal::new(initial.map(|(y, m, _)| (y, m)).unwrap_or((1970, 1)));
-    let today = RwSignal::new(None::<(i32, u8, u8)>);
-    Effect::new(move |_| {
-        #[cfg(feature = "hydrate")]
-        {
-            let now = js_sys::Date::new_0();
-            let day = (
-                now.get_full_year() as i32,
-                now.get_month() as u8 + 1,
-                now.get_date() as u8,
-            );
-            today.set(Some(day));
-            if initial.is_none() {
-                view_pos.set((day.0, day.1));
-            }
-        }
-    });
-
-    // Copy, not moved: this fires from three separate buttons in the grid and
-    // footer, and each needs its own call.
-    let close = move || {
-        #[cfg(feature = "hydrate")]
-        {
-            use leptos::wasm_bindgen::JsCast;
-            let toggle = format!("deadline-{}", task_id.get_value());
-            if let Some(input) = leptos::web_sys::window()
-                .and_then(|w| w.document())
-                .and_then(|doc| doc.get_element_by_id(&toggle))
-                .and_then(|el| el.dyn_into::<leptos::web_sys::HtmlInputElement>().ok())
-            {
-                input.set_checked(false);
-            }
-        }
-    };
-
-    Either::Right(view! {
+    let toggle = format!("deadline-{}", task.id);
+    let input_value = task.deadline_input();
+    view! {
+        cx =>
         <div class="edit edit-pop">
-            <input
-                class="edit-toggle"
-                // Open, if the page was landed on carrying this call's refusal.
-                // Without script the sentence is rendered inside this region,
-                // and a region that is closed says nothing at all.
-                checked=move || refusal().is_some()
-                type="checkbox"
-                id=toggle.clone()
-                aria-label="Change the deadline"
-            />
-            <label
-                class="field-box edit-view edit-hit"
-                class:detail-overdue=overdue
-                for=toggle.clone()
-            >
-                {glyph::calendar()}
-                <span class="field-text">{deadline_label}</span>
-                {glyph::chevron()}
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Change the deadline">
+            <label class=(class!("field-box", "edit-view", "edit-hit", "detail-overdue" if overdue)) for=(toggle.clone())>
+                <span class="field-text">(label)</span>
             </label>
             <div class="edit-form pop-panel datepick-panel">
-                <ActionForm action=action attr:class="pop-form">
-                    <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                    <input type="hidden" name="deadline" value=move || chosen.get()/>
-                    <div class="datepick-head">
-                        <button
-                            class="datepick-nav datepick-prev"
-                            type="button"
-                            aria-label="Previous month"
-                            on:click=move |_| {
-                                view_pos.update(|pos| *pos = prev_month(*pos));
-                            }
-                        >
-                            {glyph::chevron()}
-                        </button>
-                        <span class="datepick-title">{move || month_title(view_pos.get())}</span>
-                        <button
-                            class="datepick-nav datepick-next"
-                            type="button"
-                            aria-label="Next month"
-                            on:click=move |_| {
-                                view_pos.update(|pos| *pos = next_month(*pos));
-                            }
-                        >
-                            {glyph::chevron()}
-                        </button>
-                    </div>
-                    <div class="datepick-weekdays">
-                        <span>"M"</span>
-                        <span>"T"</span>
-                        <span>"W"</span>
-                        <span>"T"</span>
-                        <span>"F"</span>
-                        <span>"S"</span>
-                        <span>"S"</span>
-                    </div>
-                    <div class="datepick-grid">
-                        {move || {
-                            let pos = view_pos.get();
-                            let selected = parse_ymd(&chosen.get()).map(|(y, m, d)| (y, m, d));
-                            let today_ymd = today.get();
-                            month_cells(pos)
-                                .into_iter()
-                                .map(|cell| {
-                                    match cell {
-                                        None => view! { <span class="datepick-cell"></span> }.into_any(),
-                                        Some(day) => {
-                                            let is_today = today_ymd == Some((pos.0, pos.1, day));
-                                            let is_selected = selected == Some((pos.0, pos.1, day));
-                                            view! {
-                                                <button
-                                                    class="datepick-cell datepick-day"
-                                                    class:datepick-today=is_today
-                                                    class:datepick-selected=is_selected
-                                                    type="button"
-                                                    on:click=move |_| {
-                                                        chosen.set(ymd_string(pos.0, pos.1, day));
-                                                        close();
-                                                    }
-                                                >
-                                                    {day}
-                                                </button>
-                                            }
-                                                .into_any()
-                                        }
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </div>
-                    <div class="datepick-foot">
-                        <button
-                            class="datepick-action"
-                            type="button"
-                            on:click=move |_| {
-                                chosen.set(String::new());
-                                close();
-                            }
-                        >
-                            "Clear"
-                        </button>
-                        <button
-                            class="datepick-action"
-                            type="button"
-                            on:click=move |_| {
-                                if let Some((y, m, d)) = today.get() {
-                                    view_pos.set((y, m));
-                                    chosen.set(ymd_string(y, m, d));
-                                    close();
-                                }
-                            }
-                        >
-                            "Today"
-                        </button>
-                    </div>
+                <form class="pop-form" method="post" action="/api/save_task">
+                    <input type="hidden" name="task_id" value=(task.id.clone())>
+                    <input class="field-input" type="date" name="deadline" value=(input_value)>
                     <div class="edit-row">
-                        <button
-                            class="edit-save"
-                            type="submit"
-                            disabled=move || action.pending().get()
-                        >
-                            "Save"
-                        </button>
-                        <label class="edit-cancel" for=toggle>
-                            "Cancel"
-                        </label>
+                        <button class="edit-save" type="submit">"Save"</button>
+                        <label class="edit-cancel" for=(toggle)>"Cancel"</label>
                     </div>
-                </ActionForm>
-                {refused(refusal)}
+                </form>
+                (refused(cx, "save_task").await?)
             </div>
         </div>
-    })
-}
-
-/// `yyyy-mm-dd` into its three numbers, or nothing for the unset deadline.
-fn parse_ymd(input: &str) -> Option<(i32, u8, u8)> {
-    let mut parts = input.splitn(3, '-');
-    let year = parts.next()?.parse().ok()?;
-    let month = parts.next()?.parse().ok()?;
-    let day = parts.next()?.parse().ok()?;
-    Some((year, month, day))
-}
-
-fn ymd_string(year: i32, month: u8, day: u8) -> String {
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-fn prev_month((year, month): (i32, u8)) -> (i32, u8) {
-    if month == 1 { (year - 1, 12) } else { (year, month - 1) }
-}
-
-fn next_month((year, month): (i32, u8)) -> (i32, u8) {
-    if month == 12 { (year + 1, 1) } else { (year, month + 1) }
-}
-
-fn month_title((year, month): (i32, u8)) -> String {
-    time::Month::try_from(month)
-        .map(|named| format!("{named} {year}"))
-        .unwrap_or_else(|_| format!("{month} {year}"))
-}
-
-/// The grid for one month: blanks for the lead-in before day 1 (the week
-/// starts Monday, as the header row says), then every day in the month.
-fn month_cells((year, month): (i32, u8)) -> Vec<Option<u8>> {
-    let Ok(time_month) = time::Month::try_from(month) else {
-        return Vec::new();
-    };
-    let lead = time::Date::from_calendar_date(year, time_month, 1)
-        .map(|date| date.weekday().number_days_from_monday())
-        .unwrap_or(0);
-    let days = time_month.length(year);
-    (0..lead)
-        .map(|_| None)
-        .chain((1..=days).map(Some))
-        .collect()
-}
-/// The round "+" from the artboard, and the list of people it opens.
-///
-/// A native `<select>` cannot be made to look like this control, so the picker
-/// is the same popover the deadline uses: a checkbox holds the open state, and
-/// each person is their own one-field form. It works with the wasm bundle
-/// blocked, and it is still the design's round button.
-#[component]
-fn AssigneePicker(
-    task_id: StoredValue<String>,
-    people: Vec<Person>,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    if people.is_empty() {
-        return None;
     }
-    let action = ServerAction::<Assign>::new();
-    let refusal = crate::auth::refusal_of(action);
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let toggle = format!("assign-{}", task_id.get_value());
+}
 
-    Some(view! {
+async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool) -> Result {
+    let remove_title = format!("Take {} off this task", person.display_name);
+    view! {
+        cx =>
+        <span class="assignee-chip" title=(person.display_name.clone())>
+            (avatar(cx, person, "avatar-sm").await?)
+            <span class="assignee-name">(person.display_name.clone())</span>
+            if may_write {
+                <form class="assignee-drop" method="post" action="/api/unassign">
+                    <input type="hidden" name="task_id" value=(task_id.to_string())>
+                    <input type="hidden" name="user_id" value=(person.id.clone())>
+                    <button class="assignee-remove" type="submit" title=(remove_title)>"×"</button>
+                </form>
+            }
+        </span>
+    }
+}
+
+async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person]) -> Result {
+    if people.is_empty() {
+        return view! { cx => };
+    }
+    let toggle = format!("assign-{task_id}");
+    view! {
+        cx =>
         <div class="edit edit-pop assignee-pop">
-            <input
-                class="edit-toggle"
-                // Open, if the page was landed on carrying this call's refusal.
-                // Without script the sentence is rendered inside this region,
-                // and a region that is closed says nothing at all.
-                checked=move || refusal().is_some()
-                type="checkbox"
-                id=toggle.clone()
-                aria-label="Put someone on this task"
-            />
-            <label class="assignee-add edit-view edit-hit" for=toggle.clone()>
-                {glyph::plus()}
-            </label>
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Put someone on this task">
+            <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>"+"</label>
             <div class="edit-form pop-panel">
                 <div class="pop-list">
-                    {people
-                        .into_iter()
-                        .map(|person| {
-                            let name = person.display_name.clone();
-                            view! {
-                                <ActionForm action=action attr:class="pop-row-form">
-                                    <input
-                                        type="hidden"
-                                        name="task_id"
-                                        value=move || task_id.get_value()
-                                    />
-                                    <input type="hidden" name="user_id" value=person.id.clone()/>
-                                    <button class="pop-row" type="submit">
-                                        <Avatar person=person.clone() extra="avatar-sm"/>
-                                        <span class="pop-row-name">{name}</span>
-                                    </button>
-                                </ActionForm>
-                            }
-                        })
-                        .collect_view()}
+                    for person in people {
+                        <form class="pop-row-form" method="post" action="/api/assign">
+                            <input type="hidden" name="task_id" value=(task_id.to_string())>
+                            <input type="hidden" name="user_id" value=(person.id.clone())>
+                            <button class="pop-row" type="submit">
+                                (avatar(cx, person, "avatar-sm").await?)
+                                <span class="pop-row-name">(person.display_name.clone())</span>
+                            </button>
+                        </form>
+                    }
                 </div>
-                {refused(refusal)}
+                (refused(cx, "assign").await?)
             </div>
         </div>
-    })
+    }
 }
 
-/// The 26px "Link a task" chip in the DEPENDENCIES header, and the picker it
-/// opens: the tasks as a list, the direction as two words, one button.
-#[component]
-fn LinkPicker(
-    task_id: StoredValue<String>,
-    linkable: Vec<LinkTarget>,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
+async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget]) -> Result {
     if linkable.is_empty() {
-        return None;
+        return view! { cx => };
     }
-    let action = ServerAction::<LinkTasks>::new();
-    let refusal = crate::auth::refusal_of(action);
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let toggle = format!("link-{}", task_id.get_value());
-    let direction = format!("link-direction-{}", task_id.get_value());
-
-    Some(view! {
+    let toggle = format!("link-{task_id}");
+    view! {
+        cx =>
         <div class="edit edit-pop link-pop">
-            <input
-                class="edit-toggle"
-                // Open, if the page was landed on carrying this call's refusal.
-                // Without script the sentence is rendered inside this region,
-                // and a region that is closed says nothing at all.
-                checked=move || refusal().is_some()
-                type="checkbox"
-                id=toggle.clone()
-                aria-label="Link another task"
-            />
-            <label class="dep-chip edit-view edit-hit" for=toggle.clone()>
-                {glyph::plus()}
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Link another task">
+            <label class="dep-chip edit-view edit-hit" for=(toggle.clone())>
                 <span class="dep-chip-text">"Link a task"</span>
             </label>
             <div class="edit-form pop-panel pop-panel-wide">
-                <ActionForm action=action attr:class="pop-form">
-                    <input type="hidden" name="task_id" value=move || task_id.get_value()/>
+                <form class="pop-form" method="post" action="/api/link_tasks">
+                    <input type="hidden" name="task_id" value=(task_id.to_string())>
                     <div class="pop-list pop-list-scroll">
-                        {linkable
-                            .iter()
-                            .map(|target| {
-                                let key = target.task_key.clone();
-                                let title = target.title.clone();
-                                view! {
-                                    <label class="pick-row">
-                                        <input
-                                            type="radio"
-                                            name="other_id"
-                                            value=target.id.clone()
-                                            required
-                                        />
-                                        <span class="dep-key">{key}</span>
-                                        <span class="pick-title">{title}</span>
-                                    </label>
-                                }
-                            })
-                            .collect_view()}
+                        for target in linkable {
+                            <label class="pick-row">
+                                <input type="radio" name="other_id" value=(target.id.clone()) required="">
+                                <span class="dep-key">(target.task_key.clone())</span>
+                                <span class="pick-title">(target.title.clone())</span>
+                            </label>
+                        }
                     </div>
                     <fieldset class="pick-direction">
                         <legend class="detail-label">"DIRECTION"</legend>
                         <label class="pick-row">
-                            <input
-                                type="radio"
-                                name="direction"
-                                value="blocked_by"
-                                checked
-                                id=format!("{direction}-blocked-by")
-                            />
+                            <input type="radio" name="direction" value="blocked_by" checked="">
                             <span class="pick-title">"blocks this task"</span>
                         </label>
                         <label class="pick-row">
-                            <input
-                                type="radio"
-                                name="direction"
-                                value="blocks"
-                                id=format!("{direction}-blocks")
-                            />
+                            <input type="radio" name="direction" value="blocks">
                             <span class="pick-title">"waits on this task"</span>
                         </label>
                     </fieldset>
                     <div class="edit-row">
-                        <button
-                            class="edit-save"
-                            type="submit"
-                            disabled=move || action.pending().get()
-                        >
-                            "Link"
-                        </button>
-                        <label class="edit-cancel" for=toggle>
-                            "Cancel"
-                        </label>
+                        <button class="edit-save" type="submit">"Link"</button>
+                        <label class="edit-cancel" for=(toggle)>"Cancel"</label>
                     </div>
-                </ActionForm>
-                {refused(refusal)}
+                </form>
+                (refused(cx, "link_tasks").await?)
             </div>
         </div>
-    })
+    }
 }
-#[component]
-fn DetailScreen(
-    snapshot: DetailSnapshot,
-    on_close: impl Fn() + Copy + Send + Sync + 'static,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
+
+async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direction, may_write: bool) -> Result {
+    let cleared = edge.is_cleared();
+    let note = match direction {
+        Direction::BlockedBy => edge.blocked_by_label(),
+        Direction::Blocks => edge.blocks_label(),
+    };
+    let waiting = matches!(direction, Direction::BlockedBy) && !cleared;
+    let wire = match direction {
+        Direction::BlockedBy => "blocked_by",
+        Direction::Blocks => "blocks",
+    };
+    let tag = match direction {
+        Direction::BlockedBy => "BLOCKED BY",
+        Direction::Blocks => "BLOCKS",
+    };
+    view! {
+        cx =>
+        <div class=(class!("dep-row", "dep-row-waiting" if waiting))>
+            <span class="dep-tag">(tag)</span>
+            <span class="dep-key">(edge.task_key.clone())</span>
+            <span class="dep-title">(edge.title.clone())</span>
+            <div class="spacer"></div>
+            <span class="dep-note">(note)</span>
+            if may_write {
+                <form class="dep-unlink-form" method="post" action="/api/unlink_tasks">
+                    <input type="hidden" name="task_id" value=(task_id.to_string())>
+                    <input type="hidden" name="other_id" value=(edge.task_id.clone())>
+                    <input type="hidden" name="direction" value=(wire)>
+                    <button class="dep-unlink" type="submit" title="Remove this link">"×"</button>
+                </form>
+            }
+        </div>
+    }
+}
+
+async fn file_chip(cx: &Cx, file: &izlek_core::detail::FileLine, me: &Me, may_write: bool) -> Result {
+    let _ = may_write;
+    let may_drop = me.id == file.uploaded_by || me.role.can_administer();
+    let on_comment = file.comment_id.is_some();
+    view! {
+        cx =>
+        <span class="file-chip">
+            <a class="file-chip-name" href=(format!("/files/{}", file.id))>(file.name.clone())</a>
+            <span class="file-chip-size">(file.size_label())</span>
+            if on_comment {
+                <span class="file-chip-note">"on a comment"</span>
+            }
+            if may_drop {
+                <form class="file-chip-drop-form" method="post" action="/api/delete_file">
+                    <input type="hidden" name="file_id" value=(file.id.clone())>
+                    <button class="file-chip-drop" type="submit" title="Remove this file">"×"</button>
+                </form>
+            }
+        </span>
+    }
+}
+
+async fn comment_row(cx: &Cx, comment: &Comment) -> Result {
+    view! {
+        cx =>
+        <div class="comment">
+            (avatar(cx, &comment.author, "avatar-lg").await?)
+            <div class="comment-said">
+                <div class="comment-head">
+                    <span class="comment-who">(comment.author.display_name.clone())</span>
+                    <span class="comment-when">(moment_label(comment.at))</span>
+                </div>
+                <div class="comment-body">(comment.body.clone())</div>
+            </div>
+        </div>
+    }
+}
+
+/// The task modal's markup: title, description, assignees, deadline,
+/// dependencies, files, comments, activity and delete, exactly as the
+/// artboard draws them. Wiring `?task=<id>` on the board page is a later
+/// integration slice — this only renders the fragment.
+pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
+    let snapshot = match load_snapshot(cx, task_id).await? {
+        Ok(snapshot) => snapshot,
+        Err(refusal) => {
+            return view! { cx => <div class="modal-scrim"><div class="modal"><p class="modal-note">(refusal.message())</p></div></div> };
+        }
+    };
     let DetailSnapshot {
         detail,
         me,
@@ -1398,592 +835,195 @@ fn DetailScreen(
         attachment_limit_mb: _,
     } = snapshot;
 
-    let id = StoredValue::new(detail.id.clone());
-    let task_key = detail.task_key.clone();
-    let title = detail.title.clone();
-    let description = detail.description.clone();
-    let status = detail.column.name.clone();
-    let column_id = detail.column.id.clone();
-    let columns = detail.columns.clone();
-    let deadline_input = detail.deadline_input();
-    let overdue = detail.is_overdue(today);
-    let deadline_label = detail.deadline_label(today);
-    let assignee_count = detail.assignees.len();
-    let comment_count = detail.comments.len();
-    let file_count = detail.files.len();
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
-    let accept = (!allowed_file_types.is_empty()).then(|| {
-        allowed_file_types
-            .iter()
-            .map(|kind| format!(".{kind}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    });
-    let upload_refusal = crate::auth::refusal_from_query("upload_file");
+    let accept = (!allowed_file_types.is_empty())
+        .then(|| allowed_file_types.iter().map(|kind| format!(".{kind}")).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
 
-    let comment = ServerAction::<PostComment>::new();
-    let remove = ServerAction::<DeleteTask>::new();
-    let move_to = ServerAction::<crate::board::MoveCard>::new();
-    let drop_file = ServerAction::<DeleteFile>::new();
-    let comment_refusal = crate::auth::refusal_of(comment);
-    let remove_refusal = crate::auth::refusal_of(remove);
-    let move_refusal = crate::auth::refusal_of(move_to);
-    let drop_file_refusal = crate::auth::refusal_of(drop_file);
-    // Deleting is two steps: ask what it would cost, then say it out loud and
-    // let the person decide. The artboard's red button had no confirmation and
-    // this action reaches other people's tasks.
-    let ask = ServerAction::<WhatDeleteCosts>::new();
-    // Every action that lands re-reads the task and the board behind it. The
-    // per-region editors own their own actions and do the same.
-    for value in [comment.value(), move_to.value(), drop_file.value()] {
-        Effect::new(move |_| {
-            if matches!(value.get(), Some(Ok(None))) {
-                on_change();
-            }
-        });
-    }
-    let removed = remove.value();
-    Effect::new(move |_| {
-        if matches!(removed.get(), Some(Ok(None))) {
-            on_change();
-            on_close();
-        }
-    });
+    // The delete confirmation is computed eagerly rather than fetched on
+    // demand: there is no script here to hold the intermediate "did they
+    // click delete yet" state, so the cost is already known by the time the
+    // disclosure opens.
+    let cost = if may_delete { accounts(cx).store().deletion_cost(&detail.id).await? } else { None };
 
     view! {
-        <header class="detail-head">
-            <div class="detail-headline">
-                <span class="detail-key">{task_key}</span>
-                <TitleControl task_id=id title=title may_write=may_write on_change=on_change/>
-            </div>
-            <span class="detail-esc">"esc"</span>
-            // A link back to the bare board, so closing works without script; with
-            // script the handler closes in place and the navigation is cancelled.
-            <a
-                class="detail-close"
-                href="/"
-                aria-label="Close this task"
-                on:click=move |event| {
-                    event.prevent_default();
-                    on_close();
-                }
-            >
-                {glyph::cross()}
-            </a>
-        </header>
+        cx =>
+        <div class="modal-scrim">
+            <div class="modal" tabindex="-1">
+                <header class="detail-head">
+                    <div class="detail-headline">
+                        <span class="detail-key">(detail.task_key.clone())</span>
+                        (title_control(cx, &detail, may_write).await?)
+                    </div>
+                    <a class="detail-close" href="/" aria-label="Close this task">"×"</a>
+                </header>
 
-        <div class="detail-fields">
-            <div class="detail-field">
-                <span class="detail-label">"STATUS"</span>
-                {if may_write {
-                    Either::Left(
-                        view! {
-                            <StatusControl
-                                task_id=id
-                                column_id=column_id
-                                columns=columns
-                                action=move_to
-                            />
-                        },
-                    )
-                } else {
-                    Either::Right(
-                        view! {
+                <div class="detail-fields">
+                    <div class="detail-field">
+                        <span class="detail-label">"STATUS"</span>
+                        if may_write {
+                            <form class="status-form" method="post" action="/api/move_card">
+                                <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
+                                <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
+                                <select class="status-select" name="to_column_id">
+                                    for column in &detail.columns {
+                                        <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
+                                    }
+                                </select>
+                                <button class="status-go" type="submit">"Move"</button>
+                            </form>
+                        } else {
                             <span class="field-box">
                                 <span class="status-dot"></span>
-                                <span class="field-text">{status}</span>
+                                <span class="field-text">(detail.column.name.clone())</span>
                             </span>
-                        },
-                    )
-                }}
-                {refused(move_refusal)}
-            </div>
-            <div class="detail-field">
-                <span class="detail-label">
-                    {format!("ASSIGNEES — {assignee_count}")}
-                </span>
-                <div class="detail-assignees">
-                    {detail
-                        .assignees
-                        .iter()
-                        .map(|person| {
-                            view! {
-                                <AssigneeChip
-                                    task_id=id
-                                    person=person.clone()
-                                    may_write=may_write
-                                    on_change=on_change
-                                />
+                        }
+                        (refused(cx, "move_card").await?)
+                    </div>
+                    <div class="detail-field">
+                        <span class="detail-label">(format!("ASSIGNEES — {}", detail.assignees.len()))</span>
+                        <div class="detail-assignees">
+                            for person in &detail.assignees {
+                                (assignee_chip(cx, &detail.id, person, may_write).await?)
                             }
-                        })
-                        .collect_view()}
-                    <div class="spacer"></div>
-                    {may_write
-                        .then(|| {
-                            view! { <AssigneePicker task_id=id people=unassigned on_change=on_change/> }
-                        })}
+                            <div class="spacer"></div>
+                            if may_write {
+                                (assignee_picker(cx, &detail.id, &unassigned).await?)
+                            }
+                        </div>
+                    </div>
+                    <div class="detail-field">
+                        <span class="detail-label">"DEADLINE"</span>
+                        (deadline_control(cx, &detail, today, may_write).await?)
+                    </div>
                 </div>
-            </div>
-            <div class="detail-field">
-                <span class="detail-label">"DEADLINE"</span>
-                <DeadlineControl
-                    task_id=id
-                    deadline_label=deadline_label
-                    deadline_input=deadline_input
-                    overdue=overdue
-                    may_write=may_write
-                    on_change=on_change
-                />
-            </div>
-        </div>
 
-        <section class="detail-block">
-            <span class="detail-label">"DESCRIPTION"</span>
-            <DescriptionControl
-                task_id=id
-                description=description
-                may_write=may_write
-                on_change=on_change
-            />
-        </section>
+                <section class="detail-block">
+                    <span class="detail-label">"DESCRIPTION"</span>
+                    (description_control(cx, &detail, may_write).await?)
+                </section>
 
-        <section class="detail-block">
-            <div class="detail-block-head">
-                <span class="detail-label">"DEPENDENCIES"</span>
-                <div class="spacer"></div>
-                {may_write
-                    .then(|| {
-                        view! { <LinkPicker task_id=id linkable=linkable on_change=on_change/> }
-                    })}
-            </div>
-            {has_deps
-                .then(|| {
-                    view! {
+                <section class="detail-block">
+                    <div class="detail-block-head">
+                        <span class="detail-label">"DEPENDENCIES"</span>
+                        <div class="spacer"></div>
+                        if may_write {
+                            (link_picker(cx, &detail.id, &linkable).await?)
+                        }
+                    </div>
+                    if has_deps {
                         <div class="dep-list">
-                            {detail
-                                .blocked_by
-                                .iter()
-                                .map(|edge| {
-                                    view! {
-                                        <DepRow
-                                            task_id=id
-                                            edge=edge.clone()
-                                            direction=Direction::BlockedBy
-                                            may_write=may_write
-                                            on_change=on_change
-                                        />
-                                    }
-                                })
-                                .collect_view()}
-                            {detail
-                                .blocks
-                                .iter()
-                                .map(|edge| {
-                                    view! {
-                                        <DepRow
-                                            task_id=id
-                                            edge=edge.clone()
-                                            direction=Direction::Blocks
-                                            may_write=may_write
-                                            on_change=on_change
-                                        />
-                                    }
-                                })
-                                .collect_view()}
+                            for edge in &detail.blocked_by {
+                                (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write).await?)
+                            }
+                            for edge in &detail.blocks {
+                                (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write).await?)
+                            }
                         </div>
+                    } else {
+                        <p class="detail-quiet">"Nothing blocks this task."</p>
                     }
-                })}
-            {(!has_deps).then(|| view! { <p class="detail-quiet">"Nothing blocks this task."</p> })}
-        </section>
+                </section>
 
-        <section class="detail-block">
-            <div class="detail-block-head">
-                <span class="detail-label">"FILES"</span>
-                <span class="detail-count">{file_count}</span>
-            </div>
-            {(file_count > 0)
-                .then(|| {
-                    view! {
+                <section class="detail-block">
+                    <div class="detail-block-head">
+                        <span class="detail-label">"FILES"</span>
+                        <span class="detail-count">(detail.files.len())</span>
+                    </div>
+                    if detail.files.is_empty() {
+                        <p class="detail-quiet">"No files yet."</p>
+                    } else {
                         <div class="file-list">
-                            {detail
-                                .files
-                                .iter()
-                                .map(|file| {
-                                    view! { <FileChip file=file.clone() me=me.clone() action=drop_file/> }
-                                })
-                                .collect_view()}
+                            for file in &detail.files {
+                                (file_chip(cx, file, &me, may_write).await?)
+                            }
                         </div>
                     }
-                })}
-            {(file_count == 0).then(|| view! { <p class="detail-quiet">"No files yet."</p> })}
-            {refused(drop_file_refusal)}
-            {may_comment
-                .then(|| {
-                    let upload_input_id = format!("file-upload-{}", id.get_value());
-                    view! {
-                        <form
-                            class="file-upload"
-                            method="post"
-                            action="/files"
-                            enctype="multipart/form-data"
-                        >
-                            <input type="hidden" name="task_id" value=move || id.get_value()/>
-                            <label class="file-upload-submit" for=upload_input_id.clone()>
-                                "Attach"
-                            </label>
-                            <input
-                                class="visually-hidden"
-                                id=upload_input_id
-                                type="file"
-                                name="file"
-                                accept=accept
-                                required
-                                on:change=move |event| {
-                                    let _ = &event;
-                                    #[cfg(feature = "hydrate")]
-                                    {
-                                        use leptos::wasm_bindgen::JsCast;
-                                        if let Some(input) = event
-                                            .target()
-                                            .and_then(|target| {
-                                                target.dyn_into::<leptos::web_sys::HtmlInputElement>().ok()
-                                            })
-                                        {
-                                            if let Some(form) = input.form() {
-                                                let _ = form.request_submit();
-                                            }
-                                        }
-                                    }
-                                }
-                            />
+                    (refused(cx, "delete_file").await?)
+                    if may_comment {
+                        <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
+                            <input type="hidden" name="task_id" value=(detail.id.clone())>
+                            <input class="field-input" type="file" name="file" accept=(accept) required="">
+                            <button class="file-upload-submit" type="submit">"Attach"</button>
                         </form>
-                        {refused(upload_refusal)}
+                        (refused(cx, "upload_file").await?)
                     }
-                })}
-        </section>
+                </section>
 
-        <section class="detail-block">
-            <div class="detail-block-head">
-                <span class="detail-label">"COMMENTS"</span>
-                <span class="detail-count">{comment_count}</span>
-            </div>
-            <div class="comment-list">
-                {detail
-                    .comments
-                    .iter()
-                    .map(|entry| view! { <CommentRow comment=entry.clone()/> })
-                    .collect_view()}
-                {may_comment
-                    .then(|| {
-                        view! {
-                            <ActionForm action=comment attr:class="comment-composer">
-                                <input type="hidden" name="task_id" value=move || id.get_value()/>
-                                <textarea
-                                    class="comment-input"
-                                    name="body"
-                                    rows="3"
-                                    placeholder="Write a comment…"
-                                    required
-                                ></textarea>
+                <section class="detail-block">
+                    <div class="detail-block-head">
+                        <span class="detail-label">"COMMENTS"</span>
+                        <span class="detail-count">(detail.comments.len())</span>
+                    </div>
+                    <div class="comment-list">
+                        for entry in &detail.comments {
+                            (comment_row(cx, entry).await?)
+                        }
+                        if may_comment {
+                            <form class="comment-composer" method="post" action="/api/post_comment">
+                                <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder="Write a comment…" required=""></textarea>
                                 <div class="comment-row">
-                                    <span class="comment-hint">"⌘↵ to post"</span>
                                     <div class="spacer"></div>
-                                    <button
-                                        class="comment-post"
-                                        type="submit"
-                                        disabled=move || comment.pending().get()
-                                    >
-                                        "Comment"
-                                    </button>
+                                    <button class="comment-post" type="submit">"Comment"</button>
                                 </div>
-                            </ActionForm>
-                            {refused(comment_refusal)}
+                            </form>
+                            (refused(cx, "post_comment").await?)
                         }
-                    })}
-            </div>
-        </section>
+                    </div>
+                </section>
 
-        <section class="detail-block">
-            <span class="detail-label">"ACTIVITY"</span>
-            <div class="activity-list">
-                {detail
-                    .activity
-                    .iter()
-                    .map(|entry| {
-                        let who = entry
-                            .actor
-                            .as_ref()
-                            .map(|person| person.display_name.clone())
-                            .unwrap_or_else(|| "Izlek".to_string());
-                        view! {
+                <section class="detail-block">
+                    <span class="detail-label">"ACTIVITY"</span>
+                    <div class="activity-list">
+                        for entry in &detail.activity {
                             <div class="activity-line">
-                                <span class="activity-stamp">{entry.moment()}</span>
-                                <strong class="activity-who">{who}</strong>
-                                <span class="activity-what">{entry.sentence()}</span>
+                                <span class="activity-stamp">(entry.moment())</span>
+                                <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "Izlek".to_string()))</strong>
+                                <span class="activity-what">(entry.sentence())</span>
                             </div>
                         }
-                    })
-                    .collect_view()}
-            </div>
-        </section>
+                    </div>
+                </section>
 
-        {refused(remove_refusal)}
+                (refused(cx, "delete_task").await?)
 
-        {move || {
-            ask.value()
-                .get()
-                .and_then(|answer| answer.ok().and_then(|inner| inner.ok()))
-                .map(|cost| {
-                    let DeletionCost { task_key, title, comment_count, link_count, frees } = cost;
-                    let freed = frees.join(", ");
-                    view! {
-                        <div class="confirm">
-                            <div class="confirm-title">
-                                {format!("Delete {task_key} — {title}?")}
-                            </div>
-                            <ul class="confirm-list">
-                                {(comment_count > 0)
-                                    .then(|| {
-                                        view! {
-                                            <li>
-                                                {if comment_count == 1 {
-                                                    "1 comment goes with it".to_string()
-                                                } else {
-                                                    format!("{comment_count} comments go with it")
-                                                }}
-                                            </li>
-                                        }
-                                    })}
-                                {(link_count > 0)
-                                    .then(|| {
-                                        view! {
-                                            <li>
-                                                {if link_count == 1 {
-                                                    "1 dependency stops applying".to_string()
-                                                } else {
-                                                    format!("{link_count} dependencies stop applying")
-                                                }}
-                                            </li>
-                                        }
-                                    })}
-                                {(!freed.is_empty())
-                                    .then(|| {
-                                        view! { <li>{format!("{freed} stops being blocked")}</li> }
-                                    })}
-                            </ul>
-                            <div class="confirm-note">
-                                "The task keeps its record in the database, but nothing in Izlek brings it back."
-                            </div>
-                            <div class="confirm-row">
-                                <button
-                                    class="detail-cancel"
-                                    type="button"
-                                    on:click=move |_| ask.value().set(None)
-                                >
-                                    "Keep it"
-                                </button>
-                                <ActionForm action=remove attr:class="detail-delete-form">
-                                    <input type="hidden" name="task_id" value=move || id.get_value()/>
-                                    <button
-                                        class="detail-delete detail-delete-sure"
-                                        type="submit"
-                                        disabled=move || remove.pending().get()
-                                    >
-                                        {format!("Delete {task_key}")}
-                                    </button>
-                                </ActionForm>
-                            </div>
-                        </div>
+                <footer class="detail-foot">
+                    if may_delete {
+                        match cost {
+                            Some(cost) => {
+                                let freed = cost.frees.join(", ");
+                                <details class="confirm-details">
+                                    <summary class="detail-delete">"Delete task"</summary>
+                                    <div class="confirm">
+                                        <div class="confirm-title">(format!("Delete {} — {}?", cost.task_key, cost.title))</div>
+                                        <ul class="confirm-list">
+                                            if cost.comment_count > 0 {
+                                                <li>(if cost.comment_count == 1 { "1 comment goes with it".to_string() } else { format!("{} comments go with it", cost.comment_count) })</li>
+                                            }
+                                            if cost.link_count > 0 {
+                                                <li>(if cost.link_count == 1 { "1 dependency stops applying".to_string() } else { format!("{} dependencies stop applying", cost.link_count) })</li>
+                                            }
+                                            if !freed.is_empty() {
+                                                <li>(format!("{freed} stops being blocked"))</li>
+                                            }
+                                        </ul>
+                                        <div class="confirm-note">"The task keeps its record in the database, but nothing in Izlek brings it back."</div>
+                                        <form class="detail-delete-form" method="post" action="/api/delete_task">
+                                            <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                            <button class="detail-delete detail-delete-sure" type="submit">(format!("Delete {}", cost.task_key))</button>
+                                        </form>
+                                    </div>
+                                </details>
+                            },
+                            None => <p class="detail-quiet">"This task cannot be deleted."</p>,
+                        }
                     }
-                })
-        }}
-
-        <footer class="detail-foot">
-            {may_delete
-                .then(|| {
-                    view! {
-                        <ActionForm action=ask attr:class="detail-delete-form">
-                            <input type="hidden" name="task_id" value=move || id.get_value()/>
-                            <button
-                                class="detail-delete"
-                                type="submit"
-                                disabled=move || ask.pending().get()
-                            >
-                                {glyph::bin()}
-                                <span>"Delete task"</span>
-                            </button>
-                        </ActionForm>
-                    }
-                })}
-            <div class="spacer"></div>
-            <button class="detail-cancel" type="button" on:click=move |_| on_close()>
-                "Close"
-            </button>
-        </footer>
-    }
-}
-
-#[component]
-fn AssigneeChip(
-    task_id: StoredValue<String>,
-    person: Person,
-    may_write: bool,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let action = ServerAction::<Unassign>::new();
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let name = person.display_name.clone();
-    let person_id = person.id.clone();
-    let remove_title = format!("Take {name} off this task");
-
-    view! {
-        <span class="assignee-chip" title=name.clone()>
-            <Avatar person=person extra="avatar-sm"/>
-            <span class="assignee-name">{name.clone()}</span>
-            {may_write
-                .then(|| {
-                    view! {
-                        <ActionForm action=action attr:class="assignee-drop">
-                            <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                            <input type="hidden" name="user_id" value=person_id/>
-                            <button
-                                class="assignee-remove"
-                                type="submit"
-                                title=remove_title
-                            >
-                                {glyph::cross()}
-                            </button>
-                        </ActionForm>
-                    }
-                })}
-        </span>
-    }
-}
-
-#[component]
-fn DepRow(
-    task_id: StoredValue<String>,
-    edge: DependencyEdge,
-    direction: Direction,
-    may_write: bool,
-    on_change: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let action = ServerAction::<UnlinkTasks>::new();
-    let value = action.value();
-    Effect::new(move |_| {
-        if matches!(value.get(), Some(Ok(None))) {
-            on_change();
-        }
-    });
-    let cleared = edge.is_cleared();
-    let note = match direction {
-        Direction::BlockedBy => edge.blocked_by_label(),
-        Direction::Blocks => edge.blocks_label(),
-    };
-    // Amber means someone is stuck. This task blocking another one is the
-    // normal state of a dependency and says nothing about this task, so the
-    // colour belongs to the row on the receiving end — and only while its
-    // blocker is unfinished. Otherwise the board's "1 blocked" pill and the row
-    // colour tell two different stories about who is waiting.
-    let waiting = matches!(direction, Direction::BlockedBy) && !cleared;
-    let other_id = edge.task_id.clone();
-    let wire = match direction {
-        Direction::BlockedBy => "blocked_by",
-        Direction::Blocks => "blocks",
-    };
-    // The artboard puts the direction in the row itself, in a fixed column, so
-    // the rows line up whichever way round they run.
-    let tag = match direction {
-        Direction::BlockedBy => "BLOCKED BY",
-        Direction::Blocks => "BLOCKS",
-    };
-
-    view! {
-        <div class="dep-row" class:dep-row-waiting=waiting>
-            <span class="dep-tag">{tag}</span>
-            {if cleared {
-                Either::Left(glyph::tick())
-            } else {
-                Either::Right(glyph::lock())
-            }}
-            <span class="dep-key">{edge.task_key.clone()}</span>
-            <span class="dep-title">{edge.title.clone()}</span>
-            <div class="spacer"></div>
-            <span class="dep-note">{note}</span>
-            {may_write
-                .then(|| {
-                    view! {
-                        <ActionForm action=action attr:class="dep-unlink-form">
-                            <input type="hidden" name="task_id" value=move || task_id.get_value()/>
-                            <input type="hidden" name="other_id" value=other_id/>
-                            <input type="hidden" name="direction" value=wire/>
-                            <button class="dep-unlink" type="submit" title="Remove this link">
-                                {glyph::cross()}
-                            </button>
-                        </ActionForm>
-                    }
-                })}
-        </div>
-    }
-}
-
-/// One attachment, chip-shaped like a dependency. A file posted with a
-/// comment stays listed here too — a person hunting for what someone
-/// attached should not have to remember which comment it rode in on — with a
-/// quiet note saying where it came from.
-#[component]
-fn FileChip(
-    file: izlek_core::detail::FileLine,
-    me: Me,
-    action: ServerAction<DeleteFile>,
-) -> impl IntoView {
-    let may_drop = me.id == file.uploaded_by || me.role.can_administer();
-    let size = file.size_label();
-    let on_comment = file.comment_id.is_some();
-    let file_id = file.id.clone();
-
-    view! {
-        <span class="file-chip">
-            <a class="file-chip-name" href=format!("/files/{}", file.id)>
-                {file.name.clone()}
-            </a>
-            <span class="file-chip-size">{size}</span>
-            {on_comment.then(|| view! { <span class="file-chip-note">"on a comment"</span> })}
-            {may_drop
-                .then(|| {
-                    view! {
-                        <ActionForm action=action attr:class="file-chip-drop-form">
-                            <input type="hidden" name="file_id" value=file_id/>
-                            <button class="file-chip-drop" type="submit" title="Remove this file">
-                                {glyph::cross()}
-                            </button>
-                        </ActionForm>
-                    }
-                })}
-        </span>
-    }
-}
-
-#[component]
-fn CommentRow(comment: Comment) -> impl IntoView {
-    use izlek_core::detail::moment_label;
-
-    let author = comment.author.clone();
-    view! {
-        <div class="comment">
-            <Avatar person=author extra="avatar-lg"/>
-            <div class="comment-said">
-                <div class="comment-head">
-                    <span class="comment-who">{comment.author.display_name.clone()}</span>
-                    <span class="comment-when">{moment_label(comment.at)}</span>
-                </div>
-                <div class="comment-body">{comment.body.clone()}</div>
+                    <div class="spacer"></div>
+                    <a class="detail-cancel" href="/">"Close"</a>
+                </footer>
             </div>
         </div>
     }
