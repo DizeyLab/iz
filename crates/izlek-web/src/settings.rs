@@ -442,10 +442,33 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
 #[derive(serde::Deserialize)]
 struct SaveProfileForm {
     display_name: String,
+    /// Absent on a form that never got the field — kept as it was, same as
+    /// `theme`/`language` below.
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
-/// Renames the person asking. Nobody renames anybody else here: the id comes
-/// from the session, never from the form.
+/// The offsets the timezone field offers, `"UTC-12:00"` through `"UTC+14:00"`.
+///
+/// Decision: `time` (already a dependency) has no tz-database, and this
+/// workspace has no other crate that carries one — adding one just for a
+/// display label is a new dependency for what "show logs in my timezone"
+/// does not need. Fixed offsets satisfy it; `"UTC"` stands for +00:00.
+fn zone_options() -> Vec<String> {
+    (-12..=14)
+        .map(|hour: i32| {
+            if hour == 0 {
+                "UTC".to_string()
+            } else {
+                format!("UTC{}{:02}:00", if hour > 0 { "+" } else { "-" }, hour.abs())
+            }
+        })
+        .collect()
+}
+
+/// Renames the person asking and sets their display-only preferences. Nobody
+/// touches anybody else here: the id comes from the session, never from the
+/// form.
 #[route(POST "/api/save_profile")]
 async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let user = match require_user(cx).await {
@@ -456,10 +479,17 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     if display_name.is_empty() {
         return Ok(saved_or_refused("save_profile", Some(Refusal::EmptyName)));
     }
-    let outcome = accounts(cx)
-        .store()
-        .set_profile(&user.id, &display_name, user.photo_path.as_deref())
-        .await;
+    let timezone = input.timezone.unwrap_or_else(|| user.timezone.clone());
+    if !zone_options().contains(&timezone) {
+        return Ok(saved_or_refused("save_profile", Some(Refusal::BadZone)));
+    }
+    let accounts = accounts(cx);
+    let store = accounts.store();
+    let outcome = store.set_profile(&user.id, &display_name, user.photo_path.as_deref()).await.and(
+        store
+            .set_preferences(&user.id, &timezone, &user.theme, &user.language)
+            .await,
+    );
     let refusal = match outcome {
         Ok(()) => None,
         Err(problem) => {
@@ -725,6 +755,14 @@ async fn settings_page(cx: &Cx) -> Result {
                         <label class="field">
                             <span class="field-label">"EMAIL"</span>
                             <input class="field-input" type="email" value=(user.email.clone()) disabled="">
+                        </label>
+                        <label class="field">
+                            <span class="field-label">"TIMEZONE"</span>
+                            <select class="field-input" name="timezone">
+                                for zone in zone_options() {
+                                    <option value=(zone.clone()) selected=(zone == user.timezone)>(zone)</option>
+                                }
+                            </select>
                         </label>
                         <div class="panel-foot">
                             if let Some(refusal) = &profile_refusal {

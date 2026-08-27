@@ -6,7 +6,7 @@
 //! renders these exact types.
 
 use serde::{Deserialize, Serialize};
-use time::{Date, OffsetDateTime};
+use time::{Date, OffsetDateTime, UtcOffset};
 
 use crate::board::{Column, Person, day_label};
 
@@ -219,14 +219,75 @@ impl ActivityEntry {
     }
 }
 
-/// `Aug 19 11:04`. Times are UTC, as everything stored is.
+/// `Aug 19 11:04`, in UTC. Stored data stays UTC; a viewer's own timezone is
+/// display-only, so callers that know it want [`moment_label_in`] instead.
 pub fn moment_label(at: OffsetDateTime) -> String {
+    moment_label_in(at, UtcOffset::UTC)
+}
+
+/// As [`moment_label`], shifted into `offset` first — a viewer's stored
+/// display timezone. What is stored never changes; only the label does.
+pub fn moment_label_in(at: OffsetDateTime, offset: UtcOffset) -> String {
+    let at = at.to_offset(offset);
     format!(
         "{} {:02}:{:02}",
         day_label(at.date()),
         at.hour(),
         at.minute()
     )
+}
+
+/// Parses a stored `User::timezone` value — `"UTC"` or `"UTC+03:00"` /
+/// `"UTC-05:00"` — into the offset it names. There is no tz-database here
+/// (see the settings vocabulary decision), only fixed offsets, so anything
+/// that is not one of those is display-only weirdness rather than a reason
+/// to error: it falls back to UTC.
+pub fn parse_zone(zone: &str) -> UtcOffset {
+    let Some(rest) = zone.strip_prefix("UTC") else {
+        return UtcOffset::UTC;
+    };
+    if rest.is_empty() {
+        return UtcOffset::UTC;
+    }
+    let (sign, rest): (i8, &str) = if let Some(rest) = rest.strip_prefix('+') {
+        (1, rest)
+    } else if let Some(rest) = rest.strip_prefix('-') {
+        (-1, rest)
+    } else {
+        return UtcOffset::UTC;
+    };
+    let Some((hours, minutes)) = rest.split_once(':') else {
+        return UtcOffset::UTC;
+    };
+    let (Ok(hours), Ok(minutes)) = (hours.parse::<i8>(), minutes.parse::<i8>()) else {
+        return UtcOffset::UTC;
+    };
+    UtcOffset::from_hms(sign * hours, sign * minutes, 0).unwrap_or(UtcOffset::UTC)
+}
+
+#[cfg(test)]
+mod zone_tests {
+    use super::*;
+
+    #[test]
+    fn a_stamp_shifts_with_the_stored_offset() {
+        let at = time::macros::datetime!(2026-08-19 11:04 UTC);
+        assert_eq!(moment_label(at), "Aug 19 11:04");
+        assert_eq!(
+            moment_label_in(at, parse_zone("UTC+03:00")),
+            "Aug 19 14:04"
+        );
+        assert_eq!(
+            moment_label_in(at, parse_zone("UTC-05:00")),
+            "Aug 19 06:04"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_zone_falls_back_to_utc() {
+        assert_eq!(parse_zone("nonsense"), UtcOffset::UTC);
+        assert_eq!(parse_zone("UTC"), UtcOffset::UTC);
+    }
 }
 
 /// Everything one task detail needs, in one value.

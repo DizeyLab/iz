@@ -2173,6 +2173,70 @@ async fn an_admin_reads_the_logs() {
     assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
 }
 
+/// The `"at"` field of the activity row whose `"title"` matches, read out of
+/// a `/api/current_logs` body the way `person_id` reads an id.
+fn moment_for(body: &str, title: &str) -> String {
+    let needle = format!("\"title\":\"{title}\"");
+    let before = body.split_once(&needle).map(|(head, _)| head).unwrap_or_else(|| panic!("no such title in {body}"));
+    before.rsplit_once("\"at\":\"").and_then(|(_, rest)| rest.split('"').next()).expect("no at before the title").to_string()
+}
+
+/// The hour out of a `moment_label`-shaped stamp like `"Aug 19 11:04"`.
+fn hour_of(moment: &str) -> u32 {
+    moment
+        .rsplit(' ')
+        .next()
+        .and_then(|hm| hm.split(':').next())
+        .and_then(|h| h.parse().ok())
+        .unwrap_or_else(|| panic!("not a moment: {moment}"))
+}
+
+#[tokio::test]
+async fn a_stamp_shifts_with_the_viewers_stored_timezone() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let _task = a_task(&app, &admin_cookie, &columns[0], "Ship it").await;
+
+    let utc = until_logs_contains(&app, &admin_cookie, "\"title\":\"Ship it\"").await;
+    let utc_at = moment_for(&utc, "Ship it");
+
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+        )
+        .await;
+    assert!(
+        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let shifted = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    let shifted_at = moment_for(&shifted.body, "Ship it");
+
+    assert_ne!(utc_at, shifted_at, "utc={utc_at} shifted={shifted_at}");
+    assert_eq!(hour_of(&shifted_at), (hour_of(&utc_at) + 3) % 24, "utc={utc_at} shifted={shifted_at}");
+}
+
+#[tokio::test]
+async fn an_unlisted_timezone_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("timezone", "Mars/Olympus_Mons")],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=bad-zone&on=save_profile"), "{location}");
+}
+
 /// Creating a task files its own Created activity, but the column it lands
 /// in also fires a `Transition` the way a drop does — a `StatusBecomes` rule
 /// armed on that column must owe mail on creation, not only on a later move.

@@ -14,7 +14,7 @@ use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
-use topcoat::runtime::{Event, procedure, shard};
+use topcoat::runtime::{Event, Surrogated, procedure, shard};
 use topcoat::view::view;
 
 use crate::server::{Refusal, accounts, mail, require_user, require_writer};
@@ -173,10 +173,35 @@ async fn move_card_procedure(
     }
 }
 
+/// `deadline`, `created` or `title` — the "Sort" control in the filter bar.
+/// Anything else (a hand-edited or stale query string) falls back to
+/// `deadline` silently.
+const SORT_KEYS: [&str; 3] = ["deadline", "created", "title"];
+
+fn valid_sort(sort: Option<&str>) -> &'static str {
+    match sort {
+        Some("created") => "created",
+        Some("title") => "title",
+        _ => "deadline",
+    }
+}
+
+/// `deadline` is the order [`izlek_core::board::load`] already hands back
+/// (soonest first); the other two re-order in place here so core stays free
+/// of a UI sort preference. `created` reads the task id, a ULID, which sorts
+/// lexically by the moment it was minted — newest first.
+fn sort_column_cards(cards: &mut [TaskCard], sort: &str) {
+    match sort {
+        "created" => cards.sort_by(|a, b| b.id.cmp(&a.id)),
+        "title" => cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        _ => {}
+    }
+}
+
 /// The whole column list. `version` carries no meaning of its own — bumping
 /// it is what tells the browser to ask for this again after a drop lands.
 #[shard]
-async fn board_columns(cx: &Cx, version: f64) -> Result {
+async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
     let _ = version;
     let user = match require_user(cx).await {
         Ok(user) => user,
@@ -188,13 +213,16 @@ async fn board_columns(cx: &Cx, version: f64) -> Result {
         }
     };
     let store = accounts(cx).store().clone();
-    let Some(view_data) = izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
+    let Some(mut view_data) = izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
     else {
         return view! {
             cx =>
             <div class="scaffold-note"><p>"Something went wrong."</p></div>
         };
     };
+    for column in &mut view_data.columns {
+        sort_column_cards(&mut column.cards, &sort);
+    }
     let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
     let empty = view_data.is_empty();
@@ -413,10 +441,21 @@ struct BoardQuery {
     task: Option<String>,
     refusal: Option<String>,
     on: Option<String>,
+    sort: Option<String>,
+}
+
+/// The noun a sort key shows in the `<select>` — terse, no explainer.
+fn sort_label(sort: &str) -> &'static str {
+    match sort {
+        "created" => "Created",
+        "title" => "Title",
+        _ => "Deadline",
+    }
 }
 
 /// The signed-in board: the topbar, the filter chips and the shard that owns
 /// every column and card.
+#[allow(unused_variables)]
 pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let view_data = {
         let store = accounts(cx).store().clone();
@@ -433,6 +472,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let blocked = view_data.blocked_count();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
+    let sort = valid_sort(query.sort.as_deref());
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
         _ => None,
@@ -451,7 +491,16 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>
-            <span class="sort-note">"Sort: deadline"</span>
+            <form class="field-box" method="get" action="/">
+                <span class="field-text">"Sort"</span>
+                <select class="status-select" name="sort"
+                    @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
+                >
+                    for key in SORT_KEYS {
+                        <option value=(key) selected=(key == sort)>(sort_label(key))</option>
+                    }
+                </select>
+            </form>
             <div class="spacer"></div>
             if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} overdue"))</span> }
             if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} blocked"))</span> }
@@ -474,12 +523,64 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                     }
                 })
             >
-                board_columns(version: $(version.get()))
+                board_columns(version: $(version.get()), sort: $(sort.to_string().into_surrogate()))
             </div>
         </main>
         if let Some(task_id) = &open_task {
             (crate::detail::task_modal(cx, task_id).await?)
         }
         (card_menu_script(cx).await?)
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::{TaskCard, sort_column_cards, valid_sort};
+
+    fn card(id: &str, title: &str) -> TaskCard {
+        TaskCard {
+            id: id.to_string(),
+            task_key: id.to_string(),
+            title: title.to_string(),
+            column_id: "col".to_string(),
+            deadline: None,
+            done_at: None,
+            position: 0.0,
+            assignees: Vec::new(),
+            comment_count: 0,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn deadline_is_left_alone() {
+        let mut cards = vec![card("b", "Bravo"), card("a", "Alpha")];
+        sort_column_cards(&mut cards, "deadline");
+        assert_eq!(cards[0].id, "b");
+        assert_eq!(cards[1].id, "a");
+    }
+
+    #[test]
+    fn created_orders_newest_ulid_first() {
+        let mut cards = vec![card("01AAAA", "old"), card("01ZZZZ", "new")];
+        sort_column_cards(&mut cards, "created");
+        assert_eq!(cards[0].id, "01ZZZZ");
+        assert_eq!(cards[1].id, "01AAAA");
+    }
+
+    #[test]
+    fn title_orders_case_insensitively() {
+        let mut cards = vec![card("1", "zebra"), card("2", "Apple")];
+        sort_column_cards(&mut cards, "title");
+        assert_eq!(cards[0].title, "Apple");
+        assert_eq!(cards[1].title, "zebra");
+    }
+
+    #[test]
+    fn invalid_query_param_falls_back_to_deadline() {
+        assert_eq!(valid_sort(Some("bogus")), "deadline");
+        assert_eq!(valid_sort(None), "deadline");
+        assert_eq!(valid_sort(Some("created")), "created");
     }
 }

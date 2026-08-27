@@ -152,6 +152,7 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         Ok(user) => user,
         Err(refusal) => return Ok(Err(refusal)),
     };
+    let zone = izlek_core::detail::parse_zone(&user.timezone);
     let store = accounts(cx).store().clone();
 
     let sends = store.mail_queue(LIMIT).await?;
@@ -182,7 +183,9 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
             },
             attempts: send.attempts,
             last_error: send.last_error,
-            next_attempt: send.next_attempt_at.map(izlek_core::detail::moment_label),
+            next_attempt: send
+                .next_attempt_at
+                .map(|at| izlek_core::detail::moment_label_in(at, zone)),
         });
     }
 
@@ -213,7 +216,7 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
             event_id: decision.event_id,
             task,
             happened,
-            at: izlek_core::detail::moment_label(decision.at),
+            at: izlek_core::detail::moment_label_in(decision.at, zone),
             verdicts: vec![verdict],
         });
     }
@@ -223,7 +226,7 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         .await?
         .into_iter()
         .map(|line| ActivityRow {
-            at: izlek_core::detail::moment_label(line.at),
+            at: izlek_core::detail::moment_label_in(line.at, zone),
             actor: line.actor_name.unwrap_or_else(|| "The system".to_string()),
             sentence: activity_sentence(&line.kind, &line.detail),
             title: line.title,

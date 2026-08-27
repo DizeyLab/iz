@@ -307,6 +307,8 @@ pub enum Refusal {
     EmptyName,
     /// A limit of nothing, or a limit wider than the disk should promise.
     BadLimit,
+    /// The timezone field was not one of the offsets the form offers.
+    BadZone,
     /// Something in the allowed-types list is not a file extension.
     BadFileType,
     /// The sender panel was saved with a field it cannot work without, or with
@@ -357,6 +359,7 @@ impl Refusal {
                 "A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."
                     .to_string()
             }
+            Refusal::BadZone => "That is not a timezone.".to_string(),
             Refusal::BadFileType => {
                 "File types are extensions — png, pdf, zip — separated by commas.".to_string()
             }
@@ -393,6 +396,7 @@ impl Refusal {
             "empty-title" => Refusal::EmptyTitle,
             "empty-name" => Refusal::EmptyName,
             "bad-limit" => Refusal::BadLimit,
+            "bad-zone" => Refusal::BadZone,
             "bad-file-type" => Refusal::BadFileType,
             // The specific complaint (which field, and why) lives only in the
             // response the save itself returned; a code that survived a round
@@ -441,6 +445,7 @@ impl Refusal {
             Refusal::EmptyTitle => "empty-title",
             Refusal::EmptyName => "empty-name",
             Refusal::BadLimit => "bad-limit",
+            Refusal::BadZone => "bad-zone",
             Refusal::BadFileType => "bad-file-type",
             Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
@@ -702,6 +707,7 @@ mod refusal_message_tests {
             Refusal::FileTooBig,
             Refusal::FileTypeNotAllowed,
             Refusal::BadDeadline,
+            Refusal::BadZone,
             Refusal::Cycle,
             Refusal::MovedAlready,
             Refusal::NotFound,
