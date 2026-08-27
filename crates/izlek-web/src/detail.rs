@@ -662,7 +662,9 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 /// only then does the modal itself navigate away.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
-    const JS: &str = "document.addEventListener('keydown', function (e) { if (e.key !== 'Escape') { return; } var confirm = document.querySelector('details.confirm-details[open]'); if (confirm) { confirm.removeAttribute('open'); return; } window.location.href = '/'; });";
+    const JS: &str = "\
+        document.addEventListener('keydown', function (e) { if (e.key !== 'Escape') { return; } var confirm = document.querySelector('details.confirm-details[open]'); if (confirm) { confirm.removeAttribute('open'); return; } window.location.href = '/'; }); \
+        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { confirm.removeAttribute('open'); } }, true);";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -699,7 +701,7 @@ async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) 
 
 async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
     let empty = task.description.trim().is_empty();
-    let prose = if empty { t(lang, Key::NoDescriptionYet).to_string() } else { task.description.clone() };
+    let prose = task.description.clone();
 
     if !may_write {
         return view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> };
@@ -949,7 +951,7 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
 // `raw!` macro resolves `${e}` through its own name table, keyed on the
 // closure param's identifier text, not through the generated closure body.
 #[allow(unused_variables)]
-pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
+pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
@@ -1067,8 +1069,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                                 (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
                             }
                         </div>
-                    } else {
-                        <p class="detail-quiet">(t(lang, Key::NothingBlocksThisTask))</p>
                     }
                 </section>
 
@@ -1077,9 +1077,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                         <span class="detail-label">(t(lang, Key::Files))</span>
                         <span class="detail-count">(detail.files.len())</span>
                     </div>
-                    if detail.files.is_empty() {
-                        <p class="detail-quiet">(t(lang, Key::NoFilesYet))</p>
-                    } else {
+                    if !detail.files.is_empty() {
                         <div class="file-list">
                             for file in &detail.files {
                                 (file_chip(cx, file, &me, may_write, lang).await?)
@@ -1091,8 +1089,12 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                         <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
                             <input type="hidden" name="task_id" value=(detail.id.clone())>
                             <label class="field-box file-upload-box">
-                                <span class="field-text">(t(lang, Key::File))</span>
-                                <input class="file-upload-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
+                                (glyph::plus(cx).await?)
+                                <span class="field-text file-upload-name">(t(lang, Key::File))</span>
+                                <input class="file-upload-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!(
+                                    "(() => { var input = ${e}.inner.target; var name = input.closest('label').querySelector('.file-upload-name'); if (input.files && input.files[0]) { name.textContent = input.files[0].name; } input.form.requestSubmit(); })()",
+                                    ()
+                                ))>
                             </label>
                             <button class="quiet" type="submit">(t(lang, Key::Attach))</button>
                         </form>
@@ -1143,7 +1145,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                         match cost {
                             Some(cost) => {
                                 let freed = cost.frees.join(", ");
-                                <details class="confirm-details">
+                                <details class="confirm-details" open=(confirm_delete)>
                                     <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
                                     <div class="confirm">
                                         <div class="confirm-title">(format!("{}: {} — {}?", t(lang, Key::DeleteTask), cost.task_key, cost.title))</div>
@@ -1160,7 +1162,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                                         </ul>
                                         <form class="detail-delete-form" method="post" action="/api/delete_task">
                                             <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                            <button class="detail-delete detail-delete-sure" type="submit">(format!("{}: {}", t(lang, Key::DeleteTask), cost.task_key))</button>
+                                            <button class="detail-delete detail-delete-sure" type="submit">(t(lang, Key::DeleteTask))</button>
                                         </form>
                                     </div>
                                 </details>
@@ -1171,6 +1173,61 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                     <div class="spacer"></div>
                     <a class="quiet" href="/">(t(lang, Key::Close))</a>
                 </footer>
+            </div>
+        </div>
+        (escape_closes(cx).await?)
+    }
+}
+
+/// The "New task" popup: a house modal wearing the same scrim/panel chrome
+/// as [`task_modal`], with a form posting straight to `/api/create_task`.
+/// Wired off the board top bar's "New task" button as `/?new=1`.
+pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -> Result {
+    view! {
+        cx =>
+        <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
+            <div class="modal modal-new-task" tabindex="-1" @click=$(|e: Event| e.stop_propagation())>
+                <header class="detail-head">
+                    <span class="detail-headline">(t(lang, Key::NewTask))</span>
+                    <span class="detail-esc">(t(lang, Key::Esc))</span>
+                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
+                </header>
+                <form class="new-task-form" method="post" action="/api/create_task">
+                    <label class="field">
+                        <span class="field-label">(t(lang, Key::Title))</span>
+                        <input class="field-input" type="text" name="title" autocomplete="off" required="">
+                    </label>
+                    <div class="new-task-row">
+                        <label class="field">
+                            <span class="field-label">(t(lang, Key::Status))</span>
+                            <span class="field-box">
+                                <select class="status-select" name="column_id">
+                                    for column in columns {
+                                        <option value=(column.0.clone())>(column.1.clone())</option>
+                                    }
+                                </select>
+                                (glyph::chevron(cx).await?)
+                            </span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">(t(lang, Key::Deadline))</span>
+                            <span class="field-box">
+                                (glyph::calendar(cx).await?)
+                                <input class="field-text new-task-date" type="date" name="deadline">
+                            </span>
+                        </label>
+                    </div>
+                    <label class="field">
+                        <span class="field-label">(t(lang, Key::Description))</span>
+                        <textarea class="detail-textarea" name="description" rows="4"></textarea>
+                    </label>
+                    (refused(cx, "create_task", lang).await?)
+                    <div class="new-task-foot">
+                        <div class="spacer"></div>
+                        <a class="quiet" href="/">(t(lang, Key::Cancel))</a>
+                        <button class="primary" type="submit">(t(lang, Key::NewTask))</button>
+                    </div>
+                </form>
             </div>
         </div>
         (escape_closes(cx).await?)

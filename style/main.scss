@@ -55,53 +55,53 @@
   --topbar-height: 56px;
 }
 
-// Dark, per user (settings.rs SaveProfileForm.theme). Same warm palette,
-// inverted: surfaces sit in the --ink family, ink reads as warm off-white,
-// the terracotta accent (--danger) lightens to stay legible.
+// Dark, per user (settings.rs SaveProfileForm.theme). Reference class:
+// Linear/GitHub dark — near-black page, each layer one small, low-contrast
+// step lighter (bg < column < card), muted borders, no glowing accent.
 [data-theme="dark"] {
-  --bg: #1c1b18;
+  --bg: #121110;
   --surface: #242220;
-  --border: #34322c;
-  --border-strong: #3f3c35;
-  --ink: #f4f0e6;
-  --muted: #b7b0a0;
-  --muted-soft: #8d8676;
-  --accent: #7d93c4;
-  --accent-tint: #262b38;
-  --accent-ink: #c3cee6;
+  --border: #322f2a;
+  --border-strong: #3d3931;
+  --ink: #e9e5da;
+  --muted: #a89f8e;
+  --muted-soft: #7b7364;
+  --accent: #8797bd;
+  --accent-tint: #23283a;
+  --accent-ink: #c7d0e6;
 
-  --field-bg: #29271f;
-  --surface-sunken: #2a2822;
-  --surface-muted: #201f1a;
-  --ink-soft: #d8d2c4;
-  --row-hover: #2e2c25;
-  --panel-sunken: #2b2924;
-  --border-soft: #423f37;
-  --border-faint: #2c2a25;
-  --scrim: rgba(0, 0, 0, 0.55);
+  --field-bg: #1e1c19;
+  --surface-sunken: #1b1917;
+  --surface-muted: #171512;
+  --ink-soft: #d6d0c2;
+  --row-hover: #2b2924;
+  --panel-sunken: #201e1a;
+  --border-soft: #2c2924;
+  --border-faint: #211f1b;
+  --scrim: rgba(0, 0, 0, 0.7);
   --on-strong: #fffefb;
 
-  --danger: #c9683f;
-  --danger-tint: #3a251d;
-  --danger-tint-soft: #35231d;
-  --danger-tint-alt: #33221c;
-  --danger-border: #6b4536;
-  --danger-border-soft: #4a352c;
-  --danger-border-alt: #4a3226;
+  --danger: #c97052;
+  --danger-tint: #2e2019;
+  --danger-tint-soft: #291d18;
+  --danger-tint-alt: #281c17;
+  --danger-border: #5c4030;
+  --danger-border-soft: #423029;
+  --danger-border-alt: #402c23;
 
-  --warn-ink: #d3a355;
-  --warn-tint: #3a331d;
-  --warn-tint-soft: #332c1a;
-  --warn-border: #6b5a34;
+  --warn-ink: #c9a262;
+  --warn-tint: #2e2716;
+  --warn-tint-soft: #292314;
+  --warn-border: #5c4d2c;
 
-  --positive: #8fb86a;
-  --positive-ink: #8fc46a;
-  --positive-tint: #22301c;
-  --positive-border: #3e5a30;
+  --positive: #8ab06a;
+  --positive-ink: #93bd74;
+  --positive-tint: #1c2417;
+  --positive-border: #384a2b;
 
-  --accent-strong: #7f93c4;
-  --accent-border: #3a4256;
-  --accent-border-strong: #3c455c;
+  --accent-strong: #8797bd;
+  --accent-border: #333a4c;
+  --accent-border-strong: #383f52;
 
   --avatar-tone-1: #9c845e;
   --avatar-tone-3: #9c6270;
@@ -237,6 +237,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  margin-top: 20px;
 }
 
 .auth-label {
@@ -474,38 +475,11 @@ a {
   color: var(--muted-soft);
 }
 
-.column-add {
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--muted);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-
-  &:hover { background: var(--border); }
-}
-
 .column-cards {
   display: flex;
   flex-direction: column;
   gap: 10px;
   flex: 1;
-}
-
-.column-empty-add {
-  border: 1px dashed var(--border-soft);
-  border-radius: 8px;
-  padding: 14px;
-  background: transparent;
-  color: var(--muted-soft);
-  font-family: inherit;
-  font-size: 13px;
-  cursor: pointer;
-
-  &:hover { color: var(--ink); }
 }
 
 .card {
@@ -678,90 +652,6 @@ a {
 
 .card-menu-danger { color: var(--danger); }
 
-.board-empty {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 28px 40px;
-  box-shadow: 0 4px 16px rgba(28, 27, 24, 0.08);
-
-  &-title {
-    font-size: 16px;
-    font-weight: 600;
-  }
-
-  &-sub {
-    font-size: 13px;
-    color: var(--muted);
-    text-align: center;
-    line-height: 1.5;
-  }
-}
-
-.composer {
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-
-  &[hidden] { display: none; }
-}
-
-.composer-input {
-  width: 100%;
-  height: 34px;
-  padding: 0 10px;
-  background: var(--field-bg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  font-family: inherit;
-  font-size: 14px;
-  color: var(--ink);
-}
-
-.composer-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.composer-add {
-  height: 30px;
-  padding: 0 12px;
-  background: var(--accent);
-  color: var(--surface);
-  border: none;
-  border-radius: var(--radius);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.composer-cancel {
-  height: 30px;
-  padding: 0 10px;
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--muted);
-  cursor: pointer;
-}
-
-
 // -- the task detail modal --------------------------------------------------
 //
 // The modal is a view. Every region that can be changed is a `<form>` wearing
@@ -801,6 +691,34 @@ a {
   margin: 8px 24px 0;
   font-size: 13px;
   color: var(--danger);
+}
+
+.modal-new-task { width: 480px; }
+
+.new-task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px 24px;
+}
+
+.new-task-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.new-task-date {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  color: inherit;
+}
+
+.new-task-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 // -- the edit state ---------------------------------------------------------
@@ -1537,9 +1455,11 @@ a {
 
 .file-upload-box {
   position: relative;
-  flex: 1;
-  min-width: 0;
+  flex: none;
+  max-width: 220px;
 }
+
+.file-upload-name { max-width: 160px; }
 
 .file-upload-input {
   position: absolute;
@@ -1717,9 +1637,9 @@ a {
   max-width: calc(100% - 48px);
   margin: 0;
   padding: 18px 20px;
-  border: 1px solid var(--danger-border);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: var(--danger-tint-soft);
+  background: var(--surface);
   box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
 }
 
@@ -1743,11 +1663,6 @@ a {
   margin-top: 12px;
 }
 
-.detail-delete-sure {
-  border-color: var(--danger);
-  background: var(--danger);
-  color: var(--on-strong);
-}
 
 // --- Settings (Settings and MemberSettings artboards) ----------------------
 
@@ -1893,11 +1808,31 @@ a {
   gap: 6px;
   flex-grow: 1;
   min-width: 0;
+  margin-top: 20px;
 }
 
 .field-row {
   display: flex;
   gap: 16px;
+  margin-top: 20px;
+}
+
+// A field's own top margin gives real separation from whatever sits above it
+// — a sibling field, a lede, a foot. The first field in a container needs
+// none (the container's own padding already stands off), and a field that
+// is one of a row's two columns takes its spacing from the row instead, or
+// the pair would drift out of line with each other.
+.field:first-child,
+.auth-field:first-child,
+.rule-field:first-child,
+.field-row:first-child,
+.new-task-row:first-child {
+  margin-top: 0;
+}
+
+.field-row > .field,
+.new-task-row > .field {
+  margin-top: 0;
 }
 
 .field-narrow { flex-grow: 0; width: 120px; }
@@ -1970,6 +1905,9 @@ select.field-input {
 }
 
 .primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 36px;
   padding: 0 16px;
   background: var(--accent);
@@ -1979,9 +1917,10 @@ select.field-input {
   font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 
-  &:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  &:hover { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--surface); }
 }
 
 // -- the member list --------------------------------------------------------
@@ -1989,6 +1928,7 @@ select.field-input {
 .member-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 13px;
 
   th {
@@ -2002,8 +1942,11 @@ select.field-input {
     border-bottom: 1px solid var(--border);
   }
 
+  th:last-child, td:last-child { width: 30%; }
+
   td {
-    padding: 10px 12px 10px 0;
+    height: 48px;
+    padding: 0 12px 0 0;
     vertical-align: middle;
   }
 
@@ -2012,14 +1955,25 @@ select.field-input {
   }
 }
 
-.member-name {
-  font-weight: 600;
+// Every data cell's content sits in a row wrapper, not the `<td>` itself:
+// `display: flex` directly on a `<td>` drops it out of the table's row/column
+// model, which is what left this list's columns loose and its rows
+// unevenly centered.
+.member-name-row,
+.member-account-row {
   display: flex;
   align-items: center;
-  gap: 8px;
 }
 
+.member-name { font-weight: 600; }
+.member-name-row { gap: 8px; }
+
 .member-you {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--field-bg);
+  border: 1px solid var(--border-strong);
   font-size: 11px;
   font-weight: 500;
   color: var(--muted);
@@ -2031,17 +1985,15 @@ select.field-input {
   color: var(--muted);
 }
 
-.member-account {
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
+.member-account { color: var(--muted); }
+.member-account-row { justify-content: space-between; gap: 10px; }
+.member-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.member-resend { display: inline-flex; }
+.member-resend { display: inline-flex; flex: none; }
 
 .quiet {
+  display: inline-flex;
+  align-items: center;
   height: 28px;
   padding: 0 10px;
   background: var(--surface);
@@ -2050,6 +2002,7 @@ select.field-input {
   font-family: var(--font-sans);
   font-size: 12px;
   color: var(--accent);
+  text-decoration: none;
   cursor: pointer;
 
   &:hover { border-color: var(--accent); color: var(--accent-ink); }
@@ -2080,14 +2033,6 @@ select.field-input {
   font-size: 12px;
   color: var(--accent-ink);
   word-break: break-all;
-}
-
-.role-note {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--border);
 }
 
 .topbar-link {
@@ -2304,4 +2249,5 @@ select.field-input {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  margin-top: 20px;
 }

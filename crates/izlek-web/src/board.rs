@@ -69,7 +69,15 @@ async fn move_card_shared(
 }
 
 /// Adds a card to a column. A Viewer is refused here, in the handler.
-async fn create_task_shared(cx: &Cx, title: &str, column_id: &str) -> Result<Option<Refusal>> {
+async fn create_task_shared(
+    cx: &Cx,
+    title: &str,
+    column_id: &str,
+    description: &str,
+    deadline_raw: &str,
+) -> Result<Option<Refusal>> {
+    use time::macros::format_description;
+
     let user = match require_writer(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(Some(refusal)),
@@ -78,6 +86,13 @@ async fn create_task_shared(cx: &Cx, title: &str, column_id: &str) -> Result<Opt
     if title.is_empty() {
         return Ok(Some(Refusal::EmptyTitle));
     }
+    let deadline = match deadline_raw.trim() {
+        "" => None,
+        day => match Date::parse(day, format_description!("[year]-[month]-[day]")) {
+            Ok(day) => Some(day),
+            Err(_) => return Ok(Some(Refusal::BadDeadline)),
+        },
+    };
     let store = accounts(cx).store().clone();
     let Some(board) = store.board(&user.workspace_id).await? else {
         return Ok(Some(Refusal::Unavailable));
@@ -91,8 +106,8 @@ async fn create_task_shared(cx: &Cx, title: &str, column_id: &str) -> Result<Opt
             board_id: &board.id,
             column_id,
             title,
-            description: "",
-            deadline: None,
+            description: description.trim(),
+            deadline,
             created_by: &user.id,
         })
         .await?;
@@ -130,15 +145,21 @@ fn redirect_refused(cx: &Cx, call: &str, refusal: Refusal) -> Redirect {
 struct CreateTaskForm {
     title: String,
     column_id: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    deadline: String,
 }
 
 /// A browser without script's way onto the board: a real form post, same
 /// fields the procedure below trades over the wire.
 #[route(POST "/api/create_task")]
 async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
-    match create_task_shared(cx, &input.title, &input.column_id).await? {
+    match create_task_shared(cx, &input.title, &input.column_id, &input.description, &input.deadline).await? {
         Some(refusal) => redirect_refused(cx, "create_task", refusal),
-        None => redirect(cx),
+        // Created; the referring `/?new=1` would reopen a blank new-task
+        // modal, so land on the board itself instead.
+        None => Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/".to_string())])),
     }
 }
 
@@ -229,7 +250,6 @@ async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
     }
     let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
-    let empty = view_data.is_empty();
 
     let all_columns: Vec<(String, String)> =
         view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
@@ -241,11 +261,6 @@ async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
     view! {
         cx =>
         for column in columns { (column) }
-        if empty {
-            <div class="board-empty">
-                <div class="board-empty-title">(t(lang, Key::ThisBoardIsEmpty))</div>
-            </div>
-        }
     }
 }
 
@@ -265,37 +280,16 @@ async fn render_column(
     for card in column.cards {
         cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write, all_columns, lang).await?);
     }
-    let add_a_task = t(lang, Key::AddATask);
-    let what_needs_doing = t(lang, Key::WhatNeedsDoing);
 
     view! {
         cx =>
-        signal composing = false;
         <section class="column" id=(column_id.clone())>
             <header class="column-head">
                 <span class="column-name">(name)</span>
                 <span class="column-count">(count)</span>
-                <div class="spacer"></div>
-                if may_write {
-                    <button class="column-add" title=(add_a_task) @click=$(|_e: Event| composing.set(true))>
-                        "+"
-                    </button>
-                }
             </header>
             <div class="column-cards" id=(column_id.clone())>
                 for card in cards { (card) }
-                if may_write {
-                    <form method="post" action="/api/create_task" class="composer" :hidden=$(!composing.get())>
-                        <input type="hidden" name="column_id" value=(column_id.clone())>
-                        <input class="composer-input" type="text" name="title" placeholder=(what_needs_doing) required="">
-                        <div class="composer-row">
-                            <button class="composer-add" type="submit">(t(lang, Key::Add))</button>
-                            <button class="composer-cancel" type="button" @click=$(|_e: Event| composing.set(false))>
-                                (t(lang, Key::Cancel))
-                            </button>
-                        </div>
-                    </form>
-                }
             </div>
         </section>
     }
@@ -406,10 +400,7 @@ async fn render_card(
                     </div>
                 }
                 if may_write {
-                    <form class="pop-row-form" method="post" action="/api/delete_task">
-                        <input type="hidden" name="task_id" value=(task_id.clone())>
-                        <button class="pop-row card-menu-danger" type="submit">(t(lang, Key::Delete))</button>
-                    </form>
+                    <a class="pop-row card-menu-danger" href=(format!("/?task={}&confirm=delete", task_id))>(t(lang, Key::Delete))</a>
                 }
             </div>
         </div>
@@ -458,6 +449,8 @@ struct BoardQuery {
     refusal: Option<String>,
     on: Option<String>,
     sort: Option<String>,
+    confirm: Option<String>,
+    new: Option<String>,
 }
 
 /// The noun a sort key shows in the `<select>` — terse, no explainer.
@@ -487,8 +480,12 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let today = OffsetDateTime::now_utc().date();
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
+    let may_write = user.role.can_write_tasks();
+    let all_columns: Vec<(String, String)> =
+        view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
+    let open_new = may_write && query.new.is_some();
     let sort = valid_sort(query.sort.as_deref()).to_string();
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
@@ -508,6 +505,9 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>
+            if may_write {
+                <a class="primary new-task-open" href="/?new=1">(t(lang, Key::NewTask))</a>
+            }
             <form class="field-box field-box-sort" method="get" action="/">
                 <span class="field-text">(t(lang, Key::Sort))</span>
                 <select class="status-select" name="sort"
@@ -517,6 +517,11 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                         <option value=(key) selected=(key == sort)>(sort_label(key, lang))</option>
                     }
                 </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
             </form>
             <div class="spacer"></div>
             if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} {}", t(lang, Key::Overdue)))</span> }
@@ -544,7 +549,10 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             </div>
         </main>
         if let Some(task_id) = &open_task {
-            (crate::detail::task_modal(cx, task_id).await?)
+            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete")).await?)
+        }
+        if open_new {
+            (crate::detail::new_task_modal(cx, &all_columns, lang).await?)
         }
         (card_menu_script(cx).await?)
     }

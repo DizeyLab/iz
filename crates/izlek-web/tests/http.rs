@@ -1504,6 +1504,25 @@ async fn a_resent_link_opens_the_same_account() {
 }
 
 #[tokio::test]
+async fn redeeming_a_link_lands_on_the_board_not_the_spent_join_page() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    app.post("/api/invite_member", Some(&admin_cookie), &[("email", "asli@izlek.sh"), ("display_name", "Asli"), ("role", "member")])
+        .await;
+    let token = queued_join_token(&app, "asli@izlek.sh").await;
+
+    let answer = app
+        .post_without_script(
+            "/api/redeem_link",
+            None,
+            &format!("http://izlek.test/join/{token}"),
+            &[("token", &token), ("password", "lantern gravel spoon meadow")],
+        )
+        .await;
+    assert_eq!(answer.location.as_deref(), Some("/"), "{:?}", answer.location);
+}
+
+#[tokio::test]
 async fn an_invitation_names_the_admin_who_made_it_and_not_the_invitee() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
@@ -2512,4 +2531,47 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
 
     let logs = until_logs_contains(&app, &admin_cookie, "\"subject\":\"Renamed\"").await;
     assert!(logs.contains("\"recipient\":\"ada@izlek.sh\""), "{}", logs);
+}
+
+#[tokio::test]
+async fn the_new_task_modal_opens_from_the_board_and_creates_into_the_chosen_column() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let column = columns.last().expect("no columns on a fresh board").clone();
+
+    let raw = app.get("/?new=1", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&raw.bytes);
+    assert!(html.contains("modal-new-task"), "the new-task modal did not render: {html}");
+    assert!(
+        html.contains(&format!("value=\"{column}\"")),
+        "the column picker is missing a board column: {html}"
+    );
+
+    let answer = app
+        .post("/api/create_task", Some(&admin), &[("title", "Ship the new-task modal"), ("column_id", &column)])
+        .await;
+    assert_eq!(answer.body, "", "the create was refused: {}", answer.body);
+
+    // A browser without script posts from `/?new=1`; a success has to land on
+    // the board, not reopen the (now stale) new-task modal.
+    let no_script = app
+        .post_without_script(
+            "/api/create_task",
+            Some(&admin),
+            "http://izlek.test/?new=1",
+            &[("title", "Ship it, no script"), ("column_id", &column)],
+        )
+        .await;
+    assert_eq!(no_script.location.as_deref(), Some("/"), "{:?}", no_script.location);
+
+    let workspace_id = app.workspace_id().await;
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let card = board
+        .columns
+        .iter()
+        .find(|c| c.column.id == column)
+        .and_then(|c| c.cards.iter().find(|card| card.title == "Ship the new-task modal"))
+        .expect("the created task did not land in the chosen column");
+    assert_eq!(card.title, "Ship the new-task modal");
 }

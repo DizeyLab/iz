@@ -971,7 +971,6 @@ async fn settings_page(cx: &Cx) -> Result {
                                     placeholder="png, jpg, pdf, zip"
                                 >
                             </label>
-                            <p class="panel-lede">(t(lang, Key::LowerLimitNote))</p>
                             <div class="panel-foot">
                                 if let Some(refusal) = &limits_refusal {
                                     <span class="field-error">(refusal.message_in(lang))</span>
@@ -1014,21 +1013,25 @@ async fn settings_page(cx: &Cx) -> Result {
                                         };
                                         <tr class="member-row">
                                             <td class="member-name">
-                                                (member.display_name.clone())
-                                                if member.is_you {
-                                                    <span class="member-you">(t(lang, Key::You))</span>
-                                                }
+                                                <span class="member-name-row">
+                                                    (member.display_name.clone())
+                                                    if member.is_you {
+                                                        <span class="member-you">(t(lang, Key::You))</span>
+                                                    }
+                                                </span>
                                             </td>
                                             <td class="member-address">(member.email.clone())</td>
                                             <td><span class="chip chip-role">(member.role.as_str().to_string())</span></td>
                                             <td class="member-account">
-                                                (account)
-                                                if !member.has_password {
-                                                    <form method="post" action="/api/resend_link" class="member-resend">
-                                                        <input type="hidden" name="user_id" value=(member.id.clone())>
-                                                        <button class="quiet" type="submit">(t(lang, Key::ResendMail))</button>
-                                                    </form>
-                                                }
+                                                <span class="member-account-row">
+                                                    <span class="member-status">(account)</span>
+                                                    if !member.has_password {
+                                                        <form method="post" action="/api/resend_link" class="member-resend">
+                                                            <input type="hidden" name="user_id" value=(member.id.clone())>
+                                                            <button class="quiet" type="submit">(t(lang, Key::ResendMail))</button>
+                                                        </form>
+                                                    }
+                                                </span>
                                             </td>
                                         </tr>
                                     }
@@ -1061,12 +1064,6 @@ async fn settings_page(cx: &Cx) -> Result {
                             if let Some(address) = &mailed {
                                 <p class="field-note">(crate::i18n::mailed_to_label(lang, address))</p>
                             }
-
-                            <div class="role-note">
-                                <p class="panel-lede"><b>(t(lang, Key::RoleNoteAdminLabel))</b>(format!(" {}", t(lang, Key::RoleNoteAdminDesc)))</p>
-                                <p class="panel-lede"><b>(t(lang, Key::RoleNoteMemberLabel))</b>(format!(" {}", t(lang, Key::RoleNoteMemberDesc)))</p>
-                                <p class="panel-lede"><b>(t(lang, Key::RoleNoteViewerLabel))</b>(format!(" {}", t(lang, Key::RoleNoteViewerDesc)))</p>
-                            </div>
                         </div>
                     </section>
                 }

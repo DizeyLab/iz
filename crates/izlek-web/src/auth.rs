@@ -158,7 +158,10 @@ async fn redeem_link(cx: &Cx, Form(input): Form<RedeemLinkForm>) -> Redirect {
     {
         Ok(signed_in) => {
             set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
-            redirect(cx, None)
+            // Redeemed; the referring `/join/{token}` now names a spent
+            // link, which would show "no longer works" to someone who just
+            // signed in, so land on the board itself instead.
+            Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/".to_string())], Json(None)))
         }
         Err(error) => redirect(cx, Some(error.into())),
     }
