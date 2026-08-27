@@ -6,7 +6,7 @@
 //! browser's own drag session (`dataTransfer`), read back by the column that
 //! catches the drop.
 
-use izlek_core::board::{Moved, Person, TaskCard};
+use izlek_core::board::{DeadlineState, Moved, Person, TaskCard};
 use izlek_core::store::{NewTask, User};
 use time::{Date, OffsetDateTime};
 use topcoat::Result;
@@ -14,7 +14,7 @@ use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
-use topcoat::runtime::{Event, Surrogated, procedure, shard};
+use topcoat::runtime::{Event, procedure, shard};
 use topcoat::view::view;
 
 use crate::i18n::{Key, Lang, t};
@@ -318,9 +318,17 @@ async fn render_card(
 ) -> Result {
     let blocks = card.blocks.len();
     let blocked_by = card.blocked_by.join(", ");
-    let deadline = card.deadline_label(today);
     let overdue = card.is_overdue(today);
-    let dated = card.deadline.is_some() || card.is_done();
+    let deadline_parts = card.deadline_parts(today);
+    let dated = deadline_parts.is_some();
+    let deadline = match deadline_parts {
+        Some(parts) => match parts.state {
+            DeadlineState::Overdue => format!("{} · {}", parts.date, t(lang, Key::Overdue)),
+            DeadlineState::Done => format!("{}{}", t(lang, Key::DonePrefix), parts.date),
+            DeadlineState::OnTime => parts.date,
+        },
+        None => t(lang, Key::NoDeadline).to_string(),
+    };
     let comments = card.comment_count;
     let mut assignees = Vec::new();
     for person in card.assignees.iter() {
@@ -481,7 +489,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let blocked = view_data.blocked_count();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
-    let sort = valid_sort(query.sort.as_deref());
+    let sort = valid_sort(query.sort.as_deref()).to_string();
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
         _ => None,
@@ -500,7 +508,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>
-            <form class="field-box" method="get" action="/">
+            <form class="field-box field-box-sort" method="get" action="/">
                 <span class="field-text">(t(lang, Key::Sort))</span>
                 <select class="status-select" name="sort"
                     @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
@@ -532,7 +540,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                     }
                 })
             >
-                board_columns(version: $(version.get()), sort: $(sort.to_string().into_surrogate()))
+                board_columns(version: $(version.get()), sort: $(sort))
             </div>
         </main>
         if let Some(task_id) = &open_task {

@@ -16,7 +16,7 @@
 //! (`after_activity`/`after_freeing`) from the old version is carried over
 //! unchanged.
 
-use izlek_core::board::Person;
+use izlek_core::board::{DeadlineState, Person};
 use izlek_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in, parse_zone};
 use izlek_core::store::{Store, StoreError, User};
 use serde::{Deserialize, Serialize};
@@ -728,7 +728,11 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
 
 async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bool, lang: Lang) -> Result {
     let overdue = task.is_overdue(today);
-    let label = task.deadline_label(today);
+    let label = match task.deadline_parts(today) {
+        Some(parts) if parts.state == DeadlineState::Overdue => format!("{} · {}", parts.date, t(lang, Key::Overdue)),
+        Some(parts) => parts.date,
+        None => t(lang, Key::NoDeadline).to_string(),
+    };
     if !may_write {
         return view! {
             cx =>

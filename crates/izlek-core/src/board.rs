@@ -140,7 +140,9 @@ impl TaskCard {
     }
 
     /// The chip the card shows where a deadline would go: `Sep 12`,
-    /// `Aug 21 · overdue`, `done Aug 14` or `no deadline`.
+    /// `Aug 21 · overdue`, `done Aug 14` or `no deadline`. English-only —
+    /// kept for callers (mail, tests) that want the baked sentence; UI
+    /// rendering should use [`TaskCard::deadline_parts`] and translate.
     pub fn deadline_label(&self, today: Date) -> String {
         if let Some(done) = self.done_at {
             return format!("done {}", day_label(done.date()));
@@ -151,6 +153,34 @@ impl TaskCard {
             None => "no deadline".to_string(),
         }
     }
+
+    /// The same chip as [`TaskCard::deadline_label`], split into a
+    /// language-free date string and a state the caller translates.
+    /// `None` when there's nothing to show (no deadline, not done).
+    pub fn deadline_parts(&self, today: Date) -> Option<DeadlineParts> {
+        if let Some(done) = self.done_at {
+            return Some(DeadlineParts { date: day_label(done.date()), state: DeadlineState::Done });
+        }
+        self.deadline.map(|day| DeadlineParts {
+            date: day_label(day),
+            state: if day < today { DeadlineState::Overdue } else { DeadlineState::OnTime },
+        })
+    }
+}
+
+/// A deadline chip's date text plus what state it's in — the pieces a UI
+/// layer combines with its own translated words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadlineParts {
+    pub date: String,
+    pub state: DeadlineState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadlineState {
+    OnTime,
+    Overdue,
+    Done,
 }
 
 /// A column with its cards already in it.

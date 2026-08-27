@@ -1077,6 +1077,17 @@ a {
   white-space: nowrap;
 }
 
+// The board's Sort select shares `.field-box`/`.status-select` with the
+// status pickers, but those pickers are meant to shrink with their row —
+// the sort select isn't, so its widest option ("Oluşturulma") stays whole
+// instead of clipping like the browser's native select would under
+// `flex: 1; min-width: 0`.
+.field-box-sort {
+  flex: none;
+
+  .status-select { flex: none; width: auto; }
+}
+
 .glyph {
   flex: none;
   color: var(--muted-soft);

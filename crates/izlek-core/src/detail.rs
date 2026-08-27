@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, UtcOffset};
 
-use crate::board::{Column, Person, day_label};
+use crate::board::{Column, DeadlineParts, DeadlineState, Person, day_label};
 
 /// The stored task, plus the two ids the reader needs to know it is allowed to
 /// see it. The description lives here rather than on
@@ -342,6 +342,8 @@ impl TaskDetail {
     }
 
     /// The DEADLINE field's text: `Aug 21 · overdue`, `Sep 12`, `no deadline`.
+    /// English-only — kept for non-UI callers; UI rendering should use
+    /// [`TaskDetail::deadline_parts`] and translate.
     pub fn deadline_label(&self, today: Date) -> String {
         match self.deadline {
             Some(day) if !self.is_done() && day < today => {
@@ -350,6 +352,16 @@ impl TaskDetail {
             Some(day) => day_label(day),
             None => "no deadline".to_string(),
         }
+    }
+
+    /// The same field as [`TaskDetail::deadline_label`], split into a
+    /// language-free date string and a state the caller translates. `None`
+    /// when there's no deadline set.
+    pub fn deadline_parts(&self, today: Date) -> Option<DeadlineParts> {
+        self.deadline.map(|day| DeadlineParts {
+            date: day_label(day),
+            state: if !self.is_done() && day < today { DeadlineState::Overdue } else { DeadlineState::OnTime },
+        })
     }
 
     /// `YYYY-MM-DD` for the date input, or an empty string.

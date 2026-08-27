@@ -240,6 +240,8 @@ pub enum Key {
     ActCommented,
     UnblockedWord,
     TheSystem,
+    NoDeadline,
+    DonePrefix,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -668,6 +670,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (UnblockedWord, Tr) => "engeli kaldırıldı",
         (TheSystem, En) => "The system",
         (TheSystem, Tr) => "Sistem",
+        (NoDeadline, En) => "no deadline",
+        (NoDeadline, Tr) => "tarih yok",
+        (DonePrefix, En) => "done ",
+        (DonePrefix, Tr) => "bitti ",
     }
 }
 
