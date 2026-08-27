@@ -1315,7 +1315,7 @@ async fn a_first_sender_with_no_password_is_refused_and_says_why() {
 
     let page = app.get(location, Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("That sender setting will not work."), "{html}");
+    assert!(html.contains("A password is needed the first time."), "{html}");
 }
 
 #[tokio::test]
@@ -1323,16 +1323,20 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    let bad: &[(&str, &[(&str, &str)])] = &[
-        ("host", &[("host", "  ")]),
-        ("host", &[("host", "smtp.fastmail.com/inbox")]),
-        ("port", &[("port", "0")]),
-        ("port", &[("port", "99999")]),
-        ("username", &[("username", "")]),
-        ("from_address", &[("from_address", "board-at-izlek")]),
-        ("from_address", &[("from_address", "board@izlek")]),
+    let bad: &[(&str, &[(&str, &str)], &str)] = &[
+        ("host", &[("host", "  ")], "Give the SMTP host."),
+        (
+            "host",
+            &[("host", "smtp.fastmail.com/inbox")],
+            "The SMTP host is a host name, not an address or a URL.",
+        ),
+        ("port", &[("port", "0")], "A port is a number between 1 and 65535."),
+        ("port", &[("port", "99999")], "A port is a number between 1 and 65535."),
+        ("username", &[("username", "")], "Give the SMTP username."),
+        ("from_address", &[("from_address", "board-at-izlek")], "That is not a from-address."),
+        ("from_address", &[("from_address", "board@izlek")], "That is not a from-address."),
     ];
-    for (field, overrides) in bad {
+    for (field, overrides, expected) in bad {
         let mut form: Vec<(&str, &str)> = vec![
             ("host", "smtp.fastmail.com"),
             ("port", "587"),
@@ -1357,7 +1361,7 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
 
         let page = app.get(location, Some(&admin_cookie)).await;
         let html = String::from_utf8_lossy(&page.bytes);
-        assert!(html.contains("That sender setting will not work."), "{field}: {html}");
+        assert!(html.contains(*expected), "{field}: {html}");
     }
 }
 

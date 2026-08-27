@@ -29,6 +29,7 @@
 
 use serde::Deserialize;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 /// The path, relative to the working directory, of the file `Config::load`
@@ -41,13 +42,22 @@ const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One p
 database = "izlek.db"
 # The origin sign-in links in mail point at.
 base_url = "http://127.0.0.1:3000"
+# The address the server listens on. Environment variables are ignored —
+# this is the only thing that decides where Izlek binds.
+listen = "127.0.0.1:3000"
 "#;
+
+/// The default `listen` when the file is silent about it — an existing
+/// deployment's `config/izlek.toml` from before this key existed still
+/// loads, and still listens where it always did.
+const DEFAULT_LISTEN: &str = "127.0.0.1:3000";
 
 /// The shape of `config/izlek.toml`, before the values are checked.
 #[derive(Deserialize)]
 struct Toml {
     database: Option<String>,
     base_url: Option<String>,
+    listen: Option<String>,
 }
 
 /// What the process needs to know before it opens a socket.
@@ -57,6 +67,9 @@ pub struct Config {
     pub database: PathBuf,
     /// The origin links in mail point at, with no trailing slash.
     pub base_url: String,
+    /// The address the server binds. The only source for this — `HOST` and
+    /// `PORT` environment variables are never read.
+    pub listen: SocketAddr,
     /// Whether `config/izlek.toml` did not exist and was just written with the
     /// development defaults this boot.
     pub defaulted: bool,
@@ -155,9 +168,16 @@ impl Config {
         }
         let base_url = base_url.trim_end_matches('/').to_string();
 
+        let listen = value(toml.listen).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+        let listen: SocketAddr = listen.parse().map_err(|err| ConfigError::Invalid {
+            key: "listen",
+            why: format!("{listen:?} is not a host:port address — {err}"),
+        })?;
+
         Ok(Config {
             database: absolute(dir, Path::new(&database)),
             base_url,
+            listen,
             defaulted,
         })
     }
@@ -167,6 +187,7 @@ impl Config {
         let mut lines = vec![
             format!("database  {}", self.database.display()),
             format!("base url  {}", self.base_url),
+            format!("listen    {}", self.listen),
         ];
         lines.push("mail      the sender is in Settings, not here".to_string());
         if self.defaulted {
@@ -228,6 +249,7 @@ mod tests {
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("izlek.db"));
         assert_eq!(config.base_url, "http://127.0.0.1:3000");
+        assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
 
         let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert_eq!(written, DEVELOPMENT_DEFAULTS);
@@ -304,6 +326,33 @@ mod tests {
                     ..
                 }
             ),
+            "{problem:?}"
+        );
+    }
+
+    /// A `config/izlek.toml` written before `listen` existed must still load,
+    /// and must still bind where it always did.
+    #[test]
+    fn a_file_without_listen_falls_back_to_the_old_default() {
+        let config = Config::parse(
+            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh\"\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
+    }
+
+    #[test]
+    fn an_unparseable_listen_stops_the_boot_naming_the_key() {
+        let problem = Config::parse(
+            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh\"\nlisten = \"not an address\"\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(problem, ConfigError::Invalid { key: "listen", .. }),
             "{problem:?}"
         );
     }

@@ -60,7 +60,13 @@ async fn main() {
         .app_context(izlek_web::server::Mail::sending(engine.clone()))
         .build();
 
-    topcoat::start(router).await.expect("server error");
+    // `topcoat::start` binds HOST/PORT from the environment; the listen
+    // address is a config/izlek.toml decision, so the listener is bound
+    // explicitly against the same value the boot log just printed.
+    let listener = tokio::net::TcpListener::bind(config.listen)
+        .await
+        .expect("failed to bind the listen address");
+    topcoat::serve(listener, router).await.expect("server error");
 }
 
 /// Retries what a mail server refused earlier and picks up anything a crash

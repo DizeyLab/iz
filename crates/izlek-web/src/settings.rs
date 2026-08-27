@@ -182,9 +182,66 @@ fn redirect_to(query: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
 /// when there was nothing to refuse.
 fn saved_or_refused(call: &str, refusal: Option<Refusal>) -> (StatusCode, HeaderMap, Vec<u8>) {
     match refusal {
+        // `BadSender`'s code collapses six different complaints into one
+        // generic "bad-sender"; the sentence save time actually wrote rides
+        // along as `why` so the redirect does not have to guess it back.
+        Some(Refusal::BadSender(problem)) => redirect_to(&format!(
+            "refusal=bad-sender&on={call}&why={}",
+            qsencode(&problem)
+        )),
         Some(refusal) => redirect_to(&format!("refusal={}&on={call}", refusal.code())),
         None => redirect_to(&format!("saved={call}")),
     }
+}
+
+/// Percent-encodes just enough that a sentence with spaces and punctuation
+/// survives round-tripping through a `&`/`=`-split query string. The
+/// messages this carries are static and ASCII, so this stays byte-wise
+/// rather than reaching for a full percent-encoding crate.
+fn qsencode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "+".to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The inverse of `qsencode`. Works on bytes, not `char`s, so a multi-byte
+/// UTF-8 sequence that `qsencode` split into separate `%XX` escapes comes
+/// back together rather than one mangled `char` per byte.
+fn qsdecode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&text[i + 1..i + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -558,16 +615,27 @@ fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
     let mut refusal_code = None;
     let mut on = None;
     let mut saved = false;
+    let mut why = None;
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else { continue };
         match key {
             "refusal" => refusal_code = Some(value),
             "on" => on = Some(value),
+            "why" => why = Some(value),
             "saved" if value == call => saved = true,
             _ => {}
         }
     }
-    let refusal = if on == Some(call) { refusal_code.and_then(Refusal::from_code) } else { None };
+    let refusal = if on == Some(call) {
+        refusal_code.and_then(Refusal::from_code).map(|refusal| match (refusal, why) {
+            // The generic "bad-sender" fallback is what a tampered or absent
+            // `why` gets; a real one carries save time's own sentence.
+            (Refusal::BadSender(_), Some(why)) => Refusal::BadSender(qsdecode(why)),
+            (refusal, _) => refusal,
+        })
+    } else {
+        None
+    };
     (refusal, saved)
 }
 
