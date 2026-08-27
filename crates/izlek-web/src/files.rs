@@ -17,10 +17,6 @@ use crate::server::{Refusal, accounts, require_user};
 
 path_param!(id);
 
-/// Ported from `izlek-web/src/settings.rs`. The settings lane may re-home
-/// this as a `pub` export from `crate::settings` once it lands.
-pub const WIDEST_ATTACHMENT_MB: u64 = 500;
-
 /// The task, if this person's workspace is the one holding it. A task in
 /// another workspace is not found rather than forbidden, same as
 /// `izlek-web/src/detail.rs`'s `guard::task_of`.
@@ -121,7 +117,7 @@ fn not_found() -> (StatusCode, HeaderMap, Vec<u8>) {
 
 /// Takes one file onto a task. The route this hangs off already caps the
 /// whole request body at the widest limit any workspace could set
-/// ([`WIDEST_ATTACHMENT_MB`], registered in `main.rs`); this handler enforces
+/// ([`crate::settings::WIDEST_ATTACHMENT_MB`], registered in `main.rs`); this handler enforces
 /// the workspace's own, usually narrower, limit while the bytes are still
 /// arriving rather than after they have all landed.
 ///

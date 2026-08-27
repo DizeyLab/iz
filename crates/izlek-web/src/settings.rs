@@ -95,7 +95,7 @@ fn parse_types(raw: &str) -> Option<Vec<String>> {
 /// cannot be mistaken for another pair or break the header outright — a
 /// mailed address may hold `+`, `&`, `=`, none of which a hand-built query
 /// string may pass through raw.
-fn encode_q(raw: &str) -> String {
+pub(crate) fn encode_q(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
         match byte {
@@ -606,7 +606,9 @@ async fn settings_page(cx: &Cx) -> Result {
     let (sender_refusal, sender_saved) = call_state(query, "save_sender");
     let (test_refusal, _) = call_state(query, "send_test_mail");
     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
-    let (member_refusal, _) = call_state(query, "resend_link");
+    let (resend_refusal, _) = call_state(query, "resend_link");
+    let (invite_refusal, _) = call_state(query, "invite_member");
+    let member_refusal = resend_refusal.or(invite_refusal);
     let mailed = query_value(query, "mailed").map(decode_q);
 
     view! {
@@ -887,14 +889,6 @@ async fn settings_page(cx: &Cx) -> Result {
                                 </tbody>
                             </table>
 
-                            // `/api/invite_member` (auth.rs) answers a caller
-                            // with script, not this post, so a submit here
-                            // lands on its bare JSON rather than back on this
-                            // page.
-                            // corner-cut: no "Mailed to {address}" after
-                            // Add member, ceiling = give invite_member the
-                            // same redirect-carried answer `resend_link`
-                            // above uses, in a slice that may touch auth.rs.
                             <form method="post" action="/api/invite_member" class="member-invite">
                                 <label class="field">
                                     <span class="field-label">"NAME"</span>

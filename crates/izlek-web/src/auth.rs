@@ -13,12 +13,14 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::request::headers;
+use topcoat::router::response::{IntoResponse, Response};
 use topcoat::router::{HeaderName, StatusCode, header, route};
 
 use crate::server::{
     Refusal, accounts, clear_session_cookie, client_label, mail, presented_session,
     require_admin, require_user, set_session_cookie,
 };
+use crate::settings::encode_q;
 
 /// The workspace has exactly one name and no screen that sets it, so it is a
 /// constant rather than a field nobody was shown.
@@ -198,22 +200,38 @@ struct InviteMemberForm {
 /// Admin creates an account with a name and an address and no password. The
 /// first-sign-in link goes to that address by mail, never to the browser.
 ///
-/// Called with script, not a plain form post, so the answer is the address
-/// itself rather than a redirect — the admin panel that calls this reads it
-/// straight off the response.
+/// A caller with script reads the address straight off the JSON body, same
+/// as always. A plain form post has no such reader, so — same as
+/// `resend_link` (`izlek-web/src/settings.rs`) — it lands back on Settings
+/// instead: `mailed=<address>` on success, `refusal=<code>&on=invite_member`
+/// otherwise.
 #[route(POST "/api/invite_member")]
-async fn invite_member(cx: &Cx, Form(input): Form<InviteMemberForm>) -> Result<Json<Result<String, Refusal>>> {
+async fn invite_member(cx: &Cx, Form(input): Form<InviteMemberForm>) -> Result<Response> {
+    let has_referer = headers(cx).contains_key(header::REFERER);
     let admin = match require_admin(cx).await {
         Ok(admin) => admin,
-        Err(refusal) => return Ok(Json(Err(refusal))),
+        Err(refusal) => return invite_answer(cx, has_referer, Err(refusal)),
     };
     match accounts(cx).invite(&admin, &input.email, &input.display_name, input.role).await {
         Ok(made) => {
             mail(cx).after_invite();
-            Ok(Json(Ok(made.user.email.clone())))
+            invite_answer(cx, has_referer, Ok(made.user.email))
         }
-        Err(error) => Ok(Json(Err(error.into()))),
+        Err(error) => invite_answer(cx, has_referer, Err(error.into())),
     }
+}
+
+/// The address mailed, or the refusal, either as JSON for a caller with
+/// script or a 303 back to Settings for a browser form post.
+fn invite_answer(cx: &Cx, has_referer: bool, outcome: std::result::Result<String, Refusal>) -> Result<Response> {
+    if !has_referer {
+        return Json(outcome).into_response(cx);
+    }
+    let location = match outcome {
+        Ok(address) => format!("/settings?mailed={}", encode_q(&address)),
+        Err(refusal) => format!("/settings?refusal={}&on=invite_member", refusal.code()),
+    };
+    (StatusCode::SEE_OTHER, [(header::LOCATION, location)], ()).into_response(cx)
 }
 
 #[derive(Deserialize)]

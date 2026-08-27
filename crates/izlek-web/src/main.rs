@@ -53,7 +53,7 @@ async fn main() {
 
     let router = Router::builder()
         .discover()
-        .layer(BodyLimit::max(izlek_web::files::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
+        .layer(BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
         .cookies()
         .assets(AssetBundle::load().expect("failed to load the asset bundle"))
         .app_context(accounts)

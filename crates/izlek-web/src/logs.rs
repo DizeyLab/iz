@@ -15,17 +15,8 @@ use topcoat::router::content::Json;
 use topcoat::router::{page, route};
 use topcoat::view::view;
 
+use crate::detail::Me;
 use crate::server::{Refusal, accounts, require_admin};
-
-/// The person the current browser is signed in as. Mirrors
-/// `crate::auth::Me` (not yet ported); the two will merge once auth lands.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Me {
-    id: String,
-    display_name: String,
-    email: String,
-    role: izlek_core::Role,
-}
 
 /// One send still owed or refused, as the queue panel reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,12 +231,7 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         .collect();
 
     Ok(Ok(LogsSnapshot {
-        me: Me {
-            id: user.id,
-            display_name: user.display_name,
-            email: user.email,
-            role: user.role,
-        },
+        me: Me::from(&user),
         queue,
         decisions,
         activity,
