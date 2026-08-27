@@ -607,7 +607,12 @@ async fn a_member_may_create_a_task() {
         .flat_map(|c| &c.cards)
         .find(|card| card.title == "Wire the deadline chip")
         .expect("new task is not on the board");
-    assert_eq!(card.task_key, "DZ-01", "no key on the new task");
+    let tail = card.task_key.strip_prefix("DZ-").expect("key not shaped like DZ-<tail>");
+    assert!((5..=7).contains(&tail.len()), "key tail {tail} not 5..=7 chars");
+    assert!(
+        tail.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+        "key tail {tail} not uppercase alnum"
+    );
 }
 
 // A cross-site form post carries no refusal body — the create simply works —
@@ -1627,6 +1632,90 @@ async fn a_resent_link_opens_the_same_account() {
     assert_eq!(redeemed.status, StatusCode::SEE_OTHER, "{}", redeemed.body);
     assert_eq!(redeemed.body, "null", "{}", redeemed.body);
     assert!(redeemed.session.is_some(), "the resent link signed nobody in");
+}
+
+#[tokio::test]
+async fn an_admin_may_change_a_members_role_over_http() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let mert = app
+        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .await;
+    assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
+    let workspace_id = app.workspace_id().await;
+    let mert_id = app
+        .store
+        .users(&workspace_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|user| user.email == "mert@izlek.sh")
+        .expect("no member row for mert")
+        .id;
+
+    let answer = app.post("/api/set_role", Some(&admin_cookie), &[("user_id", &mert_id), ("role", "viewer")]).await;
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("saved=set_role"),
+        "{:?}",
+        answer.location
+    );
+
+    let reloaded = app.store.user(&mert_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.role, Role::Viewer, "role change did not persist");
+}
+
+#[tokio::test]
+async fn the_owner_cannot_be_retargeted_over_http() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let owner_id = app
+        .store
+        .owner()
+        .await
+        .unwrap()
+        .expect("workspace has no owner")
+        .id;
+
+    let answer = app.post("/api/set_role", Some(&admin_cookie), &[("user_id", &owner_id), ("role", "member")]).await;
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=set_role"),
+        "{:?}",
+        answer.location
+    );
+
+    let reloaded = app.store.user(&owner_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.role, Role::Admin, "the owner's role changed anyway");
+}
+
+#[tokio::test]
+async fn a_non_admin_may_not_set_roles_over_http() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let mert = app
+        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .await;
+    assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
+    let workspace_id = app.workspace_id().await;
+    let mert_id = app
+        .store
+        .users(&workspace_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|user| user.email == "mert@izlek.sh")
+        .expect("no member row for mert")
+        .id;
+
+    let answer = app.post("/api/set_role", Some(&member), &[("user_id", &mert_id), ("role", "admin")]).await;
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=set_role"),
+        "{:?}",
+        answer.location
+    );
+
+    let reloaded = app.store.user(&mert_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.role, Role::Member, "role change was not really refused");
 }
 
 #[tokio::test]

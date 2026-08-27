@@ -718,10 +718,7 @@ async fn rules_page(cx: &Cx) -> Result {
             <div class="topbar-divider"></div>
             <span class="board-name">(t(lang, Key::MailRules))</span>
             <div class="spacer"></div>
-            <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
-            <form method="post" action="/api/sign_out">
-                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
-            </form>
+            (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
         </header>
 
         <div class="settings-shell">

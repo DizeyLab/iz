@@ -1285,7 +1285,7 @@ impl Store for TursoStore {
         let written = async {
             let mut rows = tx
                 .query(
-                    "SELECT task_prefix, next_task_no FROM board WHERE id = ?1",
+                    "SELECT task_prefix FROM board WHERE id = ?1",
                     params![new.board_id],
                 )
                 .await?;
@@ -1293,13 +1293,7 @@ impl Store for TursoStore {
                 return Ok(None);
             };
             let prefix = row.get::<String>(0)?;
-            let number = row.get::<i64>(1)?;
             drop(rows);
-            tx.execute(
-                "UPDATE board SET next_task_no = ?1 WHERE id = ?2",
-                params![number + 1, new.board_id],
-            )
-            .await?;
 
             // New cards land at the end of their column.
             let mut rows = tx
@@ -1315,25 +1309,43 @@ impl Store for TursoStore {
             drop(rows);
             let position = last + 1.0;
 
-            let task_key = format!("{prefix}-{number:02}");
-            tx.execute(
-                "INSERT INTO task (id, board_id, task_key, title, description, column_id, \
-                 deadline, position, created_by, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
-                params![
-                    id.clone(),
-                    new.board_id,
-                    task_key.clone(),
-                    new.title,
-                    new.description,
-                    new.column_id,
-                    deadline.clone(),
-                    position,
-                    new.created_by,
-                    now.clone()
-                ],
-            )
-            .await?;
+            // The key's tail is the end of this task's own id (a ULID —
+            // Crockford-uppercase already, and the last chars are its random
+            // bits) rather than a per-board counter: a counter leaves visible
+            // gaps once tasks are deleted. Collisions are rare enough (the
+            // tail is random) that a short bounded retry with a longer tail
+            // is simpler than reserving ranges.
+            let mut tail_len = 5;
+            let task_key = loop {
+                let candidate = format!("{prefix}-{}", &id[id.len() - tail_len..]);
+                match tx
+                    .execute(
+                        "INSERT INTO task (id, board_id, task_key, title, description, column_id, \
+                         deadline, position, created_by, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                        params![
+                            id.clone(),
+                            new.board_id,
+                            candidate.clone(),
+                            new.title,
+                            new.description,
+                            new.column_id,
+                            deadline.clone(),
+                            position,
+                            new.created_by,
+                            now.clone()
+                        ],
+                    )
+                    .await
+                {
+                    Ok(_) => break candidate,
+                    Err(e) if is_constraint_violation(&e) && tail_len < 7 => {
+                        tail_len += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
             tx.execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, '', ?5)",

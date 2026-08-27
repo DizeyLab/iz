@@ -245,7 +245,10 @@ async fn load_snapshot(cx: &Cx, task_id: &str) -> Result<std::result::Result<Det
                 title: task.title,
             });
         }
-        linkable.sort_by(|a, b| a.task_key.cmp(&b.task_key));
+        // Sorted by id, not `task_key`: the key's tail is a random ULID
+        // suffix now, not a counter, so only the id (a ULID itself) still
+        // orders these by creation time.
+        linkable.sort_by(|a, b| a.id.cmp(&b.id));
     }
 
     let may_write = user.role.can_write_tasks();
@@ -539,14 +542,13 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
 //   handlers always call through the compiled-closure/`raw!` path; a bare JS
 //   string is evaluated once with no event or `this` bound) — and the
 //   "Move"/"Attach" buttons stay for a browser without script.
-// - The modal scrim's click-to-close and the window `Escape` listener are
-//   back the same way: the scrim's own `@click` is a closure calling
-//   `raw!("window.location.href='/'", ())`, its inner `.modal` stops
-//   propagation with `@click=$(|e: Event| e.stop_propagation())`, and an
-//   inline `<script>` tag (a real script element, not a `data-topcoat-on:`
-//   attribute, so it runs normally) holds the window `Escape` listener. The
-//   X glyph and the footer "Close" button (plain links/buttons, no script) still work
-//   on their own.
+// - The modal scrim's click-to-close is back the same way: the scrim's own
+//   `@click` is a closure calling `raw!("window.location.href='/'", ())`,
+//   its inner `.modal` stops propagation with
+//   `@click=$(|e: Event| e.stop_propagation())`. The window `Escape`
+//   listener lives only in `board.rs`'s `card_menu_script` — this modal is
+//   always rendered alongside it. The X glyph and the footer "Close" button
+//   (plain links/buttons, no script) still work on their own.
 // - DeadlineControl's hand-built calendar grid (`js_sys::Date` for "today",
 //   month navigation, per-day buttons) is replaced with a native
 //   `<input type="date">` inside the same CSS-only edit-toggle popover —
@@ -661,7 +663,14 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
-        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { confirm.removeAttribute('open'); } }, true);";
+        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { confirm.removeAttribute('open'); } }, true); \
+        document.addEventListener('click', function (e) { \
+            document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
+                if (toggle.closest('.datepick-pop')) { return; } \
+                var edit = toggle.closest('.edit'); \
+                if (edit && !edit.contains(e.target)) { toggle.checked = false; } \
+            }); \
+        }, true);";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 

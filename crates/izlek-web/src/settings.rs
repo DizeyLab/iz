@@ -23,6 +23,7 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
+use topcoat::runtime::Event;
 use topcoat::view::view;
 
 use izlek_core::store::{NewSender, SenderTest, User};
@@ -560,6 +561,26 @@ async fn resend_link(cx: &Cx, Form(input): Form<ResendLinkForm>) -> Result<(Stat
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SetRoleForm {
+    user_id: String,
+    role: izlek_core::Role,
+}
+
+/// Changes a member's role. Admin-only; the owner's row and the caller's own
+/// row are refused, checked in `Accounts::set_role`.
+#[route(POST "/api/set_role")]
+async fn set_role(cx: &Cx, Form(input): Form<SetRoleForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    let admin = match require_admin(cx).await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(saved_or_refused("set_role", Some(refusal))),
+    };
+    match accounts(cx).set_role(&admin, &input.user_id, input.role).await {
+        Ok(()) => Ok(saved_or_refused("set_role", None)),
+        Err(error) => Ok(saved_or_refused("set_role", Some(error.into()))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -712,6 +733,7 @@ fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
 
 /// The settings screen.
 #[page("/settings")]
+#[allow(unused_variables)]
 async fn settings_page(cx: &Cx) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
@@ -745,7 +767,8 @@ async fn settings_page(cx: &Cx) -> Result {
     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
     let (resend_refusal, _) = call_state(query, "resend_link");
     let (invite_refusal, _) = call_state(query, "invite_member");
-    let member_refusal = resend_refusal.or(invite_refusal);
+    let (role_refusal, _) = call_state(query, "set_role");
+    let member_refusal = resend_refusal.or(invite_refusal).or(role_refusal);
     let mailed = query_value(query, "mailed").map(decode_q);
 
     view! {
@@ -758,10 +781,7 @@ async fn settings_page(cx: &Cx) -> Result {
             <div class="topbar-divider"></div>
             <span class="board-name">(t(lang, Key::NavSettings))</span>
             <div class="spacer"></div>
-            <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
-            <form method="post" action="/api/sign_out">
-                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
-            </form>
+            (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
         </header>
 
         <div class="settings-shell">
@@ -1032,7 +1052,22 @@ async fn settings_page(cx: &Cx) -> Result {
                                                 </span>
                                             </td>
                                             <td class="member-address">(member.email.clone())</td>
-                                            <td><span class="chip chip-role">(member.role.as_str().to_string())</span></td>
+                                            <td>
+                                                if member.is_owner || member.is_you {
+                                                    <span class="chip chip-role">(member.role.as_str().to_string())</span>
+                                                } else {
+                                                    <form method="post" action="/api/set_role" class="member-role">
+                                                        <input type="hidden" name="user_id" value=(member.id.clone())>
+                                                        <select class="status-select" name="role"
+                                                            @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
+                                                        >
+                                                            <option value="member" selected=(member.role == izlek_core::Role::Member)>(t(lang, Key::RoleMemberOption))</option>
+                                                            <option value="viewer" selected=(member.role == izlek_core::Role::Viewer)>(t(lang, Key::RoleViewerOption))</option>
+                                                            <option value="admin" selected=(member.role == izlek_core::Role::Admin)>(t(lang, Key::RoleAdminOption))</option>
+                                                        </select>
+                                                    </form>
+                                                }
+                                            </td>
                                             <td class="member-account">
                                                 <span class="member-account-row">
                                                     <span class="member-status">(account)</span>

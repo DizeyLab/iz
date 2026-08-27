@@ -292,10 +292,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
             <div class="topbar-divider"></div>
             <span class="board-name">(t(lang, Key::Logs))</span>
             <div class="spacer"></div>
-            <span class="topbar-who" title=(me.email)>(me.display_name)</span>
-            <form method="post" action="/api/sign_out">
-                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
-            </form>
+            (crate::layout::user_menu(cx, &me.display_name, &me.email, me.role, lang).await?)
         </header>
 
         <div class="settings-shell">

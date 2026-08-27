@@ -66,9 +66,9 @@
   --ink: #e6edf3;
   --muted: #8b949e;
   --muted-soft: #6e7681;
-  --accent: #6e7fb2;
+  --accent: #8b9dd9;
   --accent-tint: #1c2333;
-  --accent-ink: #a5b4d9;
+  --accent-ink: #b7c4e8;
 
   --field-bg: #10151c;
   --surface-sunken: #11161d;
@@ -365,10 +365,90 @@ a {
   font-weight: 600;
 }
 
-.topbar-who {
+.user-menu { position: relative; }
+
+.user-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  background: none;
+  border: none;
+  font-family: inherit;
   font-size: 13px;
   color: var(--muted);
+  cursor: pointer;
+
+  &:hover { color: var(--accent-ink); }
 }
+
+.user-menu-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 30;
+  width: 220px;
+  padding: 8px 0;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(28, 27, 24, 0.14);
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.user-menu:hover .user-menu-panel,
+.user-menu:focus-within .user-menu-panel {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.user-menu-name {
+  padding: 4px 14px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.user-menu-email {
+  padding: 2px 14px 0;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.user-menu-role {
+  padding: 2px 14px 6px;
+  font-size: 12px;
+  color: var(--muted-soft);
+  text-transform: capitalize;
+}
+
+.user-menu-divider {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--border);
+}
+
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  padding: 0 14px;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ink-soft);
+  text-decoration: none;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover { background: var(--row-hover); color: var(--ink); }
+}
+
+.user-menu-item-form { display: block; }
 
 .filterbar {
   height: 52px;
@@ -1893,6 +1973,52 @@ select.field-input {
   background-position: right 12px center;
 }
 
+// The browser's native option list ignores theme tokens by default — dark
+// mode showed the OS's white/blue list until these are set explicitly.
+option {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+option:checked {
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+}
+
+option:hover {
+  background: var(--panel-sunken);
+}
+
+// Chromium's customizable select (`::picker(select)`) lets the popup itself
+// be styled instead of left to the OS. Guarded by @supports so Firefox
+// keeps the plain, already-themed option list above. Scoped to the app's
+// own select classes (not a bare `select` selector) so their closed-state
+// look — set by `.field-input`/`.status-select` above — stays exactly as
+// today; only the open popup changes.
+@supports selector(::picker(select)) {
+  select.field-input,
+  .status-select {
+    appearance: base-select;
+  }
+
+  ::picker(select) {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
+    padding: 4px;
+  }
+
+  ::picker-icon {
+    display: none;
+  }
+
+  option {
+    padding: 6px 10px;
+    border-radius: 6px;
+  }
+}
+
 // A row that states a fact instead of pretending to be an editable field. An
 // empty box that silently does nothing is worse than a sentence.
 .field-stated {
@@ -2000,7 +2126,7 @@ select.field-input {
 }
 
 .member-account { color: var(--muted); }
-.member-account-row { justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.member-account-row { flex-direction: column; align-items: flex-start; gap: 6px; }
 .member-status { flex: none; white-space: nowrap; }
 
 .member-resend { display: inline-flex; flex: none; }
@@ -2047,20 +2173,6 @@ select.field-input {
   font-size: 12px;
   color: var(--accent-ink);
   word-break: break-all;
-}
-
-.topbar-link {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-  text-decoration: none;
-  background: none;
-  border: none;
-  padding: 0;
-  font-family: inherit;
-  cursor: pointer;
-
-  &:hover { color: var(--accent-ink); }
 }
 
 // --- Mail rules (MailRules artboard) ---------------------------------------

@@ -435,13 +435,20 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (e.key !== 'Escape') { return; } \
             var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
             if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
-            var confirm = document.querySelector('details.confirm-details[open]'); \
-            if (confirm) { confirm.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
-            var editOpen = document.querySelector('.edit-toggle:checked'); \
-            if (editOpen) { editOpen.checked = false; e.stopImmediatePropagation(); return; } \
+            var open = document.querySelectorAll('.edit-toggle:checked, details.confirm-details[open]'); \
+            if (open.length) { \
+                open.forEach(function (el) { \
+                    if (el.tagName === 'DETAILS') { el.removeAttribute('open'); } else { el.checked = false; } \
+                }); \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
             var menu = document.querySelector('.card-menu-open'); \
             if (menu) { closeCardMenus(); e.stopImmediatePropagation(); return; } \
-            if (document.querySelector('.modal-scrim')) { window.location.href = '/'; } \
+            if (document.querySelector('.modal-scrim') && !window.__izlekLeaving) { \
+                window.__izlekLeaving = true; \
+                window.location.href = '/'; \
+            } \
         }, true);";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
@@ -523,11 +530,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 <span class="wordmark-dot"></span>
             </a>
             <div class="spacer"></div>
-            <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
-            <a class="topbar-link" href="/settings">(t(lang, Key::Settings))</a>
-            <form method="post" action="/api/sign_out">
-                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
-            </form>
+            (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>

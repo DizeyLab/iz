@@ -176,6 +176,25 @@ impl Accounts {
         self.mint_link(actor, &user).await
     }
 
+    /// Changes a member's role. The owner's role cannot be changed, and
+    /// nobody changes their own: both are refused rather than acted on.
+    pub async fn set_role(&self, actor: &User, user_id: &str, role: Role) -> Result<()> {
+        self.require_admin(actor)?;
+        if user_id == actor.id {
+            return Err(AccountError::Forbidden);
+        }
+        let user = self.store.user(user_id).await?.ok_or(StoreError::NotFound)?;
+        if user.workspace_id != actor.workspace_id {
+            return Err(AccountError::Forbidden);
+        }
+        let owner = self.store.owner().await?;
+        if owner.map(|o| o.id) == Some(user.id) {
+            return Err(AccountError::Forbidden);
+        }
+        self.store.set_role(user_id, role).await?;
+        Ok(())
+    }
+
     async fn mint_link(&self, actor: &User, user: &User) -> Result<Invitation> {
         let token = Token::mint();
         let expires_at = OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME;

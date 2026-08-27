@@ -1408,6 +1408,75 @@ async fn only_an_admin_may_invite() {
 }
 
 #[tokio::test]
+async fn an_admin_may_change_a_members_role() {
+    let (_scratch, accounts, admin) = claimed().await;
+    let invitation = accounts
+        .invite(&admin, "grace@izlek.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+
+    accounts
+        .set_role(&admin, &invitation.user.id, Role::Viewer)
+        .await
+        .unwrap();
+
+    let reloaded = accounts
+        .store()
+        .user(&invitation.user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.role, Role::Viewer);
+}
+
+#[tokio::test]
+async fn the_owner_may_not_have_their_role_changed_even_by_another_admin() {
+    let (_scratch, accounts, admin) = claimed().await;
+    let invitation = accounts
+        .invite(&admin, "grace@izlek.sh", "Grace", Role::Admin)
+        .await
+        .unwrap();
+    let other_admin = accounts
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
+        .await
+        .unwrap()
+        .user;
+
+    let attempt = accounts
+        .set_role(&other_admin, &admin.id, Role::Member)
+        .await;
+    assert!(matches!(attempt, Err(AccountError::Forbidden)));
+
+    let reloaded = accounts.store().user(&admin.id).await.unwrap().unwrap();
+    assert_eq!(reloaded.role, Role::Admin);
+}
+
+#[tokio::test]
+async fn nobody_may_change_their_own_role() {
+    let (_scratch, accounts, admin) = claimed().await;
+    let invitation = accounts
+        .invite(&admin, "grace@izlek.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+    let member = accounts
+        .redeem_signin_link(
+            invitation.token.expose(),
+            "sextant-and-chart",
+            "198.51.100.7",
+        )
+        .await
+        .unwrap()
+        .user;
+
+    let attempt = accounts.set_role(&member, &member.id, Role::Admin).await;
+    assert!(matches!(attempt, Err(AccountError::Forbidden)));
+}
+
+#[tokio::test]
 async fn a_link_works_once_and_a_wrong_one_never_does() {
     let (_scratch, accounts, admin) = claimed().await;
     let invitation = accounts
@@ -1997,8 +2066,19 @@ async fn a_claimed_workspace_starts_with_four_named_columns() {
     assert_eq!(done, [false, false, false, true]);
 }
 
+/// A task key's shape: `<prefix>-<5..=7 uppercase Crockford chars>`. The tail
+/// comes off the task's own id now, not a per-board counter, so exact keys
+/// are no longer predictable — only the shape and per-board uniqueness are.
+fn is_task_key_shaped(key: &str, prefix: &str) -> bool {
+    let Some(tail) = key.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('-')) else {
+        return false;
+    };
+    (5..=7).contains(&tail.len())
+        && tail.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 #[tokio::test]
-async fn tasks_get_consecutive_keys_off_the_board_counter() {
+async fn tasks_get_key_tails_off_their_own_id_not_a_board_counter() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
     for title in ["Pricing page draft", "Choose analytics stack"] {
@@ -2007,7 +2087,11 @@ async fn tasks_get_consecutive_keys_off_the_board_counter() {
 
     let board = board_of(store, &workspace).await;
     let keys: Vec<&str> = board.cards().map(|card| card.task_key.as_str()).collect();
-    assert_eq!(keys, ["DZ-01", "DZ-02"]);
+    assert_eq!(keys.len(), 2);
+    for key in &keys {
+        assert!(is_task_key_shaped(key, "DZ"), "key {key} is not shaped like DZ-<5..7 chars>");
+    }
+    assert_ne!(keys[0], keys[1], "two tasks never share a key");
 }
 
 #[tokio::test]
@@ -2060,15 +2144,16 @@ async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
     }
 
     let board = board_of(store, &workspace).await;
+    let blocked_key = board.cards().find(|card| card.id == blocked).unwrap().task_key.clone();
     let card = board.cards().find(|card| card.id == blocking).unwrap();
     assert_eq!(card.assignees.len(), 2);
     assert_eq!(card.comment_count, 3);
-    assert_eq!(card.blocks, ["DZ-02"]);
+    assert_eq!(card.blocks, [blocked_key.as_str()]);
     assert!(card.blocked_by.is_empty());
     assert!(!card.is_blocked());
 
     let waiting = board.cards().find(|card| card.id == blocked).unwrap();
-    assert_eq!(waiting.blocked_by, ["DZ-01"]);
+    assert_eq!(waiting.blocked_by, [card.task_key.as_str()]);
     assert!(waiting.is_blocked());
     assert_eq!(waiting.comment_count, 0);
     assert!(waiting.assignees.is_empty());
