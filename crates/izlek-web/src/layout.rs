@@ -13,6 +13,7 @@ use topcoat::{
     view::view,
 };
 
+use crate::i18n::Lang;
 use crate::server::current_user;
 
 /// Every path that matches no page raises a `NotFoundError`, so it renders
@@ -38,13 +39,18 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
         content => content,
     }?;
 
-    // Pages with no session (auth screens) render light; `data-theme` is
-    // only set when the request's own user picked dark.
-    let dark = matches!(current_user(cx).await, Ok(Some(user)) if user.theme == "dark");
+    // Pages with no session (auth screens) render light and English; both are
+    // only set when the request's own user has one to read.
+    let asking = match current_user(cx).await {
+        Ok(user) => user.as_ref(),
+        Err(_) => None,
+    };
+    let dark = asking.is_some_and(|user| user.theme == "dark");
+    let lang = asking.map_or(Lang::En, |user| Lang::from_code(&user.language));
 
     view! {
         <!DOCTYPE html>
-        <html lang="en" data-theme=(dark.then_some("dark"))>
+        <html lang=(lang.code()) data-theme=(dark.then_some("dark"))>
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">

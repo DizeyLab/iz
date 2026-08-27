@@ -27,6 +27,7 @@ use topcoat::view::view;
 use izlek_core::board::Column;
 use izlek_core::store::{Audience, Store, Trigger, User, Workspace};
 
+use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, refusal_of, require_admin};
 
 /// One rule as the screen reads it: a sentence, a switch and a stamp.
@@ -82,11 +83,11 @@ struct RulesSnapshot {
 }
 
 /// The word for an audience, as the artboard writes it.
-fn audience_word(audience: Audience) -> &'static str {
+fn audience_word(audience: Audience, lang: Lang) -> &'static str {
     match audience {
-        Audience::Assignees => "assignees",
-        Audience::Board => "everyone on board",
-        Audience::Creator => "its creator",
+        Audience::Assignees => t(lang, Key::AudAssignees),
+        Audience::Board => t(lang, Key::AudEveryoneOnBoard),
+        Audience::Creator => t(lang, Key::AudItsCreator),
     }
 }
 
@@ -148,70 +149,70 @@ fn sender_connected(workspace: &Workspace) -> bool {
 
 /// Splits a trigger into the sentence halves the screen prints, ported
 /// verbatim from `current_rules`'s match in `izlek-web/src/rules.rs`.
-fn sentence_of(trigger: &Trigger, columns: &[Column]) -> (String, String, String, Option<String>) {
+fn sentence_of(trigger: &Trigger, columns: &[Column], lang: Lang) -> (String, String, String, Option<String>) {
     match trigger {
         Trigger::StatusBecomes(column_id) => (
-            "When status becomes".to_string(),
+            t(lang, Key::WhenStatusBecomes).to_string(),
             columns
                 .iter()
                 .find(|column| &column.id == column_id)
                 // A rule can outlive the column it names. Saying so is
                 // better than printing an id nobody can read.
                 .map(|column| column.name.clone())
-                .unwrap_or_else(|| "a column that is gone".to_string()),
+                .unwrap_or_else(|| t(lang, Key::ColumnGone).to_string()),
             "status".to_string(),
             Some(column_id.clone()),
         ),
         Trigger::Unblocked => (
-            "When a task stops being".to_string(),
-            "blocked".to_string(),
+            t(lang, Key::WhenTaskStopsBeingBlocked).to_string(),
+            t(lang, Key::BlockedWord).to_string(),
             "unblocked".to_string(),
             None,
         ),
         Trigger::Created => {
-            ("When a task is created".to_string(), String::new(), "created".to_string(), None)
+            (t(lang, Key::WhenTaskCreated).to_string(), String::new(), "created".to_string(), None)
         }
         Trigger::Assigned => {
-            ("When someone is assigned".to_string(), String::new(), "assigned".to_string(), None)
+            (t(lang, Key::WhenSomeoneAssigned).to_string(), String::new(), "assigned".to_string(), None)
         }
         Trigger::Unassigned => (
-            "When someone is unassigned".to_string(),
+            t(lang, Key::WhenSomeoneUnassigned).to_string(),
             String::new(),
             "unassigned".to_string(),
             None,
         ),
         Trigger::Commented => (
-            "When a comment is written".to_string(),
+            t(lang, Key::WhenCommentWritten).to_string(),
             String::new(),
             "commented".to_string(),
             None,
         ),
         Trigger::DeadlineSet => (
-            "When a deadline is set".to_string(),
+            t(lang, Key::WhenDeadlineSet).to_string(),
             String::new(),
             "deadline_set".to_string(),
             None,
         ),
         Trigger::DeadlineCleared => (
-            "When a deadline is removed".to_string(),
+            t(lang, Key::WhenDeadlineRemoved).to_string(),
             String::new(),
             "deadline_cleared".to_string(),
             None,
         ),
         Trigger::Retitled => {
-            ("When a task is renamed".to_string(), String::new(), "retitled".to_string(), None)
+            (t(lang, Key::WhenTaskRenamed).to_string(), String::new(), "retitled".to_string(), None)
         }
         Trigger::Linked => {
-            ("When a task is linked".to_string(), String::new(), "linked".to_string(), None)
+            (t(lang, Key::WhenTaskLinked).to_string(), String::new(), "linked".to_string(), None)
         }
         Trigger::Unlinked => (
-            "When a task is unlinked".to_string(),
+            t(lang, Key::WhenTaskUnlinked).to_string(),
             String::new(),
             "unlinked".to_string(),
             None,
         ),
         Trigger::Deleted => {
-            ("When a task is deleted".to_string(), String::new(), "deleted".to_string(), None)
+            (t(lang, Key::WhenTaskDeleted).to_string(), String::new(), "deleted".to_string(), None)
         }
     }
 }
@@ -220,6 +221,7 @@ fn sentence_of(trigger: &Trigger, columns: &[Column]) -> (String, String, String
 /// rule may name — shared by the page and `current_rules`, so the two never
 /// drift apart.
 async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result<RulesSnapshot, Refusal> {
+    let lang = Lang::from_code(&user.language);
     let zone = izlek_core::detail::parse_zone(&user.timezone);
     let Some(board) = store.board(&user.workspace_id).await.map_err(|_| Refusal::Unavailable)? else {
         return Err(Refusal::Unavailable);
@@ -238,12 +240,12 @@ async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result
     let lines = rules
         .into_iter()
         .map(|rule| {
-            let (when, what, trigger_kind, column_id) = sentence_of(&rule.trigger, &columns);
+            let (when, what, trigger_kind, column_id) = sentence_of(&rule.trigger, &columns, lang);
             RuleLine {
                 when,
                 what,
                 subject: rule.subject.clone(),
-                audience: audience_word(rule.audience).to_string(),
+                audience: audience_word(rule.audience, lang).to_string(),
                 trigger_kind,
                 column_id,
                 audience_kind: audience_kind(rule.audience).to_string(),
@@ -522,7 +524,7 @@ struct RulesQuery {
 /// server-side, from whichever trigger the form starts on (the existing
 /// rule's, or "status" for a fresh one), since there is no script to flip it
 /// as the admin changes the select.
-async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine>, refusal: Option<&Refusal>) -> Result {
+async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine>, refusal: Option<&Refusal>, lang: Lang) -> Result {
     let is_edit = existing.is_some();
     let action = if is_edit { "/api/update_rule" } else { "/api/create_rule" };
     let trigger_kind = existing.map(|rule| rule.trigger_kind.as_str()).unwrap_or("status");
@@ -541,25 +543,25 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
                 <input type="hidden" name="rule_id" value=(rule.id.clone())>
             }
             <label class="rule-field">
-                <span class="field-label">"WHEN"</span>
+                <span class="field-label">(t(lang, Key::WhenLabel))</span>
                 <select class="field-input" name="trigger">
-                    <option value="status" selected=(trigger_kind == "status")>"status becomes"</option>
-                    <option value="unblocked" selected=(trigger_kind == "unblocked")>"a task stops being blocked"</option>
-                    <option value="created" selected=(trigger_kind == "created")>"a task is created"</option>
-                    <option value="assigned" selected=(trigger_kind == "assigned")>"someone is assigned"</option>
-                    <option value="unassigned" selected=(trigger_kind == "unassigned")>"someone is unassigned"</option>
-                    <option value="commented" selected=(trigger_kind == "commented")>"a comment is written"</option>
-                    <option value="deadline_set" selected=(trigger_kind == "deadline_set")>"a deadline is set"</option>
-                    <option value="deadline_cleared" selected=(trigger_kind == "deadline_cleared")>"a deadline is removed"</option>
-                    <option value="retitled" selected=(trigger_kind == "retitled")>"a task is renamed"</option>
-                    <option value="linked" selected=(trigger_kind == "linked")>"a task is linked"</option>
-                    <option value="unlinked" selected=(trigger_kind == "unlinked")>"a task is unlinked"</option>
-                    <option value="deleted" selected=(trigger_kind == "deleted")>"a task is deleted"</option>
+                    <option value="status" selected=(trigger_kind == "status")>(t(lang, Key::TriggerStatusBecomes))</option>
+                    <option value="unblocked" selected=(trigger_kind == "unblocked")>(t(lang, Key::TriggerUnblocked))</option>
+                    <option value="created" selected=(trigger_kind == "created")>(t(lang, Key::TriggerCreated))</option>
+                    <option value="assigned" selected=(trigger_kind == "assigned")>(t(lang, Key::TriggerAssigned))</option>
+                    <option value="unassigned" selected=(trigger_kind == "unassigned")>(t(lang, Key::TriggerUnassigned))</option>
+                    <option value="commented" selected=(trigger_kind == "commented")>(t(lang, Key::TriggerCommented))</option>
+                    <option value="deadline_set" selected=(trigger_kind == "deadline_set")>(t(lang, Key::TriggerDeadlineSet))</option>
+                    <option value="deadline_cleared" selected=(trigger_kind == "deadline_cleared")>(t(lang, Key::TriggerDeadlineCleared))</option>
+                    <option value="retitled" selected=(trigger_kind == "retitled")>(t(lang, Key::TriggerRetitled))</option>
+                    <option value="linked" selected=(trigger_kind == "linked")>(t(lang, Key::TriggerLinked))</option>
+                    <option value="unlinked" selected=(trigger_kind == "unlinked")>(t(lang, Key::TriggerUnlinked))</option>
+                    <option value="deleted" selected=(trigger_kind == "deleted")>(t(lang, Key::TriggerDeleted))</option>
                 </select>
             </label>
             if trigger_kind == "status" {
                 <label class="rule-field">
-                    <span class="field-label">"COLUMN"</span>
+                    <span class="field-label">(t(lang, Key::ColumnLabel))</span>
                     <select class="field-input" name="column_id">
                         for column in columns {
                             <option value=(column.id.clone()) selected=(column.id == column_id)>(column.name.clone())</option>
@@ -570,7 +572,7 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
                 <input type="hidden" name="column_id" value=(column_id)>
             }
             <label class="rule-field">
-                <span class="field-label">"SEND"</span>
+                <span class="field-label">(t(lang, Key::SendLabel))</span>
                 <input
                     class="field-input"
                     type="text"
@@ -582,28 +584,28 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
                 >
             </label>
             <label class="rule-field">
-                <span class="field-label">"TO"</span>
+                <span class="field-label">(t(lang, Key::ToLabel))</span>
                 <select class="field-input" name="audience">
-                    <option value="assignees" selected=(audience_kind == "assignees")>"assignees"</option>
-                    <option value="board" selected=(audience_kind == "board")>"everyone on board"</option>
-                    <option value="creator" selected=(audience_kind == "creator")>"its creator"</option>
+                    <option value="assignees" selected=(audience_kind == "assignees")>(t(lang, Key::AudienceAssignees))</option>
+                    <option value="board" selected=(audience_kind == "board")>(t(lang, Key::AudienceBoard))</option>
+                    <option value="creator" selected=(audience_kind == "creator")>(t(lang, Key::AudienceCreator))</option>
                 </select>
             </label>
             <div class="rule-field">
-                <span class="field-label">"BODY"</span>
+                <span class="field-label">(t(lang, Key::BodyLabel))</span>
                 <label class="field-box">
                     <input type="checkbox" name="include_task_details" value="true" checked=(include_task_details)>
-                    <span class="field-text">"Task details"</span>
+                    <span class="field-text">(t(lang, Key::TaskDetails))</span>
                 </label>
             </div>
             <div class="panel-foot">
                 if let Some(refusal) = refusal {
-                    <span class="field-error">(refusal.message())</span>
+                    <span class="field-error">(refusal.message_in(lang))</span>
                 }
                 if is_edit {
-                    <a class="quiet" href="/rules">"Cancel"</a>
+                    <a class="quiet" href="/rules">(t(lang, Key::Cancel))</a>
                 }
-                <button class="primary" type="submit">(if is_edit { "Save rule" } else { "Add rule" })</button>
+                <button class="primary" type="submit">(if is_edit { t(lang, Key::SaveRule) } else { t(lang, Key::AddRule) })</button>
             </div>
         </form>
     }
@@ -612,37 +614,37 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
 /// The "New rule" control and the form inside it. A `<details>` rather than
 /// anything script-driven, so a browser with no script can still open it and
 /// post the form.
-async fn composer(cx: &Cx, columns: &[ColumnChoice], refusal: Option<&Refusal>) -> Result {
+async fn composer(cx: &Cx, columns: &[ColumnChoice], refusal: Option<&Refusal>, lang: Lang) -> Result {
     view! {
         cx =>
         <details class="rule-new">
-            <summary class="rule-new-open">"New rule"</summary>
-            (rule_form(cx, columns, None, refusal).await?)
+            <summary class="rule-new-open">(t(lang, Key::NewRule))</summary>
+            (rule_form(cx, columns, None, refusal, lang).await?)
         </details>
     }
 }
 
 /// One rule's row: the form in place of it when `editing`, its display
 /// otherwise.
-async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: bool, refusal: Option<&Refusal>) -> Result {
+async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: bool, refusal: Option<&Refusal>, lang: Lang) -> Result {
     if editing {
         return view! {
             cx =>
             <div class="rule-row">
-                (rule_form(cx, columns, Some(rule), refusal).await?)
+                (rule_form(cx, columns, Some(rule), refusal, lang).await?)
             </div>
         };
     }
 
     let row_class = if rule.enabled { "rule-row" } else { "rule-row rule-row-off" };
     let switch_class = if rule.enabled { "rule-switch rule-switch-on" } else { "rule-switch" };
-    let switch_label = if rule.enabled { "Switch this rule off" } else { "Switch this rule on" };
+    let switch_label = if rule.enabled { t(lang, Key::SwitchRuleOff) } else { t(lang, Key::SwitchRuleOn) };
     let stamp = rule
         .last_sent
         .as_ref()
-        .map(|moment| format!("last sent {moment}"))
-        .or_else(|| rule.last_fired.as_ref().map(|moment| format!("last fired {moment}")))
-        .unwrap_or_else(|| "never fired".to_string());
+        .map(|moment| crate::i18n::last_sent_label(lang, moment))
+        .or_else(|| rule.last_fired.as_ref().map(|moment| crate::i18n::last_fired_label(lang, moment)))
+        .unwrap_or_else(|| t(lang, Key::NeverFired).to_string());
 
     view! {
         cx =>
@@ -659,19 +661,19 @@ async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: b
             <div class="rule-sentence">
                 <span>(rule.when.clone())</span>
                 <span class="rule-term">(rule.what.clone())</span>
-                <span>"send"</span>
+                <span>(t(lang, Key::SendConnector))</span>
                 <span class="rule-term">(rule.subject.clone())</span>
-                <span>"to"</span>
+                <span>(t(lang, Key::ToConnector))</span>
                 <span class="rule-term">(rule.audience.clone())</span>
             </div>
 
             <span class="rule-stamp">(stamp)</span>
 
-            <a class="quiet" href=(format!("/rules?edit={}", rule.id)) title="Edit this rule">"Edit"</a>
+            <a class="quiet" href=(format!("/rules?edit={}", rule.id)) title=(t(lang, Key::EditThisRule))>(t(lang, Key::EditLabel))</a>
 
             <form method="post" action="/api/delete_rule">
                 <input type="hidden" name="rule_id" value=(rule.id.clone())>
-                <button class="rule-delete" type="submit" title="Delete this rule">"Delete"</button>
+                <button class="rule-delete" type="submit" title=(t(lang, Key::DeleteThisRule))>(t(lang, Key::Delete))</button>
             </form>
         </div>
     }
@@ -690,13 +692,14 @@ async fn rules_page(cx: &Cx) -> Result {
             };
         }
     };
+    let lang = Lang::from_code(&user.language);
     let store = accounts(cx).store().clone();
     let snapshot = match snapshot_of(&store, &user).await {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
             return view! {
                 <main class="scaffold-note">
-                    <p>(refusal.message())</p>
+                    <p>(refusal.message_in(lang))</p>
                     <p><a href="/">"Back to the board"</a></p>
                 </main>
             };
@@ -713,41 +716,41 @@ async fn rules_page(cx: &Cx) -> Result {
                 <span class="wordmark-dot"></span>
             </a>
             <div class="topbar-divider"></div>
-            <span class="board-name">"Mail rules"</span>
+            <span class="board-name">(t(lang, Key::MailRules))</span>
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
         </header>
 
         <div class="settings-shell">
             <nav class="sidenav">
-                <a class="sidenav-item" href="/">"Board"</a>
-                <a class="sidenav-item sidenav-item-on" href="/rules">"Mail rules"</a>
-                <a class="sidenav-item" href="/logs">"Logs"</a>
-                <a class="sidenav-item" href="/settings">"Settings"</a>
+                <a class="sidenav-item" href="/">(t(lang, Key::NavBoard))</a>
+                <a class="sidenav-item sidenav-item-on" href="/rules">(t(lang, Key::NavMailRules))</a>
+                <a class="sidenav-item" href="/logs">(t(lang, Key::NavLogs))</a>
+                <a class="sidenav-item" href="/settings">(t(lang, Key::NavSettings))</a>
             </nav>
 
             <main class="settings-stage">
                 <div class="settings-head">
-                    <h1 class="settings-title">"Mail rules"</h1>
-                    <span class="chip chip-admin">"Admin only"</span>
+                    <h1 class="settings-title">(t(lang, Key::MailRules))</h1>
+                    <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                 </div>
 
                 if !snapshot.sender_connected {
                     <p class="rules-quiet">
-                        "No sender connected — mail waits in the queue until you set one in "
-                        <a href="/settings">"Settings"</a>
-                        "."
+                        (t(lang, Key::NoSenderConnectedPrefix))
+                        <a href="/settings">(t(lang, Key::NavSettings))</a>
+                        (t(lang, Key::NoSenderConnectedSuffix))
                     </p>
                 }
 
-                (composer(cx, &snapshot.columns, create_refusal.as_ref()).await?)
+                (composer(cx, &snapshot.columns, create_refusal.as_ref(), lang).await?)
 
                 <div class="rule-list">
                     for rule in &snapshot.rules {
-                        (rule_row(cx, rule, &snapshot.columns, edit_id.as_deref() == Some(rule.id.as_str()), update_refusal.as_ref()).await?)
+                        (rule_row(cx, rule, &snapshot.columns, edit_id.as_deref() == Some(rule.id.as_str()), update_refusal.as_ref(), lang).await?)
                     }
                     if snapshot.rules.is_empty() {
-                        <p class="rules-quiet">"No rules yet."</p>
+                        <p class="rules-quiet">(t(lang, Key::NoRulesYet))</p>
                     }
                 </div>
             </main>

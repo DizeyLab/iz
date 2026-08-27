@@ -29,6 +29,7 @@ use topcoat::router::{HeaderName, StatusCode, header, route};
 use topcoat::runtime::Event;
 use topcoat::view::{class, view};
 
+use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, mail, refusal_of, require_user, require_writer};
 
 /// A task this board could be linked to: enough to name it in the picker and
@@ -48,6 +49,7 @@ pub struct Me {
     pub display_name: String,
     pub email: String,
     pub role: izlek_core::Role,
+    pub language: String,
 }
 
 impl From<&User> for Me {
@@ -57,6 +59,7 @@ impl From<&User> for Me {
             display_name: user.display_name.clone(),
             email: user.email.clone(),
             role: user.role,
+            language: user.language.clone(),
         }
     }
 }
@@ -663,48 +666,50 @@ async fn escape_closes(cx: &Cx) -> Result {
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
-async fn refused(cx: &Cx, call: &str) -> Result {
+async fn refused(cx: &Cx, call: &str, lang: Lang) -> Result {
     match refusal_of(cx, call) {
-        Some(refusal) => view! { cx => <p class="modal-problem">(refusal.message())</p> },
+        Some(refusal) => view! { cx => <p class="modal-problem">(refusal.message_in(lang))</p> },
         None => view! { cx => },
     }
 }
 
-async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool) -> Result {
+async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
     if !may_write {
         return view! { cx => <h2 class="detail-title">(task.title.clone())</h2> };
     }
     let toggle = format!("rename-{}", task.id);
+    let rename_aria = t(lang, Key::RenameThisTask);
     view! {
         cx =>
         <div class="edit">
-            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Rename this task">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(rename_aria)>
             <h2 class="detail-title edit-view">
                 <label class="edit-hit" for=(toggle.clone())>(task.title.clone())</label>
             </h2>
             <form class="edit-form title-form" method="post" action="/api/save_task">
                 <input type="hidden" name="task_id" value=(task.id.clone())>
                 <input class="title-input" type="text" name="title" value=(task.title.clone()) autocomplete="off" required="">
-                <button class="edit-save" type="submit">"Save"</button>
-                <label class="edit-cancel" for=(toggle)>"Cancel"</label>
+                <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
+                <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
             </form>
-            (refused(cx, "save_task").await?)
+            (refused(cx, "save_task", lang).await?)
         </div>
     }
 }
 
-async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool) -> Result {
+async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
     let empty = task.description.trim().is_empty();
-    let prose = if empty { "No description yet.".to_string() } else { task.description.clone() };
+    let prose = if empty { t(lang, Key::NoDescriptionYet).to_string() } else { task.description.clone() };
 
     if !may_write {
         return view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> };
     }
     let toggle = format!("describe-{}", task.id);
+    let edit_aria = t(lang, Key::EditTheDescription);
     view! {
         cx =>
         <div class="edit">
-            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Edit the description">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(edit_aria)>
             <label class=(class!("detail-prose", "edit-view", "edit-hit", "detail-prose-empty" if empty)) for=(toggle.clone())>
                 (prose)
             </label>
@@ -712,16 +717,16 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool) -> Res
                 <input type="hidden" name="task_id" value=(task.id.clone())>
                 <textarea class="detail-textarea" name="description" rows="5">(task.description.clone())</textarea>
                 <div class="edit-row">
-                    <button class="edit-save" type="submit">"Save"</button>
-                    <label class="edit-cancel" for=(toggle)>"Cancel"</label>
+                    <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
+                    <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
                 </div>
             </form>
-            (refused(cx, "save_task").await?)
+            (refused(cx, "save_task", lang).await?)
         </div>
     }
 }
 
-async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bool) -> Result {
+async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bool, lang: Lang) -> Result {
     let overdue = task.is_overdue(today);
     let label = task.deadline_label(today);
     if !may_write {
@@ -735,10 +740,11 @@ async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bo
     }
     let toggle = format!("deadline-{}", task.id);
     let input_value = task.deadline_input();
+    let change_aria = t(lang, Key::ChangeTheDeadline);
     view! {
         cx =>
         <div class="edit edit-pop">
-            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Change the deadline">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(change_aria)>
             <label class=(class!("field-box", "edit-view", "edit-hit", "detail-overdue" if overdue)) for=(toggle.clone())>
                 (glyph::calendar(cx).await?)
                 <span class="field-text">(label)</span>
@@ -749,18 +755,18 @@ async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bo
                     <input type="hidden" name="task_id" value=(task.id.clone())>
                     <input class="field-input" type="date" name="deadline" value=(input_value)>
                     <div class="edit-row">
-                        <button class="edit-save" type="submit">"Save"</button>
-                        <label class="edit-cancel" for=(toggle)>"Cancel"</label>
+                        <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
+                        <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
                     </div>
                 </form>
-                (refused(cx, "save_task").await?)
+                (refused(cx, "save_task", lang).await?)
             </div>
         </div>
     }
 }
 
-async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool) -> Result {
-    let remove_title = format!("Take {} off this task", person.display_name);
+async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool, lang: Lang) -> Result {
+    let remove_title = crate::i18n::take_off_this_task(lang, &person.display_name);
     view! {
         cx =>
         <span class="assignee-chip" title=(person.display_name.clone())>
@@ -777,15 +783,16 @@ async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool)
     }
 }
 
-async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person]) -> Result {
+async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) -> Result {
     if people.is_empty() {
         return view! { cx => };
     }
     let toggle = format!("assign-{task_id}");
+    let put_aria = t(lang, Key::PutSomeoneOnThisTask);
     view! {
         cx =>
         <div class="edit edit-pop assignee-pop">
-            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Put someone on this task">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(put_aria)>
             <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>(glyph::plus(cx).await?)</label>
             <div class="edit-form pop-panel">
                 <div class="pop-list">
@@ -800,24 +807,25 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person]) -> Result {
                         </form>
                     }
                 </div>
-                (refused(cx, "assign").await?)
+                (refused(cx, "assign", lang).await?)
             </div>
         </div>
     }
 }
 
-async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget]) -> Result {
+async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget], lang: Lang) -> Result {
     if linkable.is_empty() {
         return view! { cx => };
     }
     let toggle = format!("link-{task_id}");
+    let link_aria = t(lang, Key::LinkAnotherTask);
     view! {
         cx =>
         <div class="edit edit-pop link-pop">
-            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Link another task">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(link_aria)>
             <label class="dep-chip edit-view edit-hit" for=(toggle.clone())>
                 (glyph::plus(cx).await?)
-                <span class="dep-chip-text">"Link a task"</span>
+                <span class="dep-chip-text">(t(lang, Key::LinkATask))</span>
             </label>
             <div class="edit-form pop-panel pop-panel-wide">
                 <form class="pop-form" method="post" action="/api/link_tasks">
@@ -832,28 +840,28 @@ async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget]) -> Result 
                         }
                     </div>
                     <fieldset class="pick-direction">
-                        <legend class="detail-label">"DIRECTION"</legend>
+                        <legend class="detail-label">(t(lang, Key::Direction))</legend>
                         <label class="pick-row">
                             <input type="radio" name="direction" value="blocked_by" checked="">
-                            <span class="pick-title">"blocks this task"</span>
+                            <span class="pick-title">(t(lang, Key::BlocksThisTask))</span>
                         </label>
                         <label class="pick-row">
                             <input type="radio" name="direction" value="blocks">
-                            <span class="pick-title">"waits on this task"</span>
+                            <span class="pick-title">(t(lang, Key::WaitsOnThisTask))</span>
                         </label>
                     </fieldset>
                     <div class="edit-row">
-                        <button class="edit-save" type="submit">"Link"</button>
-                        <label class="edit-cancel" for=(toggle)>"Cancel"</label>
+                        <button class="edit-save" type="submit">(t(lang, Key::Link))</button>
+                        <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
                     </div>
                 </form>
-                (refused(cx, "link_tasks").await?)
+                (refused(cx, "link_tasks", lang).await?)
             </div>
         </div>
     }
 }
 
-async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direction, may_write: bool) -> Result {
+async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direction, may_write: bool, lang: Lang) -> Result {
     let cleared = edge.is_cleared();
     let note = match direction {
         Direction::BlockedBy => edge.blocked_by_label(),
@@ -865,9 +873,10 @@ async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direc
         Direction::Blocks => "blocks",
     };
     let tag = match direction {
-        Direction::BlockedBy => "BLOCKED BY",
-        Direction::Blocks => "BLOCKS",
+        Direction::BlockedBy => t(lang, Key::BlockedBy).to_uppercase(),
+        Direction::Blocks => t(lang, Key::Blocks).to_uppercase(),
     };
+    let remove_title = t(lang, Key::RemoveThisLink);
     view! {
         cx =>
         <div class=(class!("dep-row", "dep-row-waiting" if waiting))>
@@ -882,29 +891,30 @@ async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direc
                     <input type="hidden" name="task_id" value=(task_id.to_string())>
                     <input type="hidden" name="other_id" value=(edge.task_id.clone())>
                     <input type="hidden" name="direction" value=(wire)>
-                    <button class="dep-unlink" type="submit" title="Remove this link">(glyph::cross(cx).await?)</button>
+                    <button class="dep-unlink" type="submit" title=(remove_title)>(glyph::cross(cx).await?)</button>
                 </form>
             }
         </div>
     }
 }
 
-async fn file_chip(cx: &Cx, file: &izlek_core::detail::FileLine, me: &Me, may_write: bool) -> Result {
+async fn file_chip(cx: &Cx, file: &izlek_core::detail::FileLine, me: &Me, may_write: bool, lang: Lang) -> Result {
     let _ = may_write;
     let may_drop = me.id == file.uploaded_by || me.role.can_administer();
     let on_comment = file.comment_id.is_some();
+    let remove_title = t(lang, Key::RemoveThisFile);
     view! {
         cx =>
         <span class="file-chip">
             <a class="file-chip-name" href=(format!("/files/{}", file.id))>(file.name.clone())</a>
             <span class="file-chip-size">(file.size_label())</span>
             if on_comment {
-                <span class="file-chip-note">"on a comment"</span>
+                <span class="file-chip-note">(t(lang, Key::OnAComment))</span>
             }
             if may_drop {
                 <form class="file-chip-drop-form" method="post" action="/api/delete_file">
                     <input type="hidden" name="file_id" value=(file.id.clone())>
-                    <button class="file-chip-drop" type="submit" title="Remove this file">(glyph::cross(cx).await?)</button>
+                    <button class="file-chip-drop" type="submit" title=(remove_title)>(glyph::cross(cx).await?)</button>
                 </form>
             }
         </span>
@@ -939,6 +949,8 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
+            // No snapshot means no user's language was read on this path
+            // either — English, same as `board.rs`'s shard-refusal branch.
             return view! {
                 cx =>
                 <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
@@ -960,6 +972,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
         allowed_file_types,
         attachment_limit_mb: _,
     } = snapshot;
+    let lang = Lang::from_code(&me.language);
 
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
@@ -980,15 +993,15 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                 <header class="detail-head">
                     <div class="detail-headline">
                         <span class="detail-key">(detail.task_key.clone())</span>
-                        (title_control(cx, &detail, may_write).await?)
+                        (title_control(cx, &detail, may_write, lang).await?)
                     </div>
-                    <span class="detail-esc">"esc"</span>
-                    <a class="detail-close" href="/" aria-label="Close this task">(glyph::cross(cx).await?)</a>
+                    <span class="detail-esc">(t(lang, Key::Esc))</span>
+                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
                 </header>
 
                 <div class="detail-fields">
                     <div class="detail-field">
-                        <span class="detail-label">"STATUS"</span>
+                        <span class="detail-label">(t(lang, Key::Status))</span>
                         if may_write {
                             <form class="status-form" method="post" action="/api/move_card">
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
@@ -1000,7 +1013,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                                     }
                                 </select>
                                 (glyph::chevron(cx).await?)
-                                <button class="status-go" type="submit">"Move"</button>
+                                <button class="status-go" type="submit">(t(lang, Key::Move))</button>
                             </form>
                         } else {
                             <span class="field-box">
@@ -1008,84 +1021,84 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                                 <span class="field-text">(detail.column.name.clone())</span>
                             </span>
                         }
-                        (refused(cx, "move_card").await?)
+                        (refused(cx, "move_card", lang).await?)
                     </div>
                     <div class="detail-field">
-                        <span class="detail-label">(format!("ASSIGNEES — {}", detail.assignees.len()))</span>
+                        <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
                         <div class="detail-assignees">
                             for person in &detail.assignees {
-                                (assignee_chip(cx, &detail.id, person, may_write).await?)
+                                (assignee_chip(cx, &detail.id, person, may_write, lang).await?)
                             }
                             <div class="spacer"></div>
                             if may_write {
-                                (assignee_picker(cx, &detail.id, &unassigned).await?)
+                                (assignee_picker(cx, &detail.id, &unassigned, lang).await?)
                             }
                         </div>
                     </div>
                     <div class="detail-field">
-                        <span class="detail-label">"DEADLINE"</span>
-                        (deadline_control(cx, &detail, today, may_write).await?)
+                        <span class="detail-label">(t(lang, Key::Deadline))</span>
+                        (deadline_control(cx, &detail, today, may_write, lang).await?)
                     </div>
                 </div>
 
                 <section class="detail-block">
-                    <span class="detail-label">"DESCRIPTION"</span>
-                    (description_control(cx, &detail, may_write).await?)
+                    <span class="detail-label">(t(lang, Key::Description))</span>
+                    (description_control(cx, &detail, may_write, lang).await?)
                 </section>
 
                 <section class="detail-block">
                     <div class="detail-block-head">
-                        <span class="detail-label">"DEPENDENCIES"</span>
+                        <span class="detail-label">(t(lang, Key::Dependencies))</span>
                         <div class="spacer"></div>
                         if may_write {
-                            (link_picker(cx, &detail.id, &linkable).await?)
+                            (link_picker(cx, &detail.id, &linkable, lang).await?)
                         }
                     </div>
                     if has_deps {
                         <div class="dep-list">
                             for edge in &detail.blocked_by {
-                                (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write).await?)
+                                (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?)
                             }
                             for edge in &detail.blocks {
-                                (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write).await?)
+                                (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
                             }
                         </div>
                     } else {
-                        <p class="detail-quiet">"Nothing blocks this task."</p>
+                        <p class="detail-quiet">(t(lang, Key::NothingBlocksThisTask))</p>
                     }
                 </section>
 
                 <section class="detail-block">
                     <div class="detail-block-head">
-                        <span class="detail-label">"FILES"</span>
+                        <span class="detail-label">(t(lang, Key::Files))</span>
                         <span class="detail-count">(detail.files.len())</span>
                     </div>
                     if detail.files.is_empty() {
-                        <p class="detail-quiet">"No files yet."</p>
+                        <p class="detail-quiet">(t(lang, Key::NoFilesYet))</p>
                     } else {
                         <div class="file-list">
                             for file in &detail.files {
-                                (file_chip(cx, file, &me, may_write).await?)
+                                (file_chip(cx, file, &me, may_write, lang).await?)
                             }
                         </div>
                     }
-                    (refused(cx, "delete_file").await?)
+                    (refused(cx, "delete_file", lang).await?)
                     if may_comment {
                         <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
                             <input type="hidden" name="task_id" value=(detail.id.clone())>
                             <label class="field-box file-upload-box">
-                                <span class="field-text">"File"</span>
+                                <span class="field-text">(t(lang, Key::File))</span>
                                 <input class="file-upload-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
                             </label>
-                            <button class="quiet" type="submit">"Attach"</button>
+                            <button class="quiet" type="submit">(t(lang, Key::Attach))</button>
                         </form>
-                        (refused(cx, "upload_file").await?)
+                        (refused(cx, "upload_file", lang).await?)
                     }
                 </section>
 
                 <section class="detail-block">
                     <div class="detail-block-head">
-                        <span class="detail-label">"COMMENTS"</span>
+                        <span class="detail-label">(t(lang, Key::Comments))</span>
                         <span class="detail-count">(detail.comments.len())</span>
                     </div>
                     <div class="comment-list">
@@ -1095,19 +1108,19 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                         if may_comment {
                             <form class="comment-composer" method="post" action="/api/post_comment">
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder="Write a comment…" required=""></textarea>
+                                <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder=(t(lang, Key::WriteAComment)) required=""></textarea>
                                 <div class="comment-row">
                                     <div class="spacer"></div>
-                                    <button class="comment-post" type="submit">"Comment"</button>
+                                    <button class="comment-post" type="submit">(t(lang, Key::Comment))</button>
                                 </div>
                             </form>
-                            (refused(cx, "post_comment").await?)
+                            (refused(cx, "post_comment", lang).await?)
                         }
                     </div>
                 </section>
 
                 <section class="detail-block">
-                    <span class="detail-label">"ACTIVITY"</span>
+                    <span class="detail-label">(t(lang, Key::Activity))</span>
                     <div class="activity-list">
                         for entry in &detail.activity {
                             <div class="activity-line">
@@ -1119,7 +1132,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                     </div>
                 </section>
 
-                (refused(cx, "delete_task").await?)
+                (refused(cx, "delete_task", lang).await?)
 
                 <footer class="detail-foot">
                     if may_delete {
@@ -1127,32 +1140,32 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                             Some(cost) => {
                                 let freed = cost.frees.join(", ");
                                 <details class="confirm-details">
-                                    <summary class="detail-delete">(glyph::bin(cx).await?)<span>"Delete task"</span></summary>
+                                    <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
                                     <div class="confirm">
-                                        <div class="confirm-title">(format!("Delete {} — {}?", cost.task_key, cost.title))</div>
+                                        <div class="confirm-title">(format!("{}: {} — {}?", t(lang, Key::DeleteTask), cost.task_key, cost.title))</div>
                                         <ul class="confirm-list">
                                             if cost.comment_count > 0 {
-                                                <li>(if cost.comment_count == 1 { "1 comment goes with it".to_string() } else { format!("{} comments go with it", cost.comment_count) })</li>
+                                                <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
                                             }
                                             if cost.link_count > 0 {
-                                                <li>(if cost.link_count == 1 { "1 dependency stops applying".to_string() } else { format!("{} dependencies stop applying", cost.link_count) })</li>
+                                                <li>(if cost.link_count == 1 { t(lang, Key::DependencyStopsApplying).to_string() } else { format!("{} {}", cost.link_count, t(lang, Key::DependenciesStopApplying)) })</li>
                                             }
                                             if !freed.is_empty() {
-                                                <li>(format!("{freed} stops being blocked"))</li>
+                                                <li>(format!("{freed} {}", t(lang, Key::StopsBeingBlocked)))</li>
                                             }
                                         </ul>
                                         <form class="detail-delete-form" method="post" action="/api/delete_task">
                                             <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                            <button class="detail-delete detail-delete-sure" type="submit">(format!("Delete {}", cost.task_key))</button>
+                                            <button class="detail-delete detail-delete-sure" type="submit">(format!("{}: {}", t(lang, Key::DeleteTask), cost.task_key))</button>
                                         </form>
                                     </div>
                                 </details>
                             },
-                            None => <p class="detail-quiet">"This task cannot be deleted."</p>,
+                            None => <p class="detail-quiet">(t(lang, Key::ThisTaskCannotBeDeleted))</p>,
                         }
                     }
                     <div class="spacer"></div>
-                    <a class="quiet" href="/">"Close"</a>
+                    <a class="quiet" href="/">(t(lang, Key::Close))</a>
                 </footer>
             </div>
         </div>

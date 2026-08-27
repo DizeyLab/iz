@@ -311,6 +311,8 @@ pub enum Refusal {
     BadZone,
     /// The theme field was not one of the values the form offers.
     BadTheme,
+    /// The language field was not one of the values the form offers.
+    BadLanguage,
     /// Something in the allowed-types list is not a file extension.
     BadFileType,
     /// The sender panel was saved with a field it cannot work without, or with
@@ -363,6 +365,7 @@ impl Refusal {
             }
             Refusal::BadZone => "That is not a timezone.".to_string(),
             Refusal::BadTheme => "That is not a theme.".to_string(),
+            Refusal::BadLanguage => "That is not a language.".to_string(),
             Refusal::BadFileType => {
                 "File types are extensions — png, pdf, zip — separated by commas.".to_string()
             }
@@ -379,6 +382,61 @@ impl Refusal {
             Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::Unavailable => "Something went wrong.".to_string(),
+        }
+    }
+
+    /// `message()`, in a user's language, for the handful of refusals
+    /// `board.rs`/`detail.rs` render — those two pages' only refusal variants.
+    /// Everything else falls back to the English `message()`: the rest of the
+    /// app's pages have not been translated yet.
+    pub fn message_in(&self, lang: crate::i18n::Lang) -> String {
+        use crate::i18n::Lang::Tr;
+        if lang != Tr {
+            return self.message();
+        }
+        match self {
+            Refusal::Forbidden => "İzin verilmiyor.".to_string(),
+            Refusal::SignInFirst => "Önce oturum aç.".to_string(),
+            Refusal::EmptyTitle => "Göreve bir başlık ver.".to_string(),
+            Refusal::EmptyComment => "Önce bir şey yaz.".to_string(),
+            Refusal::NoFile => "Önce bir dosya seç.".to_string(),
+            Refusal::FileTooBig => "Bu çalışma alanı için çok büyük.".to_string(),
+            Refusal::FileTypeNotAllowed => {
+                "Bu dosya türü bu çalışma alanının izin verdiği listede değil.".to_string()
+            }
+            Refusal::BadDeadline => "Bu bir tarih değil.".to_string(),
+            Refusal::Cycle => "Bu bağlantı görevi kendi arkasına koyar.".to_string(),
+            Refusal::MovedAlready => "Bu kartı başka biri zaten taşıdı.".to_string(),
+            Refusal::NotFound => "Böyle bir görev yok.".to_string(),
+            Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
+            Refusal::BadLimit => {
+                "Limit en az 1 MB, dosya başına en çok 500 MB, fotoğraf başına en çok 20 MB olabilir."
+                    .to_string()
+            }
+            Refusal::BadZone => "Bu bir saat dilimi değil.".to_string(),
+            Refusal::BadTheme => "Bu bir tema değil.".to_string(),
+            Refusal::BadLanguage => "Bu bir dil değil.".to_string(),
+            Refusal::BadFileType => {
+                "Dosya türleri virgülle ayrılmış uzantılardır — png, pdf, zip.".to_string()
+            }
+            // `BadSender`'s sentence is built where the complaint is
+            // decided (`settings.rs`), already in the caller's language —
+            // this is only reached for a request with no admin to read a
+            // language off of, so it falls back to English like the rest.
+            Refusal::BadSender(_) => self.message(),
+            Refusal::EmptySubject => "Kurala bir konu ver.".to_string(),
+            Refusal::Rejected => "Bu işe yaramadı.".to_string(),
+            Refusal::RateLimited => {
+                "Çok fazla deneme — birkaç dakika bekleyip tekrar dene.".to_string()
+            }
+            Refusal::AlreadyClaimed => "Bu çalışma alanının zaten bir sahibi var.".to_string(),
+            Refusal::AddressTaken => "Bu adresin zaten bir hesabı var.".to_string(),
+            Refusal::LinkNotUsable => "Bu bağlantı artık çalışmıyor.".to_string(),
+            Refusal::EmptyName => "Kendine bir isim ver.".to_string(),
+            // Built by `izlek-core`'s password validator, out of this
+            // slice's reach — stays English until that crate carries `Lang`
+            // too.
+            Refusal::Password(_) => self.message(),
         }
     }
 
@@ -401,6 +459,7 @@ impl Refusal {
             "bad-limit" => Refusal::BadLimit,
             "bad-zone" => Refusal::BadZone,
             "bad-theme" => Refusal::BadTheme,
+            "bad-language" => Refusal::BadLanguage,
             "bad-file-type" => Refusal::BadFileType,
             // The specific complaint (which field, and why) lives only in the
             // response the save itself returned; a code that survived a round
@@ -451,6 +510,7 @@ impl Refusal {
             Refusal::BadLimit => "bad-limit",
             Refusal::BadZone => "bad-zone",
             Refusal::BadTheme => "bad-theme",
+            Refusal::BadLanguage => "bad-language",
             Refusal::BadFileType => "bad-file-type",
             Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
@@ -714,6 +774,7 @@ mod refusal_message_tests {
             Refusal::BadDeadline,
             Refusal::BadZone,
             Refusal::BadTheme,
+            Refusal::BadLanguage,
             Refusal::Cycle,
             Refusal::MovedAlready,
             Refusal::NotFound,

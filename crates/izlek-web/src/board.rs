@@ -17,6 +17,7 @@ use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
 use topcoat::runtime::{Event, Surrogated, procedure, shard};
 use topcoat::view::view;
 
+use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, mail, require_user, require_writer};
 
 /// The board a task belongs to, checked against this person's workspace
@@ -206,18 +207,21 @@ async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => {
+            // No session to read a language off of — English, same as an
+            // auth screen with no user yet.
             return view! {
                 cx =>
                 <div class="scaffold-note"><p>(refusal.message())</p></div>
             };
         }
     };
+    let lang = Lang::from_code(&user.language);
     let store = accounts(cx).store().clone();
     let Some(mut view_data) = izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
     else {
         return view! {
             cx =>
-            <div class="scaffold-note"><p>"Something went wrong."</p></div>
+            <div class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></div>
         };
     };
     for column in &mut view_data.columns {
@@ -231,7 +235,7 @@ async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
         view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
     let mut columns = Vec::new();
     for column in view_data.columns {
-        columns.push(render_column(cx, column, today, may_write, &all_columns).await?);
+        columns.push(render_column(cx, column, today, may_write, &all_columns, lang).await?);
     }
 
     view! {
@@ -239,7 +243,7 @@ async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
         for column in columns { (column) }
         if empty {
             <div class="board-empty">
-                <div class="board-empty-title">"This board is empty"</div>
+                <div class="board-empty-title">(t(lang, Key::ThisBoardIsEmpty))</div>
             </div>
         }
     }
@@ -251,6 +255,7 @@ async fn render_column(
     today: Date,
     may_write: bool,
     all_columns: &[(String, String)],
+    lang: Lang,
 ) -> Result {
     let column_id = column.column.id;
     let name = column.column.name;
@@ -258,8 +263,10 @@ async fn render_column(
     let count = column.cards.len();
     let mut cards = Vec::new();
     for card in column.cards {
-        cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write, all_columns).await?);
+        cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write, all_columns, lang).await?);
     }
+    let add_a_task = t(lang, Key::AddATask);
+    let what_needs_doing = t(lang, Key::WhatNeedsDoing);
 
     view! {
         cx =>
@@ -270,7 +277,7 @@ async fn render_column(
                 <span class="column-count">(count)</span>
                 <div class="spacer"></div>
                 if may_write {
-                    <button class="column-add" title="Add a task" @click=$(|_e: Event| composing.set(true))>
+                    <button class="column-add" title=(add_a_task) @click=$(|_e: Event| composing.set(true))>
                         "+"
                     </button>
                 }
@@ -280,11 +287,11 @@ async fn render_column(
                 if may_write {
                     <form method="post" action="/api/create_task" class="composer" :hidden=$(!composing.get())>
                         <input type="hidden" name="column_id" value=(column_id.clone())>
-                        <input class="composer-input" type="text" name="title" placeholder="What needs doing?" required="">
+                        <input class="composer-input" type="text" name="title" placeholder=(what_needs_doing) required="">
                         <div class="composer-row">
-                            <button class="composer-add" type="submit">"Add"</button>
+                            <button class="composer-add" type="submit">(t(lang, Key::Add))</button>
                             <button class="composer-cancel" type="button" @click=$(|_e: Event| composing.set(false))>
-                                "Cancel"
+                                (t(lang, Key::Cancel))
                             </button>
                         </div>
                     </form>
@@ -307,6 +314,7 @@ async fn render_card(
     column_id: &str,
     may_write: bool,
     all_columns: &[(String, String)],
+    lang: Lang,
 ) -> Result {
     let blocks = card.blocks.len();
     let blocked_by = card.blocked_by.join(", ");
@@ -349,9 +357,9 @@ async fn render_card(
         >
             <div class="card-keys">
                 <span class="card-key">(card.task_key.clone())</span>
-                if blocks > 0 { <span class="card-blocks">(format!("blocks {blocks}"))</span> }
+                if blocks > 0 { <span class="card-blocks">(format!("{} {blocks}", t(lang, Key::Blocks)))</span> }
                 if !blocked_by.is_empty() {
-                    <span class="card-blocked-by">(format!("blocked by {blocked_by}"))</span>
+                    <span class="card-blocked-by">(format!("{} {blocked_by}", t(lang, Key::BlockedBy)))</span>
                 }
             </div>
             <div class="card-title">(card.title.clone())</div>
@@ -364,17 +372,17 @@ async fn render_card(
                 <div class="avatars">
                     for person in assignees { (person) }
                     if !has_assignees {
-                        <span class="avatar avatar-none" role="img" aria-label="nobody assigned" title="Nobody assigned"></span>
+                        <span class="avatar avatar-none" role="img" aria-label=(t(lang, Key::NobodyAssignedAria)) title=(t(lang, Key::NobodyAssignedTitle))></span>
                     }
                 </div>
             </div>
         </a>
         <div class="card-menu pop-panel" id=(menu_id.clone())>
             <div class="pop-list">
-                <a class="pop-row" href=(href.clone())>"Open"</a>
+                <a class="pop-row" href=(href.clone())>(t(lang, Key::Open))</a>
                 if may_write && !move_targets.is_empty() {
                     <div class="card-menu-move">
-                        <button class="pop-row card-menu-move-trigger" type="button">"Move"</button>
+                        <button class="pop-row card-menu-move-trigger" type="button">(t(lang, Key::Move))</button>
                         <div class="card-menu-submenu pop-panel">
                             <div class="pop-list">
                                 for target in move_targets.iter() {
@@ -392,7 +400,7 @@ async fn render_card(
                 if may_write {
                     <form class="pop-row-form" method="post" action="/api/delete_task">
                         <input type="hidden" name="task_id" value=(task_id.clone())>
-                        <button class="pop-row card-menu-danger" type="submit">"Delete"</button>
+                        <button class="pop-row card-menu-danger" type="submit">(t(lang, Key::Delete))</button>
                     </form>
                 }
             </div>
@@ -445,11 +453,11 @@ struct BoardQuery {
 }
 
 /// The noun a sort key shows in the `<select>` — terse, no explainer.
-fn sort_label(sort: &str) -> &'static str {
+fn sort_label(sort: &str, lang: Lang) -> &'static str {
     match sort {
-        "created" => "Created",
-        "title" => "Title",
-        _ => "Deadline",
+        "created" => t(lang, Key::SortCreated),
+        "title" => t(lang, Key::SortTitle),
+        _ => t(lang, Key::SortDeadline),
     }
 }
 
@@ -461,10 +469,11 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         let store = accounts(cx).store().clone();
         izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
     };
+    let lang = Lang::from_code(&user.language);
     let Some(view_data) = view_data else {
         return view! {
             cx =>
-            <main class="scaffold-note"><p>"Something went wrong."</p></main>
+            <main class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></main>
         };
     };
     let today = OffsetDateTime::now_utc().date();
@@ -487,26 +496,26 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             </a>
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
-            <a class="topbar-link" href="/settings">"Settings"</a>
+            <a class="topbar-link" href="/settings">(t(lang, Key::Settings))</a>
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>
             <form class="field-box" method="get" action="/">
-                <span class="field-text">"Sort"</span>
+                <span class="field-text">(t(lang, Key::Sort))</span>
                 <select class="status-select" name="sort"
                     @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
                 >
                     for key in SORT_KEYS {
-                        <option value=(key) selected=(key == sort)>(sort_label(key))</option>
+                        <option value=(key) selected=(key == sort)>(sort_label(key, lang))</option>
                     }
                 </select>
             </form>
             <div class="spacer"></div>
-            if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} overdue"))</span> }
-            if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} blocked"))</span> }
+            if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} {}", t(lang, Key::Overdue)))</span> }
+            if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} {}", t(lang, Key::Blocked)))</span> }
         </div>
         if let Some(refusal) = &refusal {
-            <p class="field-error">(refusal.message())</p>
+            <p class="field-error">(refusal.message_in(lang))</p>
         }
         <main class="board-stage">
             signal version = 0.0;

@@ -2302,6 +2302,53 @@ async fn the_dark_theme_is_saved_and_marks_the_page() {
 }
 
 #[tokio::test]
+async fn turkish_is_saved_and_the_board_renders_in_turkish() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("language", "tr")],
+        )
+        .await;
+    assert!(
+        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let page = app.get("/", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"<html lang="tr""#), "{html}");
+    assert!(html.contains("Ayarlar"), "{html}");
+
+    let settings_page = app.get("/settings", Some(&admin_cookie)).await;
+    let settings_html = String::from_utf8_lossy(&settings_page.bytes);
+    assert!(settings_html.contains("Profilin"), "{settings_html}");
+
+    let rules_page = app.get("/rules", Some(&admin_cookie)).await;
+    let rules_html = String::from_utf8_lossy(&rules_page.bytes);
+    assert!(rules_html.contains("Posta kuralları"), "{rules_html}");
+}
+
+#[tokio::test]
+async fn an_unlisted_language_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("language", "fr")],
+        )
+        .await;
+    assert_eq!(saved.location.as_deref(), Some("/settings?refusal=bad-language&on=save_profile"));
+}
+
+#[tokio::test]
 async fn an_unlisted_theme_is_refused() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;

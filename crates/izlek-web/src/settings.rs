@@ -27,6 +27,7 @@ use topcoat::view::view;
 
 use izlek_core::store::{NewSender, SenderTest, User};
 
+use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, mail, require_admin, require_user};
 
 /// The widest either limit may be set to. A ceiling of any size is a promise
@@ -323,6 +324,7 @@ async fn save_sender(cx: &Cx, Form(input): Form<SaveSenderForm>) -> Result<(Stat
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("save_sender", Some(refusal))),
     };
+    let lang = Lang::from_code(&admin.language);
 
     let host = input.host.trim().to_string();
     let username = input.username.trim().to_string();
@@ -340,24 +342,24 @@ async fn save_sender(cx: &Cx, Form(input): Form<SaveSenderForm>) -> Result<(Stat
         .unwrap_or(false);
 
     let complaint = if host.is_empty() {
-        Some("Give the SMTP host.")
+        Some(Key::SmtpHostRequired)
     } else if host.contains(char::is_whitespace) || host.contains('@') || host.contains('/') {
-        Some("The SMTP host is a host name, not an address or a URL.")
+        Some(Key::SmtpHostInvalid)
     } else if !(1..=65535).contains(&input.port) {
-        Some("A port is a number between 1 and 65535.")
+        Some(Key::PortInvalid)
     } else if username.is_empty() {
-        Some("Give the SMTP username.")
+        Some(Key::SmtpUsernameRequired)
     } else if password.is_none() && !known {
-        Some("A password is needed the first time.")
+        Some(Key::PasswordNeededFirstTime)
     } else if !is_address(&from_address) {
-        Some("That is not a from-address.")
+        Some(Key::NotFromAddress)
     } else {
         None
     };
     if let Some(problem) = complaint {
         return Ok(saved_or_refused(
             "save_sender",
-            Some(Refusal::BadSender(problem.to_string())),
+            Some(Refusal::BadSender(t(lang, problem).to_string())),
         ));
     }
 
@@ -396,6 +398,7 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("send_test_mail", Some(refusal))),
     };
+    let lang = Lang::from_code(&admin.language);
 
     let store = accounts(cx).store().clone();
     let configured = store
@@ -406,7 +409,7 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
         return Ok(saved_or_refused(
             "send_test_mail",
             Some(Refusal::BadSender(
-                "Fill the sender in and save it first — there is nothing to test yet.".to_string(),
+                t(lang, Key::SenderNotConfiguredYet).to_string(),
             )),
         ));
     }
@@ -448,10 +451,15 @@ struct SaveProfileForm {
     timezone: Option<String>,
     #[serde(default)]
     theme: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
 }
 
 /// The values the theme field offers.
 const THEME_OPTIONS: [&str; 2] = ["light", "dark"];
+
+/// The values the language field offers.
+const LANGUAGE_OPTIONS: [&str; 2] = ["en", "tr"];
 
 /// The offsets the timezone field offers, `"UTC-12:00"` through `"UTC+14:00"`.
 ///
@@ -492,11 +500,15 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     if !THEME_OPTIONS.contains(&theme.as_str()) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadTheme)));
     }
+    let language = input.language.unwrap_or_else(|| user.language.clone());
+    if !LANGUAGE_OPTIONS.contains(&language.as_str()) {
+        return Ok(saved_or_refused("save_profile", Some(Refusal::BadLanguage)));
+    }
     let accounts = accounts(cx);
     let store = accounts.store();
     let outcome = store.set_profile(&user.id, &display_name, user.photo_path.as_deref()).await.and(
         store
-            .set_preferences(&user.id, &timezone, &theme, &user.language)
+            .set_preferences(&user.id, &timezone, &theme, &language)
             .await,
     );
     let refusal = match outcome {
@@ -700,6 +712,7 @@ async fn settings_page(cx: &Cx) -> Result {
             };
         }
     };
+    let lang = Lang::from_code(&user.language);
     let administers = user.role.can_administer();
     let query = topcoat::router::request::uri(cx).query().unwrap_or("");
 
@@ -730,32 +743,32 @@ async fn settings_page(cx: &Cx) -> Result {
                 <span class="wordmark-dot"></span>
             </a>
             <div class="topbar-divider"></div>
-            <span class="board-name">"Settings"</span>
+            <span class="board-name">(t(lang, Key::NavSettings))</span>
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
         </header>
 
         <div class="settings-shell">
             <nav class="sidenav">
-                <a class="sidenav-item" href="/">"Board"</a>
-                <a class="sidenav-item" href="/rules">"Mail rules"</a>
-                <a class="sidenav-item" href="/logs">"Logs"</a>
-                <a class="sidenav-item sidenav-item-on" href="/settings">"Settings"</a>
+                <a class="sidenav-item" href="/">(t(lang, Key::NavBoard))</a>
+                <a class="sidenav-item" href="/rules">(t(lang, Key::NavMailRules))</a>
+                <a class="sidenav-item" href="/logs">(t(lang, Key::NavLogs))</a>
+                <a class="sidenav-item sidenav-item-on" href="/settings">(t(lang, Key::NavSettings))</a>
             </nav>
 
             <main class="settings-stage">
                 <div class="settings-head">
-                    <h1 class="settings-title">"Settings"</h1>
+                    <h1 class="settings-title">(t(lang, Key::NavSettings))</h1>
                     <span class="chip chip-role">(user.role.as_str().to_string())</span>
                 </div>
 
                 <section class="panel">
                     <div class="panel-head">
-                        <h2 class="panel-title">"Your profile"</h2>
+                        <h2 class="panel-title">(t(lang, Key::YourProfile))</h2>
                     </div>
                     <form method="post" action="/api/save_profile" class="panel-body">
                         <label class="field">
-                            <span class="field-label">"DISPLAY NAME"</span>
+                            <span class="field-label">(t(lang, Key::DisplayNameLabel))</span>
                             <input
                                 class="field-input"
                                 type="text"
@@ -766,11 +779,11 @@ async fn settings_page(cx: &Cx) -> Result {
                             >
                         </label>
                         <label class="field">
-                            <span class="field-label">"EMAIL"</span>
+                            <span class="field-label">(t(lang, Key::EmailLabel))</span>
                             <input class="field-input" type="email" value=(user.email.clone()) disabled="">
                         </label>
                         <label class="field">
-                            <span class="field-label">"TIMEZONE"</span>
+                            <span class="field-label">(t(lang, Key::TimezoneLabel))</span>
                             <select class="field-input" name="timezone">
                                 for zone in zone_options() {
                                     <option value=(zone.clone()) selected=(zone == user.timezone)>(zone)</option>
@@ -778,25 +791,32 @@ async fn settings_page(cx: &Cx) -> Result {
                             </select>
                         </label>
                         <label class="field">
-                            <span class="field-label">"THEME"</span>
+                            <span class="field-label">(t(lang, Key::ThemeLabel))</span>
                             <select class="field-input" name="theme">
-                                <option value="light" selected=(user.theme == "light")>"Light"</option>
-                                <option value="dark" selected=(user.theme == "dark")>"Dark"</option>
+                                <option value="light" selected=(user.theme == "light")>(t(lang, Key::LightOption))</option>
+                                <option value="dark" selected=(user.theme == "dark")>(t(lang, Key::DarkOption))</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">(t(lang, Key::LanguageLabel))</span>
+                            <select class="field-input" name="language">
+                                <option value="en" selected=(user.language == "en")>"English"</option>
+                                <option value="tr" selected=(user.language == "tr")>"Türkçe"</option>
                             </select>
                         </label>
                         <div class="panel-foot">
                             if let Some(refusal) = &profile_refusal {
-                                <span class="field-error">(refusal.message())</span>
+                                <span class="field-error">(refusal.message_in(lang))</span>
                             }
                             if profile_saved {
-                                <span class="field-note">"Saved."</span>
+                                <span class="field-note">(t(lang, Key::Saved))</span>
                             }
-                            <button class="primary" type="submit">"Save"</button>
+                            <button class="primary" type="submit">(t(lang, Key::Save))</button>
                         </div>
                     </form>
                     <div class="panel-body panel-foot panel-foot-split">
                         <form method="post" action="/api/sign_out">
-                            <button class="quiet" type="submit">"Sign out"</button>
+                            <button class="quiet" type="submit">(t(lang, Key::SignOut))</button>
                         </form>
                     </div>
                 </section>
@@ -806,22 +826,22 @@ async fn settings_page(cx: &Cx) -> Result {
                     let password_set = sender.password_set;
                     <section class="panel">
                         <div class="panel-head">
-                            <h2 class="panel-title">"Outgoing mail"</h2>
-                            <span class="chip chip-admin">"Admin only"</span>
+                            <h2 class="panel-title">(t(lang, Key::OutgoingMail))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                             if connected {
-                                <span class="chip chip-connected">"Connected"</span>
+                                <span class="chip chip-connected">(t(lang, Key::Connected))</span>
                             } else {
-                                <span class="chip chip-off">"Not configured"</span>
+                                <span class="chip chip-off">(t(lang, Key::NotConfiguredChip))</span>
                             }
                         </div>
                         <div class="panel-body">
                             if !connected {
-                                <p class="panel-lede">"Not connected — mail queues until you save."</p>
+                                <p class="panel-lede">(t(lang, Key::NotConnectedNote))</p>
                             }
                             <form method="post" action="/api/save_sender" id="sender-settings">
                                 <div class="field-row">
                                     <label class="field">
-                                        <span class="field-label">"SMTP HOST"</span>
+                                        <span class="field-label">(t(lang, Key::SmtpHostLabel))</span>
                                         <input
                                             class="field-input"
                                             type="text"
@@ -831,7 +851,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                         >
                                     </label>
                                     <label class="field field-narrow">
-                                        <span class="field-label">"PORT"</span>
+                                        <span class="field-label">(t(lang, Key::PortLabel))</span>
                                         <input
                                             class="field-input"
                                             type="number"
@@ -843,22 +863,22 @@ async fn settings_page(cx: &Cx) -> Result {
                                     </label>
                                 </div>
                                 <label class="field">
-                                    <span class="field-label">"USERNAME"</span>
+                                    <span class="field-label">(t(lang, Key::UsernameLabel))</span>
                                     <input class="field-input" type="text" name="username" value=(sender.username.clone())>
                                 </label>
                                 <label class="field">
-                                    <span class="field-label">"PASSWORD"</span>
+                                    <span class="field-label">(t(lang, Key::PasswordLabel))</span>
                                     <input
                                         class="field-input"
                                         type="password"
                                         name="password"
                                         autocomplete="off"
-                                        placeholder=(if password_set { "Set — type a new one to replace it" } else { "Needed before anything can be sent" })
+                                        placeholder=(if password_set { t(lang, Key::PasswordSetPlaceholder) } else { t(lang, Key::PasswordNeededPlaceholder) })
                                     >
                                 </label>
                                 <div class="field-row">
                                     <label class="field">
-                                        <span class="field-label">"FROM NAME"</span>
+                                        <span class="field-label">(t(lang, Key::FromNameLabel))</span>
                                         <input
                                             class="field-input"
                                             type="text"
@@ -868,7 +888,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                         >
                                     </label>
                                     <label class="field">
-                                        <span class="field-label">"FROM ADDRESS"</span>
+                                        <span class="field-label">(t(lang, Key::FromAddressLabel))</span>
                                         <input
                                             class="field-input"
                                             type="text"
@@ -882,13 +902,13 @@ async fn settings_page(cx: &Cx) -> Result {
                             <div class="panel-foot panel-foot-split">
                                 <div class="foot-side">
                                     <form method="post" action="/api/send_test_mail">
-                                        <button class="quiet" type="submit">"Send test mail to myself"</button>
+                                        <button class="quiet" type="submit">(t(lang, Key::SendTestMail))</button>
                                     </form>
                                     match (&test_refusal, &sender.test) {
-                                        (Some(refusal), _) => <span class="field-error">(refusal.message())</span>,
+                                        (Some(refusal), _) => <span class="field-error">(refusal.message_in(lang))</span>,
                                         (None, Some(result)) => match (&result.error, &result.took) {
-                                            (Some(problem), _) => <span class="field-error">(format!("not delivered, {} — {problem}", result.moment))</span>,
-                                            (None, Some(took)) => <span class="field-note">(format!("delivered in {took} — {}", result.moment))</span>,
+                                            (Some(problem), _) => <span class="field-error">(crate::i18n::not_delivered_label(lang, &result.moment, problem))</span>,
+                                            (None, Some(took)) => <span class="field-note">(crate::i18n::delivered_in_label(lang, took, &result.moment))</span>,
                                             (None, None) => "",
                                         },
                                         (None, None) => "",
@@ -896,12 +916,12 @@ async fn settings_page(cx: &Cx) -> Result {
                                 </div>
                                 <div class="foot-side">
                                     if let Some(refusal) = &sender_refusal {
-                                        <span class="field-error">(refusal.message())</span>
+                                        <span class="field-error">(refusal.message_in(lang))</span>
                                     }
                                     if sender_saved {
-                                        <span class="field-note">"Saved."</span>
+                                        <span class="field-note">(t(lang, Key::Saved))</span>
                                     }
-                                    <button class="primary" type="submit" form="sender-settings">"Save"</button>
+                                    <button class="primary" type="submit" form="sender-settings">(t(lang, Key::Save))</button>
                                 </div>
                             </div>
                         </div>
@@ -911,13 +931,13 @@ async fn settings_page(cx: &Cx) -> Result {
                 if let Some((attachment_limit_mb, photo_limit_mb)) = limits {
                     <section class="panel">
                         <div class="panel-head">
-                            <h2 class="panel-title">"Workspace limits"</h2>
-                            <span class="chip chip-admin">"Admin only"</span>
+                            <h2 class="panel-title">(t(lang, Key::WorkspaceLimits))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                         </div>
                         <form method="post" action="/api/save_limits" class="panel-body">
                             <div class="field-row">
                                 <label class="field">
-                                    <span class="field-label">"ATTACHMENT LIMIT (MB)"</span>
+                                    <span class="field-label">(t(lang, Key::AttachmentLimitLabel))</span>
                                     <input
                                         class="field-input"
                                         type="number"
@@ -929,7 +949,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                     >
                                 </label>
                                 <label class="field">
-                                    <span class="field-label">"PHOTO LIMIT (MB)"</span>
+                                    <span class="field-label">(t(lang, Key::PhotoLimitLabel))</span>
                                     <input
                                         class="field-input"
                                         type="number"
@@ -942,7 +962,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                 </label>
                             </div>
                             <label class="field">
-                                <span class="field-label">"ALLOWED FILE TYPES"</span>
+                                <span class="field-label">(t(lang, Key::AllowedFileTypesLabel))</span>
                                 <input
                                     class="field-input"
                                     type="text"
@@ -951,15 +971,15 @@ async fn settings_page(cx: &Cx) -> Result {
                                     placeholder="png, jpg, pdf, zip"
                                 >
                             </label>
-                            <p class="panel-lede">"A lower limit never touches files already uploaded."</p>
+                            <p class="panel-lede">(t(lang, Key::LowerLimitNote))</p>
                             <div class="panel-foot">
                                 if let Some(refusal) = &limits_refusal {
-                                    <span class="field-error">(refusal.message())</span>
+                                    <span class="field-error">(refusal.message_in(lang))</span>
                                 }
                                 if limits_saved {
-                                    <span class="field-note">"Saved."</span>
+                                    <span class="field-note">(t(lang, Key::Saved))</span>
                                 }
-                                <button class="primary" type="submit">"Save"</button>
+                                <button class="primary" type="submit">(t(lang, Key::Save))</button>
                             </div>
                         </form>
                     </section>
@@ -968,35 +988,35 @@ async fn settings_page(cx: &Cx) -> Result {
                 if let Some(members) = members {
                     <section class="panel">
                         <div class="panel-head">
-                            <h2 class="panel-title">"Members"</h2>
-                            <span class="chip chip-admin">"Admin only"</span>
+                            <h2 class="panel-title">(t(lang, Key::Members))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                         </div>
                         <div class="panel-body">
                             <table class="member-table">
                                 <thead>
                                     <tr>
-                                        <th>"NAME"</th>
-                                        <th>"ADDRESS"</th>
-                                        <th>"ROLE"</th>
-                                        <th>"ACCOUNT"</th>
+                                        <th>(t(lang, Key::NameCol))</th>
+                                        <th>(t(lang, Key::AddressCol))</th>
+                                        <th>(t(lang, Key::RoleCol))</th>
+                                        <th>(t(lang, Key::AccountCol))</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     for member in members {
                                         let account = if member.is_owner {
-                                            "owner".to_string()
+                                            t(lang, Key::OwnerStatus).to_string()
                                         } else if !member.has_password {
-                                            "invited".to_string()
+                                            t(lang, Key::InvitedStatus).to_string()
                                         } else if let Some(day) = member.last_signed_in.clone() {
-                                            format!("last seen {day}")
+                                            crate::i18n::last_seen_label(lang, &day)
                                         } else {
-                                            "active".to_string()
+                                            t(lang, Key::ActiveStatus).to_string()
                                         };
                                         <tr class="member-row">
                                             <td class="member-name">
                                                 (member.display_name.clone())
                                                 if member.is_you {
-                                                    <span class="member-you">"you"</span>
+                                                    <span class="member-you">(t(lang, Key::You))</span>
                                                 }
                                             </td>
                                             <td class="member-address">(member.email.clone())</td>
@@ -1006,7 +1026,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                                 if !member.has_password {
                                                     <form method="post" action="/api/resend_link" class="member-resend">
                                                         <input type="hidden" name="user_id" value=(member.id.clone())>
-                                                        <button class="quiet" type="submit">"Resend mail"</button>
+                                                        <button class="quiet" type="submit">(t(lang, Key::ResendMail))</button>
                                                     </form>
                                                 }
                                             </td>
@@ -1017,35 +1037,35 @@ async fn settings_page(cx: &Cx) -> Result {
 
                             <form method="post" action="/api/invite_member" class="member-invite">
                                 <label class="field">
-                                    <span class="field-label">"NAME"</span>
+                                    <span class="field-label">(t(lang, Key::NameCol))</span>
                                     <input class="field-input" type="text" name="display_name" maxlength="80" required="">
                                 </label>
                                 <label class="field">
-                                    <span class="field-label">"ADDRESS"</span>
+                                    <span class="field-label">(t(lang, Key::AddressCol))</span>
                                     <input class="field-input" type="email" name="email" required="">
                                 </label>
                                 <label class="field field-role">
-                                    <span class="field-label">"ROLE"</span>
+                                    <span class="field-label">(t(lang, Key::RoleCol))</span>
                                     <select class="field-input" name="role">
-                                        <option value="member">"Member"</option>
-                                        <option value="viewer">"Viewer"</option>
-                                        <option value="admin">"Admin"</option>
+                                        <option value="member">(t(lang, Key::RoleMemberOption))</option>
+                                        <option value="viewer">(t(lang, Key::RoleViewerOption))</option>
+                                        <option value="admin">(t(lang, Key::RoleAdminOption))</option>
                                     </select>
                                 </label>
-                                <button class="primary" type="submit">"Add member"</button>
+                                <button class="primary" type="submit">(t(lang, Key::AddMember))</button>
                             </form>
 
                             if let Some(refusal) = &member_refusal {
-                                <p class="field-error">(refusal.message())</p>
+                                <p class="field-error">(refusal.message_in(lang))</p>
                             }
                             if let Some(address) = &mailed {
-                                <p class="field-note">(format!("Mailed to {address}"))</p>
+                                <p class="field-note">(crate::i18n::mailed_to_label(lang, address))</p>
                             }
 
                             <div class="role-note">
-                                <p class="panel-lede"><b>"Admin"</b>" — sender, limits, members."</p>
-                                <p class="panel-lede"><b>"Member"</b>" — board and rule mail."</p>
-                                <p class="panel-lede"><b>"Viewer"</b>" — read and export only."</p>
+                                <p class="panel-lede"><b>(t(lang, Key::RoleNoteAdminLabel))</b>(format!(" {}", t(lang, Key::RoleNoteAdminDesc)))</p>
+                                <p class="panel-lede"><b>(t(lang, Key::RoleNoteMemberLabel))</b>(format!(" {}", t(lang, Key::RoleNoteMemberDesc)))</p>
+                                <p class="panel-lede"><b>(t(lang, Key::RoleNoteViewerLabel))</b>(format!(" {}", t(lang, Key::RoleNoteViewerDesc)))</p>
                             </div>
                         </div>
                     </section>

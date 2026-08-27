@@ -16,6 +16,7 @@ use topcoat::router::{page, route};
 use topcoat::view::view;
 
 use crate::detail::Me;
+use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, require_admin};
 
 /// One send still owed or refused, as the queue panel reads it.
@@ -76,38 +77,38 @@ const LIMIT: u32 = 50;
 
 /// The word the decisions panel prints for an outcome. Terse: the panel is
 /// read, not explained.
-fn outcome_word(outcome: izlek_core::store::MailOutcome) -> &'static str {
+fn outcome_word(outcome: izlek_core::store::MailOutcome, lang: Lang) -> &'static str {
     use izlek_core::store::MailOutcome;
     match outcome {
-        MailOutcome::Owed => "queued",
-        MailOutcome::AlreadyOwed => "already queued",
-        MailOutcome::NoRecipients => "nobody to mail",
-        MailOutcome::NotMatched => "did not match",
-        MailOutcome::Disabled => "rule off",
-        MailOutcome::TaskGone => "task gone",
+        MailOutcome::Owed => t(lang, Key::OutcomeQueued),
+        MailOutcome::AlreadyOwed => t(lang, Key::OutcomeAlreadyQueued),
+        MailOutcome::NoRecipients => t(lang, Key::OutcomeNoRecipients),
+        MailOutcome::NotMatched => t(lang, Key::OutcomeNotMatched),
+        MailOutcome::Disabled => t(lang, Key::OutcomeRuleOff),
+        MailOutcome::TaskGone => t(lang, Key::OutcomeTaskGone),
     }
 }
 
 /// The sentence after a task's name, mirroring `ActivityEntry::sentence` —
 /// the per-task strip on the detail screen — since the workspace feed carries
 /// the same kind and detail but no `Person` to build an `ActivityEntry` from.
-fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str) -> String {
+fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang: Lang) -> String {
     use izlek_core::detail::ActivityKind;
     let detail = detail.trim();
     match kind {
-        ActivityKind::Created => "created this task".to_string(),
-        ActivityKind::Retitled => "renamed this task".to_string(),
-        ActivityKind::Described => "edited the description".to_string(),
-        ActivityKind::DeadlineSet => format!("set deadline {detail}"),
-        ActivityKind::DeadlineCleared => "removed the deadline".to_string(),
-        ActivityKind::Assigned => format!("assigned {detail}"),
-        ActivityKind::Unassigned => format!("unassigned {detail}"),
-        ActivityKind::Linked => format!("linked {detail}"),
-        ActivityKind::Unlinked => format!("unlinked {detail}"),
-        ActivityKind::Moved => format!("moved {detail}"),
-        ActivityKind::Unblocked => format!("unblocked this task — {detail}"),
-        ActivityKind::Deleted => "deleted this task".to_string(),
-        ActivityKind::Commented => "commented".to_string(),
+        ActivityKind::Created => t(lang, Key::ActCreated).to_string(),
+        ActivityKind::Retitled => t(lang, Key::ActRetitled).to_string(),
+        ActivityKind::Described => t(lang, Key::ActDescribed).to_string(),
+        ActivityKind::DeadlineSet => crate::i18n::deadline_set_label(lang, detail),
+        ActivityKind::DeadlineCleared => t(lang, Key::ActDeadlineCleared).to_string(),
+        ActivityKind::Assigned => crate::i18n::assigned_label(lang, detail),
+        ActivityKind::Unassigned => crate::i18n::unassigned_label(lang, detail),
+        ActivityKind::Linked => crate::i18n::linked_label(lang, detail),
+        ActivityKind::Unlinked => crate::i18n::unlinked_label(lang, detail),
+        ActivityKind::Moved => crate::i18n::moved_label(lang, detail),
+        ActivityKind::Unblocked => crate::i18n::unblocked_label(lang, detail),
+        ActivityKind::Deleted => t(lang, Key::ActDeleted).to_string(),
+        ActivityKind::Commented => t(lang, Key::ActCommented).to_string(),
         ActivityKind::Other(_) => detail.to_string(),
     }
 }
@@ -118,6 +119,7 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str) -> S
 async fn event_happened(
     store: &std::sync::Arc<dyn izlek_core::store::Store>,
     event_id: &str,
+    lang: Lang,
 ) -> std::result::Result<Option<String>, izlek_core::store::StoreError> {
     use izlek_core::store::Event;
 
@@ -133,9 +135,9 @@ async fn event_happened(
             Ok(columns
                 .into_iter()
                 .find(|column| column.id == transition.to_column)
-                .map(|column| format!("moved to {}", column.name)))
+                .map(|column| crate::i18n::moved_to_label(lang, &column.name)))
         }
-        Event::Freed(_) => Ok(Some("unblocked".to_string())),
+        Event::Freed(_) => Ok(Some(t(lang, Key::UnblockedWord).to_string())),
         // Not a wired path yet — S4's work — so this only needs to be
         // exhaustive, not right.
         Event::Happened(activity) => Ok(Some(activity.kind.as_str().to_string())),
@@ -152,6 +154,7 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         Ok(user) => user,
         Err(refusal) => return Ok(Err(refusal)),
     };
+    let lang = Lang::from_code(&user.language);
     let zone = izlek_core::detail::parse_zone(&user.timezone);
     let store = accounts(cx).store().clone();
 
@@ -165,21 +168,21 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
                     .mail_rule(id)
                     .await?
                     .map(|rule| rule.subject)
-                    .unwrap_or_else(|| "a rule that is gone".to_string()),
-                None => "a rule that is gone".to_string(),
+                    .unwrap_or_else(|| t(lang, Key::RuleGone).to_string()),
+                None => t(lang, Key::RuleGone).to_string(),
             },
         };
         queue.push(QueueLine {
             recipient: send.recipient,
             subject,
             state: match send.state {
-                SendState::Pending => "pending".to_string(),
+                SendState::Pending => t(lang, Key::QueueStatePending).to_string(),
                 // A send the engine never attempted is only held — usually
                 // for want of a sender — not failed at anything.
-                SendState::Failed if send.attempts == 0 => "held".to_string(),
-                SendState::Failed => "failed".to_string(),
-                SendState::Sent => "sent".to_string(),
-                SendState::Abandoned => "abandoned".to_string(),
+                SendState::Failed if send.attempts == 0 => t(lang, Key::QueueStateHeld).to_string(),
+                SendState::Failed => t(lang, Key::QueueStateFailed).to_string(),
+                SendState::Sent => t(lang, Key::QueueStateSent).to_string(),
+                SendState::Abandoned => t(lang, Key::QueueStateAbandoned).to_string(),
             },
             attempts: send.attempts,
             last_error: send.last_error,
@@ -196,10 +199,10 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
             .mail_rule(&decision.rule_id)
             .await?
             .map(|rule| rule.subject)
-            .unwrap_or_else(|| "a rule that is gone".to_string());
+            .unwrap_or_else(|| t(lang, Key::RuleGone).to_string());
         let verdict = RuleVerdict {
             rule,
-            outcome: outcome_word(decision.outcome).to_string(),
+            outcome: outcome_word(decision.outcome, lang).to_string(),
             detail: decision.detail,
         };
         if let Some(group) = decisions.iter_mut().find(|g| g.event_id == decision.event_id) {
@@ -210,8 +213,8 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
             .task(&decision.task_id)
             .await?
             .map(|facts| format!("{} {}", facts.row.task_key, facts.row.title))
-            .unwrap_or_else(|| "a task that is gone".to_string());
-        let happened = event_happened(&store, &decision.event_id).await?;
+            .unwrap_or_else(|| t(lang, Key::TaskGoneLabel).to_string());
+        let happened = event_happened(&store, &decision.event_id, lang).await?;
         decisions.push(DecisionGroup {
             event_id: decision.event_id,
             task,
@@ -227,8 +230,8 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         .into_iter()
         .map(|line| ActivityRow {
             at: izlek_core::detail::moment_label_in(line.at, zone),
-            actor: line.actor_name.unwrap_or_else(|| "The system".to_string()),
-            sentence: activity_sentence(&line.kind, &line.detail),
+            actor: line.actor_name.unwrap_or_else(|| t(lang, Key::TheSystem).to_string()),
+            sentence: activity_sentence(&line.kind, &line.detail, lang),
             title: line.title,
         })
         .collect();
@@ -251,6 +254,8 @@ async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, 
 async fn logs_page(cx: &Cx) -> Result {
     match snapshot(cx).await {
         Ok(Ok(snapshot)) => logs_screen(cx, snapshot).await,
+        // No `Me` here to read a language off of when the refusal itself is
+        // "no session" — English, same as the other admin pages' own gate.
         Ok(Err(refusal)) => view! {
             cx =>
             <main class="scaffold-note">
@@ -268,6 +273,7 @@ async fn logs_page(cx: &Cx) -> Result {
 }
 
 async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
+    let lang = Lang::from_code(&snapshot.me.language);
     let me = snapshot.me;
     let queue = snapshot.queue;
     let decisions = snapshot.decisions;
@@ -284,50 +290,51 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                 <span class="wordmark-dot"></span>
             </a>
             <div class="topbar-divider"></div>
-            <span class="board-name">"Logs"</span>
+            <span class="board-name">(t(lang, Key::Logs))</span>
             <div class="spacer"></div>
             <span class="topbar-who" title=(me.email)>(me.display_name)</span>
         </header>
 
         <div class="settings-shell">
             <nav class="sidenav">
-                <a class="sidenav-item" href="/">"Board"</a>
-                <a class="sidenav-item" href="/rules">"Mail rules"</a>
-                <a class="sidenav-item sidenav-item-on" href="/logs">"Logs"</a>
-                <a class="sidenav-item" href="/settings">"Settings"</a>
+                <a class="sidenav-item" href="/">(t(lang, Key::NavBoard))</a>
+                <a class="sidenav-item" href="/rules">(t(lang, Key::NavMailRules))</a>
+                <a class="sidenav-item sidenav-item-on" href="/logs">(t(lang, Key::NavLogs))</a>
+                <a class="sidenav-item" href="/settings">(t(lang, Key::NavSettings))</a>
             </nav>
 
             <main class="settings-stage">
                 <div class="settings-head">
-                    <h1 class="settings-title">"Logs"</h1>
-                    <span class="chip chip-admin">"Admin only"</span>
+                    <h1 class="settings-title">(t(lang, Key::Logs))</h1>
+                    <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                 </div>
 
                 <section class="panel">
                     <div class="panel-head">
-                        <h2 class="panel-title">"Mail queue"</h2>
+                        <h2 class="panel-title">(t(lang, Key::MailQueue))</h2>
                     </div>
                     <div class="panel-body">
                         <div class="rule-list">
                             for line in queue {
-                                let state_note = if line.state == "failed" || line.state == "held" {
+                                let is_failed_or_held = line.state == t(lang, Key::QueueStateFailed) || line.state == t(lang, Key::QueueStateHeld);
+                                let state_note = if is_failed_or_held {
                                     line.last_error.unwrap_or_else(|| line.state.clone())
                                 } else {
                                     line.state.clone()
                                 };
-                                let next_attempt = line.next_attempt.unwrap_or_else(|| "no retry".to_string());
+                                let next_attempt = line.next_attempt.unwrap_or_else(|| t(lang, Key::NoRetry).to_string());
                                 <div class="rule-row">
                                     <div class="rule-sentence">
                                         <span class="rule-term">(line.recipient)</span>
                                         <span>(line.subject)</span>
                                         <span class="rule-term">(state_note)</span>
-                                        <span>(format!("attempt {}", line.attempts))</span>
+                                        <span>(crate::i18n::attempt_label(lang, line.attempts))</span>
                                     </div>
                                     <span class="rule-stamp">(next_attempt)</span>
                                 </div>
                             }
                             if queue_empty {
-                                <p class="rules-quiet">"Nothing owed."</p>
+                                <p class="rules-quiet">(t(lang, Key::NothingOwed))</p>
                             }
                         </div>
                     </div>
@@ -335,7 +342,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
 
                 <section class="panel">
                     <div class="panel-head">
-                        <h2 class="panel-title">"Mail decisions"</h2>
+                        <h2 class="panel-title">(t(lang, Key::MailDecisions))</h2>
                     </div>
                     <div class="panel-body">
                         <div class="rule-list">
@@ -351,7 +358,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                                     </div>
                                     <div class="decision-verdicts">
                                         for verdict in group.verdicts {
-                                            let chip_class = if verdict.outcome == "queued" {
+                                            let chip_class = if verdict.outcome == t(lang, Key::OutcomeQueued) {
                                                 "rule-term rule-term-queued"
                                             } else {
                                                 "rule-term"
@@ -366,7 +373,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                                 </div>
                             }
                             if decisions_empty {
-                                <p class="rules-quiet">"No decisions yet."</p>
+                                <p class="rules-quiet">(t(lang, Key::NoDecisionsYet))</p>
                             }
                         </div>
                     </div>
@@ -374,7 +381,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
 
                 <section class="panel">
                     <div class="panel-head">
-                        <h2 class="panel-title">"Activity"</h2>
+                        <h2 class="panel-title">(t(lang, Key::Activity))</h2>
                     </div>
                     <div class="panel-body">
                         <div class="rule-list">
@@ -389,7 +396,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                                 </div>
                             }
                             if activity_empty {
-                                <p class="rules-quiet">"Nothing yet."</p>
+                                <p class="rules-quiet">(t(lang, Key::NothingYet))</p>
                             }
                         </div>
                     </div>

@@ -7,6 +7,7 @@ pub mod auth;
 pub mod board;
 pub mod detail;
 pub mod files;
+pub mod i18n;
 pub mod layout;
 pub mod logs;
 pub mod rules;
