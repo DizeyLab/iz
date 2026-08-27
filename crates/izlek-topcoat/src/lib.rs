@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 pub mod auth;
+pub mod board;
 pub mod detail;
 pub mod files;
 pub mod layout;

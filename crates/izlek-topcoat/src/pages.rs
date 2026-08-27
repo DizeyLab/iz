@@ -260,17 +260,7 @@ async fn join_card(cx: &Cx, token: &str, person: Invited) -> Result {
     }
 }
 
-/// The signed-in landing, once a session resolves to a real user. Only the
-/// topbar and an empty stage for now.
+/// The signed-in landing, once a session resolves to a real user: the board.
 async fn signed_in_shell(cx: &Cx, user: User) -> Result {
-    view! {
-        cx =>
-        (topbar(cx).await?)
-        <main class="scaffold-note">
-            <p>"Signed in as " (user.display_name) "."</p>
-            <div class="board-stage">
-                // board lands in S4
-            </div>
-        </main>
-    }
+    crate::board::board_page(cx, &user).await
 }
