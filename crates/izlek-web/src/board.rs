@@ -13,7 +13,7 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::request::headers;
-use topcoat::router::{HeaderName, StatusCode, header, route};
+use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
 use topcoat::runtime::{Event, procedure, shard};
 use topcoat::view::view;
 
@@ -316,6 +316,12 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     }
 }
 
+/// Which task, if any, `/` renders the detail modal open on.
+#[query_params(error = redirect("/"))]
+struct BoardQuery {
+    task: Option<String>,
+}
+
 /// The signed-in board: the topbar, the filter chips and the shard that owns
 /// every column and card.
 pub async fn board_page(cx: &Cx, user: &User) -> Result {
@@ -333,6 +339,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
     let may_write = user.role.can_write_tasks();
+    let open_task = query_params::<BoardQuery>(cx)?.task.clone();
 
     view! {
         cx =>
@@ -373,5 +380,8 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 board_columns(version: $(version.get()))
             </div>
         </main>
+        if let Some(task_id) = &open_task {
+            (crate::detail::task_modal(cx, task_id).await?)
+        }
     }
 }

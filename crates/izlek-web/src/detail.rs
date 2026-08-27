@@ -26,6 +26,7 @@ use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, route};
+use topcoat::runtime::Event;
 use topcoat::view::{class, view};
 
 use crate::server::{Refusal, accounts, mail, refusal_of, require_user, require_writer};
@@ -522,22 +523,114 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
 // Wasm-escapes from the old version, each simplified to a plain form post
 // rather than ported to a runtime signal (noted at each site below):
 //
-// - StatusControl's `on:change` auto-submit (dyn_into the `<select>`, call
-//   `request_submit()`) is dropped; the "Move" button is always shown rather
-//   than only when script is not running.
+// - StatusControl's and the file input's `on:change` auto-submit are back as
+//   a one-line `@change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))`
+//   — a literal `@change="this.form.requestSubmit()"` runs immediately at
+//   attribute-scan time rather than on the event (topcoat's `data-topcoat-on:`
+//   handlers always call through the compiled-closure/`raw!` path; a bare JS
+//   string is evaluated once with no event or `this` bound) — and the
+//   "Move"/"Attach" buttons stay for a browser without script.
 // - The modal scrim's click-to-close and the window `Escape` listener are
-//   dropped; the X glyph and the footer "Close" button (plain links/buttons,
-//   no script) are the only ways to close.
+//   back the same way: the scrim's own `@click` is a closure calling
+//   `raw!("window.location.href='/'", ())`, its inner `.modal` stops
+//   propagation with `@click=$(|e: Event| e.stop_propagation())`, and an
+//   inline `<script>` tag (a real script element, not a `data-topcoat-on:`
+//   attribute, so it runs normally) holds the window `Escape` listener. The
+//   X glyph and the footer "Close" button (plain links/buttons, no script) still work
+//   on their own.
 // - DeadlineControl's hand-built calendar grid (`js_sys::Date` for "today",
 //   month navigation, per-day buttons) is replaced with a native
 //   `<input type="date">` inside the same CSS-only edit-toggle popover —
 //   the toggle itself needed no script in the old version either.
-// - The file input's `on:change` auto-submit is dropped; an explicit
-//   "Upload" submit button is added next to the file picker.
 // - The two-step delete confirmation (an `ask` action fetching the cost,
 //   then a second click) is collapsed into one eager read: the cost is
 //   computed while the screen renders, and a native `<details>` disclosure —
 //   no script — holds the confirmation and the real delete button.
+
+/// The artboard's glyphs, drawn rather than typed — copied verbatim from the
+/// old UI's `detail.rs` `glyph` module. A missing character in a font is a
+/// hole in the design; an inline path is the same shape everywhere.
+mod glyph {
+    use topcoat::Result;
+    use topcoat::context::Cx;
+    use topcoat::view::view;
+
+    pub async fn chevron(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 6l4 4 4-4"></path>
+            </svg>
+        }
+    }
+
+    pub async fn calendar(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="13" height="13" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                <rect x="2.5" y="3.5" width="11" height="10" rx="1.5"></rect>
+                <path d="M2.5 6.5h11M5.5 2v2.5M10.5 2v2.5"></path>
+            </svg>
+        }
+    }
+
+    pub async fn plus(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="12" height="12" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <path d="M8 3v10M3 8h10"></path>
+            </svg>
+        }
+    }
+
+    pub async fn cross(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="13" height="13" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                <path d="M4 4l8 8M12 4l-8 8"></path>
+            </svg>
+        }
+    }
+
+    pub async fn tick(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph dep-tick" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 8.5l3.5 3.5L13 5"></path>
+            </svg>
+        }
+    }
+
+    pub async fn lock(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <rect x="3.5" y="7" width="9" height="6.5" rx="1.5"></rect>
+                <path d="M5.5 7V5a2.5 2.5 0 015 0v2"></path>
+            </svg>
+        }
+    }
+
+    pub async fn bin(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l0.7 8.5a1 1 0 001 0.9h3.6a1 1 0 001-0.9l0.7-8.5"></path>
+            </svg>
+        }
+    }
+}
 
 /// A person as a circle. Ported from `izlek-web/src/board.rs`'s `Avatar`; that
 /// component has not crossed over into this crate yet, so this is a private
@@ -551,6 +644,15 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
             (initials)
         </span>
     }
+}
+
+/// The window `Escape` listener that closes the modal — plain JS, since the
+/// key never lands on the scrim itself (focus stays on the card the click
+/// opened this from).
+async fn escape_closes(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { window.location.href = '/'; } });";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
 async fn refused(cx: &Cx, call: &str) -> Result {
@@ -618,6 +720,7 @@ async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bo
         return view! {
             cx =>
             <span class=(class!("field-box", "detail-overdue" if overdue))>
+                (glyph::calendar(cx).await?)
                 <span class="field-text">(label)</span>
             </span>
         };
@@ -629,7 +732,9 @@ async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bo
         <div class="edit edit-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Change the deadline">
             <label class=(class!("field-box", "edit-view", "edit-hit", "detail-overdue" if overdue)) for=(toggle.clone())>
+                (glyph::calendar(cx).await?)
                 <span class="field-text">(label)</span>
+                (glyph::chevron(cx).await?)
             </label>
             <div class="edit-form pop-panel datepick-panel">
                 <form class="pop-form" method="post" action="/api/save_task">
@@ -657,7 +762,7 @@ async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool)
                 <form class="assignee-drop" method="post" action="/api/unassign">
                     <input type="hidden" name="task_id" value=(task_id.to_string())>
                     <input type="hidden" name="user_id" value=(person.id.clone())>
-                    <button class="assignee-remove" type="submit" title=(remove_title)>"×"</button>
+                    <button class="assignee-remove" type="submit" title=(remove_title)>(glyph::cross(cx).await?)</button>
                 </form>
             }
         </span>
@@ -673,7 +778,7 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person]) -> Result {
         cx =>
         <div class="edit edit-pop assignee-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Put someone on this task">
-            <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>"+"</label>
+            <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>(glyph::plus(cx).await?)</label>
             <div class="edit-form pop-panel">
                 <div class="pop-list">
                     for person in people {
@@ -703,6 +808,7 @@ async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget]) -> Result 
         <div class="edit edit-pop link-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label="Link another task">
             <label class="dep-chip edit-view edit-hit" for=(toggle.clone())>
+                (glyph::plus(cx).await?)
                 <span class="dep-chip-text">"Link a task"</span>
             </label>
             <div class="edit-form pop-panel pop-panel-wide">
@@ -758,6 +864,7 @@ async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direc
         cx =>
         <div class=(class!("dep-row", "dep-row-waiting" if waiting))>
             <span class="dep-tag">(tag)</span>
+            if cleared { (glyph::tick(cx).await?) } else { (glyph::lock(cx).await?) }
             <span class="dep-key">(edge.task_key.clone())</span>
             <span class="dep-title">(edge.title.clone())</span>
             <div class="spacer"></div>
@@ -767,7 +874,7 @@ async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direc
                     <input type="hidden" name="task_id" value=(task_id.to_string())>
                     <input type="hidden" name="other_id" value=(edge.task_id.clone())>
                     <input type="hidden" name="direction" value=(wire)>
-                    <button class="dep-unlink" type="submit" title="Remove this link">"×"</button>
+                    <button class="dep-unlink" type="submit" title="Remove this link">(glyph::cross(cx).await?)</button>
                 </form>
             }
         </div>
@@ -789,7 +896,7 @@ async fn file_chip(cx: &Cx, file: &izlek_core::detail::FileLine, me: &Me, may_wr
             if may_drop {
                 <form class="file-chip-drop-form" method="post" action="/api/delete_file">
                     <input type="hidden" name="file_id" value=(file.id.clone())>
-                    <button class="file-chip-drop" type="submit" title="Remove this file">"×"</button>
+                    <button class="file-chip-drop" type="submit" title="Remove this file">(glyph::cross(cx).await?)</button>
                 </form>
             }
         </span>
@@ -820,7 +927,13 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
-            return view! { cx => <div class="modal-scrim"><div class="modal"><p class="modal-note">(refusal.message())</p></div></div> };
+            return view! {
+                cx =>
+                <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
+                    <div class="modal" @click=$(|e: Event| e.stop_propagation())><p class="modal-note">(refusal.message())</p></div>
+                </div>
+                (escape_closes(cx).await?)
+            };
         }
     };
     let DetailSnapshot {
@@ -849,14 +962,15 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
 
     view! {
         cx =>
-        <div class="modal-scrim">
-            <div class="modal" tabindex="-1">
+        <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
+            <div class="modal" tabindex="-1" @click=$(|e: Event| e.stop_propagation())>
                 <header class="detail-head">
                     <div class="detail-headline">
                         <span class="detail-key">(detail.task_key.clone())</span>
                         (title_control(cx, &detail, may_write).await?)
                     </div>
-                    <a class="detail-close" href="/" aria-label="Close this task">"×"</a>
+                    <span class="detail-esc">"esc"</span>
+                    <a class="detail-close" href="/" aria-label="Close this task">(glyph::cross(cx).await?)</a>
                 </header>
 
                 <div class="detail-fields">
@@ -867,11 +981,12 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
                                 <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
                                 <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
-                                <select class="status-select" name="to_column_id">
+                                <select class="status-select" name="to_column_id" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
                                     for column in &detail.columns {
                                         <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
                                     }
                                 </select>
+                                (glyph::chevron(cx).await?)
                                 <button class="status-go" type="submit">"Move"</button>
                             </form>
                         } else {
@@ -945,7 +1060,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                     if may_comment {
                         <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
                             <input type="hidden" name="task_id" value=(detail.id.clone())>
-                            <input class="field-input" type="file" name="file" accept=(accept) required="">
+                            <input class="field-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
                             <button class="file-upload-submit" type="submit">"Attach"</button>
                         </form>
                         (refused(cx, "upload_file").await?)
@@ -996,7 +1111,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                             Some(cost) => {
                                 let freed = cost.frees.join(", ");
                                 <details class="confirm-details">
-                                    <summary class="detail-delete">"Delete task"</summary>
+                                    <summary class="detail-delete">(glyph::bin(cx).await?)<span>"Delete task"</span></summary>
                                     <div class="confirm">
                                         <div class="confirm-title">(format!("Delete {} — {}?", cost.task_key, cost.title))</div>
                                         <ul class="confirm-list">
@@ -1026,5 +1141,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                 </footer>
             </div>
         </div>
+        (escape_closes(cx).await?)
     }
 }
