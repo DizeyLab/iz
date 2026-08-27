@@ -4,6 +4,7 @@
 use topcoat::{
     Result,
     asset::{Asset, asset},
+    context::Cx,
     router::{
         StatusCode, page,
         layout,
@@ -11,6 +12,8 @@ use topcoat::{
     },
     view::view,
 };
+
+use crate::server::current_user;
 
 /// Every path that matches no page raises a `NotFoundError`, so it renders
 /// through `root_layout`'s catch below rather than the router's bare default.
@@ -24,7 +27,7 @@ async fn missing() -> Result {
 const STYLE: Asset = asset!("assets/main.css");
 
 #[layout("/")]
-async fn root_layout(slot: Result) -> Result {
+async fn root_layout(cx: &Cx, slot: Result) -> Result {
     let content = match slot {
         Err(error) if error.downcast_ref::<NotFoundError>().is_some() => view! {
             (StatusCode::NOT_FOUND)
@@ -35,9 +38,13 @@ async fn root_layout(slot: Result) -> Result {
         content => content,
     }?;
 
+    // Pages with no session (auth screens) render light; `data-theme` is
+    // only set when the request's own user picked dark.
+    let dark = matches!(current_user(cx).await, Ok(Some(user)) if user.theme == "dark");
+
     view! {
         <!DOCTYPE html>
-        <html lang="en">
+        <html lang="en" data-theme=(dark.then_some("dark"))>
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">

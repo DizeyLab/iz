@@ -2221,6 +2221,47 @@ async fn a_stamp_shifts_with_the_viewers_stored_timezone() {
     assert_eq!(hour_of(&shifted_at), (hour_of(&utc_at) + 3) % 24, "utc={utc_at} shifted={shifted_at}");
 }
 
+/// The first `activity-stamp` span's text out of a task modal's HTML — the
+/// same shape `moment_for` reads out of a `/api/current_logs` body.
+fn activity_stamp_of(html: &str) -> &str {
+    let (_, rest) = html
+        .split_once(r#"class="activity-stamp">"#)
+        .unwrap_or_else(|| panic!("no activity stamp in {html}"));
+    rest.split_once('<').map(|(stamp, _)| stamp).expect("unterminated activity stamp")
+}
+
+#[tokio::test]
+async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    let utc_at = activity_stamp_of(&html).to_string();
+
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+        )
+        .await;
+    assert!(
+        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let shifted_page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let shifted_html = String::from_utf8_lossy(&shifted_page.bytes);
+    let shifted_at = activity_stamp_of(&shifted_html).to_string();
+
+    assert_ne!(utc_at, shifted_at, "utc={utc_at} shifted={shifted_at}");
+    assert_eq!(hour_of(&shifted_at), (hour_of(&utc_at) + 3) % 24, "utc={utc_at} shifted={shifted_at}");
+}
+
 #[tokio::test]
 async fn an_unlisted_timezone_is_refused() {
     let app = App::open().await;
@@ -2235,6 +2276,45 @@ async fn an_unlisted_timezone_is_refused() {
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
     assert!(location.contains("refusal=bad-zone&on=save_profile"), "{location}");
+}
+
+#[tokio::test]
+async fn the_dark_theme_is_saved_and_marks_the_page() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("theme", "dark")],
+        )
+        .await;
+    assert!(
+        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let page = app.get("/settings", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"data-theme="dark""#), "{html}");
+}
+
+#[tokio::test]
+async fn an_unlisted_theme_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("theme", "neon")],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=bad-theme&on=save_profile"), "{location}");
 }
 
 /// Creating a task files its own Created activity, but the column it lands

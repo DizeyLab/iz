@@ -220,6 +220,7 @@ fn sentence_of(trigger: &Trigger, columns: &[Column]) -> (String, String, String
 /// rule may name — shared by the page and `current_rules`, so the two never
 /// drift apart.
 async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result<RulesSnapshot, Refusal> {
+    let zone = izlek_core::detail::parse_zone(&user.timezone);
     let Some(board) = store.board(&user.workspace_id).await.map_err(|_| Refusal::Unavailable)? else {
         return Err(Refusal::Unavailable);
     };
@@ -251,11 +252,11 @@ async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result
                 last_sent: last_sent
                     .iter()
                     .find(|(id, _)| id == &rule.id)
-                    .map(|(_, at)| izlek_core::detail::moment_label(*at)),
+                    .map(|(_, at)| izlek_core::detail::moment_label_in(*at, zone)),
                 last_fired: last_decision
                     .iter()
                     .find(|(id, _)| id == &rule.id)
-                    .map(|(_, at)| izlek_core::detail::moment_label(*at)),
+                    .map(|(_, at)| izlek_core::detail::moment_label_in(*at, zone)),
                 id: rule.id,
             }
         })

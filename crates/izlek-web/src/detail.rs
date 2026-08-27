@@ -17,10 +17,10 @@
 //! unchanged.
 
 use izlek_core::board::Person;
-use izlek_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label};
+use izlek_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in, parse_zone};
 use izlek_core::store::{Store, StoreError, User};
 use serde::{Deserialize, Serialize};
-use time::Date;
+use time::{Date, UtcOffset};
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
@@ -67,6 +67,9 @@ pub struct DetailSnapshot {
     pub detail: TaskDetail,
     pub me: Me,
     pub today: Date,
+    /// The viewer's stored display timezone — comments and activity stamps
+    /// shift into this, the same as `/logs` does.
+    pub zone: UtcOffset,
     pub linkable: Vec<LinkTarget>,
     pub may_write: bool,
     pub may_comment: bool,
@@ -262,6 +265,7 @@ async fn load_snapshot(cx: &Cx, task_id: &str) -> Result<std::result::Result<Det
         attachment_limit_mb,
         me: Me::from(&user),
         today: OffsetDateTime::now_utc().date(),
+        zone: parse_zone(&user.timezone),
     }))
 }
 
@@ -907,7 +911,7 @@ async fn file_chip(cx: &Cx, file: &izlek_core::detail::FileLine, me: &Me, may_wr
     }
 }
 
-async fn comment_row(cx: &Cx, comment: &Comment) -> Result {
+async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
     view! {
         cx =>
         <div class="comment">
@@ -915,7 +919,7 @@ async fn comment_row(cx: &Cx, comment: &Comment) -> Result {
             <div class="comment-said">
                 <div class="comment-head">
                     <span class="comment-who">(comment.author.display_name.clone())</span>
-                    <span class="comment-when">(moment_label(comment.at))</span>
+                    <span class="comment-when">(moment_label_in(comment.at, zone))</span>
                 </div>
                 <div class="comment-body">(comment.body.clone())</div>
             </div>
@@ -948,6 +952,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
         detail,
         me,
         today,
+        zone,
         linkable,
         may_write,
         may_comment,
@@ -1085,7 +1090,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                     </div>
                     <div class="comment-list">
                         for entry in &detail.comments {
-                            (comment_row(cx, entry).await?)
+                            (comment_row(cx, entry, zone).await?)
                         }
                         if may_comment {
                             <form class="comment-composer" method="post" action="/api/post_comment">
@@ -1106,7 +1111,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                     <div class="activity-list">
                         for entry in &detail.activity {
                             <div class="activity-line">
-                                <span class="activity-stamp">(entry.moment())</span>
+                                <span class="activity-stamp">(entry.moment_in(zone))</span>
                                 <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "Izlek".to_string()))</strong>
                                 <span class="activity-what">(entry.sentence())</span>
                             </div>

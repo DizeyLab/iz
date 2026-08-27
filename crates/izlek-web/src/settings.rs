@@ -446,7 +446,12 @@ struct SaveProfileForm {
     /// `theme`/`language` below.
     #[serde(default)]
     timezone: Option<String>,
+    #[serde(default)]
+    theme: Option<String>,
 }
+
+/// The values the theme field offers.
+const THEME_OPTIONS: [&str; 2] = ["light", "dark"];
 
 /// The offsets the timezone field offers, `"UTC-12:00"` through `"UTC+14:00"`.
 ///
@@ -483,11 +488,15 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     if !zone_options().contains(&timezone) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadZone)));
     }
+    let theme = input.theme.unwrap_or_else(|| user.theme.clone());
+    if !THEME_OPTIONS.contains(&theme.as_str()) {
+        return Ok(saved_or_refused("save_profile", Some(Refusal::BadTheme)));
+    }
     let accounts = accounts(cx);
     let store = accounts.store();
     let outcome = store.set_profile(&user.id, &display_name, user.photo_path.as_deref()).await.and(
         store
-            .set_preferences(&user.id, &timezone, &user.theme, &user.language)
+            .set_preferences(&user.id, &timezone, &theme, &user.language)
             .await,
     );
     let refusal = match outcome {
@@ -552,11 +561,14 @@ async fn members_now(cx: &Cx, asking: &User) -> Result<Vec<Member>> {
     let store = accounts(cx).store().clone();
     let owner = store.owner().await?.map(|owner| owner.id);
     let users = store.users(&asking.workspace_id).await?;
+    let zone = izlek_core::detail::parse_zone(&asking.timezone);
     Ok(users
         .into_iter()
         .map(|user| Member {
             has_password: user.password_hash.is_some(),
-            last_signed_in: user.last_signed_in_at.map(|at| izlek_core::board::day_label(at.date())),
+            last_signed_in: user
+                .last_signed_in_at
+                .map(|at| izlek_core::board::day_label(at.to_offset(zone).date())),
             is_you: user.id == asking.id,
             is_owner: owner.as_deref() == Some(user.id.as_str()),
             id: user.id,
@@ -611,7 +623,7 @@ impl Sender {
     }
 }
 
-async fn sender_now(cx: &Cx) -> Result<Sender> {
+async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
     let workspace = accounts(cx).store().workspace().await?;
     Ok(match workspace {
         None => Sender {
@@ -631,7 +643,7 @@ async fn sender_now(cx: &Cx) -> Result<Sender> {
             from_address: workspace.smtp_from_address.unwrap_or_default(),
             password_set: workspace.smtp_password_set,
             test: workspace.sender_test.map(|test| TestResult {
-                moment: izlek_core::detail::moment_label(test.at),
+                moment: izlek_core::detail::moment_label_in(test.at, zone),
                 took: test.error.is_none().then(|| took_label(test.took_ms)),
                 error: test.error,
             }),
@@ -691,7 +703,8 @@ async fn settings_page(cx: &Cx) -> Result {
     let administers = user.role.can_administer();
     let query = topcoat::router::request::uri(cx).query().unwrap_or("");
 
-    let sender = if administers { Some(sender_now(cx).await?) } else { None };
+    let zone = izlek_core::detail::parse_zone(&user.timezone);
+    let sender = if administers { Some(sender_now(cx, zone).await?) } else { None };
     let (limits, allowed_types) = if administers {
         let (attachment, photo, types) = limits_now(cx, &user.workspace_id).await?;
         (Some((attachment, photo)), types)
@@ -762,6 +775,13 @@ async fn settings_page(cx: &Cx) -> Result {
                                 for zone in zone_options() {
                                     <option value=(zone.clone()) selected=(zone == user.timezone)>(zone)</option>
                                 }
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">"THEME"</span>
+                            <select class="field-input" name="theme">
+                                <option value="light" selected=(user.theme == "light")>"Light"</option>
+                                <option value="dark" selected=(user.theme == "dark")>"Dark"</option>
                             </select>
                         </label>
                         <div class="panel-foot">

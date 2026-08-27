@@ -217,6 +217,12 @@ impl ActivityEntry {
     pub fn moment(&self) -> String {
         moment_label(self.at)
     }
+
+    /// As [`Self::moment`], shifted into `offset` first — a viewer's stored
+    /// display timezone.
+    pub fn moment_in(&self, offset: UtcOffset) -> String {
+        moment_label_in(self.at, offset)
+    }
 }
 
 /// `Aug 19 11:04`, in UTC. Stored data stays UTC; a viewer's own timezone is

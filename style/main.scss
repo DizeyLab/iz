@@ -11,11 +11,101 @@
   --accent-tint: #eef0f5;
   --accent-ink: #2f3c5c;
 
+  --field-bg: #faf9f6;
+  --surface-sunken: #f1efe8;
+  --surface-muted: #faf9f4;
+  --ink-soft: #3d3a34;
+  --row-hover: #f3f1ea;
+  --panel-sunken: #f2f0ea;
+  --border-soft: #d5d1c7;
+  --border-faint: #f0eee7;
+  --scrim: rgba(28, 27, 24, 0.28);
+  --on-strong: #fffefb;
+
+  --danger: #a04a24;
+  --danger-tint: #f9ece4;
+  --danger-tint-soft: #fdf6f2;
+  --danger-tint-alt: #fbf1ec;
+  --danger-border: #e8c9b8;
+  --danger-border-soft: #eddcd3;
+  --danger-border-alt: #ecd0bf;
+
+  --warn-ink: #7a5c1e;
+  --warn-tint: #f7f0dd;
+  --warn-tint-soft: #fdfaf1;
+  --warn-border: #e6d7ae;
+
+  --positive: #5c7b46;
+  --positive-ink: #4a6636;
+  --positive-tint: #eef3e9;
+  --positive-border: #d3e0c6;
+
+  --accent-strong: #5a6a94;
+  --accent-border: #d6dbe8;
+  --accent-border-strong: #d8dce6;
+
+  --avatar-tone-1: #7b6846;
+  --avatar-tone-3: #7b4655;
+  --avatar-tone-4: #46707b;
+
   --font-sans: 'Schibsted Grotesk', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   --radius: 6px;
   --topbar-height: 56px;
+}
+
+// Dark, per user (settings.rs SaveProfileForm.theme). Same warm palette,
+// inverted: surfaces sit in the --ink family, ink reads as warm off-white,
+// the terracotta accent (--danger) lightens to stay legible.
+[data-theme="dark"] {
+  --bg: #1c1b18;
+  --surface: #242220;
+  --border: #34322c;
+  --border-strong: #3f3c35;
+  --ink: #f4f0e6;
+  --muted: #b7b0a0;
+  --muted-soft: #8d8676;
+  --accent: #7d93c4;
+  --accent-tint: #262b38;
+  --accent-ink: #c3cee6;
+
+  --field-bg: #29271f;
+  --surface-sunken: #2a2822;
+  --surface-muted: #201f1a;
+  --ink-soft: #d8d2c4;
+  --row-hover: #2e2c25;
+  --panel-sunken: #2b2924;
+  --border-soft: #423f37;
+  --border-faint: #2c2a25;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --on-strong: #fffefb;
+
+  --danger: #c9683f;
+  --danger-tint: #3a251d;
+  --danger-tint-soft: #35231d;
+  --danger-tint-alt: #33221c;
+  --danger-border: #6b4536;
+  --danger-border-soft: #4a352c;
+  --danger-border-alt: #4a3226;
+
+  --warn-ink: #d3a355;
+  --warn-tint: #3a331d;
+  --warn-tint-soft: #332c1a;
+  --warn-border: #6b5a34;
+
+  --positive: #8fb86a;
+  --positive-ink: #8fc46a;
+  --positive-tint: #22301c;
+  --positive-border: #3e5a30;
+
+  --accent-strong: #7f93c4;
+  --accent-border: #3a4256;
+  --accent-border-strong: #3c455c;
+
+  --avatar-tone-1: #9c845e;
+  --avatar-tone-3: #9c6270;
+  --avatar-tone-4: #5f96a3;
 }
 
 * { box-sizing: border-box; }
@@ -159,7 +249,7 @@ a {
 .auth-input {
   height: 40px;
   padding: 0 12px;
-  background: #faf9f6;
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   font-family: var(--font-sans);
@@ -184,7 +274,7 @@ a {
   gap: 8px;
   height: 40px;
   padding: 0 12px;
-  background: #f2f0ea;
+  background: var(--panel-sunken);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
 }
@@ -208,7 +298,7 @@ a {
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
-  color: #5c7b46;
+  color: var(--positive);
 }
 
 .auth-submit {
@@ -238,21 +328,21 @@ a {
 .auth-key {
   font-family: var(--font-mono);
   font-size: 10px;
-  background: #5a6a94;
+  background: var(--accent-strong);
   border-radius: 4px;
   padding: 1px 5px;
 }
 
 .auth-warn {
   font-size: 12px;
-  color: #a04a24;
+  color: var(--danger);
 }
 
 .auth-problem {
   font-size: 13px;
-  color: #a04a24;
-  background: #fbf1ec;
-  border: 1px solid #eddcd3;
+  color: var(--danger);
+  background: var(--danger-tint-alt);
+  border: 1px solid var(--danger-border-soft);
   border-radius: var(--radius);
   padding: 10px 12px;
 }
@@ -261,7 +351,7 @@ a {
   font-size: 12px;
   color: var(--muted-soft);
   line-height: 1.5;
-  border-top: 1px solid #f0eee7;
+  border-top: 1px solid var(--border-faint);
   padding-top: 12px;
 }
 
@@ -292,7 +382,7 @@ a {
 .segmented {
   display: flex;
   align-items: center;
-  background: #f2f0ea;
+  background: var(--panel-sunken);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 2px;
@@ -328,15 +418,15 @@ a {
   font-weight: 600;
 
   &-overdue {
-    background: #f9ece4;
-    border: 1px solid #ecd0bf;
-    color: #a04a24;
+    background: var(--danger-tint);
+    border: 1px solid var(--danger-border-alt);
+    color: var(--danger);
   }
 
   &-blocked {
-    background: #f7f0dd;
-    border: 1px solid #e6d7ae;
-    color: #7a5c1e;
+    background: var(--warn-tint);
+    border: 1px solid var(--warn-border);
+    color: var(--warn-ink);
   }
 }
 
@@ -357,7 +447,7 @@ a {
 }
 
 .column {
-  background: #f1efe8;
+  background: var(--surface-sunken);
   border-radius: 10px;
   padding: 12px;
   display: flex;
@@ -395,7 +485,7 @@ a {
   line-height: 1;
   cursor: pointer;
 
-  &:hover { background: #e7e4dc; }
+  &:hover { background: var(--border); }
 }
 
 .column-cards {
@@ -406,7 +496,7 @@ a {
 }
 
 .column-empty-add {
-  border: 1px dashed #d5d1c7;
+  border: 1px dashed var(--border-soft);
   border-radius: 8px;
   padding: 14px;
   background: transparent;
@@ -445,7 +535,7 @@ a {
 }
 
 .card-done {
-  background: #faf9f4;
+  background: var(--surface-muted);
   box-shadow: none;
 
   .card-title { color: var(--muted); }
@@ -462,7 +552,7 @@ a {
 .card-key { color: var(--muted-soft); }
 
 .card-blocks,
-.card-blocked-by { color: #7a5c1e; }
+.card-blocked-by { color: var(--warn-ink); }
 
 .card-title {
   font-size: 14px;
@@ -485,13 +575,13 @@ a {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
-  background: #f1efe8;
+  background: var(--surface-sunken);
   border-radius: 4px;
   padding: 2px 6px;
 
   &-overdue {
-    color: #a04a24;
-    background: #f9ece4;
+    color: var(--danger);
+    background: var(--danger-tint);
   }
 
   &-none {
@@ -549,11 +639,11 @@ a {
     flex: none;
   }
 
-  &-tone-0 { background: #46557b; }
-  &-tone-1 { background: #7b6846; }
-  &-tone-2 { background: #5c7b46; }
-  &-tone-3 { background: #7b4655; }
-  &-tone-4 { background: #46707b; }
+  &-tone-0 { background: var(--accent); }
+  &-tone-1 { background: var(--avatar-tone-1); }
+  &-tone-2 { background: var(--positive); }
+  &-tone-3 { background: var(--avatar-tone-3); }
+  &-tone-4 { background: var(--avatar-tone-4); }
 }
 
 // -- the card context menu ---------------------------------------------------
@@ -586,7 +676,7 @@ a {
 .card-menu-move:hover > .card-menu-submenu,
 .card-menu-move-trigger:focus + .card-menu-submenu { display: block; }
 
-.card-menu-danger { color: #a04a24; }
+.card-menu-danger { color: var(--danger); }
 
 .board-empty {
   position: absolute;
@@ -632,7 +722,7 @@ a {
   width: 100%;
   height: 34px;
   padding: 0 10px;
-  background: #faf9f6;
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   font-family: inherit;
@@ -684,7 +774,7 @@ a {
 .modal-scrim {
   position: fixed;
   inset: 0;
-  background: rgba(28, 27, 24, 0.28);
+  background: var(--scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -710,7 +800,7 @@ a {
 .modal-problem {
   margin: 8px 24px 0;
   font-size: 13px;
-  color: #a04a24;
+  color: var(--danger);
 }
 
 // -- the edit state ---------------------------------------------------------
@@ -737,7 +827,7 @@ a {
 .edit-toggle:checked ~ .edit-form { display: block; }
 .edit-toggle:checked ~ .title-form { display: flex; }
 .edit-toggle:focus-visible ~ .edit-view {
-  outline: 2px solid var(--accent, #46557b);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -755,7 +845,7 @@ a {
   border: none;
   border-radius: var(--radius);
   background: var(--ink);
-  color: #fffefb;
+  color: var(--surface);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -819,7 +909,7 @@ a {
   text-decoration: none;
   cursor: pointer;
 
-  &:hover { background: #f3f1ea; }
+  &:hover { background: var(--row-hover); }
 }
 
 .pop-row-name { font-size: 12px; }
@@ -834,7 +924,7 @@ a {
   font-size: 12px;
   cursor: pointer;
 
-  &:hover { background: #f3f1ea; }
+  &:hover { background: var(--row-hover); }
 }
 
 .pick-title { color: var(--muted); }
@@ -930,7 +1020,7 @@ a {
   text-decoration: none;
   cursor: pointer;
 
-  &:hover { background: #f3f1ea; }
+  &:hover { background: var(--row-hover); }
 }
 
 // -- the field row ----------------------------------------------------------
@@ -971,7 +1061,7 @@ a {
   gap: 8px;
   height: 36px;
   padding: 0 10px;
-  background: #faf9f6;
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   font-size: 13px;
@@ -998,7 +1088,7 @@ a {
   gap: 8px;
   height: 36px;
   padding: 0 10px;
-  background: #faf9f6;
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
 }
@@ -1011,7 +1101,7 @@ a {
   background: var(--muted-soft);
 }
 
-.status-dot-done { background: #5c7b46; }
+.status-dot-done { background: var(--positive); }
 
 // The select carries no chrome of its own: the box around it is the control.
 .status-select {
@@ -1041,10 +1131,10 @@ a {
 }
 
 .detail-overdue {
-  border-color: #e8c9b8;
-  color: #a04a24;
+  border-color: var(--danger-border);
+  color: var(--danger);
 
-  .glyph { color: #a04a24; }
+  .glyph { color: var(--danger); }
 }
 
 // -- deadline calendar -------------------------------------------------------
@@ -1076,7 +1166,7 @@ a {
   color: var(--muted);
   cursor: pointer;
 
-  &:hover { background: #f3f1ea; }
+  &:hover { background: var(--row-hover); }
 }
 
 .datepick-prev .glyph { transform: rotate(90deg); }
@@ -1109,7 +1199,7 @@ a {
   color: var(--ink);
   cursor: pointer;
 
-  &:hover { background: #f3f1ea; }
+  &:hover { background: var(--row-hover); }
 }
 
 .datepick-today { box-shadow: inset 0 0 0 1px var(--accent); }
@@ -1149,7 +1239,7 @@ a {
   gap: 6px;
   height: 36px;
   padding: 0 6px;
-  background: #faf9f6;
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
 }
@@ -1201,7 +1291,7 @@ a {
   color: var(--muted-soft);
   cursor: pointer;
 
-  &:hover { color: #a04a24; }
+  &:hover { color: var(--danger); }
 }
 
 // The artboard's round dashed "+". It is a label, and the popover it opens
@@ -1248,7 +1338,7 @@ a {
   margin: 0;
   font-size: 14px;
   line-height: 1.6;
-  color: #3d3a34;
+  color: var(--ink-soft);
   white-space: pre-wrap;
 }
 
@@ -1310,17 +1400,17 @@ a {
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: #faf9f6;
+  background: var(--field-bg);
   font-size: 13px;
 }
 
 .dep-row-waiting {
-  background: #fdfaf1;
-  border-color: #e6d7ae;
+  background: var(--warn-tint-soft);
+  border-color: var(--warn-border);
 
   .dep-tag,
   .dep-note,
-  .glyph { color: #7a5c1e; }
+  .glyph { color: var(--warn-ink); }
 }
 
 .dep-tag {
@@ -1332,7 +1422,7 @@ a {
   color: var(--muted-soft);
 }
 
-.dep-tick { color: #5c7b46; }
+.dep-tick { color: var(--positive); }
 
 .dep-key {
   flex: none;
@@ -1368,7 +1458,7 @@ a {
   color: var(--muted-soft);
   cursor: pointer;
 
-  &:hover { color: #a04a24; }
+  &:hover { color: var(--danger); }
 }
 
 // -- files --------------------------------------------------------------
@@ -1424,7 +1514,7 @@ a {
   color: var(--muted-soft);
   cursor: pointer;
 
-  &:hover { color: #a04a24; }
+  &:hover { color: var(--danger); }
 }
 
 .file-upload {
@@ -1490,7 +1580,7 @@ a {
   margin-top: 3px;
   font-size: 13px;
   line-height: 1.55;
-  color: #3d3a34;
+  color: var(--ink-soft);
   white-space: pre-wrap;
 }
 
@@ -1521,7 +1611,7 @@ a {
   border: none;
   border-radius: var(--radius);
   background: var(--ink);
-  color: #fffefb;
+  color: var(--surface);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -1574,12 +1664,12 @@ a {
   gap: 6px;
   height: 36px;
   padding: 0 14px;
-  border: 1px solid #e8c9b8;
+  border: 1px solid var(--danger-border);
   border-radius: var(--radius);
   background: var(--surface);
   font-family: inherit;
   font-size: 13px;
-  color: #a04a24;
+  color: var(--danger);
   cursor: pointer;
 
   &:disabled { opacity: 0.5; cursor: default; }
@@ -1602,7 +1692,7 @@ a {
   content: "";
   position: fixed;
   inset: 0;
-  background: rgba(28, 27, 24, 0.28);
+  background: var(--scrim);
   z-index: 20;
 }
 
@@ -1616,9 +1706,9 @@ a {
   max-width: calc(100% - 48px);
   margin: 0;
   padding: 18px 20px;
-  border: 1px solid #e8c9b8;
+  border: 1px solid var(--danger-border);
   border-radius: 12px;
-  background: #fdf6f2;
+  background: var(--danger-tint-soft);
   box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
 }
 
@@ -1632,7 +1722,7 @@ a {
   margin: 8px 0 0;
   padding-left: 18px;
   font-size: 13px;
-  color: #3d3a34;
+  color: var(--ink-soft);
 }
 
 .confirm-row {
@@ -1643,9 +1733,9 @@ a {
 }
 
 .detail-delete-sure {
-  border-color: #a04a24;
-  background: #a04a24;
-  color: #fffefb;
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--on-strong);
 }
 
 // --- Settings (Settings and MemberSettings artboards) ----------------------
@@ -1673,10 +1763,10 @@ a {
   border-radius: var(--radius);
   font-size: 13px;
   font-weight: 500;
-  color: #3d3a35;
+  color: var(--ink-soft);
   text-decoration: none;
 
-  &:hover { background: #f1efe8; color: var(--ink); }
+  &:hover { background: var(--surface-sunken); color: var(--ink); }
 
   &-on {
     background: var(--accent-tint);
@@ -1725,10 +1815,10 @@ a {
   text-transform: capitalize;
 }
 
-.chip-role { background: var(--accent-tint); border: 1px solid #d6dbe8; color: var(--accent-ink); }
-.chip-admin { background: #f2f0ea; border: 1px solid var(--border-strong); color: var(--muted); }
-.chip-connected { background: #eef3e9; border: 1px solid #d3e0c6; color: #4a6636; }
-.chip-off { background: #f7f0dd; border: 1px solid #e6d7ae; color: #7a5c1e; }
+.chip-role { background: var(--accent-tint); border: 1px solid var(--accent-border); color: var(--accent-ink); }
+.chip-admin { background: var(--panel-sunken); border: 1px solid var(--border-strong); color: var(--muted); }
+.chip-connected { background: var(--positive-tint); border: 1px solid var(--positive-border); color: var(--positive-ink); }
+.chip-off { background: var(--warn-tint); border: 1px solid var(--warn-border); color: var(--warn-ink); }
 
 .panel {
   background: var(--surface);
@@ -1786,23 +1876,6 @@ a {
   min-width: 0;
 }
 
-// The quiet counterpart of `.primary`, for an action that is real but is not
-// what the panel is for — signing out of a panel about your name, say.
-.quiet {
-  height: 36px;
-  padding: 0 16px;
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-
-  &:hover { background: #f1efe8; }
-}
-
 .field {
   display: flex;
   flex-direction: column;
@@ -1828,7 +1901,7 @@ a {
 .field-input {
   height: 40px;
   padding: 0 12px;
-  background: #faf9f6;
+  background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   font-family: var(--font-sans);
@@ -1842,7 +1915,7 @@ a {
   }
 
   &:disabled {
-    background: #f2f0ea;
+    background: var(--panel-sunken);
     color: var(--muted);
   }
 }
@@ -1867,7 +1940,7 @@ select.field-input {
   align-items: center;
   height: 40px;
   padding: 0 12px;
-  background: #f2f0ea;
+  background: var(--panel-sunken);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   font-size: 13px;
@@ -1882,7 +1955,7 @@ select.field-input {
 
 .field-error {
   font-size: 12px;
-  color: #a04a24;
+  color: var(--danger);
 }
 
 .primary {
@@ -1987,7 +2060,7 @@ select.field-input {
   gap: 6px;
   padding: 12px;
   background: var(--accent-tint);
-  border: 1px solid #d6dbe8;
+  border: 1px solid var(--accent-border);
   border-radius: var(--radius);
 }
 
@@ -2054,7 +2127,7 @@ select.field-input {
   // A rule that is switched off is still listed — the screen shows what
   // exists, not what is live — and reads as the quieter of the two.
   &-off {
-    background: #faf9f4;
+    background: var(--surface-muted);
     opacity: 0.75;
   }
 }
@@ -2067,7 +2140,7 @@ select.field-input {
   padding: 0;
   border: none;
   border-radius: 10px;
-  background: #d5d1c7;
+  background: var(--border-soft);
   position: relative;
   cursor: pointer;
 
@@ -2095,7 +2168,7 @@ select.field-input {
   flex-grow: 1;
   min-width: 0;
   font-size: 13px;
-  color: #3d3a34;
+  color: var(--ink-soft);
 }
 
 // One chosen word inside the sentence: a column, a subject, an audience.
@@ -2104,22 +2177,22 @@ select.field-input {
   align-items: center;
   padding: 3px 8px;
   background: var(--accent-tint);
-  border: 1px solid #d8dce6;
+  border: 1px solid var(--accent-border-strong);
   border-radius: 5px;
   font-weight: 500;
 }
 
 .rule-row-off .rule-term {
-  background: #f1efe8;
+  background: var(--surface-sunken);
   border-color: var(--border-strong);
 }
 
 // A rule's verdict that queued a mail — the one outcome worth a look — reads
 // as the positive tint the rest of the app already uses for "connected".
 .rule-term-queued {
-  background: #eef3e9;
-  border-color: #d3e0c6;
-  color: #4a6636;
+  background: var(--positive-tint);
+  border-color: var(--positive-border);
+  color: var(--positive-ink);
 }
 
 // One event and every rule's verdict on it, so the task and moment are said
@@ -2144,7 +2217,7 @@ select.field-input {
 .decision-title {
   font-size: 13px;
   font-weight: 600;
-  color: #3d3a34;
+  color: var(--ink-soft);
 }
 
 .decision-verdicts {
@@ -2159,7 +2232,7 @@ select.field-input {
   flex-wrap: wrap;
   gap: 8px;
   font-size: 13px;
-  color: #3d3a34;
+  color: var(--ink-soft);
 }
 
 .rule-stamp {
@@ -2176,14 +2249,14 @@ select.field-input {
   height: 28px;
   padding: 0 10px;
   background: var(--surface);
-  border: 1px solid #e8c9b8;
+  border: 1px solid var(--danger-border);
   border-radius: var(--radius);
-  color: #a04a24;
+  color: var(--danger);
   font-family: var(--font-sans);
   font-size: 12px;
   cursor: pointer;
 
-  &:hover { background: #f1efe8; }
+  &:hover { background: var(--surface-sunken); }
 }
 
 .rule-new {
