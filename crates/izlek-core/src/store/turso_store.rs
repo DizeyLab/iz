@@ -867,7 +867,13 @@ impl Store for TursoStore {
                 ],
             )
             .await
-            .map_err(backend)?;
+            .map_err(|e| {
+                if is_constraint_violation(&e) {
+                    StoreError::Conflict("account")
+                } else {
+                    backend(e)
+                }
+            })?;
         self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
@@ -968,13 +974,16 @@ impl Store for TursoStore {
             return Err(StoreError::Conflict("account"));
         }
         let conn = self.conn.lock().await;
+        // The check above and this write are not one transaction: a second
+        // claimant can slip in between them and take the unique index first,
+        // so the write's own failure is read too, not just the pre-check's.
         let n = conn
             .execute(
                 "UPDATE user SET email = ?1 WHERE id = ?2",
                 params![email, user_id],
             )
             .await
-            .map_err(backend)?;
+            .map_err(|e| if is_constraint_violation(&e) { StoreError::Conflict("account") } else { backend(e) })?;
         if n == 0 {
             Err(StoreError::NotFound)
         } else {

@@ -698,7 +698,8 @@ async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) 
 
 async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
     let empty = task.description.trim().is_empty();
-    let prose = task.description.clone();
+    let no_description = t(lang, Key::NoDescription).to_string();
+    let prose = if empty { no_description.clone() } else { task.description.clone() };
 
     if !may_write {
         return view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> };
@@ -709,7 +710,7 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
         cx =>
         <div class="edit">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(edit_aria)>
-            <label class=(class!("detail-prose", "edit-view", "edit-hit", "detail-prose-empty" if empty)) for=(toggle.clone())>
+            <label class=(class!("detail-prose", "edit-view", "edit-hit", "detail-prose-empty" if empty)) for=(toggle.clone()) data-empty=(no_description)>
                 (prose)
             </label>
             <form class="edit-form describe-form" method="post" action="/api/save_task">
@@ -1066,12 +1067,15 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
-            // No snapshot means no user's language was read on this path
-            // either — English, same as `board.rs`'s shard-refusal branch.
+            // A refused snapshot can still have a signed-in user behind it —
+            // a gone task id is the common case — so the language is read
+            // the same way `board.rs`'s query-refusal branch does, English
+            // only when there truly is nobody signed in to read one off of.
+            let lang = require_user(cx).await.map(|user| Lang::from_code(&user.language)).unwrap_or(Lang::En);
             return view! {
                 cx =>
                 <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
-                    <div class="modal" @click=$(|e: Event| e.stop_propagation())><p class="modal-note">(refusal.message())</p></div>
+                    <div class="modal" @click=$(|e: Event| e.stop_propagation())><p class="modal-note">(refusal.message_in(lang))</p></div>
                 </div>
                 (escape_closes(cx).await?)
             };
@@ -1180,6 +1184,8 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                 (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
                             }
                         </div>
+                    } else {
+                        <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
                     }
                 </section>
 

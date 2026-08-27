@@ -512,6 +512,12 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     }
     let accounts = accounts(cx);
     let store = accounts.store();
+    // Checked before anything is written: a taken email must refuse the whole
+    // save, not leave the name/theme/language/timezone changes standing while
+    // only the email is turned away.
+    if email != user.email && store.user_by_email(&user.workspace_id, &email).await?.is_some() {
+        return Ok(saved_or_refused("save_profile", Some(Refusal::AddressTaken)));
+    }
     let outcome = store
         .set_profile(&user.id, &display_name, user.photo_path.as_deref())
         .await

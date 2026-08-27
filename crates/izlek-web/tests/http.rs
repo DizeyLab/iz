@@ -610,6 +610,32 @@ async fn a_member_may_create_a_task() {
     assert_eq!(card.task_key, "DZ-01", "no key on the new task");
 }
 
+// A cross-site form post carries no refusal body — the create simply works —
+// so `carry_refusal_on_redirect` used to have nothing to rewrite and sent the
+// browser straight to the attacker's own Referer. The fix sanitizes the
+// Location on every redirect this layer sees, refusal or not.
+#[tokio::test]
+async fn a_successful_create_never_redirects_off_site() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+
+    let answer = app
+        .post_without_script(
+            "/api/create_task",
+            Some(&admin),
+            "https://elsewhere.example/steal",
+            &[("title", "Cross-site create"), ("column_id", &column)],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    let location = answer.location.expect("a redirect with nowhere to go");
+    assert!(
+        !location.contains("elsewhere.example"),
+        "the browser was sent off-site: {location}"
+    );
+}
+
 #[tokio::test]
 async fn a_task_cannot_be_dropped_into_another_workspaces_column() {
     let app = App::open().await;
@@ -949,6 +975,31 @@ async fn a_member_may_move_a_card() {
     assert!(answer.body.contains("\"moved\""), "no move in the activity");
 }
 
+// Same open-redirect shape as create_task's: an empty (successful) body left
+// the Referer's host untouched before the fix.
+#[tokio::test]
+async fn a_successful_move_never_redirects_off_site() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let task = a_task(&app, &admin, &columns[0], "Cross-site move").await;
+
+    let answer = app
+        .post_without_script(
+            "/api/move_card",
+            Some(&admin),
+            "https://elsewhere.example/steal",
+            &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    let location = answer.location.expect("a redirect with nowhere to go");
+    assert!(
+        !location.contains("elsewhere.example"),
+        "the browser was sent off-site: {location}"
+    );
+}
+
 #[tokio::test]
 async fn a_drop_decided_against_a_stale_board_is_refused() {
     let app = App::open().await;
@@ -1155,6 +1206,33 @@ async fn a_profile_email_cannot_take_somebody_elses_address() {
     let page = app.get(location, Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("already has an account"), "{html}");
+}
+
+// A taken email used to refuse only the email while the name/theme/language/
+// timezone in the same form still got written — a half-applied save.
+#[tokio::test]
+async fn a_taken_email_refuses_the_whole_save_not_only_the_email() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&member),
+            &[
+                ("display_name", "Emre Renamed"),
+                ("email", "ada@izlek.sh"),
+                ("theme", "dark"),
+            ],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=address-taken&on=save_profile"), "{location}");
+
+    let mine = app.get("/settings", Some(&member)).await;
+    let html = String::from_utf8_lossy(&mine.bytes);
+    assert!(html.contains("value=\"Emre\""), "the name changed anyway: {html}");
 }
 
 #[tokio::test]
@@ -2597,6 +2675,21 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
 
     let logs = until_logs_contains(&app, &admin_cookie, "\"subject\":\"Renamed\"").await;
     assert!(logs.contains("\"recipient\":\"ada@izlek.sh\""), "{}", logs);
+}
+
+// `?task=X&new=1` together used to render both modals at once — two
+// document-level datepicker listeners double-stepping the month nav.
+#[tokio::test]
+async fn task_and_new_together_render_only_the_task_modal() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin, &column, "Only one modal at a time").await;
+
+    let raw = app.get(&format!("/?task={task}&new=1"), Some(&admin)).await;
+    let html = String::from_utf8_lossy(&raw.bytes);
+    assert_eq!(html.matches("class=\"modal-scrim\"").count(), 1, "{html}");
+    assert!(!html.contains("modal-new-task"), "the new-task modal rendered too: {html}");
 }
 
 #[tokio::test]

@@ -612,16 +612,25 @@ async fn carry_refusal_on_redirect(cx: &Cx, body: Body, next: Next<'_>) -> topco
     let (mut parts, body) = response.into_parts();
     // The body of one of these redirects is a serialised `Option<Refusal>` and
     // nothing else; the cap is there so a response that is something else
-    // entirely cannot be read into memory whole.
+    // entirely cannot be read into memory whole. A body that fails to parse —
+    // an empty one included, the shape a route with nothing to say back sends
+    // — is read as "no refusal", never as "leave the Location alone": the
+    // Referer sanitization below has to run on every redirect this layer
+    // sees, not only the ones that happen to carry a refusal.
     let Ok(bytes) = to_bytes(body, 64 * 1024).await else {
         return Ok(Response::from_parts(parts, Body::empty()));
     };
-    if let Ok(Some(refusal)) = serde_json::from_slice::<Option<Refusal>>(&bytes)
-        && let Some(location) = parts.headers.get(header::LOCATION).and_then(|v| v.to_str().ok())
-        && let Some(carried) = carrying(location, refusal.code(), &called)
-        && let Ok(value) = HeaderValue::from_str(&carried)
-    {
-        parts.headers.insert(header::LOCATION, value);
+    let refusal = serde_json::from_slice::<Option<Refusal>>(&bytes).ok().flatten();
+    if let Some(location) = parts.headers.get(header::LOCATION).and_then(|v| v.to_str().ok()) {
+        let rewritten = match refusal {
+            Some(refusal) => carrying(location, refusal.code(), &called),
+            None => Some(same_origin(location).to_string()),
+        };
+        if let Some(carried) = rewritten
+            && let Ok(value) = HeaderValue::from_str(&carried)
+        {
+            parts.headers.insert(header::LOCATION, value);
+        }
     }
     Ok(Response::from_parts(parts, Body::from(bytes)))
 }

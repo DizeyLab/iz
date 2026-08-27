@@ -283,7 +283,7 @@ async fn render_column(
 
     view! {
         cx =>
-        <section class="column" id=(column_id.clone())>
+        <section class="column">
             <header class="column-head">
                 <span class="column-name">(name)</span>
                 <span class="column-count">(count)</span>
@@ -343,7 +343,7 @@ async fn render_card(
 
     view! {
         cx =>
-        <a class="card" id=(column_id.to_string()) class:card-done=(done_column) href=(href.clone())
+        <a class="card" class:card-done=(done_column) href=(href.clone())
             draggable=(if may_write { "true" } else { "false" })
             @dragstart=$(|e: Event| raw!(
                 "(() => { ${e}.inner.dataTransfer.setData('izlek-task', ${drag_task_id}); ${e}.inner.dataTransfer.setData('izlek-from', ${drag_from_column}); })()",
@@ -413,7 +413,8 @@ async fn render_card(
 ///
 /// Also holds the board page's one `Escape` listener: a single capture-phase
 /// handler layered topmost-first (datepicker panel, then confirm popup, then
-/// card menu, then the modal itself) so one press closes exactly the
+/// any other open `.edit-toggle` — rename, describe, assignee, link popovers
+/// — then card menu, then the modal itself) so one press closes exactly the
 /// topmost overlay and never falls through to close two at once. The other
 /// overlay scripts (`datepicker_script`, `escape_closes`) keep only their
 /// click/outside-click logic; this is the only place `Escape` is handled.
@@ -436,6 +437,8 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
             var confirm = document.querySelector('details.confirm-details[open]'); \
             if (confirm) { confirm.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
+            var editOpen = document.querySelector('.edit-toggle:checked'); \
+            if (editOpen) { editOpen.checked = false; e.stopImmediatePropagation(); return; } \
             var menu = document.querySelector('.card-menu-open'); \
             if (menu) { closeCardMenus(); e.stopImmediatePropagation(); return; } \
             if (document.querySelector('.modal-scrim')) { window.location.href = '/'; } \
@@ -502,7 +505,10 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
-    let open_new = may_write && query.new.is_some();
+    // `?task=X&new=1` together would render both modals at once — two
+    // document-level datepicker listeners double-stepping the month nav — so
+    // an open task wins and `new` is ignored.
+    let open_new = may_write && query.new.is_some() && open_task.is_none();
     let sort = valid_sort(query.sort.as_deref()).to_string();
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
@@ -556,7 +562,14 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 @dragover=$(|e: Event| e.prevent_default())
                 @drop=$(async move |e: Event| {
                     e.prevent_default();
-                    let to = e.target.id.clone();
+                    // The drop can land on a card's inner text or icon, not
+                    // just the column's own surface — walk up to the column
+                    // that actually owns the id, rather than trusting the
+                    // exact element under the pointer to carry one.
+                    let to = raw!(
+                        "cx.hydrate((() => { var col = ${e}.inner.target.closest('.column-cards'); return col ? col.id : ''; })())",
+                        "".to_owned()
+                    );
                     let task_id = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-task'))", "".to_owned());
                     let from = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-from'))", "".to_owned());
                     if !task_id.is_empty() {
