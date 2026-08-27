@@ -110,6 +110,20 @@ fn redirect(cx: &Cx) -> Redirect {
     Ok((StatusCode::SEE_OTHER, [(header::LOCATION, back)]))
 }
 
+/// Back to the referer, with the refusal on the query the way `settings.rs`
+/// carries one, so a browser without script learns why a create or move did
+/// not happen.
+fn redirect_refused(cx: &Cx, call: &str, refusal: Refusal) -> Redirect {
+    let back = headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("/")
+        .to_string();
+    let separator = if back.contains('?') { '&' } else { '?' };
+    let location = format!("{back}{separator}refusal={}&on={call}", refusal.code());
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]))
+}
+
 #[derive(serde::Deserialize)]
 struct CreateTaskForm {
     title: String,
@@ -120,8 +134,10 @@ struct CreateTaskForm {
 /// fields the procedure below trades over the wire.
 #[route(POST "/api/create_task")]
 async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
-    let _ = create_task_shared(cx, &input.title, &input.column_id).await?;
-    redirect(cx)
+    match create_task_shared(cx, &input.title, &input.column_id).await? {
+        Some(refusal) => redirect_refused(cx, "create_task", refusal),
+        None => redirect(cx),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -134,8 +150,10 @@ struct MoveCardForm {
 /// The same move the drop procedure performs, reachable without script.
 #[route(POST "/api/move_card")]
 async fn move_card(cx: &Cx, Form(input): Form<MoveCardForm>) -> Redirect {
-    let _ = move_card_shared(cx, &input.task_id, &input.from_column_id, &input.to_column_id).await?;
-    redirect(cx)
+    match move_card_shared(cx, &input.task_id, &input.from_column_id, &input.to_column_id).await? {
+        Some(refusal) => redirect_refused(cx, "move_card", refusal),
+        None => redirect(cx),
+    }
 }
 
 /// What a drop calls: performs the move and hands back a refusal code, if
@@ -316,10 +334,13 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     }
 }
 
-/// Which task, if any, `/` renders the detail modal open on.
+/// Which task, if any, `/` renders the detail modal open on, and the refusal
+/// (if any) a create or move landed back here with.
 #[query_params(error = redirect("/"))]
 struct BoardQuery {
     task: Option<String>,
+    refusal: Option<String>,
+    on: Option<String>,
 }
 
 /// The signed-in board: the topbar, the filter chips and the shard that owns
@@ -339,7 +360,12 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
     let may_write = user.role.can_write_tasks();
-    let open_task = query_params::<BoardQuery>(cx)?.task.clone();
+    let query = query_params::<BoardQuery>(cx)?;
+    let open_task = query.task.clone();
+    let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
+        (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
+        _ => None,
+    };
 
     view! {
         cx =>
@@ -362,6 +388,9 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             if (overdue > 0) { <span class="chip chip-overdue">(format!("{overdue} overdue"))</span> }
             if (blocked > 0) { <span class="chip chip-blocked">(format!("{blocked} blocked"))</span> }
         </div>
+        if let Some(refusal) = &refusal {
+            <p class="field-error">(refusal.message())</p>
+        }
         <main class="board-stage">
             signal version = 0.0;
             <div class="board-columns"

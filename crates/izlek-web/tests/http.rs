@@ -562,14 +562,12 @@ async fn a_viewer_who_posts_to_create_task_anyway_is_refused() {
         .await;
 
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    // FINDING: board.rs's `create_task` route discards `create_task_shared`'s
-    // refusal (`let _ = create_task_shared(...).await?;`) and its `Redirect`
-    // has no `Json` component at all, unlike auth.rs/detail.rs's — so neither
-    // a hydrated caller nor a scriptless browser ever learns *why* a create
-    // was refused, only that they were sent back. The old test's
-    // `assert_eq!(answer.body, "\"Forbidden\"")` has no wire shape to land on
-    // any more; the refusal is checked by its side effect below instead.
     assert_eq!(answer.body, "");
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=create_task"),
+        "{:?}",
+        answer.location
+    );
 
     // And the refusal is not cosmetic: the board is still empty.
     let workspace_id = app.workspace_id().await;
@@ -594,10 +592,12 @@ async fn a_member_may_create_a_task() {
             &[("title", "Wire the deadline chip"), ("column_id", &column)],
         )
         .await;
-    // create_task carries no body at all (see FINDING above); "" is success
-    // here just as much as it is a swallowed refusal — the side effect below
-    // is what actually tells the two apart.
     assert_eq!(answer.body, "");
+    assert!(
+        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        "a create that worked said it was refused: {:?}",
+        answer.location
+    );
 
     let workspace_id = app.workspace_id().await;
     let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
@@ -625,9 +625,12 @@ async fn a_task_cannot_be_dropped_into_another_workspaces_column() {
             ],
         )
         .await;
-    // See FINDING on `a_viewer_who_posts_to_create_task_anyway_is_refused`:
-    // create_task never surfaces a refusal in its body.
     assert_eq!(answer.body, "");
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=create_task"),
+        "{:?}",
+        answer.location
+    );
     let workspace_id = app.workspace_id().await;
     let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
     assert!(
@@ -646,6 +649,11 @@ async fn a_card_needs_a_title() {
         .post("/api/create_task", Some(&admin), &[("title", "   "), ("column_id", &column)])
         .await;
     assert_eq!(answer.body, "");
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=empty-title&on=create_task"),
+        "{:?}",
+        answer.location
+    );
     let workspace_id = app.workspace_id().await;
     let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
     assert_eq!(board.columns.iter().flat_map(|c| &c.cards).count(), 0, "a blank title was stored anyway");
@@ -880,10 +888,12 @@ async fn a_viewer_who_posts_a_move_anyway_is_refused() {
         .await;
 
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    // See FINDING on `a_viewer_who_posts_to_create_task_anyway_is_refused`:
-    // move_card shares create_task's bodyless `Redirect` and never surfaces a
-    // refusal either.
     assert_eq!(answer.body, "");
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=move_card"),
+        "{:?}",
+        answer.location
+    );
 
     // And nothing moved: the refusal is in the handler, not in the drawing.
     let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
@@ -909,7 +919,12 @@ async fn a_member_may_move_a_card() {
             &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])],
         )
         .await;
-    assert_eq!(answer.body, "", "move_card never carries a body (see FINDING)");
+    assert_eq!(answer.body, "");
+    assert!(
+        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        "a move that worked said it was refused: {:?}",
+        answer.location
+    );
 
     let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
     assert!(answer.body.contains("\"moved\""), "no move in the activity");
@@ -940,9 +955,12 @@ async fn a_drop_decided_against_a_stale_board_is_refused() {
             &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[2])],
         )
         .await;
-    // Same FINDING: move_card's `Redirect` carries no body, so the
-    // stale-drop refusal is checked below, on the activity log, not here.
     assert_eq!(second.body, "");
+    assert!(
+        second.location.as_deref().unwrap_or_default().contains("refusal=moved-already&on=move_card"),
+        "{:?}",
+        second.location
+    );
 
     // The winner's move stands, and there is exactly one crossing.
     let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
@@ -973,6 +991,11 @@ async fn a_card_cannot_be_moved_into_another_boards_column() {
         )
         .await;
     assert_eq!(answer.body, "");
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=move_card"),
+        "{:?}",
+        answer.location
+    );
     let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
     assert!(answer.body.contains(&columns[0]), "the forbidden move happened anyway");
 }
@@ -1059,11 +1082,12 @@ async fn a_profile_cannot_be_saved_without_a_name() {
 
     let answer = app.post("/api/save_profile", Some(&admin_cookie), &[("display_name", "   ")]).await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=empty-name&on=save_profile"),
-        "{:?}",
-        answer.location
-    );
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=empty-name&on=save_profile"), "{location}");
+
+    let page = app.get(location, Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("Give yourself a name."), "{html}");
 }
 
 #[tokio::test]
@@ -1141,10 +1165,14 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
                 &[("attachment_limit_mb", attachment), ("photo_limit_mb", photo), ("allowed_file_types", "")],
             )
             .await;
+        let location = answer.location.as_deref().unwrap_or_default();
+        assert!(location.contains("refusal=bad-limit&on=save_limits"), "{attachment}/{photo}: {location}");
+
+        let page = app.get(location, Some(&admin_cookie)).await;
+        let html = String::from_utf8_lossy(&page.bytes);
         assert!(
-            answer.location.as_deref().unwrap_or_default().contains("refusal=bad-limit&on=save_limits"),
-            "{attachment}/{photo}: {:?}",
-            answer.location
+            html.contains("A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."),
+            "{attachment}/{photo}: {html}"
         );
     }
 }
@@ -1161,11 +1189,12 @@ async fn a_file_type_that_is_not_an_extension_is_refused() {
             &[("attachment_limit_mb", "25"), ("photo_limit_mb", "2"), ("allowed_file_types", "../etc/passwd")],
         )
         .await;
-    assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=bad-file-type&on=save_limits"),
-        "{:?}",
-        answer.location
-    );
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=bad-file-type&on=save_limits"), "{location}");
+
+    let page = app.get(location, Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("File types are extensions"), "{html}");
 }
 
 #[tokio::test]
@@ -1281,11 +1310,12 @@ async fn a_first_sender_with_no_password_is_refused_and_says_why() {
             ],
         )
         .await;
-    assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=bad-sender&on=save_sender"),
-        "{:?}",
-        answer.location
-    );
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=bad-sender&on=save_sender"), "{location}");
+
+    let page = app.get(location, Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("That sender setting will not work."), "{html}");
 }
 
 #[tokio::test]
@@ -1319,11 +1349,15 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
             }
         }
         let answer = app.post("/api/save_sender", Some(&admin_cookie), &form).await;
+        let location = answer.location.as_deref().unwrap_or_default();
         assert!(
-            answer.location.as_deref().unwrap_or_default().contains("refusal=bad-sender&on=save_sender"),
-            "{field} was accepted with {overrides:?}: {:?}",
-            answer.location
+            location.contains("refusal=bad-sender&on=save_sender"),
+            "{field} was accepted with {overrides:?}: {location}"
         );
+
+        let page = app.get(location, Some(&admin_cookie)).await;
+        let html = String::from_utf8_lossy(&page.bytes);
+        assert!(html.contains("That sender setting will not work."), "{field}: {html}");
     }
 }
 

@@ -391,6 +391,13 @@ impl Refusal {
             "address-taken" => Refusal::AddressTaken,
             "link-not-usable" => Refusal::LinkNotUsable,
             "empty-title" => Refusal::EmptyTitle,
+            "empty-name" => Refusal::EmptyName,
+            "bad-limit" => Refusal::BadLimit,
+            "bad-file-type" => Refusal::BadFileType,
+            // The specific complaint (which field, and why) lives only in the
+            // response the save itself returned; a code that survived a round
+            // trip through the address bar carries no more than this.
+            "bad-sender" => Refusal::BadSender("That sender setting will not work.".to_string()),
             "empty-comment" => Refusal::EmptyComment,
             "no-file" => Refusal::NoFile,
             "file-too-big" => Refusal::FileTooBig,
