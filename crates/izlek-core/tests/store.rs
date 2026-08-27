@@ -13,7 +13,7 @@ use izlek_core::store::{
     SendState, Store, StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
-use uuid::Uuid;
+use ulid::Ulid;
 
 /// A throwaway database on disk. Turso's in-memory mode is not what production
 /// runs, so the tests exercise a real file.
@@ -24,7 +24,7 @@ struct Scratch {
 
 impl Scratch {
     async fn open() -> Self {
-        let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
             .await
@@ -102,7 +102,7 @@ async fn member(store: &TursoStore, workspace_id: &str, email: &str, name: &str)
 /// empty table.
 async fn a_pre_0013_store_with_a_rule_send_and_decision()
 -> (PathBuf, String, String, String, String) {
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
@@ -140,14 +140,14 @@ async fn a_pre_0013_store_with_a_rule_send_and_decision()
         .unwrap();
     }
 
-    let workspace = Uuid::new_v4().to_string();
-    let admin = Uuid::new_v4().to_string();
-    let board = Uuid::new_v4().to_string();
-    let backlog = Uuid::new_v4().to_string();
-    let done = Uuid::new_v4().to_string();
-    let task = Uuid::new_v4().to_string();
-    let rule = Uuid::new_v4().to_string();
-    let transition = Uuid::new_v4().to_string();
+    let workspace = Ulid::new().to_string();
+    let admin = Ulid::new().to_string();
+    let board = Ulid::new().to_string();
+    let backlog = Ulid::new().to_string();
+    let done = Ulid::new().to_string();
+    let task = Ulid::new().to_string();
+    let rule = Ulid::new().to_string();
+    let transition = Ulid::new().to_string();
     conn.execute(
         "INSERT INTO workspace (id, name, created_at) VALUES (?1, 'Izlek', '2026-08-26T00:00:00Z')",
         turso::params![workspace.clone()],
@@ -231,7 +231,7 @@ async fn a_pre_0013_store_with_a_rule_send_and_decision()
 
 #[tokio::test]
 async fn migrations_apply_once_and_survive_reopen() {
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
@@ -333,7 +333,7 @@ async fn a_second_claim_loses_and_changes_nothing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_claims_produce_exactly_one_admin() {
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
     let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
@@ -386,7 +386,7 @@ async fn concurrent_claims_produce_exactly_one_admin() {
 /// come back `Ok`, never that error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn many_concurrent_callers_never_see_concurrent_use_forbidden() {
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
     let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
@@ -822,7 +822,7 @@ async fn profile_and_role_updates_stick() {
 #[tokio::test]
 async fn updates_to_a_missing_user_are_not_found() {
     let scratch = Scratch::open().await;
-    let missing = Uuid::new_v4().to_string();
+    let missing = Ulid::new().to_string();
     assert!(matches!(
         scratch.store.set_password_hash(&missing, "x").await,
         Err(StoreError::NotFound)
@@ -945,7 +945,7 @@ async fn the_store_is_usable_behind_a_trait_object() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prefetched_link_is_consumed_exactly_once() {
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
     let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
@@ -2899,7 +2899,7 @@ async fn an_orphan_row_is_refused() {
         .len();
     assert_eq!(existing, 1, "only the admin");
 
-    let dir = std::env::temp_dir().join(format!("izlek-fk-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-fk-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_str().unwrap().to_owned();
     {
@@ -2976,7 +2976,7 @@ async fn a_rule_that_fires_on_nothing_is_refused_by_the_schema() {
     // past it: a status rule with no column, straight at the table. The check
     // constraint is the guard, and if it were ever dropped this insert would
     // quietly succeed and the engine would carry a rule that matches nothing.
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
     let store = TursoStore::open(&path).await.unwrap();
@@ -3436,7 +3436,7 @@ impl Mailer for Remembering {
 
 /// A store shared between the tests and an engine.
 async fn shared() -> (PathBuf, Arc<TursoStore>, String, String) {
-    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = Arc::new(
         TursoStore::open(dir.join("izlek.db").to_str().unwrap())

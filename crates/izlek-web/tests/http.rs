@@ -29,7 +29,7 @@ use izlek_web::server::{Mail, SESSION_COOKIE};
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
 use topcoat::router::{Body, BodyLimit, Router, RouterBuilderDiscoverExt, to_bytes};
-use uuid::Uuid;
+use ulid::Ulid;
 
 /// The bundle `cargo build -p izlek-web` + `topcoat asset bundle --bin
 /// izlek-web` write next to the crate's own `target/debug`, not next to the
@@ -49,7 +49,7 @@ struct App {
 
 impl App {
     async fn build(base_url: &str, mail: Mail) -> Self {
-        let dir = std::env::temp_dir().join(format!("izlek-http-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store: Arc<dyn Store> = Arc::new(
             TursoStore::open(dir.join("izlek.db").to_str().unwrap())
@@ -76,7 +76,7 @@ impl App {
     /// settings, so a transition actually reaches the ledger instead of the
     /// silent no-op `open`'s router hands every crossing.
     async fn open_with_mail() -> Self {
-        let dir = std::env::temp_dir().join(format!("izlek-http-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store: Arc<dyn Store> = Arc::new(
             TursoStore::open(dir.join("izlek.db").to_str().unwrap())
@@ -1657,7 +1657,7 @@ async fn a_rule_may_not_be_hung_off_a_column_that_is_not_on_this_board() {
             Some(&admin_cookie),
             &[
                 ("trigger", "status"),
-                ("column_id", &Uuid::new_v4().to_string()),
+                ("column_id", &Ulid::new().to_string()),
                 ("subject", "Task completed"),
                 ("audience", "assignees"),
             ],
@@ -1706,7 +1706,7 @@ async fn switching_a_rule_off_leaves_it_listed_and_switched_off() {
 async fn a_rule_id_this_workspace_does_not_own_is_refused() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let stranger = Uuid::new_v4().to_string();
+    let stranger = Ulid::new().to_string();
 
     for path in ["/api/set_rule_enabled", "/api/delete_rule"] {
         let answer = app.post(path, Some(&admin_cookie), &[("rule_id", &stranger), ("enabled", "false")]).await;

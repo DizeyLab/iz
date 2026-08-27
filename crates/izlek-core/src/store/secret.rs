@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn load_or_create_key_persists_and_restricts() {
-        let dir = std::env::temp_dir().join(format!("izlek-key-test-{}", uuid_lite()));
+        let dir = std::env::temp_dir().join(format!("izlek-key-test-{}", unique_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("izlek.key");
         let first = load_or_create_key(&path).unwrap();
@@ -187,9 +187,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A tiny stand-in so this module does not reach for the `uuid` crate just
+    // A tiny stand-in so this module does not reach for the `ulid` crate just
     // to name a scratch directory.
-    fn uuid_lite() -> u64 {
+    fn unique_suffix() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

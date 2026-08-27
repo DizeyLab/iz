@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use turso::transaction::TransactionBehavior;
 use turso::{Builder, Connection, Row, Value, params};
-use uuid::Uuid;
+use ulid::Ulid;
 
 use super::secret;
 use super::{
@@ -609,9 +609,9 @@ impl Store for TursoStore {
         display_name: &str,
         password_hash: &str,
     ) -> Result<(Workspace, User)> {
-        let workspace_id = Uuid::new_v4().to_string();
-        let admin_id = Uuid::new_v4().to_string();
-        let board_id = Uuid::new_v4().to_string();
+        let workspace_id = Ulid::new().to_string();
+        let admin_id = Ulid::new().to_string();
+        let board_id = Ulid::new().to_string();
         let now = now_text()?;
         let email = fold_email(email);
 
@@ -668,7 +668,7 @@ impl Store for TursoStore {
                     "INSERT INTO board_column (id, board_id, name, position, is_done) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
-                        Uuid::new_v4().to_string(),
+                        Ulid::new().to_string(),
                         board_id.clone(),
                         *name,
                         position as i64,
@@ -832,7 +832,7 @@ impl Store for TursoStore {
         {
             return Err(StoreError::Conflict("account"));
         }
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         self.conn
             .lock()
             .await
@@ -982,7 +982,7 @@ impl Store for TursoStore {
         token_hash: &str,
         expires_at: OffsetDateTime,
     ) -> Result<SigninLink> {
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         self.conn
             .lock()
             .await
@@ -1050,7 +1050,7 @@ impl Store for TursoStore {
         token_hash: &str,
         expires_at: OffsetDateTime,
     ) -> Result<Session> {
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         self.conn
             .lock()
             .await
@@ -1124,7 +1124,7 @@ impl Store for TursoStore {
         conn
             .execute(
                 "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES (?1, ?2, ?3)",
-                params![Uuid::new_v4().to_string(), bucket, stamp(at)?],
+                params![Ulid::new().to_string(), bucket, stamp(at)?],
             )
             .await
             .map_err(backend)?;
@@ -1179,7 +1179,7 @@ impl Store for TursoStore {
         is_done: bool,
     ) -> Result<Column> {
         let conn = self.conn.lock().await;
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         conn
             .execute(
                 "INSERT INTO board_column (id, board_id, name, position, is_done) \
@@ -1197,8 +1197,8 @@ impl Store for TursoStore {
     }
 
     async fn create_task(&self, new: NewTask<'_>) -> Result<TaskCreated> {
-        let id = Uuid::new_v4().to_string();
-        let activity_id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
+        let activity_id = Ulid::new().to_string();
         let now = now_text()?;
         let deadline = new.deadline.map(day_text).transpose()?;
 
@@ -1448,8 +1448,8 @@ impl Store for TursoStore {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<CommentWritten> {
-        let comment_id = Uuid::new_v4().to_string();
-        let activity_id = Uuid::new_v4().to_string();
+        let comment_id = Ulid::new().to_string();
+        let activity_id = Ulid::new().to_string();
         let when = stamp(at)?;
 
         let mut conn = self.tx_conn().await?;
@@ -1495,7 +1495,7 @@ impl Store for TursoStore {
 
     async fn add_attachment(&self, new: NewAttachment<'_>) -> Result<String> {
         let conn = self.conn.lock().await;
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         let size = new.bytes.len() as i64;
         conn
             .execute(
@@ -1632,7 +1632,7 @@ impl Store for TursoStore {
             }
             let mut ids = Vec::with_capacity(lines.len());
             for (kind, detail) in lines {
-                let id = Uuid::new_v4().to_string();
+                let id = Ulid::new().to_string();
                 tx.execute(
                     "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1667,7 +1667,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<Moved> {
         let stamp = stamp(at)?;
-        let transition_id = Uuid::new_v4().to_string();
+        let transition_id = Ulid::new().to_string();
 
         // Dropping a card back where it came from is not a move. Answer before
         // opening a transaction: there is nothing to serialise.
@@ -1789,7 +1789,7 @@ impl Store for TursoStore {
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    Uuid::new_v4().to_string(),
+                    Ulid::new().to_string(),
                     task_id,
                     actor_id,
                     ActivityKind::Moved.as_str(),
@@ -1887,7 +1887,7 @@ impl Store for TursoStore {
                 params![task_id, stamp.clone()],
             )
             .await?;
-            let deleted_activity_id = Uuid::new_v4().to_string();
+            let deleted_activity_id = Ulid::new().to_string();
             tx.execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, '', ?5)",
@@ -1925,7 +1925,7 @@ impl Store for TursoStore {
                     "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
                      VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
                     params![
-                        Uuid::new_v4().to_string(),
+                        Ulid::new().to_string(),
                         blocked.clone(),
                         ActivityKind::Unblocked.as_str(),
                         format!("{task_key} was deleted"),
@@ -1944,7 +1944,7 @@ impl Store for TursoStore {
                 None
             } else {
                 let event = Freeing {
-                    id: Uuid::new_v4().to_string(),
+                    id: Ulid::new().to_string(),
                     board_id,
                     cause_key: task_key.clone(),
                     cause_title: title,
@@ -2069,7 +2069,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<String> {
         let conn = self.conn.lock().await;
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         conn
             .execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
@@ -2098,7 +2098,7 @@ impl Store for TursoStore {
         audience: Audience,
         at: OffsetDateTime,
     ) -> Result<MailRule> {
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         let (kind, column) = trigger_parts(trigger);
         self.conn
             .lock()
@@ -2303,7 +2303,7 @@ impl Store for TursoStore {
         recipient: &str,
         at: OffsetDateTime,
     ) -> Result<Option<MailSend>> {
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         // The index is the decision. `DO NOTHING` turns the second engine run
         // into zero rows affected rather than an error to interpret, and the
         // caller that gets `None` sends nothing.
@@ -2345,7 +2345,7 @@ impl Store for TursoStore {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<MailSend> {
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         self.conn
             .lock()
             .await
@@ -2491,7 +2491,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
-        let id = Uuid::new_v4().to_string();
+        let id = Ulid::new().to_string();
         conn
             .execute(
                 "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
@@ -3003,7 +3003,7 @@ mod probe {
 
     #[tokio::test]
     async fn durability_defaults_are_recorded() {
-        let dir = std::env::temp_dir().join(format!("izlek-probe-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-probe-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.db");
         let db = Builder::new_local(path.to_str().unwrap())
@@ -3021,7 +3021,7 @@ mod probe {
 
     #[tokio::test]
     async fn concurrent_writers_on_one_database() {
-        let dir = std::env::temp_dir().join(format!("izlek-probe-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-probe-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.db");
         let db = Builder::new_local(path.to_str().unwrap())
@@ -3064,7 +3064,7 @@ mod probe {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_database_handles_on_one_file() {
         // Two handles on the same file is the shape a second process takes.
-        let dir = std::env::temp_dir().join(format!("izlek-probe-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-probe-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.db");
         let p = path.to_str().unwrap().to_string();
@@ -3137,7 +3137,7 @@ mod probe {
     /// is asserted against the real query rather than against a comment.
     #[tokio::test]
     async fn the_workspace_read_path_cannot_carry_the_password() {
-        let dir = std::env::temp_dir().join(format!("izlek-sender-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-sender-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
             .await
@@ -3193,7 +3193,7 @@ mod migration {
     /// only half-apply is a migration that can lose the mail ledger.
     #[tokio::test]
     async fn a_migration_that_fails_partway_leaves_nothing_behind() {
-        let dir = std::env::temp_dir().join(format!("izlek-migration-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("izlek-migration-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
             .await

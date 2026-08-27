@@ -21,7 +21,7 @@ server = [
   "dep:subtle",
   "dep:tokio",
   "dep:turso",
-  "dep:uuid",
+  "dep:ulid",
 ]
 
 [dependencies]
@@ -39,7 +39,7 @@ time.workspace = true
 toml.workspace = true
 tokio = { workspace = true, optional = true }
 turso = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+ulid = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-trait = "0.1.92"

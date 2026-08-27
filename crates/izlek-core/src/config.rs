@@ -205,14 +205,14 @@ mod tests {
     /// A scratch directory, cleaned up when the test ends, so `load_from` can
     /// be exercised without touching the process's own working directory.
     fn scratch() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("izlek-config-test-{}", uuid_like()));
+        let dir = std::env::temp_dir().join(format!("izlek-config-test-{}", unique_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     /// Good enough uniqueness for a scratch directory name; no need for a
-    /// real UUID dependency just for this.
-    fn uuid_like() -> u128 {
+    /// real ULID dependency just for this.
+    fn unique_suffix() -> u128 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
