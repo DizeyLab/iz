@@ -655,15 +655,12 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     }
 }
 
-/// The window `Escape` listener that closes overlays, layered — plain JS,
-/// since the key never lands on the scrim itself (focus stays on the card
-/// the click opened this from). The delete-confirm `<details>` only exists
-/// inside this modal today, so a nested overlay closes first and stops;
-/// only then does the modal itself navigate away.
+/// The confirm-details outside-click closer. `Escape` for every overlay
+/// (this one included) is handled centrally by `board.rs`'s
+/// `card_menu_script`, which is always mounted alongside this modal.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
-        document.addEventListener('keydown', function (e) { if (e.key !== 'Escape') { return; } var confirm = document.querySelector('details.confirm-details[open]'); if (confirm) { confirm.removeAttribute('open'); return; } window.location.href = '/'; }); \
         document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { confirm.removeAttribute('open'); } }, true);";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
@@ -747,19 +744,20 @@ async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bo
     let toggle = format!("deadline-{}", task.id);
     let input_value = task.deadline_input();
     let change_aria = t(lang, Key::ChangeTheDeadline);
+    let no_deadline = t(lang, Key::NoDeadline);
     view! {
         cx =>
-        <div class="edit edit-pop">
+        <div class="edit edit-pop datepick-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(change_aria)>
             <label class=(class!("field-box", "edit-view", "edit-hit", "detail-overdue" if overdue)) for=(toggle.clone())>
                 (glyph::calendar(cx).await?)
-                <span class="field-text">(label)</span>
+                <span class="field-text datepick-label" data-empty=(no_deadline)>(label)</span>
                 (glyph::chevron(cx).await?)
             </label>
             <div class="edit-form pop-panel datepick-panel">
                 <form class="pop-form" method="post" action="/api/save_task">
                     <input type="hidden" name="task_id" value=(task.id.clone())>
-                    <input class="field-input" type="date" name="deadline" value=(input_value)>
+                    (datepicker_grid(cx, "deadline", &input_value, lang).await?)
                     <div class="edit-row">
                         <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
                         <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
@@ -769,6 +767,119 @@ async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bo
             </div>
         </div>
     }
+}
+
+/// The calendar grid's static shell inside a `.datepick-panel`: a hidden
+/// `<input>` carrying the real `yyyy-mm-dd` value, month nav, and the day
+/// grid — the grid cells and month title are blank until `datepicker_script`
+/// fills them in on open (see that function's doc comment for why the fill
+/// happens in JS rather than here).
+async fn datepicker_grid(cx: &Cx, name: &str, value: &str, lang: Lang) -> Result {
+    view! {
+        cx =>
+        <input class="datepick-input" type="hidden" name=(name.to_string()) value=(value.to_string())>
+        <div class="datepick-head">
+            <button class="datepick-nav datepick-prev" type="button" aria-label=(t(lang, Key::PreviousMonth))>(glyph::chevron(cx).await?)</button>
+            <span class="datepick-title"></span>
+            <button class="datepick-nav datepick-next" type="button" aria-label=(t(lang, Key::NextMonth))>(glyph::chevron(cx).await?)</button>
+        </div>
+        <div class="datepick-weekdays"></div>
+        <div class="datepick-grid"></div>
+        <div class="datepick-foot">
+            <button class="datepick-action datepick-clear" type="button">(t(lang, Key::Clear))</button>
+            <button class="datepick-action datepick-today" type="button">(t(lang, Key::Today))</button>
+        </div>
+    }
+}
+
+/// The house calendar's month grid, wholly in JS: this is a plain document
+/// reload per page (no framework runtime to hand a computed grid to), so the
+/// grid is built client-side from `<input class=datepick-input>`'s value
+/// and the browser's own "today" — mirroring the old wasm build's
+/// `js_sys::Date`-driven `DeadlineControl`, minus the wasm. Wires month
+/// nav, day pick, Clear/Today, and closes a panel on outside click —
+/// registered in the capture phase so a stray click never reaches
+/// `escape_closes`'s confirm-closing listener while a panel is open.
+/// `Escape` itself is handled centrally by `board.rs`'s `card_menu_script`.
+async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
+    use crate::i18n::datepicker_js_literals;
+    use topcoat::view::Unescaped;
+    let (months, weekdays) = datepicker_js_literals(lang);
+    let js = format!(
+        "(function() {{\
+            var MONTHS = {months};\
+            var WEEKDAYS = {weekdays};\
+            function pad(n) {{ return String(n).padStart(2, '0'); }}\
+            function parseYmd(v) {{ if (!v) return null; var p = v.split('-'); if (p.length !== 3) return null; return {{ y: +p[0], m: +p[1], d: +p[2] }}; }}\
+            function todayYmd() {{ var t = new Date(); return {{ y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() }}; }}\
+            function render(panel) {{\
+                var input = panel.querySelector('.datepick-input');\
+                var sel = parseYmd(input.value);\
+                var t = todayYmd();\
+                if (!panel.dataset.year) {{ var base = sel || t; panel.dataset.year = base.y; panel.dataset.month = base.m; }}\
+                var y = +panel.dataset.year, m = +panel.dataset.month;\
+                panel.querySelector('.datepick-title').textContent = MONTHS[m - 1] + ' ' + y;\
+                panel.querySelector('.datepick-weekdays').innerHTML = WEEKDAYS.map(function(w) {{ return '<span>' + w + '</span>'; }}).join('');\
+                var lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;\
+                var days = new Date(y, m, 0).getDate();\
+                var cells = [];\
+                for (var i = 0; i < lead; i++) {{ cells.push('<span class=\\\"datepick-cell\\\"></span>'); }}\
+                for (var d = 1; d <= days; d++) {{\
+                    var isToday = t.y === y && t.m === m && t.d === d;\
+                    var isSel = sel && sel.y === y && sel.m === m && sel.d === d;\
+                    var cls = 'datepick-cell datepick-day' + (isToday ? ' datepick-today' : '') + (isSel ? ' datepick-selected' : '');\
+                    cells.push('<button type=\\\"button\\\" class=\\\"' + cls + '\\\" data-day=\\\"' + d + '\\\">' + d + '</button>');\
+                }}\
+                panel.querySelector('.datepick-grid').innerHTML = cells.join('');\
+            }}\
+            function pick(panel, ymd) {{\
+                var input = panel.querySelector('.datepick-input');\
+                input.value = ymd ? (ymd.y + '-' + pad(ymd.m) + '-' + pad(ymd.d)) : '';\
+                var pop = panel.closest('.datepick-pop');\
+                var label = pop.querySelector('.datepick-label');\
+                if (label) {{ label.textContent = ymd ? (MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d)) : label.dataset.empty; }}\
+                var toggle = pop.querySelector('.edit-toggle');\
+                if (toggle) {{ toggle.checked = false; }}\
+            }}\
+            document.addEventListener('change', function(e) {{\
+                var toggle = e.target.closest('.datepick-pop > .edit-toggle');\
+                if (!toggle || !toggle.checked) {{ return; }}\
+                var panel = toggle.closest('.datepick-pop').querySelector('.datepick-panel');\
+                if (panel) {{ render(panel); }}\
+            }});\
+            document.addEventListener('click', function(e) {{\
+                var prev = e.target.closest('.datepick-prev');\
+                var next = e.target.closest('.datepick-next');\
+                var day = e.target.closest('.datepick-day');\
+                var clear = e.target.closest('.datepick-clear');\
+                var today = e.target.closest('.datepick-today');\
+                if (prev || next) {{\
+                    var panel = e.target.closest('.datepick-panel');\
+                    var y = +panel.dataset.year, m = +panel.dataset.month;\
+                    if (prev) {{ m -= 1; if (m < 1) {{ m = 12; y -= 1; }} }} else {{ m += 1; if (m > 12) {{ m = 1; y += 1; }} }}\
+                    panel.dataset.year = y; panel.dataset.month = m;\
+                    render(panel);\
+                    return;\
+                }}\
+                if (day) {{\
+                    var panel = e.target.closest('.datepick-panel');\
+                    pick(panel, {{ y: +panel.dataset.year, m: +panel.dataset.month, d: +day.dataset.day }});\
+                    return;\
+                }}\
+                if (clear) {{ pick(e.target.closest('.datepick-panel'), null); return; }}\
+                if (today) {{\
+                    var panel = e.target.closest('.datepick-panel');\
+                    var t = todayYmd();\
+                    panel.dataset.year = t.y; panel.dataset.month = t.m;\
+                    pick(panel, t);\
+                    return;\
+                }}\
+                var openPop = document.querySelector('.datepick-pop > .edit-toggle:checked');\
+                if (openPop && !openPop.closest('.datepick-pop').contains(e.target)) {{ openPop.checked = false; }}\
+            }}, true);\
+        }})();"
+    );
+    view! { cx => <script>(Unescaped::new_unchecked(js))</script> }
 }
 
 async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool, lang: Lang) -> Result {
@@ -1096,7 +1207,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                     ()
                                 ))>
                             </label>
-                            <button class="quiet" type="submit">(t(lang, Key::Attach))</button>
                         </form>
                         (refused(cx, "upload_file", lang).await?)
                     }
@@ -1175,6 +1285,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                 </footer>
             </div>
         </div>
+        (datepicker_script(cx, lang).await?)
         (escape_closes(cx).await?)
     }
 }
@@ -1209,13 +1320,19 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                                 (glyph::chevron(cx).await?)
                             </span>
                         </label>
-                        <label class="field">
+                        <div class="field">
                             <span class="field-label">(t(lang, Key::Deadline))</span>
-                            <span class="field-box">
-                                (glyph::calendar(cx).await?)
-                                <input class="field-text new-task-date" type="date" name="deadline">
-                            </span>
-                        </label>
+                            <div class="edit edit-pop datepick-pop">
+                                <input class="edit-toggle" type="checkbox" id="new-task-deadline">
+                                <label class="field-box edit-view edit-hit" for="new-task-deadline">
+                                    (glyph::calendar(cx).await?)
+                                    <span class="field-text datepick-label" data-empty=(t(lang, Key::NoDeadline))>(t(lang, Key::NoDeadline))</span>
+                                </label>
+                                <div class="edit-form pop-panel datepick-panel">
+                                    (datepicker_grid(cx, "deadline", "", lang).await?)
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <label class="field">
                         <span class="field-label">(t(lang, Key::Description))</span>
@@ -1230,6 +1347,7 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                 </form>
             </div>
         </div>
+        (datepicker_script(cx, lang).await?)
         (escape_closes(cx).await?)
     }
 }

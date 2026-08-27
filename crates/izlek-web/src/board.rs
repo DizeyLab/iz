@@ -410,6 +410,13 @@ async fn render_card(
 /// Opens a card's context menu at the cursor and closes whichever one was
 /// open; a plain document click closes it again. Rendered once — every
 /// card's `@contextmenu` calls into this same global, by the menu's id.
+///
+/// Also holds the board page's one `Escape` listener: a single capture-phase
+/// handler layered topmost-first (datepicker panel, then confirm popup, then
+/// card menu, then the modal itself) so one press closes exactly the
+/// topmost overlay and never falls through to close two at once. The other
+/// overlay scripts (`datepicker_script`, `escape_closes`) keep only their
+/// click/outside-click logic; this is the only place `Escape` is handled.
 async fn card_menu_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -422,7 +429,17 @@ async fn card_menu_script(cx: &Cx) -> Result {
             menu.style.top = e.clientY + 'px'; \
             menu.classList.add('card-menu-open'); \
         }; \
-        document.addEventListener('click', closeCardMenus);";
+        document.addEventListener('click', closeCardMenus); \
+        document.addEventListener('keydown', function (e) { \
+            if (e.key !== 'Escape') { return; } \
+            var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
+            if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
+            var confirm = document.querySelector('details.confirm-details[open]'); \
+            if (confirm) { confirm.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
+            var menu = document.querySelector('.card-menu-open'); \
+            if (menu) { closeCardMenus(); e.stopImmediatePropagation(); return; } \
+            if (document.querySelector('.modal-scrim')) { window.location.href = '/'; } \
+        }, true);";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -502,6 +519,9 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
             <a class="topbar-link" href="/settings">(t(lang, Key::Settings))</a>
+            <form method="post" action="/api/sign_out">
+                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
+            </form>
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>

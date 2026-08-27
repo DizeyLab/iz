@@ -820,6 +820,38 @@ async fn profile_and_role_updates_stick() {
 }
 
 #[tokio::test]
+async fn email_change_persists_and_refuses_a_taken_address() {
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("izlek.db").to_str().unwrap().to_string();
+
+    let user_id = {
+        let store = TursoStore::open(&path).await.unwrap();
+        let (ws_id, _admin_id) = claim(&store).await;
+        let user_id = member(&store, &ws_id, "grace@izlek.sh", "Grace").await;
+        store
+            .set_email(&user_id, &ws_id, "Grace.New@Izlek.sh")
+            .await
+            .unwrap();
+        // Case-folded the same way sign-in matches an address.
+        assert!(store.user_by_email(&ws_id, "grace.new@izlek.sh").await.unwrap().is_some());
+        assert!(store.user_by_email(&ws_id, "grace@izlek.sh").await.unwrap().is_none());
+
+        // Taken by the admin already claimed above.
+        let err = store.set_email(&user_id, &ws_id, "ada@izlek.sh").await.unwrap_err();
+        assert!(matches!(err, StoreError::Conflict("account")));
+        user_id
+    };
+
+    // Persists across a reopen, and the refused attempt did not stick.
+    let store = TursoStore::open(&path).await.unwrap();
+    let user = store.user(&user_id).await.unwrap().unwrap();
+    assert_eq!(user.email, "grace.new@izlek.sh");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn display_preferences_default_and_persist_across_reopen() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();

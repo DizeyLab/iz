@@ -577,6 +577,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
         photo_path: Option<&str>,
     ) -> Result<()>;
 
+    /// Changes the sign-in address. Refuses with [`StoreError::Conflict`] if
+    /// another account in the same workspace already holds it — the same
+    /// wording `create_user` refuses a duplicate invite with.
+    async fn set_email(&self, user_id: &str, workspace_id: &str, email: &str) -> Result<()>;
+
     /// Display-only preferences: stored data stays UTC/neutral, these only
     /// change how a browser renders it for this one person.
     async fn set_preferences(

@@ -69,7 +69,6 @@ pub enum Key {
     Dependencies,
     Files,
     File,
-    Attach,
     Comments,
     WriteAComment,
     Comment,
@@ -230,6 +229,23 @@ pub enum Key {
     TheSystem,
     NoDeadline,
     DonePrefix,
+    Clear,
+    Today,
+    PreviousMonth,
+    NextMonth,
+    WeekdayInitials,
+    MonthJanuary,
+    MonthFebruary,
+    MonthMarch,
+    MonthApril,
+    MonthMay,
+    MonthJune,
+    MonthJuly,
+    MonthAugust,
+    MonthSeptember,
+    MonthOctober,
+    MonthNovember,
+    MonthDecember,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -320,8 +336,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Files, Tr) => "DOSYALAR",
         (File, En) => "File",
         (File, Tr) => "Dosya",
-        (Attach, En) => "Attach",
-        (Attach, Tr) => "Ekle",
         (Comments, En) => "COMMENTS",
         (Comments, Tr) => "YORUMLAR",
         (WriteAComment, En) => "Write a comment…",
@@ -431,7 +445,7 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (AccountCol, En) => "ACCOUNT",
         (AccountCol, Tr) => "HESAP",
         (OwnerStatus, En) => "owner",
-        (OwnerStatus, Tr) => "sahip",
+        (OwnerStatus, Tr) => "kurucu",
         (InvitedStatus, En) => "invited",
         (InvitedStatus, Tr) => "davet edildi",
         (ActiveStatus, En) => "active",
@@ -638,7 +652,70 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (NoDeadline, Tr) => "tarih yok",
         (DonePrefix, En) => "done ",
         (DonePrefix, Tr) => "bitti ",
+        (Clear, En) => "Clear",
+        (Clear, Tr) => "Temizle",
+        (Today, En) => "Today",
+        (Today, Tr) => "Bugün",
+        (PreviousMonth, En) => "Previous month",
+        (PreviousMonth, Tr) => "Önceki ay",
+        (NextMonth, En) => "Next month",
+        (NextMonth, Tr) => "Sonraki ay",
+        (WeekdayInitials, En) => "M,T,W,T,F,S,S",
+        (WeekdayInitials, Tr) => "P,S,Ç,P,C,C,P",
+        (MonthJanuary, En) => "January",
+        (MonthJanuary, Tr) => "Ocak",
+        (MonthFebruary, En) => "February",
+        (MonthFebruary, Tr) => "Şubat",
+        (MonthMarch, En) => "March",
+        (MonthMarch, Tr) => "Mart",
+        (MonthApril, En) => "April",
+        (MonthApril, Tr) => "Nisan",
+        (MonthMay, En) => "May",
+        (MonthMay, Tr) => "Mayıs",
+        (MonthJune, En) => "June",
+        (MonthJune, Tr) => "Haziran",
+        (MonthJuly, En) => "July",
+        (MonthJuly, Tr) => "Temmuz",
+        (MonthAugust, En) => "August",
+        (MonthAugust, Tr) => "Ağustos",
+        (MonthSeptember, En) => "September",
+        (MonthSeptember, Tr) => "Eylül",
+        (MonthOctober, En) => "October",
+        (MonthOctober, Tr) => "Ekim",
+        (MonthNovember, En) => "November",
+        (MonthNovember, Tr) => "Kasım",
+        (MonthDecember, En) => "December",
+        (MonthDecember, Tr) => "Aralık",
     }
+}
+
+/// The twelve month names, in a user's language, `January`-first — the order
+/// [`js_month_names`] hands to the datepicker's inline script.
+fn month_names(lang: Lang) -> [&'static str; 12] {
+    use Key::*;
+    [
+        t(lang, MonthJanuary),
+        t(lang, MonthFebruary),
+        t(lang, MonthMarch),
+        t(lang, MonthApril),
+        t(lang, MonthMay),
+        t(lang, MonthJune),
+        t(lang, MonthJuly),
+        t(lang, MonthAugust),
+        t(lang, MonthSeptember),
+        t(lang, MonthOctober),
+        t(lang, MonthNovember),
+        t(lang, MonthDecember),
+    ]
+}
+
+/// The datepicker's month names and weekday initials as JS array/string
+/// literals, embedded once per page in its inline script — the grid itself
+/// is built in JS (see `detail.rs`'s `datepicker_script`).
+pub fn datepicker_js_literals(lang: Lang) -> (String, String) {
+    let months = month_names(lang).map(|name| format!("\"{name}\"")).join(",");
+    let weekdays = t(lang, Key::WeekdayInitials).split(',').map(|initial| format!("\"{initial}\"")).collect::<Vec<_>>().join(",");
+    (format!("[{months}]"), format!("[{weekdays}]"))
 }
 
 /// The queue's "attempt N" stamp, in a user's language.

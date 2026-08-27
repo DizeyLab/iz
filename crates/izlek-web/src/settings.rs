@@ -446,7 +446,9 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
 struct SaveProfileForm {
     display_name: String,
     /// Absent on a form that never got the field — kept as it was, same as
-    /// `theme`/`language` below.
+    /// `timezone`/`theme`/`language` below.
+    #[serde(default)]
+    email: Option<String>,
     #[serde(default)]
     timezone: Option<String>,
     #[serde(default)]
@@ -504,15 +506,20 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     if !LANGUAGE_OPTIONS.contains(&language.as_str()) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadLanguage)));
     }
+    let email = input.email.map(|e| e.trim().to_lowercase()).unwrap_or_else(|| user.email.clone());
+    if !is_address(&email) {
+        return Ok(saved_or_refused("save_profile", Some(Refusal::BadEmail)));
+    }
     let accounts = accounts(cx);
     let store = accounts.store();
-    let outcome = store.set_profile(&user.id, &display_name, user.photo_path.as_deref()).await.and(
-        store
-            .set_preferences(&user.id, &timezone, &theme, &language)
-            .await,
-    );
+    let outcome = store
+        .set_profile(&user.id, &display_name, user.photo_path.as_deref())
+        .await
+        .and(store.set_preferences(&user.id, &timezone, &theme, &language).await)
+        .and(store.set_email(&user.id, &user.workspace_id, &email).await);
     let refusal = match outcome {
         Ok(()) => None,
+        Err(izlek_core::store::StoreError::Conflict("account")) => Some(Refusal::AddressTaken),
         Err(problem) => {
             eprintln!("store error: {problem}");
             Some(Refusal::Unavailable)
@@ -746,6 +753,9 @@ async fn settings_page(cx: &Cx) -> Result {
             <span class="board-name">(t(lang, Key::NavSettings))</span>
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
+            <form method="post" action="/api/sign_out">
+                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
+            </form>
         </header>
 
         <div class="settings-shell">
@@ -780,7 +790,7 @@ async fn settings_page(cx: &Cx) -> Result {
                         </label>
                         <label class="field">
                             <span class="field-label">(t(lang, Key::EmailLabel))</span>
-                            <input class="field-input" type="email" value=(user.email.clone()) disabled="">
+                            <input class="field-input" type="email" name="email" value=(user.email.clone()) required="">
                         </label>
                         <label class="field">
                             <span class="field-label">(t(lang, Key::TimezoneLabel))</span>
@@ -814,11 +824,6 @@ async fn settings_page(cx: &Cx) -> Result {
                             <button class="primary" type="submit">(t(lang, Key::Save))</button>
                         </div>
                     </form>
-                    <div class="panel-body panel-foot panel-foot-split">
-                        <form method="post" action="/api/sign_out">
-                            <button class="quiet" type="submit">(t(lang, Key::SignOut))</button>
-                        </form>
-                    </div>
                 </section>
 
                 if let Some(sender) = &sender {

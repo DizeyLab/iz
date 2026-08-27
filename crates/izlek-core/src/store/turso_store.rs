@@ -960,6 +960,28 @@ impl Store for TursoStore {
         }
     }
 
+    async fn set_email(&self, user_id: &str, workspace_id: &str, email: &str) -> Result<()> {
+        let email = fold_email(email);
+        if let Some(existing) = self.user_by_email(workspace_id, &email).await?
+            && existing.id != user_id
+        {
+            return Err(StoreError::Conflict("account"));
+        }
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE user SET email = ?1 WHERE id = ?2",
+                params![email, user_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
     async fn set_preferences(
         &self,
         user_id: &str,

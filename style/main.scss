@@ -56,56 +56,56 @@
 }
 
 // Dark, per user (settings.rs SaveProfileForm.theme). Reference class:
-// Linear/GitHub dark — near-black page, each layer one small, low-contrast
-// step lighter (bg < column < card), muted borders, no glowing accent.
+// GitHub dark — neutral-cool near-black page, each layer one small,
+// low-contrast step lighter (bg < column < card), muted borders, quiet accent.
 [data-theme="dark"] {
-  --bg: #121110;
-  --surface: #242220;
-  --border: #322f2a;
-  --border-strong: #3d3931;
-  --ink: #e9e5da;
-  --muted: #a89f8e;
-  --muted-soft: #7b7364;
-  --accent: #8797bd;
-  --accent-tint: #23283a;
-  --accent-ink: #c7d0e6;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #21262d;
+  --border-strong: #30363d;
+  --ink: #e6edf3;
+  --muted: #8b949e;
+  --muted-soft: #6e7681;
+  --accent: #6e7fb2;
+  --accent-tint: #1c2333;
+  --accent-ink: #a5b4d9;
 
-  --field-bg: #1e1c19;
-  --surface-sunken: #1b1917;
-  --surface-muted: #171512;
-  --ink-soft: #d6d0c2;
-  --row-hover: #2b2924;
-  --panel-sunken: #201e1a;
-  --border-soft: #2c2924;
-  --border-faint: #211f1b;
-  --scrim: rgba(0, 0, 0, 0.7);
-  --on-strong: #fffefb;
+  --field-bg: #10151c;
+  --surface-sunken: #11161d;
+  --surface-muted: #0f141a;
+  --ink-soft: #c9d1d9;
+  --row-hover: #1c2129;
+  --panel-sunken: #141920;
+  --border-soft: #1d232b;
+  --border-faint: #191f26;
+  --scrim: rgba(0, 0, 0, 0.75);
+  --on-strong: #f0f6fc;
 
-  --danger: #c97052;
-  --danger-tint: #2e2019;
-  --danger-tint-soft: #291d18;
-  --danger-tint-alt: #281c17;
-  --danger-border: #5c4030;
-  --danger-border-soft: #423029;
-  --danger-border-alt: #402c23;
+  --danger: #b35449;
+  --danger-tint: #221316;
+  --danger-tint-soft: #1f1214;
+  --danger-tint-alt: #1d1113;
+  --danger-border: #57302e;
+  --danger-border-soft: #3f2626;
+  --danger-border-alt: #3a2323;
 
-  --warn-ink: #c9a262;
-  --warn-tint: #2e2716;
-  --warn-tint-soft: #292314;
-  --warn-border: #5c4d2c;
+  --warn-ink: #c69a4e;
+  --warn-tint: #221c10;
+  --warn-tint-soft: #1e190e;
+  --warn-border: #57452a;
 
-  --positive: #8ab06a;
-  --positive-ink: #93bd74;
-  --positive-tint: #1c2417;
-  --positive-border: #384a2b;
+  --positive: #7aa864;
+  --positive-ink: #8bbd74;
+  --positive-tint: #14200f;
+  --positive-border: #2f4a26;
 
-  --accent-strong: #8797bd;
-  --accent-border: #333a4c;
-  --accent-border-strong: #383f52;
+  --accent-strong: #7688bb;
+  --accent-border: #2a3245;
+  --accent-border-strong: #333c52;
 
-  --avatar-tone-1: #9c845e;
-  --avatar-tone-3: #9c6270;
-  --avatar-tone-4: #5f96a3;
+  --avatar-tone-1: #937d58;
+  --avatar-tone-3: #96606e;
+  --avatar-tone-4: #5b93a1;
 }
 
 * { box-sizing: border-box; }
@@ -1619,6 +1619,20 @@ a {
   z-index: 21;
 }
 
+// While the confirm is open, the modal panel behind it is not visible: one
+// popup on screen at a time. `visibility` (not `display`) so the scrim
+// keeps showing and the confirm — a fixed-position descendant that would
+// otherwise inherit the hidden visibility — is pulled back to visible.
+.modal:has(details.confirm-details[open]) {
+  visibility: hidden;
+
+  details.confirm-details[open],
+  details.confirm-details[open]::before,
+  details.confirm-details[open] .confirm {
+    visibility: visible;
+  }
+}
+
 .confirm-details[open]::before {
   content: "";
   position: fixed;
@@ -1986,8 +2000,8 @@ select.field-input {
 }
 
 .member-account { color: var(--muted); }
-.member-account-row { justify-content: space-between; gap: 10px; }
-.member-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-account-row { justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.member-status { flex: none; white-space: nowrap; }
 
 .member-resend { display: inline-flex; flex: none; }
 
@@ -2040,6 +2054,11 @@ select.field-input {
   font-weight: 500;
   color: var(--muted);
   text-decoration: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
 
   &:hover { color: var(--accent-ink); }
 }

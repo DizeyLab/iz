@@ -313,6 +313,8 @@ pub enum Refusal {
     BadTheme,
     /// The language field was not one of the values the form offers.
     BadLanguage,
+    /// The email field did not look like an address.
+    BadEmail,
     /// Something in the allowed-types list is not a file extension.
     BadFileType,
     /// The sender panel was saved with a field it cannot work without, or with
@@ -366,6 +368,7 @@ impl Refusal {
             Refusal::BadZone => "That is not a timezone.".to_string(),
             Refusal::BadTheme => "That is not a theme.".to_string(),
             Refusal::BadLanguage => "That is not a language.".to_string(),
+            Refusal::BadEmail => "That is not an address.".to_string(),
             Refusal::BadFileType => {
                 "File types are extensions — png, pdf, zip — separated by commas.".to_string()
             }
@@ -416,6 +419,7 @@ impl Refusal {
             Refusal::BadZone => "Bu bir saat dilimi değil.".to_string(),
             Refusal::BadTheme => "Bu bir tema değil.".to_string(),
             Refusal::BadLanguage => "Bu bir dil değil.".to_string(),
+            Refusal::BadEmail => "Bu bir adres değil.".to_string(),
             Refusal::BadFileType => {
                 "Dosya türleri virgülle ayrılmış uzantılardır — png, pdf, zip.".to_string()
             }
@@ -460,6 +464,7 @@ impl Refusal {
             "bad-zone" => Refusal::BadZone,
             "bad-theme" => Refusal::BadTheme,
             "bad-language" => Refusal::BadLanguage,
+            "bad-email" => Refusal::BadEmail,
             "bad-file-type" => Refusal::BadFileType,
             // The specific complaint (which field, and why) lives only in the
             // response the save itself returned; a code that survived a round
@@ -511,6 +516,7 @@ impl Refusal {
             Refusal::BadZone => "bad-zone",
             Refusal::BadTheme => "bad-theme",
             Refusal::BadLanguage => "bad-language",
+            Refusal::BadEmail => "bad-email",
             Refusal::BadFileType => "bad-file-type",
             Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
@@ -775,6 +781,7 @@ mod refusal_message_tests {
             Refusal::BadZone,
             Refusal::BadTheme,
             Refusal::BadLanguage,
+            Refusal::BadEmail,
             Refusal::Cycle,
             Refusal::MovedAlready,
             Refusal::NotFound,

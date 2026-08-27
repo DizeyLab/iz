@@ -1110,6 +1110,54 @@ async fn a_profile_cannot_be_saved_without_a_name() {
 }
 
 #[tokio::test]
+async fn a_profile_can_change_its_own_email_and_stays_signed_in() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&member),
+            &[("display_name", "Emre Y"), ("email", "emre.new@izlek.sh")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert!(
+        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+
+    // Same cookie still works: the session is keyed by user id, not address.
+    let mine = app.get("/settings", Some(&member)).await;
+    assert_eq!(mine.status, StatusCode::OK, "{}", mine.status);
+    let html = String::from_utf8_lossy(&mine.bytes);
+    assert!(html.contains("emre.new@izlek.sh"), "{html}");
+}
+
+#[tokio::test]
+async fn a_profile_email_cannot_take_somebody_elses_address() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&member),
+            &[("display_name", "Emre"), ("email", "ada@izlek.sh")],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=address-taken&on=save_profile"), "{location}");
+
+    let page = app.get(location, Some(&member)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("already has an account"), "{html}");
+}
+
+#[tokio::test]
 async fn a_signed_out_browser_cannot_rename_anybody() {
     let app = App::open().await;
     let _ = admin(&app).await;
@@ -1861,6 +1909,24 @@ async fn the_files_section_is_on_the_detail_page() {
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("multipart/form-data"), "no multipart upload form on the detail page");
     assert!(html.contains(r#"action="/files""#), "the upload form does not post to /files");
+}
+
+#[tokio::test]
+async fn the_datepicker_shell_renders_in_both_task_modals() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Pick a date on me").await;
+
+    let detail = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&detail.bytes);
+    assert!(html.contains("datepick-input"), "no datepicker shell on the task modal: {html}");
+    assert!(html.contains("datepick-grid"), "no datepicker grid on the task modal: {html}");
+
+    let new_task = app.get("/?new=1", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&new_task.bytes);
+    assert!(html.contains("datepick-input"), "no datepicker shell on the new-task modal: {html}");
+    assert!(html.contains("datepick-grid"), "no datepicker grid on the new-task modal: {html}");
 }
 
 /// The id of the file named `name` in a `/api/fetch_task` snapshot's body,

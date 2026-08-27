@@ -719,6 +719,9 @@ async fn rules_page(cx: &Cx) -> Result {
             <span class="board-name">(t(lang, Key::MailRules))</span>
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
+            <form method="post" action="/api/sign_out">
+                <button class="topbar-link" type="submit">(t(lang, Key::SignOut))</button>
+            </form>
         </header>
 
         <div class="settings-shell">
