@@ -708,7 +708,7 @@ impl Engine {
                 | ActivityKind::Other(_) => format!("{} touched it.", actor),
             },
         };
-        let body = format!(
+        let mut body = format!(
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",
             key = facts.row.task_key,
             title = facts.row.title,
@@ -716,6 +716,29 @@ impl Engine {
             base = self.base_url,
             id = facts.row.id,
         );
+        if rule.include_task_details {
+            let assignees = self.store.assignees_for_task(task_id).await?;
+            let assignees = if assignees.is_empty() {
+                "none".to_string()
+            } else {
+                assignees
+                    .iter()
+                    .map(|person| person.display_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let deadline = facts
+                .row
+                .deadline
+                .map(|date| date.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            body.push_str(&format!(
+                "\nKey: {key}\nTitle: {title}\nColumn: {column}\nDeadline: {deadline}\nAssignees: {assignees}\n",
+                key = facts.row.task_key,
+                title = facts.row.title,
+                column = named(&facts.row.column_id),
+            ));
+        }
         Ok(Some(Outgoing {
             to: send.recipient.clone(),
             subject: rule.subject.clone(),

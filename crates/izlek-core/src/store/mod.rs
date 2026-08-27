@@ -143,6 +143,13 @@ pub struct User {
     /// Who made this account. Null for the first account, which nobody
     /// invited.
     pub invited_by: Option<String>,
+    /// Display-only. Stored data stays UTC/neutral; this only changes how a
+    /// browser renders it for this one person.
+    pub timezone: String,
+    /// Display-only, as [`Self::timezone`].
+    pub theme: String,
+    /// Display-only, as [`Self::timezone`].
+    pub language: String,
 }
 
 impl User {
@@ -268,6 +275,10 @@ pub struct MailRule {
     pub audience: Audience,
     pub enabled: bool,
     pub created_at: OffsetDateTime,
+    /// Fold the task's own facts — key, title, column, deadline, assignees —
+    /// into the mail body, instead of the body being only the rule's static
+    /// sentence.
+    pub include_task_details: bool,
 }
 
 /// Where one mail got to.
@@ -566,6 +577,16 @@ pub trait Store: BoardReads + DetailReads + 'static {
         photo_path: Option<&str>,
     ) -> Result<()>;
 
+    /// Display-only preferences: stored data stays UTC/neutral, these only
+    /// change how a browser renders it for this one person.
+    async fn set_preferences(
+        &self,
+        user_id: &str,
+        timezone: &str,
+        theme: &str,
+        language: &str,
+    ) -> Result<()>;
+
     async fn set_role(&self, user_id: &str, role: Role) -> Result<()>;
 
     async fn mark_signed_in(&self, user_id: &str, at: OffsetDateTime) -> Result<()>;
@@ -783,6 +804,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         subject: &str,
         audience: Audience,
         at: OffsetDateTime,
+        include_task_details: bool,
     ) -> Result<MailRule>;
 
     /// Every rule on the board, switched off ones included: the admin screen
@@ -798,6 +820,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         trigger: &Trigger,
         subject: &str,
         audience: Audience,
+        include_task_details: bool,
     ) -> Result<()>;
 
     /// The board a task belongs to, reading through the soft delete —

@@ -53,6 +53,7 @@ struct RuleLine {
     /// The audience's own word — "assignees", "board", "creator" — as the
     /// edit form's select expects it.
     audience_kind: String,
+    include_task_details: bool,
     enabled: bool,
     /// `Aug 24 14:02`, or nothing when no mail from this rule has ever been
     /// accepted by the mail server.
@@ -245,6 +246,7 @@ async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result
                 trigger_kind,
                 column_id,
                 audience_kind: audience_kind(rule.audience).to_string(),
+                include_task_details: rule.include_task_details,
                 enabled: rule.enabled,
                 last_sent: last_sent
                     .iter()
@@ -330,6 +332,8 @@ struct CreateRuleForm {
     column_id: String,
     subject: String,
     audience: String,
+    #[serde(default)]
+    include_task_details: String,
 }
 
 /// Writes one rule.
@@ -374,7 +378,14 @@ async fn create_rule(cx: &Cx, Form(input): Form<CreateRuleForm>) -> Redirect {
     };
 
     if store
-        .create_mail_rule(&board.id, &trigger, &subject, audience, time::OffsetDateTime::now_utc())
+        .create_mail_rule(
+            &board.id,
+            &trigger,
+            &subject,
+            audience,
+            time::OffsetDateTime::now_utc(),
+            input.include_task_details == "true",
+        )
         .await
         .is_err()
     {
@@ -390,6 +401,8 @@ struct UpdateRuleForm {
     column_id: String,
     subject: String,
     audience: String,
+    #[serde(default)]
+    include_task_details: String,
 }
 
 /// Rewrites a rule's sentence in place. Guarded exactly like `create_rule` —
@@ -437,7 +450,17 @@ async fn update_rule(cx: &Cx, Form(input): Form<UpdateRuleForm>) -> Redirect {
         return redirect(cx, Some(Refusal::Forbidden));
     };
 
-    if store.update_mail_rule(&input.rule_id, &trigger, &subject, audience).await.is_err() {
+    if store
+        .update_mail_rule(
+            &input.rule_id,
+            &trigger,
+            &subject,
+            audience,
+            input.include_task_details == "true",
+        )
+        .await
+        .is_err()
+    {
         return redirect(cx, Some(Refusal::Unavailable));
     }
     redirect(cx, None)
@@ -508,6 +531,7 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
         .unwrap_or_default();
     let subject = existing.map(|rule| rule.subject.as_str()).unwrap_or_default();
     let audience_kind = existing.map(|rule| rule.audience_kind.as_str()).unwrap_or("assignees");
+    let include_task_details = existing.is_some_and(|rule| rule.include_task_details);
 
     view! {
         cx =>
@@ -564,12 +588,19 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
                     <option value="creator" selected=(audience_kind == "creator")>"its creator"</option>
                 </select>
             </label>
+            <div class="rule-field">
+                <span class="field-label">"BODY"</span>
+                <label class="field-box">
+                    <input type="checkbox" name="include_task_details" value="true" checked=(include_task_details)>
+                    <span class="field-text">"Task details"</span>
+                </label>
+            </div>
             <div class="panel-foot">
                 if let Some(refusal) = refusal {
                     <span class="field-error">(refusal.message())</span>
                 }
                 if is_edit {
-                    <a class="rule-delete" href="/rules">"Cancel"</a>
+                    <a class="quiet" href="/rules">"Cancel"</a>
                 }
                 <button class="primary" type="submit">(if is_edit { "Save rule" } else { "Add rule" })</button>
             </div>
@@ -635,7 +666,7 @@ async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: b
 
             <span class="rule-stamp">(stamp)</span>
 
-            <a class="rule-delete" href=(format!("/rules?edit={}", rule.id)) title="Edit this rule">"Edit"</a>
+            <a class="quiet" href=(format!("/rules?edit={}", rule.id)) title="Edit this rule">"Edit"</a>
 
             <form method="post" action="/api/delete_rule">
                 <input type="hidden" name="rule_id" value=(rule.id.clone())>

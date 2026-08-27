@@ -61,6 +61,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         14,
         include_str!("../../migrations/0014_created_into_a_column_is_a_transition.sql"),
     ),
+    (
+        15,
+        include_str!("../../migrations/0015_task_details_in_the_mail.sql"),
+    ),
+    (
+        16,
+        include_str!("../../migrations/0016_display_preferences.sql"),
+    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -269,8 +277,8 @@ impl TursoStore {
     }
 }
 
-const RULE_COLUMNS: &str =
-    "id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at";
+const RULE_COLUMNS: &str = "id, board_id, trigger_kind, trigger_column, subject, audience, \
+     enabled, created_at, include_task_details";
 
 const SEND_COLUMNS: &str = "id, rule_id, event_id, task_id, recipient, state, attempts, \
      last_error, next_attempt_at, sent_at, kind, subject, body";
@@ -335,6 +343,7 @@ fn rule_from(row: &Row) -> Result<MailRule> {
         audience,
         enabled: row.get::<i64>(6).map_err(backend)? != 0,
         created_at: parse_stamp(&text(row, 7)?)?,
+        include_task_details: row.get::<i64>(8).map_err(backend)? != 0,
     })
 }
 
@@ -571,11 +580,14 @@ fn user_from(row: &Row) -> Result<User> {
         created_at: parse_stamp(&text(row, 7)?)?,
         last_signed_in_at: opt_stamp(row, 8)?,
         invited_by: opt_text(row, 9)?,
+        timezone: text(row, 10)?,
+        theme: text(row, 11)?,
+        language: text(row, 12)?,
     })
 }
 
 const USER_COLUMNS: &str = "id, workspace_id, email, display_name, role, password_hash, \
-     photo_path, created_at, last_signed_in_at, invited_by";
+     photo_path, created_at, last_signed_in_at, invited_by, timezone, theme, language";
 
 fn signin_link_from(row: &Row) -> Result<SigninLink> {
     Ok(SigninLink {
@@ -938,6 +950,28 @@ impl Store for TursoStore {
             .execute(
                 "UPDATE user SET display_name = ?1, photo_path = ?2 WHERE id = ?3",
                 params![display_name, photo, user_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn set_preferences(
+        &self,
+        user_id: &str,
+        timezone: &str,
+        theme: &str,
+        language: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE user SET timezone = ?1, theme = ?2, language = ?3 WHERE id = ?4",
+                params![timezone, theme, language, user_id],
             )
             .await
             .map_err(backend)?;
@@ -2124,6 +2158,7 @@ impl Store for TursoStore {
         subject: &str,
         audience: Audience,
         at: OffsetDateTime,
+        include_task_details: bool,
     ) -> Result<MailRule> {
         let id = Ulid::new().to_string();
         let (kind, column) = trigger_parts(trigger);
@@ -2133,8 +2168,8 @@ impl Store for TursoStore {
             .execute(
                 "INSERT INTO mail_rule \
                  (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, \
-                  created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+                  created_at, include_task_details) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
                 params![
                     id.clone(),
                     board_id,
@@ -2142,7 +2177,8 @@ impl Store for TursoStore {
                     column,
                     subject,
                     audience_text(audience),
-                    stamp(at)?
+                    stamp(at)?,
+                    i64::from(include_task_details)
                 ],
             )
             .await
@@ -2176,14 +2212,22 @@ impl Store for TursoStore {
         trigger: &Trigger,
         subject: &str,
         audience: Audience,
+        include_task_details: bool,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
         let (kind, column) = trigger_parts(trigger);
         let n = conn
             .execute(
                 "UPDATE mail_rule SET trigger_kind = ?1, trigger_column = ?2, subject = ?3, \
-                 audience = ?4 WHERE id = ?5",
-                params![kind, column, subject, audience_text(audience), rule_id],
+                 audience = ?4, include_task_details = ?5 WHERE id = ?6",
+                params![
+                    kind,
+                    column,
+                    subject,
+                    audience_text(audience),
+                    i64::from(include_task_details),
+                    rule_id
+                ],
             )
             .await
             .map_err(backend)?;

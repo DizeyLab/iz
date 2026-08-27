@@ -236,14 +236,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 14);
+    assert_eq!(first.schema_version().await.unwrap(), 16);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 14);
+    assert_eq!(second.schema_version().await.unwrap(), 16);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -260,7 +260,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
         a_pre_0013_store_with_a_rule_send_and_decision().await;
 
     let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 14);
+    assert_eq!(store.schema_version().await.unwrap(), 16);
     assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
 
     let rules = store.mail_rules(&board).await.unwrap();
@@ -817,6 +817,36 @@ async fn profile_and_role_updates_stick() {
             .photo_path
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn display_preferences_default_and_persist_across_reopen() {
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("izlek.db").to_string_lossy().into_owned();
+
+    let store = TursoStore::open(&path).await.unwrap();
+    let (_, admin_id) = claim(&store).await;
+
+    let admin = store.user(&admin_id).await.unwrap().unwrap();
+    assert_eq!(admin.timezone, "UTC");
+    assert_eq!(admin.theme, "light");
+    assert_eq!(admin.language, "en");
+
+    store
+        .set_preferences(&admin_id, "Europe/Istanbul", "dark", "tr")
+        .await
+        .unwrap();
+    drop(store);
+
+    let reopened = TursoStore::open(&path).await.unwrap();
+    let admin = reopened.user(&admin_id).await.unwrap().unwrap();
+    assert_eq!(admin.timezone, "Europe/Istanbul");
+    assert_eq!(admin.theme, "dark");
+    assert_eq!(admin.language, "tr");
+
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -2965,6 +2995,7 @@ async fn a_rule(store: &TursoStore, workspace: &str, column: &str, subject: &str
             subject,
             Audience::Assignees,
             OffsetDateTime::now_utc(),
+            false,
         )
         .await
         .unwrap()
@@ -3031,6 +3062,7 @@ async fn a_rule_is_one_sentence_and_starts_live() {
             "You can start now",
             Audience::Assignees,
             OffsetDateTime::now_utc(),
+        false,
         )
         .await
         .expect("an unblocked rule is whole without a column");
@@ -3573,6 +3605,71 @@ async fn a_rule_that_is_off_sends_nothing() {
 }
 
 #[tokio::test]
+async fn a_rule_can_opt_the_task_key_into_its_own_mail() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let with_details = add_task(
+        &store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        Some(date!(2026 - 09 - 01)),
+        &admin,
+    )
+    .await;
+    store.assign_task(&with_details, &mate).await.unwrap();
+    let plain = add_task(&store, &workspace, "Backlog", "Also ship it", None, &admin).await;
+    store.assign_task(&plain, &mate).await.unwrap();
+
+    let opted_in = store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(column_named(&store, &workspace, "Done").await),
+            "Task completed, with details",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            true,
+        )
+        .await
+        .unwrap();
+    let opted_out = a_rule(&store, &workspace, "Done", "Task completed, plain").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+
+    let moved = moved_to(&store, &workspace, &with_details, "Backlog", "Done", &admin).await;
+    engine.on_transition(&moved).await.unwrap();
+    let moved_plain = moved_to(&store, &workspace, &plain, "Backlog", "Done", &admin).await;
+    engine.on_transition(&moved_plain).await.unwrap();
+
+    let sent = mailer.sent();
+    let with_details_mail = sent
+        .iter()
+        .find(|mail| mail.subject == "Task completed, with details")
+        .expect("the opted-in rule sent its mail");
+    assert!(
+        with_details_mail.body.contains("Key:"),
+        "an opted-in rule's mail carries the task details block: {}",
+        with_details_mail.body
+    );
+    assert!(with_details_mail.body.contains("Assignees: Emre"));
+    assert!(with_details_mail.body.contains("Deadline: 2026-09-01"));
+
+    let plain_mail = sent
+        .iter()
+        .find(|mail| mail.subject == "Task completed, plain")
+        .expect("the opted-out rule also sent its mail");
+    assert!(
+        !plain_mail.body.contains("Key:"),
+        "a rule that never opted in gets no details block: {}",
+        plain_mail.body
+    );
+    let _ = (opted_in, opted_out);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_mail_says_when_the_card_moved_not_when_it_was_sent() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
@@ -3696,6 +3793,7 @@ async fn you_can_start_now_waits_for_the_last_blocker() {
             "You can start now",
             Audience::Assignees,
             now,
+        false,
         )
         .await
         .unwrap();
@@ -3767,6 +3865,7 @@ async fn a_deleted_blocker_also_says_you_can_start_now() {
             "You can start now",
             Audience::Assignees,
             now,
+        false,
         )
         .await
         .unwrap();
@@ -3832,6 +3931,7 @@ async fn a_delete_that_leaves_somebody_still_waiting_mails_nobody() {
             "You can start now",
             Audience::Assignees,
             now,
+        false,
         )
         .await
         .unwrap();
@@ -3878,6 +3978,7 @@ async fn a_mail_owed_by_a_delete_is_rebuilt_from_the_delete_on_a_retry() {
             "You can start now",
             Audience::Assignees,
             now,
+        false,
         )
         .await
         .unwrap();
@@ -4026,6 +4127,7 @@ async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() 
             "Task completed",
             Audience::Board,
             OffsetDateTime::now_utc(),
+            false,
         )
         .await
         .unwrap();
@@ -4067,6 +4169,7 @@ async fn a_rule_round_trips_every_word_the_board_speaks() {
                 "A word the board speaks",
                 Audience::Assignees,
                 OffsetDateTime::now_utc(),
+            false,
             )
             .await
             .unwrap();
@@ -4112,7 +4215,7 @@ async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
 
     scratch
         .store
-        .update_mail_rule(&rule.id, &Trigger::Unblocked, "New subject", Audience::Board)
+        .update_mail_rule(&rule.id, &Trigger::Unblocked, "New subject", Audience::Board, false)
         .await
         .unwrap();
 
@@ -4137,7 +4240,8 @@ async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
                 "no-such-rule",
                 &Trigger::Unblocked,
                 "x",
-                Audience::Board
+                Audience::Board,
+                false
             )
             .await,
         Err(StoreError::NotFound)
@@ -4561,6 +4665,7 @@ async fn an_assignment_mails_the_assignees_minus_the_actor() {
             "You were assigned",
             Audience::Assignees,
             OffsetDateTime::now_utc(),
+        false,
         )
         .await
         .unwrap();
@@ -4609,6 +4714,7 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
             "A comment landed",
             Audience::Creator,
             OffsetDateTime::now_utc(),
+        false,
         )
         .await
         .unwrap();

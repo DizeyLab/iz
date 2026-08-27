@@ -648,12 +648,14 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     }
 }
 
-/// The window `Escape` listener that closes the modal — plain JS, since the
-/// key never lands on the scrim itself (focus stays on the card the click
-/// opened this from).
+/// The window `Escape` listener that closes overlays, layered — plain JS,
+/// since the key never lands on the scrim itself (focus stays on the card
+/// the click opened this from). The delete-confirm `<details>` only exists
+/// inside this modal today, so a nested overlay closes first and stops;
+/// only then does the modal itself navigate away.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
-    const JS: &str = "document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { window.location.href = '/'; } });";
+    const JS: &str = "document.addEventListener('keydown', function (e) { if (e.key !== 'Escape') { return; } var confirm = document.querySelector('details.confirm-details[open]'); if (confirm) { confirm.removeAttribute('open'); return; } window.location.href = '/'; });";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -1145,7 +1147,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
                         }
                     }
                     <div class="spacer"></div>
-                    <a class="detail-cancel" href="/">"Close"</a>
+                    <a class="quiet" href="/">"Close"</a>
                 </footer>
             </div>
         </div>

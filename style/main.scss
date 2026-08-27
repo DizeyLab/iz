@@ -827,6 +827,7 @@ a {
   font-size: 12px;
   color: var(--ink);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 
   &:hover { background: #f3f1ea; }
@@ -1595,18 +1596,6 @@ a {
   &:disabled { opacity: 0.5; cursor: default; }
 }
 
-.detail-cancel {
-  height: 36px;
-  padding: 0 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--surface);
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--muted);
-  cursor: pointer;
-}
-
 // -- the delete confirmation ------------------------------------------------
 //
 // The open `<details>` becomes a scrim + centered panel, the same shape as
@@ -2191,20 +2180,21 @@ select.field-input {
   color: var(--muted-soft);
 }
 
+// The "Delete" action in a rule row. Danger tint matches `.detail-delete`'s
+// confirm button, sized to sit next to `.quiet`'s "Edit".
 .rule-delete {
   flex-shrink: 0;
-  height: 32px;
-  padding: 0 12px;
-  background: transparent;
-  border: 1px solid var(--border-strong);
+  height: 28px;
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid #e8c9b8;
   border-radius: var(--radius);
-  color: var(--muted);
+  color: #a04a24;
   font-family: var(--font-sans);
   font-size: 12px;
-  font-weight: 600;
   cursor: pointer;
 
-  &:hover { background: #f1efe8; color: #a04a24; }
+  &:hover { background: #f1efe8; }
 }
 
 .rule-new {
