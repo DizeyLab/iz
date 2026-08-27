@@ -205,8 +205,8 @@ async fn board_columns(cx: &Cx, version: f64) -> Result {
 
     view! {
         cx =>
-        for column in (columns) { (column) }
-        if (empty) {
+        for column in columns { (column) }
+        if empty {
             <div class="board-empty">
                 <div class="board-empty-title">"This board is empty"</div>
             </div>
@@ -237,15 +237,15 @@ async fn render_column(
                 <span class="column-name">(name)</span>
                 <span class="column-count">(count)</span>
                 <div class="spacer"></div>
-                if (may_write) {
+                if may_write {
                     <button class="column-add" title="Add a task" @click=$(|_e: Event| composing.set(true))>
                         "+"
                     </button>
                 }
             </header>
             <div class="column-cards" id=(column_id.clone())>
-                for card in (cards) { (card) }
-                if (may_write) {
+                for card in cards { (card) }
+                if may_write {
                     <form method="post" action="/api/create_task" class="composer" :hidden=$(!composing.get())>
                         <input type="hidden" name="column_id" value=(column_id.clone())>
                         <input class="composer-input" type="text" name="title" placeholder="What needs doing?" required="">
@@ -262,6 +262,10 @@ async fn render_column(
     }
 }
 
+// The `@dragstart` handler below never reads `e` as ordinary Rust — the
+// `raw!` macro resolves `${e}` through its own name table, keyed on the
+// closure param's identifier text, not through the generated closure body.
+#[allow(unused_variables)]
 async fn render_card(
     cx: &Cx,
     card: TaskCard,
@@ -296,8 +300,8 @@ async fn render_card(
         >
             <div class="card-keys">
                 <span class="card-key">(card.task_key.clone())</span>
-                if (blocks > 0) { <span class="card-blocks">(format!("blocks {blocks}"))</span> }
-                if (!blocked_by.is_empty()) {
+                if blocks > 0 { <span class="card-blocks">(format!("blocks {blocks}"))</span> }
+                if !blocked_by.is_empty() {
                     <span class="card-blocked-by">(format!("blocked by {blocked_by}"))</span>
                 }
             </div>
@@ -306,11 +310,11 @@ async fn render_card(
                 <span class="card-deadline" class:card-deadline-overdue=(overdue) class:card-deadline-none=(!dated)>
                     (deadline)
                 </span>
-                if (comments > 0) { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
+                if comments > 0 { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
                 <div class="spacer"></div>
                 <div class="avatars">
-                    for person in (assignees) { (person) }
-                    if (!has_assignees) {
+                    for person in assignees { (person) }
+                    if !has_assignees {
                         <span class="avatar avatar-none" role="img" aria-label="nobody assigned" title="Nobody assigned"></span>
                     }
                 </div>
@@ -377,7 +381,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <div class="spacer"></div>
             <span class="topbar-who" title=(user.email.clone())>(user.display_name.clone())</span>
             <a class="topbar-link" href="/settings">"Settings"</a>
-            if (may_write) {
+            if may_write {
                 <button class="new-task">"New task"</button>
             }
         </header>
@@ -385,8 +389,8 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <div class="topbar-divider"></div>
             <span class="sort-note">"Sort: deadline"</span>
             <div class="spacer"></div>
-            if (overdue > 0) { <span class="chip chip-overdue">(format!("{overdue} overdue"))</span> }
-            if (blocked > 0) { <span class="chip chip-blocked">(format!("{blocked} blocked"))</span> }
+            if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} overdue"))</span> }
+            if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} blocked"))</span> }
         </div>
         if let Some(refusal) = &refusal {
             <p class="field-error">(refusal.message())</p>
@@ -401,7 +405,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                     let task_id = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-task'))", "".to_owned());
                     let from = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-from'))", "".to_owned());
                     if !task_id.is_empty() {
-                        let result = move_card_procedure(task_id, from, to).await;
+                        let _result = move_card_procedure(task_id, from, to).await;
                         version.set(version.get() + 1.0);
                     }
                 })

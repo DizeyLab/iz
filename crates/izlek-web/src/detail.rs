@@ -923,6 +923,10 @@ async fn comment_row(cx: &Cx, comment: &Comment) -> Result {
 /// dependencies, files, comments, activity and delete, exactly as the
 /// artboard draws them. Wiring `?task=<id>` on the board page is a later
 /// integration slice — this only renders the fragment.
+// Two `@change` handlers below never read `e` as ordinary Rust — the
+// `raw!` macro resolves `${e}` through its own name table, keyed on the
+// closure param's identifier text, not through the generated closure body.
+#[allow(unused_variables)]
 pub async fn task_modal(cx: &Cx, task_id: &str) -> Result {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
