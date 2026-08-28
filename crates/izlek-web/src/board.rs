@@ -379,11 +379,14 @@ async fn render_card(
 /// card's `@contextmenu` calls into this same global, by the menu's id.
 ///
 /// Also registers the board page's own `Escape` resolvers on
-/// `window.__izlekEsc`: the datepicker panel (priority 100, above the modal
-/// chain — `detail::escape_closes` used to defer to it) and the card menu
-/// (priority 10). Viewer, delete confirm, open edit popovers and the modal
-/// itself stay `detail::escape_closes`'s at priority 90; the whole order
-/// lives in the table on `layout.rs`'s `escape_manager_script`.
+/// `window.__izlekEsc`: the datepicker panel (priority 20 — below the
+/// dropdown panel and the user-menu, above only the card menu; the modal
+/// chain steps aside on its own (its resolver returns false while a
+/// datepick is open), which is how the datepicker still closes before the
+/// modal) and the card menu (priority 10). Viewer, delete confirm, open
+/// edit popovers and the modal itself stay `detail::escape_closes`'s at
+/// priority 90; the whole order lives in the table on `layout.rs`'s
+/// `escape_manager_script`.
 async fn card_menu_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -400,7 +403,7 @@ async fn card_menu_script(cx: &Cx) -> Result {
             menu.classList.add('card-menu-open'); \
         }; \
         document.addEventListener('click', closeCardMenus); \
-        window.__izlekEsc.register(100, function () { \
+        window.__izlekEsc.register(20, function () { \
             var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
             if (!datepick) { return false; } \
             datepick.checked = false; \
