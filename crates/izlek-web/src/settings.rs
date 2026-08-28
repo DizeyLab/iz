@@ -1056,7 +1056,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                                 if member.is_owner || member.is_you {
                                                     <span class="chip chip-role">(member.role.as_str().to_string())</span>
                                                 } else {
-                                                    <form method="post" action="/api/set_role" class="member-role">
+                                                    <form method="post" action="/api/set_role" class="member-role status-form">
                                                         <input type="hidden" name="user_id" value=(member.id.clone())>
                                                         <select class="status-select" name="role"
                                                             @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
