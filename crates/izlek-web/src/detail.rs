@@ -662,6 +662,9 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 /// itself; datepick and card menu stay `board.rs`'s — this capture listener
 /// registers first (inline in modal markup) and stops the key, and
 /// `__izlekLeaving` is one navigation per document, `pageshow` releases it.
+/// Focused native media controls swallow `Escape` before the page ever
+/// sees the key, so focus landing on the viewer's audio/video is moved
+/// straight back to the panel.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -698,6 +701,12 @@ async fn escape_closes(cx: &Cx) -> Result {
             } \
         }, true); \
         document.addEventListener('pageshow', function () { window.__izlekLeaving = false; }); \
+        document.addEventListener('focusin', function (e) { \
+            var media = e.target; \
+            if (media.tagName !== 'AUDIO' && media.tagName !== 'VIDEO') { return; } \
+            var panel = media.closest('.viewer'); \
+            if (panel) { panel.focus(); } \
+        }, true); \
         document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { if (window.location.search.indexOf('confirm=delete') !== -1 && !window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } else { confirm.removeAttribute('open'); } } }, true); \
         document.addEventListener('click', function (e) { \
             document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
@@ -1387,7 +1396,7 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result 
         cx =>
         <div class="modal-scrim viewer-scrim">
             <a class="viewer-close" href=(close_href.clone()) aria-label=(t(lang, Key::CloseTheFile))></a>
-            <div class="modal viewer">
+            <div class="modal viewer" tabindex="-1">
                 <header class="detail-head">
                     <span class="detail-headline"><span class="detail-key">(name.clone())</span></span>
                     <a class="quiet" href=(download_href)>(t(lang, Key::Download))</a>
