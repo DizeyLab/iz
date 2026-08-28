@@ -312,7 +312,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
                 <link
                     rel="stylesheet"
-                    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
+                    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,600;1,400;1,600&display=swap"
                 >
                 <title>"Izlek"</title>
                 <link rel="stylesheet" href=(STYLE)>
