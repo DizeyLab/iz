@@ -446,7 +446,7 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
 struct SaveProfileForm {
     display_name: String,
     /// Absent on a form that never got the field — kept as it was, same as
-    /// `timezone`/`theme`/`language` below.
+    /// `timezone`/`theme`/`language`/`ui` below.
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
@@ -455,10 +455,15 @@ struct SaveProfileForm {
     theme: Option<String>,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    ui: Option<String>,
 }
 
 /// The values the theme field offers.
 const THEME_OPTIONS: [&str; 2] = ["light", "dark"];
+
+/// The values the ui field offers.
+const UI_OPTIONS: [&str; 2] = ["instrument", "ledger"];
 
 /// The values the language field offers.
 const LANGUAGE_OPTIONS: [&str; 2] = ["en", "tr"];
@@ -502,6 +507,10 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     if !THEME_OPTIONS.contains(&theme.as_str()) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadTheme)));
     }
+    let ui = input.ui.unwrap_or_else(|| user.ui.clone());
+    if !UI_OPTIONS.contains(&ui.as_str()) {
+        return Ok(saved_or_refused("save_profile", Some(Refusal::BadUi)));
+    }
     let language = input.language.unwrap_or_else(|| user.language.clone());
     if !LANGUAGE_OPTIONS.contains(&language.as_str()) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadLanguage)));
@@ -521,7 +530,7 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     let outcome = store
         .set_profile(&user.id, &display_name, user.photo_path.as_deref())
         .await
-        .and(store.set_preferences(&user.id, &timezone, &theme, &language).await)
+        .and(store.set_preferences(&user.id, &timezone, &theme, &language, &ui).await)
         .and(store.set_email(&user.id, &user.workspace_id, &email).await);
     let refusal = match outcome {
         Ok(()) => None,
@@ -830,6 +839,13 @@ async fn settings_page(cx: &Cx) -> Result {
                             <select class="field-input" name="theme">
                                 <option value="light" selected=(user.theme == "light")>(t(lang, Key::LightOption))</option>
                                 <option value="dark" selected=(user.theme == "dark")>(t(lang, Key::DarkOption))</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">(t(lang, Key::UiLabel))</span>
+                            <select class="field-input" name="ui">
+                                <option value="instrument" selected=(user.ui == "instrument")>"Instrument"</option>
+                                <option value="ledger" selected=(user.ui == "ledger")>"Ledger"</option>
                             </select>
                         </label>
                         <label class="field">

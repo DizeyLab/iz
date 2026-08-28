@@ -109,6 +109,8 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 if (root.getAttribute('lang')) { document.documentElement.setAttribute('lang', root.getAttribute('lang')); } \
                 if (root.hasAttribute('data-theme')) { document.documentElement.setAttribute('data-theme', root.getAttribute('data-theme')); } \
                 else { document.documentElement.removeAttribute('data-theme'); } \
+                if (root.hasAttribute('data-ui')) { document.documentElement.setAttribute('data-ui', root.getAttribute('data-ui')); } \
+                else { document.documentElement.removeAttribute('data-ui'); } \
                 if (url) { history.replaceState(null, '', url); } \
                 window.scrollTo(fresh ? 0 : x, fresh ? 0 : y); \
                 wire(); \
@@ -286,6 +288,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
         Err(_) => None,
     };
     let dark = asking.is_some_and(|user| user.theme == "dark");
+    let ui = asking.map_or("instrument", |user| user.ui.as_str());
     let lang = asking.map_or(Lang::En, |user| Lang::from_code(&user.language));
 
     let content = match slot {
@@ -301,7 +304,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
 
     view! {
         <!DOCTYPE html>
-        <html lang=(lang.code()) data-theme=(dark.then_some("dark"))>
+        <html lang=(lang.code()) data-theme=(dark.then_some("dark")) data-ui=(ui)>
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">

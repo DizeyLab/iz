@@ -236,14 +236,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 16);
+    assert_eq!(first.schema_version().await.unwrap(), 17);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 16);
+    assert_eq!(second.schema_version().await.unwrap(), 17);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -260,7 +260,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
         a_pre_0013_store_with_a_rule_send_and_decision().await;
 
     let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 16);
+    assert_eq!(store.schema_version().await.unwrap(), 17);
     assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
 
     let rules = store.mail_rules(&board).await.unwrap();
@@ -864,9 +864,10 @@ async fn display_preferences_default_and_persist_across_reopen() {
     assert_eq!(admin.timezone, "UTC");
     assert_eq!(admin.theme, "light");
     assert_eq!(admin.language, "en");
+    assert_eq!(admin.ui, "instrument");
 
     store
-        .set_preferences(&admin_id, "Europe/Istanbul", "dark", "tr")
+        .set_preferences(&admin_id, "Europe/Istanbul", "dark", "tr", "ledger")
         .await
         .unwrap();
     drop(store);
@@ -876,6 +877,7 @@ async fn display_preferences_default_and_persist_across_reopen() {
     assert_eq!(admin.timezone, "Europe/Istanbul");
     assert_eq!(admin.theme, "dark");
     assert_eq!(admin.language, "tr");
+    assert_eq!(admin.ui, "ledger");
 
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);

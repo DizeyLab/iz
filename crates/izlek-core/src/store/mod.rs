@@ -150,6 +150,8 @@ pub struct User {
     pub theme: String,
     /// Display-only, as [`Self::timezone`].
     pub language: String,
+    /// Display-only, as [`Self::timezone`].
+    pub ui: String,
 }
 
 impl User {
@@ -596,6 +598,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         timezone: &str,
         theme: &str,
         language: &str,
+        ui: &str,
     ) -> Result<()>;
 
     async fn set_role(&self, user_id: &str, role: Role) -> Result<()>;

@@ -2818,6 +2818,49 @@ async fn an_unlisted_theme_is_refused() {
     assert!(location.contains("refusal=bad-theme&on=save_profile"), "{location}");
 }
 
+#[tokio::test]
+async fn the_ledger_ui_is_saved_and_marks_the_page() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("ui", "ledger")],
+        )
+        .await;
+    assert!(
+        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let page = app.get("/settings", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"data-ui="ledger""#), "{html}");
+}
+
+#[tokio::test]
+async fn an_unlisted_ui_is_refused() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("ui", "neon")],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(location.contains("refusal=bad-ui&on=save_profile"), "{location}");
+
+    let page = app.get("/settings", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"data-ui="instrument""#), "{html}");
+}
+
 /// Creating a task files its own Created activity, but the column it lands
 /// in also fires a `Transition` the way a drop does — a `StatusBecomes` rule
 /// armed on that column must owe mail on creation, not only on a later move.

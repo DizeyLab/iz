@@ -311,6 +311,8 @@ pub enum Refusal {
     BadZone,
     /// The theme field was not one of the values the form offers.
     BadTheme,
+    /// The ui field was not one of the values the form offers.
+    BadUi,
     /// The language field was not one of the values the form offers.
     BadLanguage,
     /// The email field did not look like an address.
@@ -367,6 +369,7 @@ impl Refusal {
             }
             Refusal::BadZone => "That is not a timezone.".to_string(),
             Refusal::BadTheme => "That is not a theme.".to_string(),
+            Refusal::BadUi => "That is not an interface.".to_string(),
             Refusal::BadLanguage => "That is not a language.".to_string(),
             Refusal::BadEmail => "That is not an address.".to_string(),
             Refusal::BadFileType => {
@@ -418,6 +421,7 @@ impl Refusal {
             }
             Refusal::BadZone => "Bu bir saat dilimi değil.".to_string(),
             Refusal::BadTheme => "Bu bir tema değil.".to_string(),
+            Refusal::BadUi => "Bu bir arayüz değil.".to_string(),
             Refusal::BadLanguage => "Bu bir dil değil.".to_string(),
             Refusal::BadEmail => "Bu bir adres değil.".to_string(),
             Refusal::BadFileType => {
@@ -463,6 +467,7 @@ impl Refusal {
             "bad-limit" => Refusal::BadLimit,
             "bad-zone" => Refusal::BadZone,
             "bad-theme" => Refusal::BadTheme,
+            "bad-ui" => Refusal::BadUi,
             "bad-language" => Refusal::BadLanguage,
             "bad-email" => Refusal::BadEmail,
             "bad-file-type" => Refusal::BadFileType,
@@ -515,6 +520,7 @@ impl Refusal {
             Refusal::BadLimit => "bad-limit",
             Refusal::BadZone => "bad-zone",
             Refusal::BadTheme => "bad-theme",
+            Refusal::BadUi => "bad-ui",
             Refusal::BadLanguage => "bad-language",
             Refusal::BadEmail => "bad-email",
             Refusal::BadFileType => "bad-file-type",

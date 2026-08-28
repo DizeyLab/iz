@@ -69,6 +69,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         16,
         include_str!("../../migrations/0016_display_preferences.sql"),
     ),
+    (17, include_str!("../../migrations/0017_ui_preference.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -583,11 +584,12 @@ fn user_from(row: &Row) -> Result<User> {
         timezone: text(row, 10)?,
         theme: text(row, 11)?,
         language: text(row, 12)?,
+        ui: text(row, 13)?,
     })
 }
 
 const USER_COLUMNS: &str = "id, workspace_id, email, display_name, role, password_hash, \
-     photo_path, created_at, last_signed_in_at, invited_by, timezone, theme, language";
+     photo_path, created_at, last_signed_in_at, invited_by, timezone, theme, language, ui";
 
 fn signin_link_from(row: &Row) -> Result<SigninLink> {
     Ok(SigninLink {
@@ -997,12 +999,13 @@ impl Store for TursoStore {
         timezone: &str,
         theme: &str,
         language: &str,
+        ui: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
         let n = conn
             .execute(
-                "UPDATE user SET timezone = ?1, theme = ?2, language = ?3 WHERE id = ?4",
-                params![timezone, theme, language, user_id],
+                "UPDATE user SET timezone = ?1, theme = ?2, language = ?3, ui = ?4 WHERE id = ?5",
+                params![timezone, theme, language, ui, user_id],
             )
             .await
             .map_err(backend)?;
