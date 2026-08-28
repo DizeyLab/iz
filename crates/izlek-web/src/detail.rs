@@ -598,6 +598,27 @@ pub(crate) mod glyph {
         }
     }
 
+    pub async fn play(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph glyph-play" width="14" height="14" viewBox="0 0 16 16"
+                fill="currentColor" stroke="currentColor" stroke-width="1.5"
+                stroke-linejoin="round" aria-hidden="true">
+                <path d="M5.5 3.5v9l7.5-4.5z"></path>
+            </svg>
+        }
+    }
+
+    pub async fn pause(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph glyph-pause" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <path d="M5.5 3.5v9M10.5 3.5v9"></path>
+            </svg>
+        }
+    }
+
     pub async fn cross(cx: &Cx) -> Result {
         view! {
             cx =>
@@ -1361,6 +1382,49 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
     }
 }
 
+/// The house audio player: play toggle, clock, seek bar over a hidden
+/// `<audio>` — native controls live in the browser's own chrome, ignore the
+/// theme, and swallow `Escape` while focused, so the viewer draws its own.
+async fn audio_player_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+            var player = document.querySelector('.audio-player'); \
+            if (!player) { return; } \
+            var audio = player.querySelector('.audio-el'); \
+            var play = player.querySelector('.audio-play'); \
+            var seek = player.querySelector('.audio-seek'); \
+            var now = player.querySelector('.audio-now'); \
+            var dur = player.querySelector('.audio-dur'); \
+            function clock(s) { \
+                if (!isFinite(s)) { return '0:00'; } \
+                var m = Math.floor(s / 60); \
+                var r = Math.floor(s % 60); \
+                return m + ':' + (r < 10 ? '0' : '') + r; \
+            } \
+            play.addEventListener('click', function () { \
+                if (audio.paused) { audio.play(); } else { audio.pause(); } \
+            }); \
+            audio.addEventListener('play', function () { \
+                player.classList.add('audio-playing'); \
+                play.setAttribute('aria-label', play.getAttribute('data-pause')); \
+            }); \
+            audio.addEventListener('pause', function () { \
+                player.classList.remove('audio-playing'); \
+                play.setAttribute('aria-label', play.getAttribute('data-play')); \
+            }); \
+            audio.addEventListener('loadedmetadata', function () { dur.textContent = clock(audio.duration); }); \
+            audio.addEventListener('timeupdate', function () { \
+                now.textContent = clock(audio.currentTime); \
+                if (audio.duration) { seek.value = audio.currentTime / audio.duration * 1000; } \
+            }); \
+            seek.addEventListener('input', function () { \
+                if (audio.duration) { audio.currentTime = seek.value / 1000 * audio.duration; } \
+            }); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+
 /// The in-app file viewer: `<img>`/`<video>`/`<audio>`/`<object>` per
 /// [`crate::files::ViewerKind`], opened over the task modal via
 /// `?task=<id>&file=<id>` — the same query-param overlay pattern as
@@ -1407,7 +1471,18 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result 
                     match kind {
                         crate::files::ViewerKind::Image => <img class="viewer-media" src=(src) alt=(name)>,
                         crate::files::ViewerKind::Video => <video class="viewer-media" src=(src) controls=""></video>,
-                        crate::files::ViewerKind::Audio => <audio class="viewer-media" src=(src) controls=""></audio>,
+                        crate::files::ViewerKind::Audio => <div class="audio-player">
+                            <button type="button" class="audio-play" aria-label=(t(lang, Key::Play))
+                                data-play=(t(lang, Key::Play)) data-pause=(t(lang, Key::Pause))>
+                                (glyph::play(cx).await?)
+                                (glyph::pause(cx).await?)
+                            </button>
+                            <span class="audio-time audio-now">"0:00"</span>
+                            <input class="audio-seek" type="range" min="0" max="1000" value="0" aria-label=(name.clone())>
+                            <span class="audio-time audio-dur">"0:00"</span>
+                            <audio class="audio-el" src=(src) preload="metadata"></audio>
+                            (audio_player_script(cx).await?)
+                        </div>,
                         crate::files::ViewerKind::Pdf => <object class="viewer-media viewer-pdf" data=(src) type="application/pdf"></object>,
                     }
                 </div>

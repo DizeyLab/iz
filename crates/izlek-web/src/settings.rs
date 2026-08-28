@@ -1059,7 +1059,11 @@ async fn settings_page(cx: &Cx) -> Result {
                                                     <form method="post" action="/api/set_role" class="member-role status-form">
                                                         <input type="hidden" name="user_id" value=(member.id.clone())>
                                                         <select class="status-select" name="role"
-                                                            @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
+                                                            // Saved in the background: nothing else on the page changes
+                                                            // on success, so a full reload would only flash. A refusal
+                                                            // still needs the redirect's banner, and a network error
+                                                            // falls back to the plain submit.
+                                                            @change=$(|e: Event| raw!("{ var f = ${e}.inner.target.form; fetch(f.action, { method: 'POST', body: new URLSearchParams(new FormData(f)) }).then(function (r) { if (!r.ok || r.url.indexOf('refusal=') !== -1) { window.location.href = r.url; } }, function () { f.requestSubmit(); }); }", ()))
                                                         >
                                                             <option value="member" selected=(member.role == izlek_core::Role::Member)>(t(lang, Key::RoleMemberOption))</option>
                                                             <option value="viewer" selected=(member.role == izlek_core::Role::Viewer)>(t(lang, Key::RoleViewerOption))</option>
