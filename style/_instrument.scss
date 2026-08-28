@@ -1,9 +1,174 @@
 // Instrument UI skin — dense, neutral-cool, chrome-quiet. Tokens live in
 // main.scss; skin-specific overrides and component rules for
 // [data-ui="instrument"] land here.
+//
+// Cascade note: this file is `@use`d at the TOP of main.scss, before every
+// component rule, so any override must out-specify its base rule rather than
+// rely on source order. Everything below sits inside the wrapper block, which
+// adds one attribute selector (0,1,0) to every rule.
 
-// --- Instrument skin: chrome (topbar, wordmark, nav) -------------------------
+[data-ui="instrument"] {
 
-// --- Instrument skin: fields & controls --------------------------------------
+  // --- Instrument skin: chrome (topbar, wordmark, nav) -----------------------
 
-// --- Instrument skin: density & spacing --------------------------------------
+  // 44px chrome strip. Pairs with the .board-stage min-height below, which
+  // re-derives its calc from these two literals.
+  .topbar {
+    height: 44px;
+  }
+
+  .filterbar {
+    height: 40px;
+  }
+
+  .board-stage {
+    min-height: calc(100vh - 44px - 40px);
+  }
+
+  // Wordmark and board name read as engraved panel labels: mono, uppercase,
+  // tracked wide.
+  .wordmark-text {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .board-name {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  // Active nav underlines in accent, not ink.
+  .topbar-nav-on {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  // --- Instrument skin: board (ruled columns) --------------------------------
+
+  // Columns are not floating wells; they are panels separated by hairline
+  // rules. Cards keep surface/1px border/radius-3/no-shadow — the instrument
+  // tokens already supply all four, so .card itself needs no override.
+  .board-columns {
+    gap: 0;
+  }
+
+  .column {
+    background: transparent;
+    border-right: 1px solid var(--border);
+
+    &:last-child {
+      border-right: none;
+    }
+  }
+
+  // --- Instrument skin: chips (status LEDs) ----------------------------------
+
+  // Tint fills go away; a chip is its colored text plus a 6px LED square.
+  // Per-variant colors (.chip-overdue etc.) survive untouched — this rule
+  // never declares `color`.
+  .chip {
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+
+    &::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      margin-right: 6px;
+      flex: none;
+      background: currentColor;
+    }
+  }
+
+  // --- Instrument skin: avatars (squares) ------------------------------------
+
+  // Circles become 18px squares; the 2px overlap ring is gone, so assignees
+  // butt closer. 2px is intentional (below the 3px radius token) — squares
+  // must not read as chips.
+  .avatar {
+    width: 18px;
+    height: 18px;
+    border-radius: 2px;
+    border: none;
+  }
+
+  .avatar + .avatar {
+    margin-left: -4px;
+  }
+
+  // Keep the empty-assignee slot's dashed outline, which the border: none
+  // above would otherwise silence.
+  .avatar-none {
+    border: 1px dashed var(--border-strong);
+    background: transparent;
+  }
+
+  // --- Instrument skin: fields & controls -------------------------------------
+
+  // The primary action is an outlined target, not a filled one.
+  .primary {
+    background: transparent;
+    border: 1px solid var(--accent-border);
+    color: var(--accent);
+
+    &:hover {
+      background: transparent;
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+  }
+
+  // Quiet stays outline-muted; only the fill drops so fields and buttons
+  // share one flat ground.
+  .quiet {
+    background: transparent;
+  }
+
+  // --- Instrument skin: mono metadata idiom -----------------------------------
+
+  // Timestamps, card meta and member statuses join .field-label/.detail-label
+  // in tracked uppercase mono. (Emails stay sentence-case — .member-address
+  // keeps its mono but gains no uppercase; uppercase addresses hurt reading.)
+  .comment-when {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .card-comments,
+  .card-deadline {
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .member-status {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .member-you {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: var(--radius-sm);
+  }
+
+  // --- Instrument skin: density & spacing --------------------------------------
+
+  // (Deliberately sparse: density lives in the chrome heights, the gapless
+  // ruled columns and the square avatars above. Token values — control
+  // heights, radii, shadows — already carry the rest.)
+
+}

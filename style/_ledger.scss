@@ -2,6 +2,243 @@
 // Tokens live in main.scss; skin-specific overrides and component rules for
 // [data-ui="ledger"] land here.
 
-// --- Ledger skin: paper & typography -----------------------------------------
+// Every selector carries the [data-ui="ledger"] prefix (one nested block
+// below). That attribute+class specificity outranks the same-name class
+// rules in main.scss, so the order of the @use never matters.
 
-// --- Ledger skin: rules & ornaments ------------------------------------------
+[data-ui="ledger"] {
+  // --- Ledger skin: typography -------------------------------------------------
+
+  // The display face carries named things: the wordmark, page/board/panel
+  // titles, task titles, people. Keys, dates, counts and labels stay IBM
+  // Plex Mono 10px uppercase — main.scss's metadata idiom is left alone.
+  .wordmark-text {
+    font-family: var(--font-display);
+    font-size: 21px;
+    font-weight: 600;
+  }
+
+  .board-name {
+    font-family: var(--font-display);
+    font-size: 15px;
+  }
+
+  .auth-title,
+  .settings-title,
+  .detail-title,
+  .title-input,
+  .panel-title,
+  .column-name,
+  .card-title,
+  .member-name {
+    font-family: var(--font-display);
+  }
+
+  .settings-title { font-size: 22px; }
+  .panel-title { font-size: 15px; }
+  .card-title { font-size: 14px; }
+
+  // --- Ledger skin: rules & ornaments (no boxes) -------------------------------
+
+  // Panels and cards give up their chrome: the paper itself is the surface
+  // and a hairline separates entries. Section heads sit on a 2px ink rule.
+  .panel {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+  }
+
+  .panel-head {
+    border-bottom: 2px solid var(--rule-strong);
+    padding: 0 0 10px;
+  }
+
+  .auth-card {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  .column {
+    background: transparent;
+    border-radius: 0;
+  }
+
+  .column-empty {
+    background: transparent;
+    border-color: var(--border-soft);
+  }
+
+  .column-head {
+    padding: 2px 4px 8px;
+    border-bottom: 2px solid var(--rule-strong);
+  }
+
+  // A card is an entry in the ledger: no box, a hairline under it, and the
+  // hover darkens that rule instead of flooding a background.
+  .card {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    padding: 10px 2px;
+    transition: border-color var(--dur-fast) var(--ease);
+
+    &:hover {
+      background: transparent;
+      border-bottom-color: var(--rule-strong);
+    }
+  }
+
+  .card-done {
+    background: transparent;
+
+    .card-title { text-decoration: line-through; }
+  }
+
+  .rule-row {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    padding: 14px 2px;
+
+    &-off { background: transparent; }
+  }
+
+  // --- Ledger skin: baseline header --------------------------------------------
+
+  .topbar {
+    background: transparent;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+
+  .topbar-nav-on { box-shadow: inset 0 -2px 0 var(--rule-strong); }
+
+  // --- Ledger skin: chips as inked text ----------------------------------------
+
+  .chip {
+    display: inline-flex;
+    align-items: baseline;
+    height: auto;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dotted currentColor;
+    border-radius: 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+
+    // The tint fills and boxes go; the hue stays on as the ink color.
+    &-overdue,
+    &-blocked,
+    &-role,
+    &-admin,
+    &-connected,
+    &-off { background: transparent; }
+
+    &-role,
+    &-admin { border: none; border-bottom: 1px dotted currentColor; }
+
+    &-role,
+    &-admin,
+    &-connected,
+    &-off { text-transform: uppercase; }
+  }
+
+  // --- Ledger skin: controls -----------------------------------------------------
+
+  // Outlined-ink controls; the primary action is set in solid ink with paper
+  // text, inverting cleanly in the dark set because both sides are tokens.
+  .primary {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--bg);
+
+    &:hover {
+      background: var(--ink-soft);
+      border-color: var(--ink-soft);
+      color: var(--bg);
+    }
+  }
+
+  .auth-submit,
+  .edit-save,
+  .comment-post {
+    background: var(--ink);
+    color: var(--bg);
+  }
+
+  .auth-submit:hover,
+  .edit-save:hover,
+  .comment-post:hover {
+    background: var(--ink-soft);
+  }
+
+  .quiet {
+    background: transparent;
+    border-color: var(--ink-soft);
+
+    &:hover {
+      border-color: var(--ink);
+      color: var(--ink);
+    }
+  }
+
+  .quiet-danger {
+    border-color: var(--danger);
+
+    &:hover {
+      border-color: var(--danger);
+      background: transparent;
+    }
+  }
+
+  .detail-delete {
+    background: transparent;
+    border-color: var(--danger);
+  }
+
+  // Fields rule themselves onto the paper: transparent ground, ink outline.
+  .auth-input,
+  .field-input,
+  .title-input {
+    background: transparent;
+    border-color: var(--ink-soft);
+
+    &:focus-visible {
+      background: transparent;
+      border-color: var(--ink);
+    }
+
+    &:disabled { background: transparent; }
+  }
+
+  .auth-locked,
+  .field-box,
+  .status-form {
+    background: transparent;
+    border-color: var(--ink-soft);
+  }
+
+  // --- Ledger skin: toggles ------------------------------------------------------
+
+  // The switch becomes what a mark is on paper: an empty ink square when
+  // off, a filled one when on. The knob has no role here.
+  .rule-switch {
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--ink);
+    border-radius: 0;
+    background: transparent;
+
+    .rule-switch-knob { display: none; }
+  }
+
+  .rule-switch-on { background: var(--ink); }
+}
