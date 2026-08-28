@@ -76,7 +76,7 @@ pub enum Moved {
 pub struct Person {
     pub id: String,
     pub display_name: String,
-    pub photo_path: Option<String>,
+    pub has_photo: bool,
 }
 
 impl Person {

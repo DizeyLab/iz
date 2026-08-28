@@ -53,7 +53,14 @@ async fn main() {
 
     let router = Router::builder()
         .discover()
-        .layer(BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
+        .layer(
+            BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
+                .at("/files"),
+        )
+        .layer(
+            BodyLimit::max(izlek_web::settings::WIDEST_PHOTO_MB as usize * 1024 * 1024)
+                .at("/api/profile_photo"),
+        )
         .cookies()
         .assets(AssetBundle::load().expect("failed to load the asset bundle"))
         .app_context(accounts)
@@ -66,7 +73,9 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .expect("failed to bind the listen address");
-    topcoat::serve(listener, router).await.expect("server error");
+    topcoat::serve(listener, router)
+        .await
+        .expect("server error");
 }
 
 /// Retries what a mail server refused earlier and picks up anything a crash

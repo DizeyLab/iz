@@ -171,7 +171,11 @@ mod codec_tests {
 /// A 303 to `/settings`, with `query` appended.
 fn redirect_to(query: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
     let mut headers = HeaderMap::new();
-    let location = if query.is_empty() { "/settings".to_string() } else { format!("/settings?{query}") };
+    let location = if query.is_empty() {
+        "/settings".to_string()
+    } else {
+        format!("/settings?{query}")
+    };
     if let Ok(value) = HeaderValue::from_str(&location) {
         headers.insert(header::LOCATION, value);
     }
@@ -181,7 +185,10 @@ fn redirect_to(query: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
 /// Where a save lands: back on Settings, with the refusal (if any) on the
 /// query the same way `files.rs`'s upload carries one, or `saved=<call>`
 /// when there was nothing to refuse.
-fn saved_or_refused(call: &str, refusal: Option<Refusal>) -> (StatusCode, HeaderMap, Vec<u8>) {
+pub(crate) fn saved_or_refused(
+    call: &str,
+    refusal: Option<Refusal>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
     match refusal {
         // `BadSender`'s code collapses six different complaints into one
         // generic "bad-sender"; the sentence save time actually wrote rides
@@ -224,18 +231,16 @@ fn qsdecode(text: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(b'%');
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&text[i + 1..i + 3], 16) {
+                Ok(byte) => {
+                    out.push(byte);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             b => {
                 out.push(b);
                 i += 1;
@@ -262,7 +267,10 @@ struct SaveLimitsForm {
 /// checked against, so a type that is not a plain extension has no business
 /// being stored as one.
 #[route(POST "/api/save_limits")]
-async fn save_limits(cx: &Cx, Form(input): Form<SaveLimitsForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+async fn save_limits(
+    cx: &Cx,
+    Form(input): Form<SaveLimitsForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let admin = match require_admin(cx).await {
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("save_limits", Some(refusal))),
@@ -319,7 +327,10 @@ struct SaveSenderForm {
 /// half-filled sender is not a configuration — it is a mail nobody receives
 /// and a ledger nobody reads.
 #[route(POST "/api/save_sender")]
-async fn save_sender(cx: &Cx, Form(input): Form<SaveSenderForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+async fn save_sender(
+    cx: &Cx,
+    Form(input): Form<SaveSenderForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let admin = match require_admin(cx).await {
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("save_sender", Some(refusal))),
@@ -417,7 +428,10 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let Some(outcome) = mail(cx).test(&admin.email).await else {
         // No engine in this process at all. Nothing sends here, and saying so
         // beats writing down a failure the settings did not cause.
-        return Ok(saved_or_refused("send_test_mail", Some(Refusal::Unavailable)));
+        return Ok(saved_or_refused(
+            "send_test_mail",
+            Some(Refusal::Unavailable),
+        ));
     };
 
     let at = time::OffsetDateTime::now_utc();
@@ -437,7 +451,10 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     };
     if let Err(problem) = store.record_sender_test(&admin.workspace_id, test).await {
         eprintln!("store error: {problem}");
-        return Ok(saved_or_refused("send_test_mail", Some(Refusal::Unavailable)));
+        return Ok(saved_or_refused(
+            "send_test_mail",
+            Some(Refusal::Unavailable),
+        ));
     }
     Ok(saved_or_refused("send_test_mail", None))
 }
@@ -480,7 +497,11 @@ fn zone_options() -> Vec<String> {
             if hour == 0 {
                 "UTC".to_string()
             } else {
-                format!("UTC{}{:02}:00", if hour > 0 { "+" } else { "-" }, hour.abs())
+                format!(
+                    "UTC{}{:02}:00",
+                    if hour > 0 { "+" } else { "-" },
+                    hour.abs()
+                )
             }
         })
         .collect()
@@ -490,7 +511,10 @@ fn zone_options() -> Vec<String> {
 /// touches anybody else here: the id comes from the session, never from the
 /// form.
 #[route(POST "/api/save_profile")]
-async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+async fn save_profile(
+    cx: &Cx,
+    Form(input): Form<SaveProfileForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(saved_or_refused("save_profile", Some(refusal))),
@@ -515,7 +539,10 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     if !LANGUAGE_OPTIONS.contains(&language.as_str()) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadLanguage)));
     }
-    let email = input.email.map(|e| e.trim().to_lowercase()).unwrap_or_else(|| user.email.clone());
+    let email = input
+        .email
+        .map(|e| e.trim().to_lowercase())
+        .unwrap_or_else(|| user.email.clone());
     if !is_address(&email) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadEmail)));
     }
@@ -524,13 +551,25 @@ async fn save_profile(cx: &Cx, Form(input): Form<SaveProfileForm>) -> Result<(St
     // Checked before anything is written: a taken email must refuse the whole
     // save, not leave the name/theme/language/timezone changes standing while
     // only the email is turned away.
-    if email != user.email && store.user_by_email(&user.workspace_id, &email).await?.is_some() {
-        return Ok(saved_or_refused("save_profile", Some(Refusal::AddressTaken)));
+    if email != user.email
+        && store
+            .user_by_email(&user.workspace_id, &email)
+            .await?
+            .is_some()
+    {
+        return Ok(saved_or_refused(
+            "save_profile",
+            Some(Refusal::AddressTaken),
+        ));
     }
     let outcome = store
-        .set_profile(&user.id, &display_name, user.photo_path.as_deref())
+        .set_profile(&user.id, &display_name)
         .await
-        .and(store.set_preferences(&user.id, &timezone, &theme, &language, &ui).await)
+        .and(
+            store
+                .set_preferences(&user.id, &timezone, &theme, &language, &ui)
+                .await,
+        )
         .and(store.set_email(&user.id, &user.workspace_id, &email).await);
     let refusal = match outcome {
         Ok(()) => None,
@@ -555,7 +594,10 @@ struct ResendLinkForm {
 /// mailed address travels home on the redirect's query, the same way a
 /// refusal does.
 #[route(POST "/api/resend_link")]
-async fn resend_link(cx: &Cx, Form(input): Form<ResendLinkForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+async fn resend_link(
+    cx: &Cx,
+    Form(input): Form<ResendLinkForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let admin = match require_admin(cx).await {
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("resend_link", Some(refusal))),
@@ -563,7 +605,10 @@ async fn resend_link(cx: &Cx, Form(input): Form<ResendLinkForm>) -> Result<(Stat
     match accounts(cx).resend_invitation(&admin, &input.user_id).await {
         Ok(invitation) => {
             mail(cx).after_invite();
-            Ok(redirect_to(&format!("mailed={}", encode_q(&invitation.user.email))))
+            Ok(redirect_to(&format!(
+                "mailed={}",
+                encode_q(&invitation.user.email)
+            )))
         }
         Err(error) => Ok(saved_or_refused("resend_link", Some(error.into()))),
     }
@@ -578,12 +623,18 @@ struct SetRoleForm {
 /// Changes a member's role. Admin-only; the owner's row and the caller's own
 /// row are refused, checked in `Accounts::set_role`.
 #[route(POST "/api/set_role")]
-async fn set_role(cx: &Cx, Form(input): Form<SetRoleForm>) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+async fn set_role(
+    cx: &Cx,
+    Form(input): Form<SetRoleForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let admin = match require_admin(cx).await {
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("set_role", Some(refusal))),
     };
-    match accounts(cx).set_role(&admin, &input.user_id, input.role).await {
+    match accounts(cx)
+        .set_role(&admin, &input.user_id, input.role)
+        .await
+    {
         Ok(()) => Ok(saved_or_refused("set_role", None)),
         Err(error) => Ok(saved_or_refused("set_role", Some(error.into()))),
     }
@@ -600,6 +651,7 @@ async fn set_role(cx: &Cx, Form(input): Form<SetRoleForm>) -> Result<(StatusCode
 struct Member {
     id: String,
     display_name: String,
+    has_photo: bool,
     email: String,
     role: izlek_core::Role,
     has_password: bool,
@@ -627,6 +679,7 @@ async fn members_now(cx: &Cx, asking: &User) -> Result<Vec<Member>> {
             is_owner: owner.as_deref() == Some(user.id.as_str()),
             id: user.id,
             display_name: user.display_name,
+            has_photo: user.has_photo,
             email: user.email,
             role: user.role,
         })
@@ -691,7 +744,10 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
         },
         Some(workspace) => Sender {
             host: workspace.smtp_host.unwrap_or_default(),
-            port: workspace.smtp_port.and_then(|p| u16::try_from(p).ok()).unwrap_or(587),
+            port: workspace
+                .smtp_port
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(587),
             username: workspace.smtp_username.unwrap_or_default(),
             from_name: workspace.smtp_from_name.unwrap_or_default(),
             from_address: workspace.smtp_from_address.unwrap_or_default(),
@@ -713,7 +769,9 @@ fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
     let mut saved = false;
     let mut why = None;
     for pair in query.split('&') {
-        let Some((key, value)) = pair.split_once('=') else { continue };
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
         match key {
             "refusal" => refusal_code = Some(value),
             "on" => on = Some(value),
@@ -723,12 +781,14 @@ fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
         }
     }
     let refusal = if on == Some(call) {
-        refusal_code.and_then(Refusal::from_code).map(|refusal| match (refusal, why) {
-            // The generic "bad-sender" fallback is what a tampered or absent
-            // `why` gets; a real one carries save time's own sentence.
-            (Refusal::BadSender(_), Some(why)) => Refusal::BadSender(qsdecode(why)),
-            (refusal, _) => refusal,
-        })
+        refusal_code
+            .and_then(Refusal::from_code)
+            .map(|refusal| match (refusal, why) {
+                // The generic "bad-sender" fallback is what a tampered or absent
+                // `why` gets; a real one carries save time's own sentence.
+                (Refusal::BadSender(_), Some(why)) => Refusal::BadSender(qsdecode(why)),
+                (refusal, _) => refusal,
+            })
     } else {
         None
     };
@@ -736,7 +796,11 @@ fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
 }
 
 fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
-    query.split('&').find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v))
+    query.split('&').find_map(|pair| {
+        pair.split_once('=')
+            .filter(|(k, _)| *k == key)
+            .map(|(_, v)| v)
+    })
 }
 
 /// The settings screen.
@@ -760,16 +824,27 @@ async fn settings_page(cx: &Cx) -> Result {
     let query = topcoat::router::request::uri(cx).query().unwrap_or("");
 
     let zone = izlek_core::detail::parse_zone(&user.timezone);
-    let sender = if administers { Some(sender_now(cx, zone).await?) } else { None };
+    let sender = if administers {
+        Some(sender_now(cx, zone).await?)
+    } else {
+        None
+    };
     let (limits, allowed_types) = if administers {
         let (attachment, photo, types) = limits_now(cx, &user.workspace_id).await?;
         (Some((attachment, photo)), types)
     } else {
         (None, Vec::new())
     };
-    let members = if administers { Some(members_now(cx, &user).await?) } else { None };
+    let members = if administers {
+        Some(members_now(cx, &user).await?)
+    } else {
+        None
+    };
 
     let (profile_refusal, profile_saved) = call_state(query, "save_profile");
+    let (photo_refusal, photo_saved) = call_state(query, "profile_photo");
+    let (photo_delete_refusal, _) = call_state(query, "delete_profile_photo");
+    let photo_refusal = photo_refusal.or(photo_delete_refusal);
     let (sender_refusal, sender_saved) = call_state(query, "save_sender");
     let (test_refusal, _) = call_state(query, "send_test_mail");
     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
@@ -788,7 +863,7 @@ async fn settings_page(cx: &Cx) -> Result {
             </a>
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Settings, lang).await?)
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
+            (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)
         </header>
 
         <div class="settings-shell">
@@ -865,6 +940,31 @@ async fn settings_page(cx: &Cx) -> Result {
                             <button class="primary" type="submit">(t(lang, Key::Save))</button>
                         </div>
                     </form>
+                    <form class="panel-body photo-form" method="post" action="/api/profile_photo" enctype="multipart/form-data">
+                        <span class="field-label">(t(lang, Key::Picture))</span>
+                        <div class="photo-row">
+                            (crate::layout::avatar(cx, &izlek_core::board::Person {
+                                id: user.id.clone(),
+                                display_name: user.display_name.clone(),
+                                has_photo: user.has_photo,
+                            }, "avatar-lg").await?)
+                            <label class="field-box file-upload-box">
+                                <span class="field-text file-upload-name">(t(lang, Key::Picture))</span>
+                                <input class="file-upload-input" type="file" name="file" accept="image/*" data-autosubmit="">
+                            </label>
+                        </div>
+                        if let Some(refusal) = &photo_refusal {
+                            <span class="field-error">(refusal.message_in(lang))</span>
+                        }
+                        if photo_saved {
+                            <span class="field-note">(t(lang, Key::Saved))</span>
+                        }
+                    </form>
+                    if user.has_photo {
+                        <form class="panel-body photo-form" method="post" action="/api/delete_profile_photo">
+                            <button class="quiet" type="submit">(t(lang, Key::Remove))</button>
+                        </form>
+                    }
                 </section>
 
                 if let Some(sender) = &sender {
@@ -1057,9 +1157,15 @@ async fn settings_page(cx: &Cx) -> Result {
                                         } else {
                                             t(lang, Key::ActiveStatus).to_string()
                                         };
+                                        let member_person = izlek_core::board::Person {
+                                            id: member.id.clone(),
+                                            display_name: member.display_name.clone(),
+                                            has_photo: member.has_photo,
+                                        };
                                         <tr class="member-row">
                                             <td class="member-name">
                                                 <span class="member-name-row">
+                                                    (crate::layout::avatar(cx, &member_person, "avatar-sm").await?)
                                                     (member.display_name.clone())
                                                     if member.is_you {
                                                         <span class="member-you">(t(lang, Key::You))</span>

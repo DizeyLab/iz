@@ -101,6 +101,8 @@ pub enum Key {
 
     // settings.rs
     YourProfile,
+    Picture,
+    Remove,
     DisplayNameLabel,
     EmailLabel,
     TimezoneLabel,
@@ -431,6 +433,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (YourProfile, En) => "Your profile",
         (YourProfile, Tr) => "Profilin",
+        (Picture, En) => "Picture",
+        (Picture, Tr) => "Resim",
+        (Remove, En) => "Remove",
+        (Remove, Tr) => "Kaldır",
         (DisplayNameLabel, En) => "DISPLAY NAME",
         (DisplayNameLabel, Tr) => "GÖRÜNEN AD",
         (EmailLabel, En) => "EMAIL",
@@ -801,8 +807,14 @@ fn month_names(lang: Lang) -> [&'static str; 12] {
 /// literals, embedded once per page in its inline script — the grid itself
 /// is built in JS (see `detail.rs`'s `datepicker_script`).
 pub fn datepicker_js_literals(lang: Lang) -> (String, String) {
-    let months = month_names(lang).map(|name| format!("\"{name}\"")).join(",");
-    let weekdays = t(lang, Key::WeekdayInitials).split(',').map(|initial| format!("\"{initial}\"")).collect::<Vec<_>>().join(",");
+    let months = month_names(lang)
+        .map(|name| format!("\"{name}\""))
+        .join(",");
+    let weekdays = t(lang, Key::WeekdayInitials)
+        .split(',')
+        .map(|initial| format!("\"{initial}\""))
+        .collect::<Vec<_>>()
+        .join(",");
     (format!("[{months}]"), format!("[{weekdays}]"))
 }
 
@@ -936,7 +948,9 @@ pub fn moved_not_watched_label(lang: Lang, to: &str, watched: &str) -> String {
 pub fn freed_not_watched_label(lang: Lang, watched: &str) -> String {
     match lang {
         Lang::En => format!("freed a task, rule watches a move to {watched}"),
-        Lang::Tr => format!("bir görevin engelini kaldırdı, kural {watched} sütununa taşınmasını izliyor"),
+        Lang::Tr => {
+            format!("bir görevin engelini kaldırdı, kural {watched} sütununa taşınmasını izliyor")
+        }
     }
 }
 

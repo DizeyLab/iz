@@ -236,14 +236,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 17);
+    assert_eq!(first.schema_version().await.unwrap(), 18);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 17);
+    assert_eq!(second.schema_version().await.unwrap(), 18);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -260,7 +260,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
         a_pre_0013_store_with_a_rule_send_and_decision().await;
 
     let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 17);
+    assert_eq!(store.schema_version().await.unwrap(), 18);
     assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
 
     let rules = store.mail_rules(&board).await.unwrap();
@@ -780,7 +780,12 @@ async fn profile_and_role_updates_stick() {
 
     scratch
         .store
-        .set_profile(&user.id, "Grace H.", Some("photos/grace.png"))
+        .set_profile(&user.id, "Grace H.")
+        .await
+        .unwrap();
+    scratch
+        .store
+        .set_photo(&user.id, b"grace-bytes", "image/png")
         .await
         .unwrap();
     scratch
@@ -791,9 +796,12 @@ async fn profile_and_role_updates_stick() {
     let at = OffsetDateTime::now_utc();
     scratch.store.mark_signed_in(&user.id, at).await.unwrap();
 
+    let photo = scratch.store.photo(&user.id).await.unwrap().unwrap();
+    assert_eq!(photo.0, b"grace-bytes".to_vec());
+    assert_eq!(photo.1, "image/png");
     let user = scratch.store.user(&user.id).await.unwrap().unwrap();
     assert_eq!(user.display_name, "Grace H.");
-    assert_eq!(user.photo_path.as_deref(), Some("photos/grace.png"));
+    assert!(user.has_photo);
     assert_eq!(user.role, Role::Viewer);
     // Stored as RFC 3339 text, so equality holds to the second.
     assert_eq!(
@@ -802,21 +810,10 @@ async fn profile_and_role_updates_stick() {
     );
 
     // Clearing the photo is a real update, not a no-op.
-    scratch
-        .store
-        .set_profile(&user.id, "Grace H.", None)
-        .await
-        .unwrap();
-    assert!(
-        scratch
-            .store
-            .user(&user.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .photo_path
-            .is_none()
-    );
+    scratch.store.clear_photo(&user.id).await.unwrap();
+    let user = scratch.store.user(&user.id).await.unwrap().unwrap();
+    assert!(!user.has_photo);
+    assert!(scratch.store.photo(&user.id).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -2292,7 +2289,7 @@ fn initials_fall_back_to_two_letters() {
     let person = |name: &str| Person {
         id: "u".into(),
         display_name: name.into(),
-        photo_path: None,
+        has_photo: false,
     };
     assert_eq!(person("Mel Duarte").initials(), "MD");
     assert_eq!(person("Ada").initials(), "A");

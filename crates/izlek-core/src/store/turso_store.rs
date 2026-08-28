@@ -10,7 +10,7 @@ use rand::Rng;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use turso::transaction::TransactionBehavior;
-use turso::{Builder, Connection, Row, Value, params};
+use turso::{Builder, Connection, Row, params};
 use ulid::Ulid;
 
 use super::secret;
@@ -70,6 +70,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0016_display_preferences.sql"),
     ),
     (17, include_str!("../../migrations/0017_ui_preference.sql")),
+    (18, include_str!("../../migrations/0018_photo_in_the_user.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -577,7 +578,7 @@ fn user_from(row: &Row) -> Result<User> {
         display_name: text(row, 3)?,
         role: Role::parse(&text(row, 4)?).ok_or_else(|| StoreError::Corrupt("role".into()))?,
         password_hash: opt_text(row, 5)?,
-        photo_path: opt_text(row, 6)?,
+        has_photo: row.get::<i64>(6).map_err(backend)? != 0,
         created_at: parse_stamp(&text(row, 7)?)?,
         last_signed_in_at: opt_stamp(row, 8)?,
         invited_by: opt_text(row, 9)?,
@@ -589,7 +590,7 @@ fn user_from(row: &Row) -> Result<User> {
 }
 
 const USER_COLUMNS: &str = "id, workspace_id, email, display_name, role, password_hash, \
-     photo_path, created_at, last_signed_in_at, invited_by, timezone, theme, language, ui";
+     (photo IS NOT NULL), created_at, last_signed_in_at, invited_by, timezone, theme, language, ui";
 
 fn signin_link_from(row: &Row) -> Result<SigninLink> {
     Ok(SigninLink {
@@ -943,21 +944,12 @@ impl Store for TursoStore {
         }
     }
 
-    async fn set_profile(
-        &self,
-        user_id: &str,
-        display_name: &str,
-        photo_path: Option<&str>,
-    ) -> Result<()> {
+    async fn set_profile(&self, user_id: &str, display_name: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        let photo = match photo_path {
-            Some(p) => Value::from(p.to_string()),
-            None => Value::Null,
-        };
         let n = conn
             .execute(
-                "UPDATE user SET display_name = ?1, photo_path = ?2 WHERE id = ?3",
-                params![display_name, photo, user_id],
+                "UPDATE user SET display_name = ?1 WHERE id = ?2",
+                params![display_name, user_id],
             )
             .await
             .map_err(backend)?;
@@ -965,6 +957,56 @@ impl Store for TursoStore {
             Err(StoreError::NotFound)
         } else {
             Ok(())
+        }
+    }
+
+    async fn set_photo(&self, user_id: &str, bytes: &[u8], mime: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE user SET photo = ?1, photo_mime = ?2 WHERE id = ?3",
+                params![bytes, mime, user_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn clear_photo(&self, user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE user SET photo = NULL, photo_mime = NULL WHERE id = ?1",
+                params![user_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            Err(StoreError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn photo(&self, user_id: &str) -> Result<Option<(Vec<u8>, String)>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT photo, photo_mime FROM user WHERE id = ?1",
+                params![user_id],
+            )
+            .await
+            .map_err(backend)?;
+        match rows.next().await.map_err(backend)? {
+            Some(row) => match row.get::<Option<Vec<u8>>>(0).map_err(backend)? {
+                Some(bytes) => Ok(Some((bytes, text(&row, 1)?))),
+                None => Ok(None),
+            },
+            None => Ok(None),
         }
     }
 
@@ -2800,7 +2842,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT u.id, u.display_name, u.photo_path FROM task_assignee a \
+                "SELECT u.id, u.display_name, (u.photo IS NOT NULL) FROM task_assignee a \
                  JOIN user u ON u.id = a.user_id \
                  WHERE a.task_id = ?1 ORDER BY u.display_name",
                 params![task_id],
@@ -2812,7 +2854,7 @@ impl DetailReads for TursoStore {
             out.push(Person {
                 id: text(&row, 0)?,
                 display_name: text(&row, 1)?,
-                photo_path: opt_text(&row, 2)?,
+                has_photo: row.get::<i64>(2).map_err(backend)? != 0,
             });
         }
         Ok(out)
@@ -2824,7 +2866,7 @@ impl DetailReads for TursoStore {
         // so neither leaves the server for this screen.
         let mut rows = conn
             .query(
-                "SELECT id, display_name, photo_path FROM user \
+                "SELECT id, display_name, (photo IS NOT NULL) FROM user \
                  WHERE workspace_id = ?1 AND role <> ?2 ORDER BY display_name",
                 params![workspace_id, Role::Viewer.as_str()],
             )
@@ -2835,7 +2877,7 @@ impl DetailReads for TursoStore {
             out.push(Person {
                 id: text(&row, 0)?,
                 display_name: text(&row, 1)?,
-                photo_path: opt_text(&row, 2)?,
+                has_photo: row.get::<i64>(2).map_err(backend)? != 0,
             });
         }
         Ok(out)
@@ -2883,7 +2925,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, u.photo_path \
+                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, (u.photo IS NOT NULL) \
                  FROM comment c JOIN user u ON u.id = c.author_id \
                  WHERE c.task_id = ?1 ORDER BY c.created_at, c.rowid",
                 params![task_id],
@@ -2899,7 +2941,7 @@ impl DetailReads for TursoStore {
                 author: Person {
                     id: text(&row, 3)?,
                     display_name: text(&row, 4)?,
-                    photo_path: opt_text(&row, 5)?,
+                    has_photo: row.get::<i64>(5).map_err(backend)? != 0,
                 },
             });
         }
@@ -2939,7 +2981,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
-                 u.photo_path \
+                 (u.photo IS NOT NULL) \
                  FROM activity a LEFT JOIN user u ON u.id = a.actor_id \
                  WHERE a.task_id = ?1 ORDER BY a.created_at, a.rowid",
                 params![task_id],
@@ -2952,7 +2994,7 @@ impl DetailReads for TursoStore {
                 Some(id) => Some(Person {
                     id,
                     display_name: text(&row, 5)?,
-                    photo_path: opt_text(&row, 6)?,
+                    has_photo: row.get::<i64>(6).map_err(backend)? != 0,
                 }),
                 None => None,
             };
@@ -3039,7 +3081,7 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT a.task_id, u.id, u.display_name, u.photo_path \
+                "SELECT a.task_id, u.id, u.display_name, (u.photo IS NOT NULL) \
                  FROM task_assignee a \
                  JOIN task t ON t.id = a.task_id \
                  JOIN user u ON u.id = a.user_id \
@@ -3056,7 +3098,7 @@ impl BoardReads for TursoStore {
                 Person {
                     id: text(&row, 1)?,
                     display_name: text(&row, 2)?,
-                    photo_path: opt_text(&row, 3)?,
+                    has_photo: row.get::<i64>(3).map_err(backend)? != 0,
                 },
             ));
         }

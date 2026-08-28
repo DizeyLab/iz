@@ -17,8 +17,8 @@ use topcoat::router::response::{IntoResponse, Response};
 use topcoat::router::{HeaderName, StatusCode, header, route};
 
 use crate::server::{
-    Refusal, accounts, clear_session_cookie, client_label, mail, presented_session,
-    require_admin, require_user, set_session_cookie,
+    Refusal, accounts, clear_session_cookie, client_label, mail, presented_session, require_admin,
+    require_user, set_session_cookie,
 };
 use crate::settings::encode_q;
 
@@ -100,7 +100,12 @@ struct ClaimWorkspaceForm {
 #[route(POST "/api/claim_workspace")]
 async fn claim_workspace(cx: &Cx, Form(input): Form<ClaimWorkspaceForm>) -> Redirect {
     match accounts(cx)
-        .claim_workspace(WORKSPACE_NAME, &input.email, &input.display_name, &input.password)
+        .claim_workspace(
+            WORKSPACE_NAME,
+            &input.email,
+            &input.display_name,
+            &input.password,
+        )
         .await
     {
         Ok((_workspace, signed_in)) => {
@@ -121,7 +126,10 @@ struct SignInForm {
 /// password yet, or the password is wrong.
 #[route(POST "/api/sign_in")]
 async fn sign_in(cx: &Cx, Form(input): Form<SignInForm>) -> Redirect {
-    match accounts(cx).sign_in(&input.email, &input.password, &client_label(cx)).await {
+    match accounts(cx)
+        .sign_in(&input.email, &input.password, &client_label(cx))
+        .await
+    {
         Ok(signed_in) => {
             set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
             redirect(cx, None)
@@ -161,7 +169,11 @@ async fn redeem_link(cx: &Cx, Form(input): Form<RedeemLinkForm>) -> Redirect {
             // Redeemed; the referring `/join/{token}` now names a spent
             // link, which would show "no longer works" to someone who just
             // signed in, so land on the board itself instead.
-            Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/".to_string())], Json(None)))
+            Ok((
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, "/".to_string())],
+                Json(None),
+            ))
         }
         Err(error) => redirect(cx, Some(error.into())),
     }
@@ -215,7 +227,10 @@ async fn invite_member(cx: &Cx, Form(input): Form<InviteMemberForm>) -> Result<R
         Ok(admin) => admin,
         Err(refusal) => return invite_answer(cx, has_referer, Err(refusal)),
     };
-    match accounts(cx).invite(&admin, &input.email, &input.display_name, input.role).await {
+    match accounts(cx)
+        .invite(&admin, &input.email, &input.display_name, input.role)
+        .await
+    {
         Ok(made) => {
             mail(cx).after_invite();
             invite_answer(cx, has_referer, Ok(made.user.email))
@@ -226,7 +241,11 @@ async fn invite_member(cx: &Cx, Form(input): Form<InviteMemberForm>) -> Result<R
 
 /// The address mailed, or the refusal, either as JSON for a caller with
 /// script or a 303 back to Settings for a browser form post.
-fn invite_answer(cx: &Cx, has_referer: bool, outcome: std::result::Result<String, Refusal>) -> Result<Response> {
+fn invite_answer(
+    cx: &Cx,
+    has_referer: bool,
+    outcome: std::result::Result<String, Refusal>,
+) -> Result<Response> {
     if !has_referer {
         return Json(outcome).into_response(cx);
     }

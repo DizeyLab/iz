@@ -29,7 +29,11 @@ async fn landing(cx: &Cx) -> Result {
         Ok(Some(user)) => signed_in_shell(cx, user.clone()).await,
         Ok(None) => {
             let claimed = accounts(cx).store().owner().await?.is_some();
-            if claimed { sign_in_card(cx).await } else { setup_card(cx).await }
+            if claimed {
+                sign_in_card(cx).await
+            } else {
+                setup_card(cx).await
+            }
         }
         Err(_) => view! {
             cx =>

@@ -137,7 +137,7 @@ pub struct User {
     pub display_name: String,
     pub role: Role,
     pub password_hash: Option<String>,
-    pub photo_path: Option<String>,
+    pub has_photo: bool,
     pub created_at: OffsetDateTime,
     pub last_signed_in_at: Option<OffsetDateTime>,
     /// Who made this account. Null for the first account, which nobody
@@ -578,12 +578,15 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     async fn set_password_hash(&self, user_id: &str, hash: &str) -> Result<()>;
 
-    async fn set_profile(
-        &self,
-        user_id: &str,
-        display_name: &str,
-        photo_path: Option<&str>,
-    ) -> Result<()>;
+    async fn set_profile(&self, user_id: &str, display_name: &str) -> Result<()>;
+
+    /// Stores the profile photo's bytes and mime type, replacing any previous one.
+    async fn set_photo(&self, user_id: &str, bytes: &[u8], mime: &str) -> Result<()>;
+
+    async fn clear_photo(&self, user_id: &str) -> Result<()>;
+
+    /// The photo's bytes and mime type, or `None` when none is set.
+    async fn photo(&self, user_id: &str) -> Result<Option<(Vec<u8>, String)>>;
 
     /// Changes the sign-in address. Refuses with [`StoreError::Conflict`] if
     /// another account in the same workspace already holds it — the same

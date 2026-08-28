@@ -10,7 +10,9 @@ use time::OffsetDateTime;
 use topcoat::context::Cx;
 use topcoat::router::content::multipart::Multipart;
 use topcoat::router::request::headers as request_headers;
-use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, path_param, query_params, route};
+use topcoat::router::{
+    HeaderMap, HeaderValue, StatusCode, header, path_param, query_params, route,
+};
 
 use izlek_core::store::{NewAttachment, Store, User};
 
@@ -61,16 +63,13 @@ fn home(refusal: Refusal) -> (StatusCode, HeaderMap, Vec<u8>) {
 /// carry a control character. What a browser calls a file is a label on a
 /// row, never a place to write bytes.
 fn label_of(file_name: &str) -> String {
-    let base = file_name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(file_name);
+    let base = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
     base.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// What the bytes are, decided from the bytes themselves — never from the
 /// part's `content_type()`, which is whatever the browser felt like sending.
-fn sniff(bytes: &[u8]) -> &'static str {
+pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
         "image/png"
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -87,7 +86,10 @@ fn sniff(bytes: &[u8]) -> &'static str {
         "image/avif"
     } else if bytes.len() >= 12
         && &bytes[4..8] == b"ftyp"
-        && matches!(&bytes[8..12], b"heic" | b"heix" | b"hevc" | b"heif" | b"mif1" | b"msf1")
+        && matches!(
+            &bytes[8..12],
+            b"heic" | b"heix" | b"hevc" | b"heif" | b"mif1" | b"msf1"
+        )
     {
         // Apple's HEIC container reuses the ISO-BMFF `ftyp` box video shares;
         // the brand at bytes 8..12 is what tells a photo from a video apart.
@@ -106,7 +108,11 @@ fn sniff(bytes: &[u8]) -> &'static str {
         "audio/flac"
     } else if bytes.starts_with(b"OggS") {
         "audio/ogg"
-    } else if bytes.starts_with(b"ID3") || bytes.starts_with(&[0xFF, 0xFB]) || bytes.starts_with(&[0xFF, 0xF3]) || bytes.starts_with(&[0xFF, 0xF2]) {
+    } else if bytes.starts_with(b"ID3")
+        || bytes.starts_with(&[0xFF, 0xFB])
+        || bytes.starts_with(&[0xFF, 0xF3])
+        || bytes.starts_with(&[0xFF, 0xF2])
+    {
         "audio/mpeg"
     } else if std::str::from_utf8(bytes).is_ok() {
         "text/plain"
@@ -127,7 +133,13 @@ fn disposition_of(file_name: &str, inline: bool) -> String {
     let kind = if inline { "inline" } else { "attachment" };
     let ascii: String = file_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let mut encoded = String::new();
     for &byte in file_name.as_bytes() {
@@ -241,7 +253,10 @@ struct DownloadQuery {
 /// Fields arrive in request order: `task_id` before `file`, so the task and
 /// the workspace's limits are known before a byte of the file is kept.
 #[route(POST "/files")]
-async fn upload(cx: &Cx, mut multipart: Multipart) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> {
+async fn upload(
+    cx: &Cx,
+    mut multipart: Multipart,
+) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(home(refusal)),
@@ -392,11 +407,13 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&row.mime_type).unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&row.mime_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&disposition_of(&row.file_name, inline)).unwrap_or(HeaderValue::from_static("attachment")),
+        HeaderValue::from_str(&disposition_of(&row.file_name, inline))
+            .unwrap_or(HeaderValue::from_static("attachment")),
     );
     // Safari refuses to play a `<video>`/`<audio>` element without a `206`
     // reply to its own `Range` probe; every other engine loses instant seek
@@ -405,7 +422,9 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
     let total = bytes.len() as u64;
-    let range = request_headers(cx).get(header::RANGE).and_then(|v| v.to_str().ok());
+    let range = request_headers(cx)
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
     match range.and_then(|r| parse_range(r, total)) {
         Some(Ok((start, end))) => {
             let slice = bytes[start as usize..=end as usize].to_vec();
@@ -435,16 +454,34 @@ mod tests {
         assert_eq!(sniff(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]), "image/png");
         assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
         assert_eq!(sniff(b"hello, this is plainly text"), "text/plain");
-        assert_eq!(sniff(&[0x00, 0x01, 0xFE, 0xFF, 0x02]), "application/octet-stream");
+        assert_eq!(
+            sniff(&[0x00, 0x01, 0xFE, 0xFF, 0x02]),
+            "application/octet-stream"
+        );
     }
 
     #[test]
     fn sniffs_the_media_types() {
-        assert_eq!(sniff(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"), "video/mp4");
-        assert_eq!(sniff(b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00"), "image/avif");
-        assert_eq!(sniff(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"), "image/heic");
-        assert_eq!(sniff(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00"), "image/heic");
-        assert_eq!(sniff(b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"), "video/quicktime");
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"),
+            "video/mp4"
+        );
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00"),
+            "image/avif"
+        );
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"),
+            "image/heic"
+        );
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00"),
+            "image/heic"
+        );
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"),
+            "video/quicktime"
+        );
         assert_eq!(sniff(&[0x1A, 0x45, 0xDF, 0xA3, 0x00, 0x00]), "video/webm");
         assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
         assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WAVEfmt "), "audio/wav");
@@ -519,7 +556,11 @@ mod tests {
         assert_eq!(viewer_kind("application/pdf"), Some(ViewerKind::Pdf));
         assert_eq!(viewer_kind("text/plain"), None);
         assert_eq!(viewer_kind("application/octet-stream"), None);
-        assert_eq!(viewer_kind("image/heic"), None, "no decoder, no viewer element");
+        assert_eq!(
+            viewer_kind("image/heic"),
+            None,
+            "no decoder, no viewer element"
+        );
         assert_eq!(viewer_kind("video/quicktime"), Some(ViewerKind::Video));
     }
 
@@ -528,15 +569,27 @@ mod tests {
         assert_eq!(parse_range("bytes=0-3", 10), Some(Ok((0, 3))));
         assert_eq!(parse_range("bytes=-2", 10), Some(Ok((8, 9))));
         assert_eq!(parse_range("bytes=5-", 10), Some(Ok((5, 9))));
-        assert_eq!(parse_range("bytes=5-100", 10), Some(Ok((5, 9))), "end clamps to the last byte");
+        assert_eq!(
+            parse_range("bytes=5-100", 10),
+            Some(Ok((5, 9))),
+            "end clamps to the last byte"
+        );
     }
 
     #[test]
     fn range_is_unsatisfiable_past_the_end_and_ignored_when_multi_range_or_malformed() {
         assert_eq!(parse_range("bytes=10-20", 10), Some(Err(())));
         assert_eq!(parse_range("bytes=-0", 10), Some(Err(())));
-        assert_eq!(parse_range("bytes=0-3,5-8", 10), None, "multi-range falls back to a full body");
+        assert_eq!(
+            parse_range("bytes=0-3,5-8", 10),
+            None,
+            "multi-range falls back to a full body"
+        );
         assert_eq!(parse_range("nonsense", 10), None);
-        assert_eq!(parse_range("bytes=0-3", 0), None, "an empty file has no range to satisfy");
+        assert_eq!(
+            parse_range("bytes=0-3", 0),
+            None,
+            "an empty file has no range to satisfy"
+        );
     }
 }

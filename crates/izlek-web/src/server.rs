@@ -86,7 +86,11 @@ impl Mail {
     /// rehydrates it and lets the engine decide whether any rule owes a mail.
     /// `store` is the same store the request already wrote through — the
     /// engine has no public handle back to it, so the caller carries it.
-    pub fn after_activity(&self, store: std::sync::Arc<dyn izlek_core::store::Store>, activity_id: String) {
+    pub fn after_activity(
+        &self,
+        store: std::sync::Arc<dyn izlek_core::store::Store>,
+        activity_id: String,
+    ) {
         let Some(engine) = self.0.clone() else {
             return;
         };
@@ -149,7 +153,9 @@ impl Mail {
 /// The engine for this request, or a silent one when the router was built
 /// without an engine at all.
 pub fn mail(cx: &Cx) -> Mail {
-    try_app_context::<Mail>(cx).cloned().unwrap_or_else(Mail::silent)
+    try_app_context::<Mail>(cx)
+        .cloned()
+        .unwrap_or_else(Mail::silent)
 }
 
 /// The application cookie jar, with the attributes every Izlek cookie wants.
@@ -163,7 +169,9 @@ fn app_cookies(cx: &Cx) -> impl Cookies {
 
 /// The cookie value this request presented, if it presented one.
 pub fn presented_session(cx: &Cx) -> Option<String> {
-    cookies(cx).get(SESSION_COOKIE).map(|c| c.value().to_string())
+    cookies(cx)
+        .get(SESSION_COOKIE)
+        .map(|c| c.value().to_string())
 }
 
 /// A stable-enough label for the client, for rate limiting. A proxy header is
@@ -332,6 +340,8 @@ pub enum Refusal {
     FileTooBig,
     /// The name does not end in one of the extensions the admin allows.
     FileTypeNotAllowed,
+    /// The bytes uploaded as a profile photo do not sniff as an image.
+    NotAnImage,
     /// A rule with no subject line: the mail it sends would arrive blank.
     EmptySubject,
     /// The date field did not hold a date.
@@ -382,6 +392,7 @@ impl Refusal {
             Refusal::FileTypeNotAllowed => {
                 "That kind of file is not on this workspace's allowed list.".to_string()
             }
+            Refusal::NotAnImage => "That is not an image.".to_string(),
             Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -410,6 +421,7 @@ impl Refusal {
             Refusal::FileTypeNotAllowed => {
                 "Bu dosya türü bu çalışma alanının izin verdiği listede değil.".to_string()
             }
+            Refusal::NotAnImage => "Bu bir resim değil.".to_string(),
             Refusal::BadDeadline => "Bu bir tarih değil.".to_string(),
             Refusal::Cycle => "Bu bağlantı görevi kendi arkasına koyar.".to_string(),
             Refusal::MovedAlready => "Bu kartı başka biri zaten taşıdı.".to_string(),
@@ -479,6 +491,7 @@ impl Refusal {
             "no-file" => Refusal::NoFile,
             "file-too-big" => Refusal::FileTooBig,
             "file-type" => Refusal::FileTypeNotAllowed,
+            "not-an-image" => Refusal::NotAnImage,
             "empty-subject" => Refusal::EmptySubject,
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
@@ -529,6 +542,7 @@ impl Refusal {
             Refusal::NoFile => "no-file",
             Refusal::FileTooBig => "file-too-big",
             Refusal::FileTypeNotAllowed => "file-type",
+            Refusal::NotAnImage => "not-an-image",
             Refusal::EmptySubject => "empty-subject",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
@@ -601,7 +615,11 @@ pub fn refusal_of(cx: &Cx, call: &str) -> Option<Refusal> {
 /// checks for is `SEE_OTHER` — the guard's three conditions are otherwise
 /// unchanged.
 #[topcoat::router::layer("/api")]
-async fn carry_refusal_on_redirect(cx: &Cx, body: Body, next: Next<'_>) -> topcoat::Result<Response> {
+async fn carry_refusal_on_redirect(
+    cx: &Cx,
+    body: Body,
+    next: Next<'_>,
+) -> topcoat::Result<Response> {
     // A form post from a browser asks for a page back. A server-function call
     // from the hydrated bundle does not.
     let wants_page = headers(cx)
@@ -626,8 +644,14 @@ async fn carry_refusal_on_redirect(cx: &Cx, body: Body, next: Next<'_>) -> topco
     let Ok(bytes) = to_bytes(body, 64 * 1024).await else {
         return Ok(Response::from_parts(parts, Body::empty()));
     };
-    let refusal = serde_json::from_slice::<Option<Refusal>>(&bytes).ok().flatten();
-    if let Some(location) = parts.headers.get(header::LOCATION).and_then(|v| v.to_str().ok()) {
+    let refusal = serde_json::from_slice::<Option<Refusal>>(&bytes)
+        .ok()
+        .flatten();
+    if let Some(location) = parts
+        .headers
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+    {
         let rewritten = match refusal {
             Some(refusal) => carrying(location, refusal.code(), &called),
             None => Some(same_origin(location).to_string()),
@@ -825,7 +849,11 @@ mod refusal_of_tests {
     use topcoat::context::CxTestBuilder;
 
     fn cx_at(uri: &str) -> Cx {
-        let (parts, ()) = http::Request::builder().uri(uri).body(()).unwrap().into_parts();
+        let (parts, ()) = http::Request::builder()
+            .uri(uri)
+            .body(())
+            .unwrap()
+            .into_parts();
         CxTestBuilder::new().request_context(parts).build()
     }
 
@@ -906,7 +934,13 @@ mod session_cookie_tests {
         let set = set_cookie_headers(&cx);
         assert_eq!(set.len(), 1);
         assert!(set[0].starts_with("izlek_session=tok123;"), "{}", set[0]);
-        for attr in ["Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age=1209600"] {
+        for attr in [
+            "Path=/",
+            "Secure",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Max-Age=1209600",
+        ] {
             assert!(set[0].contains(attr), "{} missing {attr}", set[0]);
         }
     }

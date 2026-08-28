@@ -6,32 +6,68 @@ use topcoat::{
     asset::{Asset, asset},
     context::Cx,
     router::{
-        StatusCode, page,
-        layout,
+        StatusCode,
         error::{NotFoundError, not_found},
+        layout, page,
     },
     view::{Unescaped, view},
 };
 
+use izlek_core::board::Person;
+
 use crate::i18n::{Key, Lang, t};
 use crate::server::current_user;
+
+/// A person as a circle (or, on the Instrument skin, a square) — the initials
+/// avatar when there is no photo, an `<img>` reading `/photo/{id}` otherwise.
+/// Shared by the board, the modal and every topbar user menu.
+pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
+    let tone = person
+        .id
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
+        % 5;
+    let class = format!("avatar avatar-tone-{tone} {extra}");
+    let name = person.display_name.clone();
+    if person.has_photo {
+        let src = format!("/photo/{}", person.id);
+        view! {
+            cx =>
+            <img class=(class) src=(src) alt=(name.clone()) data-name=(name)>
+        }
+    } else {
+        let initials = person.initials();
+        view! {
+            cx =>
+            <span class=(class) data-name=(name)>(initials)</span>
+        }
+    }
+}
 
 /// The topbar's signed-in identity: the display name, opening on hover or
 /// focus onto details (name, address, role), settings and sign-out. Shared
 /// by every signed-in page's topbar (board, settings, mail rules, logs).
-pub async fn user_menu(cx: &Cx, display_name: &str, email: &str, role: izlek_core::Role, lang: Lang) -> Result {
-    let role_key = match role {
+pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
+    let role_key = match me.role {
         izlek_core::Role::Admin => Key::RoleAdminOption,
         izlek_core::Role::Member => Key::RoleMemberOption,
         izlek_core::Role::Viewer => Key::RoleViewerOption,
     };
+    let person = izlek_core::board::Person {
+        id: me.id.clone(),
+        display_name: me.display_name.clone(),
+        has_photo: me.has_photo,
+    };
     view! {
         cx =>
         <div class="user-menu">
-            <button type="button" class="user-menu-trigger">(display_name.to_string())</button>
+            <button type="button" class="user-menu-trigger">
+                (avatar(cx, &person, "").await?)
+                (me.display_name.clone())
+            </button>
             <div class="user-menu-panel">
-                <div class="user-menu-name">(display_name.to_string())</div>
-                <div class="user-menu-email">(email.to_string())</div>
+                <div class="user-menu-name">(me.display_name.clone())</div>
+                <div class="user-menu-email">(me.email.clone())</div>
                 <div class="user-menu-role">(t(lang, role_key))</div>
                 <div class="user-menu-divider"></div>
                 <a class="user-menu-item" href="/settings">(t(lang, Key::Settings))</a>
