@@ -717,18 +717,12 @@ async fn rules_page(cx: &Cx) -> Result {
             </a>
             <div class="topbar-divider"></div>
             <span class="board-name">(t(lang, Key::MailRules))</span>
+            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Rules, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
         </header>
 
         <div class="settings-shell">
-            <nav class="sidenav">
-                <a class="sidenav-item" href="/">(t(lang, Key::NavBoard))</a>
-                <a class="sidenav-item sidenav-item-on" href="/rules">(t(lang, Key::NavMailRules))</a>
-                <a class="sidenav-item" href="/logs">(t(lang, Key::NavLogs))</a>
-                <a class="sidenav-item" href="/settings">(t(lang, Key::NavSettings))</a>
-            </nav>
-
             <main class="settings-stage">
                 <div class="settings-head">
                     <h1 class="settings-title">(t(lang, Key::MailRules))</h1>

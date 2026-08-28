@@ -788,25 +788,27 @@ async fn settings_page(cx: &Cx) -> Result {
             </a>
             <div class="topbar-divider"></div>
             <span class="board-name">(t(lang, Key::NavSettings))</span>
+            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Settings, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
         </header>
 
         <div class="settings-shell">
-            <nav class="sidenav">
-                <a class="sidenav-item" href="/">(t(lang, Key::NavBoard))</a>
-                <a class="sidenav-item" href="/rules">(t(lang, Key::NavMailRules))</a>
-                <a class="sidenav-item" href="/logs">(t(lang, Key::NavLogs))</a>
-                <a class="sidenav-item sidenav-item-on" href="/settings">(t(lang, Key::NavSettings))</a>
-            </nav>
-
             <main class="settings-stage">
                 <div class="settings-head">
                     <h1 class="settings-title">(t(lang, Key::NavSettings))</h1>
                     <span class="chip chip-role">(user.role.as_str().to_string())</span>
                 </div>
+                <nav class="settings-sections">
+                    <a class="settings-section-link" href="#profile">(t(lang, Key::YourProfile))</a>
+                    if administers {
+                        <a class="settings-section-link" href="#outgoing">(t(lang, Key::OutgoingMail))</a>
+                        <a class="settings-section-link" href="#limits">(t(lang, Key::WorkspaceLimits))</a>
+                        <a class="settings-section-link" href="#members">(t(lang, Key::Members))</a>
+                    }
+                </nav>
 
-                <section class="panel">
+                <section class="panel" id="profile">
                     <div class="panel-head">
                         <h2 class="panel-title">(t(lang, Key::YourProfile))</h2>
                     </div>
@@ -870,7 +872,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 if let Some(sender) = &sender {
                     let connected = sender.is_connected();
                     let password_set = sender.password_set;
-                    <section class="panel">
+                    <section class="panel" id="outgoing">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::OutgoingMail))</h2>
                             <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
@@ -975,7 +977,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 }
 
                 if let Some((attachment_limit_mb, photo_limit_mb)) = limits {
-                    <section class="panel">
+                    <section class="panel" id="limits">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::WorkspaceLimits))</h2>
                             <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
@@ -1031,7 +1033,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 }
 
                 if let Some(members) = members {
-                    <section class="panel">
+                    <section class="panel" id="members">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::Members))</h2>
                             <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>

@@ -43,6 +43,56 @@ pub async fn user_menu(cx: &Cx, display_name: &str, email: &str, role: izlek_cor
     }
 }
 
+/// The four signed-in pages, as the topbar nav links between them.
+#[derive(Clone, Copy, PartialEq)]
+pub enum NavPage {
+    Board,
+    Rules,
+    Logs,
+    Settings,
+}
+
+impl NavPage {
+    const ALL: [Self; 4] = [Self::Board, Self::Rules, Self::Logs, Self::Settings];
+
+    fn href(self) -> &'static str {
+        match self {
+            Self::Board => "/",
+            Self::Rules => "/rules",
+            Self::Logs => "/logs",
+            Self::Settings => "/settings",
+        }
+    }
+
+    fn label(self) -> Key {
+        match self {
+            Self::Board => Key::NavBoard,
+            Self::Rules => Key::NavMailRules,
+            Self::Logs => Key::NavLogs,
+            Self::Settings => Key::NavSettings,
+        }
+    }
+}
+
+/// The topbar's page nav, shared by every signed-in page: the four pages
+/// with the current one marked. Plain `<a>`s — the soft-nav forwarder
+/// swaps them like any same-origin link, so `data-hard` stays off.
+pub async fn topbar_nav(cx: &Cx, active: NavPage, lang: Lang) -> Result {
+    view! {
+        cx =>
+        <nav class="topbar-nav-links">
+            for page in NavPage::ALL {
+                <a
+                    class=(if page == active { "topbar-nav topbar-nav-on" } else { "topbar-nav" })
+                    href=(page.href())
+                >
+                    (t(lang, page.label()))
+                </a>
+            }
+        </nav>
+    }
+}
+
 /// The page-swap machinery that keeps every mutation on the same document.
 ///
 /// Every `/api/*` mutation is a plain form post answered with a 303 — sound

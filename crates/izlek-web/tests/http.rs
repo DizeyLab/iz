@@ -2893,14 +2893,32 @@ async fn creating_a_task_into_a_ruled_column_owes_mail() {
 }
 
 #[tokio::test]
-async fn the_settings_sidenav_offers_logs() {
+async fn the_topbar_nav_marks_the_active_page() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    let page = app.get("/settings", Some(&admin_cookie)).await;
-    assert_eq!(page.status, StatusCode::OK);
+    for (path, active) in [("/", "/"), ("/rules", "/rules"), ("/logs", "/logs"), ("/settings", "/settings")] {
+        let page = app.get(path, Some(&admin_cookie)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        let html = String::from_utf8_lossy(&page.bytes);
+        for nav in ["/", "/rules", "/logs", "/settings"] {
+            let expected = if nav == active {
+                format!(r#"class="topbar-nav topbar-nav-on" href="{nav}""#)
+            } else {
+                format!(r#"class="topbar-nav" href="{nav}""#)
+            };
+            assert!(html.contains(&expected), "page {path} lacks `{expected}`: {html}");
+        }
+    }
+
+    // The settings section list keeps the panels' admin gating: a member
+    // sees only the Profile anchor.
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let page = app.get("/settings", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("href=\"/logs\""), "{html}");
+    assert!(html.contains(r##"href="#profile""##), "{html}");
+    assert!(!html.contains("href=\"#limits\""), "{html}");
+    assert!(!html.contains("href=\"#members\""), "{html}");
 }
 
 /// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`

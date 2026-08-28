@@ -92,7 +92,7 @@ pub enum Key {
     Overdue,
     Blocked,
 
-    // Sidenav / chrome shared by settings.rs, rules.rs, logs.rs.
+    // Topbar nav / chrome shared by board.rs, rules.rs, logs.rs, settings.rs.
     NavBoard,
     NavMailRules,
     NavLogs,

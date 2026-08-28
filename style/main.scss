@@ -377,6 +377,28 @@ a {
   font-weight: 600;
 }
 
+.topbar-nav-links {
+  display: flex;
+  gap: 16px;
+}
+
+.topbar-nav {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-soft);
+  text-decoration: none;
+  padding-bottom: 2px;
+
+  &:hover { color: var(--ink); }
+
+  &-on {
+    color: var(--ink);
+    box-shadow: inset 0 -2px 0 var(--ink);
+  }
+}
+
 .scaffold-note {
   margin: 24px;
   padding: 20px 24px;
@@ -2065,38 +2087,8 @@ a {
 
 .settings-shell {
   display: flex;
-  min-height: calc(100vh - var(--topbar-height));
-}
-
-.sidenav {
-  width: 220px;
-  flex-shrink: 0;
-  border-right: 1px solid var(--border);
-  padding: 20px 12px;
-  display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-
-.sidenav-item {
-  display: flex;
-  align-items: center;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: var(--radius);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--ink-soft);
-  text-decoration: none;
-  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-
-  &:hover { background: var(--surface-sunken); color: var(--ink); }
-
-  &-on {
-    background: var(--accent-tint);
-    color: var(--accent-ink);
-    font-weight: 600;
-  }
+  min-height: calc(100vh - var(--topbar-height));
 }
 
 .settings-stage {
@@ -2114,6 +2106,23 @@ a {
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.settings-sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.settings-section-link {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-soft);
+  text-decoration: none;
+
+  &:hover { color: var(--ink); }
 }
 
 .settings-title {
