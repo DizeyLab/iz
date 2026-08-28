@@ -18,9 +18,14 @@ use topcoat::view::{Unescaped, view};
 /// Emitted once per page that renders a `<select>`; the enhancement is
 /// per-element and idempotent (`data-dd-done`), re-run on `izlek:wire` so
 /// selects arriving in a soft page swap get theirs too. Owns its own
-/// `Escape` resolver on `window.__izlekEsc` (priority 50 — an open panel
-/// closes before the topbar and card-menu layers below it; the whole order
-/// lives in the table on `layout.rs`'s `escape_manager_script`).
+/// `Escape` resolver on `window.__izlekEsc` (priority 95 — the dropdown
+/// outranks the modal chain: Escape on an open panel closes just the
+/// panel, never the modal above it. The old per-script listeners made
+/// this order path-dependent — a modal swapped in by soft navigation
+/// registered its listener last and lost to the dropdown; a full load
+/// with `?task=` registered it first and the modal chain won, closing
+/// the whole modal over an open dropdown — the registry pins the correct
+/// order; the whole table lives in `layout.rs`'s `escape_manager_script`).
 pub async fn dropdown_script(cx: &Cx) -> Result {
     const JS: &str = "\
         (function () {\
@@ -117,7 +122,7 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                     if (row) { pick(select, trigger, panel, row); }\
                 });\
             }\
-            window.__izlekEsc.register(50, function () {\
+            window.__izlekEsc.register(95, function () {\
                 var panel = document.querySelector('.dd-panel.dd-open');\
                 if (!panel) { return false; }\
                 var trigger = panel.__ddTrigger;\

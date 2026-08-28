@@ -295,8 +295,8 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
 ///
 /// | prio | closes | registered by |
 /// |------|--------|---------------|
+/// | 95 | the open dropdown panel (refocusing its trigger) | `dropdown.rs`'s `dropdown_script` |
 /// | 90 | the viewer, then the delete confirm, then non-datepick edit popovers, then the task modal | `detail.rs`'s `escape_closes` |
-/// | 50 | the open dropdown panel (refocusing its trigger) | `dropdown.rs`'s `dropdown_script` |
 /// | 40 | the topbar `.user-menu` (pin+blur), then the rules composer, then a rules edit row (back to `/rules`) | `layout.rs`'s `escape_script` |
 /// | 20 | the datepicker popover | `board.rs`'s `card_menu_script` |
 /// | 10 | the card context menu | `board.rs`'s `card_menu_script` |
