@@ -4509,3 +4509,23 @@ async fn an_unknown_photo_id_is_not_found_and_the_photo_revalidates_by_etag() {
     assert_eq!(cached.status, StatusCode::NOT_MODIFIED);
     assert!(cached.bytes.is_empty());
 }
+
+/// The nav shows a page only to a role that can act on it: an admin's board
+/// carries all four links, a member's carries neither Rules nor Logs.
+#[tokio::test]
+async fn the_nav_hides_rules_and_logs_from_a_member() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let member = invited(&app, &admin, "deniz@izlek.sh", "Deniz", Role::Member).await;
+
+    let admin_board = app.get("/", Some(&admin)).await;
+    let admin_html = String::from_utf8_lossy(&admin_board.bytes).into_owned();
+    assert!(admin_html.contains("href=\"/rules\""));
+    assert!(admin_html.contains("href=\"/logs\""));
+
+    let member_board = app.get("/", Some(&member)).await;
+    let member_html = String::from_utf8_lossy(&member_board.bytes).into_owned();
+    assert!(member_html.contains("href=\"/settings\""));
+    assert!(!member_html.contains("href=\"/rules\""));
+    assert!(!member_html.contains("href=\"/logs\""));
+}

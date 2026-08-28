@@ -45,8 +45,8 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 }
 
 /// The topbar's signed-in identity: the display name, opening on hover or
-/// focus onto details (name, address, role), settings and sign-out. Shared
-/// by every signed-in page's topbar (board, settings, mail rules, logs).
+/// focus onto details (name, address, role) and sign-out. Shared by every
+/// signed-in page's topbar (board, settings, mail rules, logs).
 pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
     let role_key = match me.role {
         izlek_core::Role::Admin => Key::RoleAdminOption,
@@ -69,8 +69,6 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
                 <div class="user-menu-name">(me.display_name.clone())</div>
                 <div class="user-menu-email">(me.email.clone())</div>
                 <div class="user-menu-role">(t(lang, role_key))</div>
-                <div class="user-menu-divider"></div>
-                <a class="user-menu-item" href="/settings">(t(lang, Key::Settings))</a>
                 <form class="user-menu-item-form" method="post" action="/api/sign_out" data-hard="">
                     <button class="user-menu-item" type="submit">(t(lang, Key::SignOut))</button>
                 </form>
@@ -111,19 +109,22 @@ impl NavPage {
 }
 
 /// The topbar's page nav, shared by every signed-in page: the four pages
-/// with the current one marked. Plain `<a>`s — the soft-nav forwarder
+/// with the current one marked, the admin-only ones (rules, logs) shown
+/// only to roles that can administer. Plain `<a>`s — the soft-nav forwarder
 /// swaps them like any same-origin link, so `data-hard` stays off.
-pub async fn topbar_nav(cx: &Cx, active: NavPage, lang: Lang) -> Result {
+pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: Lang) -> Result {
     view! {
         cx =>
         <nav class="topbar-nav-links">
             for page in NavPage::ALL {
+                if role.can_administer() || !matches!(page, NavPage::Rules | NavPage::Logs) {
                 <a
                     class=(if page == active { "topbar-nav topbar-nav-on" } else { "topbar-nav" })
                     href=(page.href())
                 >
                     (t(lang, page.label()))
                 </a>
+                }
             }
         </nav>
     }
