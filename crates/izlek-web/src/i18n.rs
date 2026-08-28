@@ -36,6 +36,7 @@ pub enum Key {
     Title,
     Cancel,
     SomethingWentWrong,
+    NothingAtThisAddress,
     NobodyAssignedAria,
     NobodyAssignedTitle,
     Open,
@@ -145,11 +146,25 @@ pub enum Key {
     NotFromAddress,
     SenderNotConfiguredYet,
 
+    // pages.rs
+    LinkExpiredTitle,
+    SetupTitle,
+    SetupSub,
+    YourNameLabel,
+    CreateWorkspace,
+    SignInTitle,
+    SignInSub,
+    SignInButton,
+    PickPasswordTitle,
+    AdminMadeYouAnAccount,
+    SigningInAsLabel,
+    NewPasswordLabel,
+    SetPasswordAndSignIn,
+
     // rules.rs
     MailRules,
     EditLabel,
     NoSenderConnectedPrefix,
-    NoSenderConnectedSuffix,
     NewRule,
     WhenLabel,
     ColumnLabel,
@@ -235,6 +250,7 @@ pub enum Key {
     NotAnUnblockedEvent,
     TheSystem,
     NoDeadline,
+    NoTasks,
     NoDescription,
     NoDependencies,
     DonePrefix,
@@ -266,6 +282,14 @@ pub fn take_off_this_task(lang: Lang, name: &str) -> String {
     }
 }
 
+/// Who made an invited member's account, when that is still knowable.
+pub fn made_you_an_account(lang: Lang, admin_name: &str) -> String {
+    match lang {
+        Lang::En => format!("{admin_name} made you an account."),
+        Lang::Tr => format!("{admin_name} senin için hesap oluşturdu."),
+    }
+}
+
 /// The phrase a key names, in a user's language.
 pub fn t(lang: Lang, key: Key) -> &'static str {
     use Key::*;
@@ -279,6 +303,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Cancel, Tr) => "Vazgeç",
         (SomethingWentWrong, En) => "Something went wrong.",
         (SomethingWentWrong, Tr) => "Bir şeyler ters gitti.",
+        (NothingAtThisAddress, En) => "Nothing at this address.",
+        (NothingAtThisAddress, Tr) => "Bu adreste bir şey yok.",
         (NobodyAssignedAria, En) => "nobody assigned",
         (NobodyAssignedAria, Tr) => "kimse atanmadı",
         (NobodyAssignedTitle, En) => "Nobody assigned",
@@ -419,8 +445,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Connected, Tr) => "Bağlı",
         (NotConfiguredChip, En) => "Not configured",
         (NotConfiguredChip, Tr) => "Yapılandırılmadı",
-        (NotConnectedNote, En) => "Not connected — mail queues until you save.",
-        (NotConnectedNote, Tr) => "Bağlı değil — kaydedene kadar posta kuyrukta bekler.",
+        (NotConnectedNote, En) => "Not connected.",
+        (NotConnectedNote, Tr) => "Bağlı değil.",
         (SmtpHostLabel, En) => "SMTP HOST",
         (SmtpHostLabel, Tr) => "SMTP SUNUCUSU",
         (PortLabel, En) => "PORT",
@@ -429,10 +455,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (UsernameLabel, Tr) => "KULLANICI ADI",
         (PasswordLabel, En) => "PASSWORD",
         (PasswordLabel, Tr) => "PAROLA",
-        (PasswordSetPlaceholder, En) => "Set",
-        (PasswordSetPlaceholder, Tr) => "Ayarlı",
-        (PasswordNeededPlaceholder, En) => "Needed before anything can be sent",
-        (PasswordNeededPlaceholder, Tr) => "Bir şey gönderilmeden önce gerekli",
+        (PasswordSetPlaceholder, En) => "Unchanged",
+        (PasswordSetPlaceholder, Tr) => "Değişmedi",
+        (PasswordNeededPlaceholder, En) => "Required",
+        (PasswordNeededPlaceholder, Tr) => "Gerekli",
         (FromNameLabel, En) => "FROM NAME",
         (FromNameLabel, Tr) => "GÖNDEREN ADI",
         (FromAddressLabel, En) => "FROM ADDRESS",
@@ -487,25 +513,46 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (PasswordNeededFirstTime, Tr) => "İlk seferde bir parola gerekir.",
         (NotFromAddress, En) => "That is not a from-address.",
         (NotFromAddress, Tr) => "Bu bir gönderen adresi değil.",
-        (SenderNotConfiguredYet, En) => {
-            "Fill the sender in and save it first — there is nothing to test yet."
+        (SenderNotConfiguredYet, En) => "No sender to test.",
+        (SenderNotConfiguredYet, Tr) => "Test edilecek gönderen yok.",
+
+        (LinkExpiredTitle, En) => "This link no longer works",
+        (LinkExpiredTitle, Tr) => "Bu bağlantı artık çalışmıyor",
+        (SetupTitle, En) => "Set up Izlek",
+        (SetupTitle, Tr) => "Izlek'i kur",
+        (SetupSub, En) => "First account becomes the admin.",
+        (SetupSub, Tr) => "İlk hesap yönetici olur.",
+        (YourNameLabel, En) => "YOUR NAME",
+        (YourNameLabel, Tr) => "ADIN",
+        (CreateWorkspace, En) => "Create workspace",
+        (CreateWorkspace, Tr) => "Çalışma alanı oluştur",
+        (SignInTitle, En) => "Sign in to Izlek",
+        (SignInTitle, Tr) => "Izlek'e giriş yap",
+        (SignInSub, En) => {
+            "Accounts are made by the admin. If you were invited, use the link you were sent — it is where you choose your password."
         }
-        (SenderNotConfiguredYet, Tr) => {
-            "Önce göndereni doldurup kaydet — henüz test edilecek bir şey yok."
+        (SignInSub, Tr) => {
+            "Hesaplar yönetici tarafından oluşturulur. Davet edildiysen, sana gönderilen bağlantıyı kullan — parolanı orada seçersin."
         }
+        (SignInButton, En) => "Sign in",
+        (SignInButton, Tr) => "Giriş yap",
+        (PickPasswordTitle, En) => "Pick a password",
+        (PickPasswordTitle, Tr) => "Bir parola seç",
+        (SigningInAsLabel, En) => "SIGNING IN AS",
+        (SigningInAsLabel, Tr) => "GİRİŞ YAPILAN HESAP",
+        (NewPasswordLabel, En) => "NEW PASSWORD",
+        (NewPasswordLabel, Tr) => "YENİ PAROLA",
+        (SetPasswordAndSignIn, En) => "Set password and sign in",
+        (SetPasswordAndSignIn, Tr) => "Parolayı ayarla ve giriş yap",
+        (AdminMadeYouAnAccount, En) => "An admin made you an account.",
+        (AdminMadeYouAnAccount, Tr) => "Bir yönetici sana hesap oluşturdu.",
 
         (MailRules, En) => "Mail rules",
         (MailRules, Tr) => "Posta kuralları",
         (EditLabel, En) => "Edit",
         (EditLabel, Tr) => "Düzenle",
-        (NoSenderConnectedPrefix, En) => {
-            "No sender connected — mail waits in the queue until you set one in "
-        }
-        (NoSenderConnectedPrefix, Tr) => {
-            "Bağlı bir gönderen yok — bir tane ayarlayana kadar posta kuyrukta bekler: "
-        }
-        (NoSenderConnectedSuffix, En) => ".",
-        (NoSenderConnectedSuffix, Tr) => ".",
+        (NoSenderConnectedPrefix, En) => "No sender connected.",
+        (NoSenderConnectedPrefix, Tr) => "Bağlı gönderen yok.",
         (NewRule, En) => "New rule",
         (NewRule, Tr) => "Yeni kural",
         (WhenLabel, En) => "WHEN",
@@ -673,6 +720,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (TheSystem, Tr) => "Sistem",
         (NoDeadline, En) => "no deadline",
         (NoDeadline, Tr) => "tarih yok",
+        (NoTasks, En) => "No tasks",
+        (NoTasks, Tr) => "Görev yok",
         (NoDescription, En) => "no description",
         (NoDescription, Tr) => "açıklama yok",
         (NoDependencies, En) => "no dependencies",

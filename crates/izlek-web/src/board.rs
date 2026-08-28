@@ -276,6 +276,7 @@ async fn render_column(
     let name = column.column.name;
     let is_done_column = column.column.is_done;
     let count = column.cards.len();
+    let is_empty = column.cards.is_empty();
     let mut cards = Vec::new();
     for card in column.cards {
         cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write, all_columns, lang).await?);
@@ -289,6 +290,7 @@ async fn render_column(
                 <span class="column-count">(count)</span>
             </header>
             <div class="column-cards" id=(column_id.clone())>
+                if is_empty { <div class="column-empty">(t(lang, Key::NoTasks))</div> }
                 for card in cards { (card) }
             </div>
         </section>

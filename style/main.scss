@@ -56,7 +56,17 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   --radius: 6px;
+  --radius-sm: var(--radius);
+  --radius-md: 8px;
+  --radius-lg: 12px;
   --topbar-height: 56px;
+
+  --shadow-1: 0 1px 2px rgba(28, 27, 24, 0.06);
+  --shadow-2: 0 8px 24px rgba(28, 27, 24, 0.14);
+  --shadow-3: 0 12px 40px rgba(28, 27, 24, 0.18);
+
+  --dur-fast: 120ms;
+  --ease: ease-out;
 }
 
 // Dark, per user (settings.rs SaveProfileForm.theme). Reference class:
@@ -114,6 +124,10 @@
   --violet-tint: #2e1f42;
   --violet-border: #513a6e;
   --violet-ink: #cba8ea;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 12px 40px rgba(0, 0, 0, 0.6);
 }
 
 * { box-sizing: border-box; }
@@ -123,11 +137,12 @@ body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 a {
   color: var(--accent);
+  transition: color var(--dur-fast) var(--ease);
   &:hover { color: var(--accent-ink); }
 }
 
@@ -173,12 +188,16 @@ a {
 }
 
 .board-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .scaffold-note {
-  padding: 32px 24px;
+  margin: 24px;
+  padding: 20px 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   color: var(--muted);
 }
 
@@ -200,22 +219,15 @@ a {
   gap: 10px;
 }
 
-.auth-kicker {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--muted-soft);
-}
-
 .auth-card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 28px 30px;
+  border-radius: var(--radius-lg);
+  padding: 28px 28px;
   display: flex;
   flex-direction: column;
   gap: 18px;
-  box-shadow: 0 4px 16px rgba(28, 27, 24, 0.04);
+  box-shadow: var(--shadow-2);
 
   form {
     display: flex;
@@ -231,8 +243,9 @@ a {
 }
 
 .auth-title {
-  font-size: 19px;
+  font-size: 18px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .auth-sub {
@@ -265,8 +278,9 @@ a {
   font-size: 13px;
   color: var(--ink);
 
-  &:focus {
-    outline: none;
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
     background: var(--surface);
     border-color: var(--accent);
   }
@@ -295,21 +309,6 @@ a {
   flex-grow: 1;
 }
 
-.auth-locked-note {
-  font-size: 12px;
-  color: var(--muted-soft);
-}
-
-.auth-rules {
-  margin: 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--positive);
-}
-
 .auth-submit {
   height: 42px;
   display: flex;
@@ -330,7 +329,7 @@ a {
 }
 
 .auth-submit-text {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -338,13 +337,8 @@ a {
   font-family: var(--font-mono);
   font-size: 10px;
   background: var(--accent-strong);
-  border-radius: 4px;
-  padding: 1px 5px;
-}
-
-.auth-warn {
-  font-size: 12px;
-  color: var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
 }
 
 .auth-problem {
@@ -356,20 +350,12 @@ a {
   padding: 10px 12px;
 }
 
-.auth-foot {
-  font-size: 12px;
-  color: var(--muted-soft);
-  line-height: 1.5;
-  border-top: 1px solid var(--border-faint);
-  padding-top: 12px;
-}
-
 // -- the board (Main and EmptyBoard artboards) -------------------------------
 
 .spacer { flex-grow: 1; }
 
 .board-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -385,6 +371,7 @@ a {
   font-size: 13px;
   color: var(--muted);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--accent-ink); }
 }
@@ -398,8 +385,8 @@ a {
   padding: 8px 0;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(28, 27, 24, 0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
@@ -452,6 +439,7 @@ a {
   text-decoration: none;
   text-align: left;
   cursor: pointer;
+  transition: background-color, color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); color: var(--ink); }
 }
@@ -485,8 +473,8 @@ a {
   color: var(--muted);
   background: transparent;
   border: none;
-  padding: 5px 12px;
-  border-radius: 4px;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -494,16 +482,16 @@ a {
   font-weight: 600;
   color: var(--ink);
   background: var(--surface);
-  box-shadow: 0 1px 2px rgba(28, 27, 24, 0.06);
+  box-shadow: var(--shadow-1);
 }
 
 .chip {
   display: flex;
   align-items: center;
-  height: 32px;
-  padding: 0 12px;
+  height: 24px;
+  padding: 0 10px;
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
 
   &-overdue {
@@ -517,6 +505,18 @@ a {
     border: 1px solid var(--warn-border);
     color: var(--warn-ink);
   }
+
+  &-role,
+  &-admin,
+  &-connected,
+  &-off {
+    text-transform: capitalize;
+  }
+
+  &-role { background: var(--accent-tint); border: 1px solid var(--accent-border); color: var(--accent-ink); }
+  &-admin { background: var(--panel-sunken); border: 1px solid var(--border-strong); color: var(--muted); }
+  &-connected { background: var(--positive-tint); border: 1px solid var(--positive-border); color: var(--positive-ink); }
+  &-off { background: var(--warn-tint); border: 1px solid var(--warn-border); color: var(--warn-ink); }
 }
 
 .board-stage {
@@ -537,7 +537,7 @@ a {
 
 .column {
   background: var(--surface-sunken);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -560,7 +560,11 @@ a {
 .column-count {
   font-family: var(--font-mono);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--muted-soft);
+  background: var(--panel-sunken);
+  border-radius: var(--radius);
+  padding: 1px 6px;
 }
 
 .column-cards {
@@ -570,6 +574,19 @@ a {
   flex: 1;
 }
 
+.column-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  font-size: 12px;
+  color: var(--muted-soft);
+}
+
 .card {
   // The card is an anchor so it has an address; it must not read as one.
   display: block;
@@ -577,10 +594,16 @@ a {
   color: inherit;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 12px;
-  box-shadow: 0 1px 2px rgba(28, 27, 24, 0.05);
+  box-shadow: var(--shadow-1);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+
+  &:hover {
+    background: var(--row-hover);
+    border-color: var(--border-strong);
+  }
 
   &:focus-visible {
     outline: 2px solid var(--accent);
@@ -593,7 +616,8 @@ a {
 .column-drop {
   outline: 1px dashed var(--border-strong);
   outline-offset: 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  background: var(--accent-tint);
 }
 
 .card-done {
@@ -611,14 +635,14 @@ a {
   font-size: 10px;
 }
 
-.card-key { color: var(--muted-soft); }
+.card-key { color: var(--muted); }
 
 .card-blocks,
 .card-blocked-by { color: var(--warn-ink); }
 
 .card-title {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   line-height: 1.4;
   margin-top: 4px;
 }
@@ -636,9 +660,10 @@ a {
   align-items: center;
   font-family: var(--font-mono);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
   background: var(--surface-sunken);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 6px;
 
   &-overdue {
@@ -671,12 +696,12 @@ a {
   border: 2px solid var(--surface);
   color: var(--surface);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
 
-  & + & { margin-left: -7px; }
+  & + & { margin-left: -8px; }
 
   &-none {
     border: 1px dashed var(--border-strong);
@@ -690,7 +715,7 @@ a {
     width: 18px;
     height: 18px;
     border: none;
-    font-size: 8px;
+    font-size: 10px;
   }
 
   &-lg {
@@ -766,8 +791,8 @@ a {
   max-width: 100%;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
   padding: 0;
   outline: none;
 }
@@ -802,9 +827,9 @@ a {
   padding: 20px 24px 24px;
 }
 
-.viewer-media { max-width: 100%; max-height: 78vh; border-radius: 8px; }
+.viewer-media { max-width: 100%; max-height: 78vh; border-radius: var(--radius-md); }
 
-.viewer-pdf { width: 100%; height: 78vh; border: 1px solid var(--border); border-radius: 8px; }
+.viewer-pdf { width: 100%; height: 78vh; border: 1px solid var(--border); border-radius: var(--radius-md); }
 
 .new-task-form {
   display: flex;
@@ -858,7 +883,7 @@ a {
 .edit-toggle:focus-visible ~ .edit-view {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .edit-row {
@@ -903,8 +928,8 @@ a {
   padding: 8px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(28, 27, 24, 0.14);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
 }
 
 .pop-panel-wide { min-width: 320px; }
@@ -927,9 +952,9 @@ a {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 4px 6px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   font-family: inherit;
   font-size: 12px;
@@ -937,6 +962,7 @@ a {
   text-align: left;
   text-decoration: none;
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
 }
@@ -948,10 +974,11 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 6px;
-  border-radius: 5px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
 }
@@ -971,7 +998,7 @@ a {
   label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     cursor: pointer;
   }
 }
@@ -1002,8 +1029,9 @@ a {
 
 .detail-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.3;
 }
 
@@ -1021,7 +1049,7 @@ a {
   border-radius: var(--radius);
   background: var(--surface);
   font-family: inherit;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--ink);
 }
@@ -1032,8 +1060,8 @@ a {
   font-size: 10px;
   color: var(--muted-soft);
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
 }
 
 .detail-close {
@@ -1048,6 +1076,7 @@ a {
   color: var(--muted);
   text-decoration: none;
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
 }
@@ -1079,6 +1108,7 @@ a {
 .detail-count {
   font-family: var(--font-mono);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--muted-soft);
 }
 
@@ -1155,14 +1185,17 @@ a {
   color: var(--ink);
   cursor: pointer;
 
-  &:focus { outline: none; }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
 }
 
 .status-go {
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   font-family: inherit;
   font-size: 11px;
@@ -1201,10 +1234,11 @@ a {
   width: 20px;
   height: 20px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
 }
@@ -1235,9 +1269,11 @@ a {
 }
 
 .datepick-day {
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--ink);
   cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
 }
@@ -1267,6 +1303,7 @@ a {
   font-size: 11px;
   color: var(--accent);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--accent-ink); }
 }
@@ -1291,10 +1328,10 @@ a {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   white-space: nowrap;
   padding: 3px 6px 3px 3px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   border: 1px solid var(--border);
 }
@@ -1330,6 +1367,7 @@ a {
   background: transparent;
   color: var(--muted-soft);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--danger); }
 }
@@ -1347,6 +1385,7 @@ a {
   border-radius: 50%;
   color: var(--muted-soft);
   cursor: pointer;
+  transition: color, border-color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--ink); border-color: var(--muted-soft); }
 }
@@ -1376,7 +1415,7 @@ a {
 .detail-prose {
   display: block;
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.6;
   color: var(--ink-soft);
   white-space: pre-wrap;
@@ -1398,7 +1437,7 @@ a {
   border-radius: var(--radius);
   background: var(--surface);
   font-family: inherit;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.6;
   color: var(--ink);
   resize: vertical;
@@ -1410,15 +1449,16 @@ a {
 .dep-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 9px;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   font-size: 12px;
   color: var(--muted);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--ink); }
 }
@@ -1439,7 +1479,7 @@ a {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--field-bg);
   font-size: 13px;
 }
@@ -1493,10 +1533,11 @@ a {
   width: 24px;
   height: 24px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-soft);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--danger); }
 }
@@ -1512,11 +1553,11 @@ a {
 .file-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 9px;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   font-size: 12px;
   color: var(--muted);
@@ -1525,6 +1566,7 @@ a {
 .file-chip-name {
   color: inherit;
   text-decoration: none;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--ink); }
 }
@@ -1549,10 +1591,11 @@ a {
   width: 20px;
   height: 20px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted-soft);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--danger); }
 }
@@ -1571,6 +1614,7 @@ a {
   flex: none;
   max-width: 220px;
   background: var(--surface);
+  transition: border-color var(--dur-fast) var(--ease);
 
   &:hover { border-color: var(--accent); }
 }
@@ -1644,12 +1688,6 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.comment-hint {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--muted-soft);
 }
 
 .comment-post {
@@ -1776,13 +1814,13 @@ a {
   margin: 0;
   padding: 18px 20px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
+  box-shadow: var(--shadow-3);
 }
 
 .confirm-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--ink);
 }
@@ -1829,6 +1867,7 @@ a {
   font-weight: 500;
   color: var(--ink-soft);
   text-decoration: none;
+  transition: background-color, color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--surface-sunken); color: var(--ink); }
 
@@ -1858,36 +1897,15 @@ a {
 
 .settings-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.01em;
 }
 
-.settings-note {
-  flex-basis: 100%;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.chip-role,
-.chip-admin,
-.chip-connected,
-.chip-off {
-  height: 24px;
-  padding: 0 10px;
-  font-size: 11px;
-  text-transform: capitalize;
-}
-
-.chip-role { background: var(--accent-tint); border: 1px solid var(--accent-border); color: var(--accent-ink); }
-.chip-admin { background: var(--panel-sunken); border: 1px solid var(--border-strong); color: var(--muted); }
-.chip-connected { background: var(--positive-tint); border: 1px solid var(--positive-border); color: var(--positive-ink); }
-.chip-off { background: var(--warn-tint); border: 1px solid var(--warn-border); color: var(--warn-ink); }
-
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
 }
 
@@ -1901,7 +1919,7 @@ a {
 
 .panel-title {
   margin: 0;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -1992,8 +2010,9 @@ a {
   font-size: 13px;
   color: var(--ink);
 
-  &:focus {
-    outline: none;
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
     background: var(--surface);
     border-color: var(--accent);
   }
@@ -2065,9 +2084,9 @@ option:hover {
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
-  padding: 4px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  padding: 8px;
   display: none;
 }
 
@@ -2078,7 +2097,7 @@ option:hover {
   width: 100%;
   padding: 6px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: none;
   font: inherit;
   font-size: 13px;
@@ -2086,10 +2105,11 @@ option:hover {
   color: var(--ink);
   white-space: nowrap;
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
 
   &:hover,
   &:focus,
-  &.dd-option-active { background: var(--panel-sunken); outline: none; }
+  &.dd-option-active { background: var(--row-hover); outline: none; }
 }
 
 .dd-option-selected { background: var(--accent-tint); color: var(--accent-ink); }
@@ -2134,6 +2154,7 @@ option:hover {
   font-weight: 600;
   text-decoration: none;
   cursor: pointer;
+  transition: background-color, border-color, color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--surface); }
 }
@@ -2185,7 +2206,7 @@ option:hover {
 
 .member-you {
   flex: none;
-  padding: 1px 7px;
+  padding: 1px 8px;
   border-radius: 999px;
   background: var(--field-bg);
   border: 1px solid var(--border-strong);
@@ -2219,8 +2240,17 @@ option:hover {
   color: var(--accent);
   text-decoration: none;
   cursor: pointer;
+  transition: border-color, color var(--dur-fast) var(--ease);
 
   &:hover { border-color: var(--accent); color: var(--accent-ink); }
+}
+
+// Danger modifier for a `.quiet` button — the "Delete" action in a rule row.
+.quiet-danger {
+  border-color: var(--danger-border);
+  color: var(--danger);
+
+  &:hover { border-color: var(--danger); color: var(--danger); background: var(--surface-sunken); }
 }
 
 .member-invite {
@@ -2288,7 +2318,7 @@ option:hover {
   padding: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 
   // A rule that is switched off is still listed — the screen shows what
   // exists, not what is live — and reads as the quieter of the two.
@@ -2305,7 +2335,7 @@ option:hover {
   height: 20px;
   padding: 0;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--border-soft);
   position: relative;
   cursor: pointer;
@@ -2346,7 +2376,7 @@ option:hover {
   padding: 3px 8px;
   background: transparent;
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   font-weight: 500;
   color: var(--ink);
 }
@@ -2412,7 +2442,7 @@ option:hover {
   padding: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .decision-head {
@@ -2450,27 +2480,11 @@ option:hover {
   color: var(--muted-soft);
 }
 
-// The "Delete" action in a rule row. Danger tint matches `.detail-delete`'s
-// confirm button, sized to sit next to `.quiet`'s "Edit".
-.rule-delete {
-  flex-shrink: 0;
-  height: 28px;
-  padding: 0 10px;
-  background: var(--surface);
-  border: 1px solid var(--danger-border);
-  border-radius: var(--radius);
-  color: var(--danger);
-  font-family: var(--font-sans);
-  font-size: 12px;
-  cursor: pointer;
-
-  &:hover { background: var(--surface-sunken); }
-}
 
 .rule-new {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .rule-new-open {
@@ -2485,7 +2499,7 @@ option:hover {
   list-style: none;
 
   &::marker, &::-webkit-details-marker { display: none; }
-  &::before { content: '+'; margin-right: 8px; font-size: 15px; }
+  &::before { content: '+'; margin-right: 8px; font-size: 13px; }
 }
 
 .rule-new-body {

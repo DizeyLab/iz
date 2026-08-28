@@ -15,6 +15,7 @@ use topcoat::router::{page, path_param};
 use topcoat::view::view;
 
 use crate::auth::{Invited, invited_by_token};
+use crate::i18n::{Key, Lang, made_you_an_account, t};
 use crate::server::{accounts, current_user, refusal_of};
 
 path_param!(token);
@@ -34,7 +35,7 @@ async fn landing(cx: &Cx) -> Result {
             cx =>
             (topbar(cx).await?)
             <main class="scaffold-note">
-                <p>"Something went wrong."</p>
+                <p>(t(Lang::En, Key::SomethingWentWrong))</p>
             </main>
         },
     }
@@ -52,8 +53,7 @@ async fn join(cx: &Cx) -> Result {
             <main class="auth-stage">
                 <div class="auth-column">
                     <div class="auth-card">
-                        <div class="auth-title">"This link no longer works"</div>
-                        <div class="auth-sub">"Sign-in links last seven days."</div>
+                        <div class="auth-title">(t(Lang::En, Key::LinkExpiredTitle))</div>
                     </div>
                 </div>
             </main>
@@ -73,36 +73,24 @@ async fn topbar(cx: &Cx) -> Result {
     }
 }
 
-async fn password_rules(cx: &Cx) -> Result {
-    view! {
-        cx =>
-        <ul class="auth-rules">
-            <li>"at least 10 characters"</li>
-            <li>"not your address or your name"</li>
-        </ul>
-    }
-}
-
 /// "Set up Izlek" — the first account in an empty workspace.
 async fn setup_card(cx: &Cx) -> Result {
     let refusal = refusal_of(cx, "claim_workspace");
+    let lang = Lang::En;
 
     view! {
         cx =>
         (topbar(cx).await?)
         <main class="auth-stage">
             <div class="auth-column">
-                <span class="auth-kicker">"FIRST ACCOUNT — EMPTY WORKSPACE"</span>
                 <div class="auth-card">
                     <div class="auth-head">
-                        <div class="auth-title">"Set up Izlek"</div>
-                        <div class="auth-sub">
-                            "Nobody has signed in yet, so this account administers the workspace: the mail sender, the limits and the member list are yours."
-                        </div>
+                        <div class="auth-title">(t(lang, Key::SetupTitle))</div>
+                        <div class="auth-sub">(t(lang, Key::SetupSub))</div>
                     </div>
                     <form method="post" action="/api/claim_workspace">
                         <label class="auth-field">
-                            <span class="auth-label">"YOUR NAME"</span>
+                            <span class="auth-label">(t(lang, Key::YourNameLabel))</span>
                             <input
                                 class="auth-input"
                                 type="text"
@@ -112,7 +100,7 @@ async fn setup_card(cx: &Cx) -> Result {
                             >
                         </label>
                         <label class="auth-field">
-                            <span class="auth-label">"EMAIL"</span>
+                            <span class="auth-label">(t(lang, Key::EmailLabel))</span>
                             <input
                                 class="auth-input auth-input-mono"
                                 type="email"
@@ -122,7 +110,7 @@ async fn setup_card(cx: &Cx) -> Result {
                             >
                         </label>
                         <label class="auth-field">
-                            <span class="auth-label">"PASSWORD"</span>
+                            <span class="auth-label">(t(lang, Key::PasswordLabel))</span>
                             <input
                                 class="auth-input auth-input-mono"
                                 type="password"
@@ -131,18 +119,14 @@ async fn setup_card(cx: &Cx) -> Result {
                                 required=""
                             >
                         </label>
-                        (password_rules(cx).await?)
                         <button class="auth-submit" type="submit">
-                            <span class="auth-submit-text">"Create workspace"</span>
+                            <span class="auth-submit-text">(t(lang, Key::CreateWorkspace))</span>
                             <span class="auth-key">"↵"</span>
                         </button>
                     </form>
                     if let Some(refusal) = &refusal {
                         <div class="auth-problem">(refusal.message())</div>
                     }
-                    <div class="auth-foot">
-                        "Mail rules stay quiet until you connect a sender in Settings. Nothing leaves the machine before that."
-                    </div>
                 </div>
             </div>
         </main>
@@ -154,23 +138,21 @@ async fn setup_card(cx: &Cx) -> Result {
 /// password is wrong — the difference is not the browser's business.
 async fn sign_in_card(cx: &Cx) -> Result {
     let refusal = refusal_of(cx, "sign_in");
+    let lang = Lang::En;
 
     view! {
         cx =>
         (topbar(cx).await?)
         <main class="auth-stage">
             <div class="auth-column">
-                <span class="auth-kicker">"SIGN IN"</span>
                 <div class="auth-card">
                     <div class="auth-head">
-                        <div class="auth-title">"Sign in to Izlek"</div>
-                        <div class="auth-sub">
-                            "Accounts are made by the admin. If you were invited, use the link you were sent — it is where you choose your password."
-                        </div>
+                        <div class="auth-title">(t(lang, Key::SignInTitle))</div>
+                        <div class="auth-sub">(t(lang, Key::SignInSub))</div>
                     </div>
                     <form method="post" action="/api/sign_in">
                         <label class="auth-field">
-                            <span class="auth-label">"EMAIL"</span>
+                            <span class="auth-label">(t(lang, Key::EmailLabel))</span>
                             <input
                                 class="auth-input auth-input-mono"
                                 type="email"
@@ -180,7 +162,7 @@ async fn sign_in_card(cx: &Cx) -> Result {
                             >
                         </label>
                         <label class="auth-field">
-                            <span class="auth-label">"PASSWORD"</span>
+                            <span class="auth-label">(t(lang, Key::PasswordLabel))</span>
                             <input
                                 class="auth-input auth-input-mono"
                                 type="password"
@@ -190,7 +172,7 @@ async fn sign_in_card(cx: &Cx) -> Result {
                             >
                         </label>
                         <button class="auth-submit" type="submit">
-                            <span class="auth-submit-text">"Sign in"</span>
+                            <span class="auth-submit-text">(t(lang, Key::SignInButton))</span>
                             <span class="auth-key">"↵"</span>
                         </button>
                     </form>
@@ -207,34 +189,33 @@ async fn sign_in_card(cx: &Cx) -> Result {
 /// invitation.
 async fn join_card(cx: &Cx, token: &str, person: Invited) -> Result {
     let refusal = refusal_of(cx, "redeem_link");
+    let lang = Lang::En;
     // Who made the account, when that is still knowable. The fallback names
     // no one rather than naming the wrong person.
     let made_by = match &person.invited_by {
-        Some(admin) => format!("{admin} made you an account."),
-        None => "An admin made you an account.".to_string(),
+        Some(admin) => made_you_an_account(lang, admin),
+        None => t(lang, Key::AdminMadeYouAnAccount).to_string(),
     };
 
     view! {
         cx =>
         <main class="auth-stage">
             <div class="auth-column">
-                <span class="auth-kicker">"INVITED MEMBER — FIRST SIGN-IN"</span>
                 <div class="auth-card">
                     <div class="auth-head">
-                        <div class="auth-title">"Pick a password"</div>
+                        <div class="auth-title">(t(lang, Key::PickPasswordTitle))</div>
                         <div class="auth-sub">(made_by)</div>
                     </div>
                     <div class="auth-field">
-                        <span class="auth-label">"SIGNING IN AS"</span>
+                        <span class="auth-label">(t(lang, Key::SigningInAsLabel))</span>
                         <div class="auth-locked">
                             <span class="auth-locked-value">(person.email)</span>
-                            <span class="auth-locked-note">"set by the admin"</span>
                         </div>
                     </div>
                     <form method="post" action="/api/redeem_link">
                         <input type="hidden" name="token" value=(token)>
                         <label class="auth-field">
-                            <span class="auth-label">"NEW PASSWORD"</span>
+                            <span class="auth-label">(t(lang, Key::NewPasswordLabel))</span>
                             <input
                                 class="auth-input auth-input-mono"
                                 type="password"
@@ -243,17 +224,13 @@ async fn join_card(cx: &Cx, token: &str, person: Invited) -> Result {
                                 required=""
                             >
                         </label>
-                        (password_rules(cx).await?)
                         <button class="auth-submit" type="submit">
-                            <span class="auth-submit-text">"Set password and sign in"</span>
+                            <span class="auth-submit-text">(t(lang, Key::SetPasswordAndSignIn))</span>
                         </button>
                     </form>
                     if let Some(refusal) = &refusal {
                         <div class="auth-problem">(refusal.message())</div>
                     }
-                    <div class="auth-foot">
-                        "Name and photo can wait — you land on the board straight after this. The admin cannot see or set your password."
-                    </div>
                 </div>
             </div>
         </main>

@@ -85,16 +85,6 @@ const STYLE: Asset = asset!("assets/main.css");
 
 #[layout("/")]
 async fn root_layout(cx: &Cx, slot: Result) -> Result {
-    let content = match slot {
-        Err(error) if error.downcast_ref::<NotFoundError>().is_some() => view! {
-            (StatusCode::NOT_FOUND)
-            <main class="scaffold-note">
-                <p>"Nothing at this address."</p>
-            </main>
-        },
-        content => content,
-    }?;
-
     // Pages with no session (auth screens) render light and English; both are
     // only set when the request's own user has one to read.
     let asking = match current_user(cx).await {
@@ -103,6 +93,17 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
     };
     let dark = asking.is_some_and(|user| user.theme == "dark");
     let lang = asking.map_or(Lang::En, |user| Lang::from_code(&user.language));
+
+    let content = match slot {
+        Err(error) if error.downcast_ref::<NotFoundError>().is_some() => view! {
+            cx =>
+            (StatusCode::NOT_FOUND)
+            <main class="scaffold-note">
+                <p>(t(lang, Key::NothingAtThisAddress))</p>
+            </main>
+        },
+        content => content,
+    }?;
 
     view! {
         <!DOCTYPE html>

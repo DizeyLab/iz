@@ -673,7 +673,7 @@ async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: b
 
             <form method="post" action="/api/delete_rule">
                 <input type="hidden" name="rule_id" value=(rule.id.clone())>
-                <button class="rule-delete" type="submit" title=(t(lang, Key::DeleteThisRule))>(t(lang, Key::Delete))</button>
+                <button class="quiet quiet-danger" type="submit" title=(t(lang, Key::DeleteThisRule))>(t(lang, Key::Delete))</button>
             </form>
         </div>
     }
@@ -739,7 +739,6 @@ async fn rules_page(cx: &Cx) -> Result {
                     <p class="rules-quiet">
                         (t(lang, Key::NoSenderConnectedPrefix))
                         <a href="/settings">(t(lang, Key::NavSettings))</a>
-                        (t(lang, Key::NoSenderConnectedSuffix))
                     </p>
                 }
 
