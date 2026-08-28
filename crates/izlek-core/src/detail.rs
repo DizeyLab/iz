@@ -71,6 +71,10 @@ pub struct FileLine {
     pub id: String,
     pub name: String,
     pub size_bytes: u64,
+    /// What the server decided the bytes are — the same value the download
+    /// route answers with, carried here so a chip can decide whether its
+    /// filename opens the in-app viewer or just downloads.
+    pub mime_type: String,
     /// The comment this file was posted with, when it was posted with one.
     pub comment_id: Option<String>,
     pub uploaded_by: String,

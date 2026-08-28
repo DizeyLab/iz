@@ -506,9 +506,9 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
 }
 
 /// Deletes an attachment's row and its bytes. A hard delete, unlike
-/// [`delete_task`]'s soft one — a file is a blob on disk, not a fact worth an
-/// audit trail. Only the person who put it there, or an admin, may take it
-/// away.
+/// [`delete_task`]'s soft one — a file is a blob in the database, not a fact
+/// worth an audit trail. Only the person who put it there, or an admin, may
+/// take it away.
 #[route(POST "/api/delete_file")]
 async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
     let user = match require_user(cx).await {
@@ -663,7 +663,7 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
-        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { confirm.removeAttribute('open'); } }, true); \
+        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { if (window.location.search.indexOf('confirm=delete') !== -1 && !window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } else { confirm.removeAttribute('open'); } } }, true); \
         document.addEventListener('click', function (e) { \
             document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
                 if (toggle.closest('.datepick-pop')) { return; } \
@@ -1025,15 +1025,27 @@ async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direc
     }
 }
 
-async fn file_chip(cx: &Cx, file: &izlek_core::detail::FileLine, me: &Me, may_write: bool, lang: Lang) -> Result {
+async fn file_chip(
+    cx: &Cx,
+    task_id: &str,
+    file: &izlek_core::detail::FileLine,
+    me: &Me,
+    may_write: bool,
+    lang: Lang,
+) -> Result {
     let _ = may_write;
     let may_drop = me.id == file.uploaded_by || me.role.can_administer();
     let on_comment = file.comment_id.is_some();
     let remove_title = t(lang, Key::RemoveThisFile);
+    let href = if crate::files::viewer_kind(&file.mime_type).is_some() {
+        format!("/?task={task_id}&file={}", file.id)
+    } else {
+        format!("/files/{}", file.id)
+    };
     view! {
         cx =>
         <span class="file-chip">
-            <a class="file-chip-name" href=(format!("/files/{}", file.id))>(file.name.clone())</a>
+            <a class="file-chip-name" href=(href)>(file.name.clone())</a>
             <span class="file-chip-size">(file.size_label())</span>
             if on_comment {
                 <span class="file-chip-note">(t(lang, Key::OnAComment))</span>
@@ -1206,7 +1218,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                     if !detail.files.is_empty() {
                         <div class="file-list">
                             for file in &detail.files {
-                                (file_chip(cx, file, &me, may_write, lang).await?)
+                                (file_chip(cx, &detail.id, file, &me, may_write, lang).await?)
                             }
                         </div>
                     }
@@ -1273,7 +1285,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                 <details class="confirm-details" open=(confirm_delete)>
                                     <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
                                     <div class="confirm">
-                                        <div class="confirm-title">(format!("{}: {} — {}?", t(lang, Key::DeleteTask), cost.task_key, cost.title))</div>
+                                        <div class="confirm-title">(format!("{} — {}?", cost.task_key, cost.title))</div>
                                         <ul class="confirm-list">
                                             if cost.comment_count > 0 {
                                                 <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
@@ -1302,6 +1314,60 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
         </div>
         (datepicker_script(cx, lang).await?)
         (escape_closes(cx).await?)
+    }
+}
+
+/// The in-app file viewer: `<img>`/`<video>`/`<audio>`/`<object>` per
+/// [`crate::files::ViewerKind`], opened over the task modal via
+/// `?task=<id>&file=<id>` — the same query-param overlay pattern as
+/// [`task_modal`] itself off `board.rs`. Renders nothing (not even a scrim)
+/// when the file is not this task's, or is not this workspace's, or carries a
+/// mime type with no viewer element: a filename's own link only ever points
+/// here when [`crate::files::viewer_kind`] already said yes, but a hand-edited
+/// query string gets the same silent no as a stale or foreign id.
+pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result {
+    let user = match require_user(cx).await {
+        Ok(user) => user,
+        Err(_) => return view! { cx => },
+    };
+    let store = accounts(cx).store().clone();
+    if task_of(store.as_ref(), &user, task_id).await.is_err() {
+        return view! { cx => };
+    }
+    let Ok(Some(attachment)) = store.attachment(file_id).await else {
+        return view! { cx => };
+    };
+    if attachment.task_id != task_id {
+        return view! { cx => };
+    }
+    let Some(kind) = crate::files::viewer_kind(&attachment.mime_type) else {
+        return view! { cx => };
+    };
+    let lang = Lang::from_code(&user.language);
+    let close_href = format!("/?task={task_id}");
+    let src = format!("/files/{file_id}");
+    let download_href = format!("/files/{file_id}?dl=1");
+    let name = attachment.file_name.clone();
+    view! {
+        cx =>
+        <a class="modal-scrim viewer-scrim" href=(close_href.clone())>
+            <div class="modal viewer" tabindex="-1" @click=$(|e: Event| e.stop_propagation())>
+                <header class="detail-head">
+                    <span class="detail-headline"><span class="detail-key">(name.clone())</span></span>
+                    <a class="quiet" href=(download_href)>(t(lang, Key::Download))</a>
+                    <span class="detail-esc">(t(lang, Key::Esc))</span>
+                    <a class="detail-close" href=(close_href) aria-label=(t(lang, Key::CloseTheFile))>(glyph::cross(cx).await?)</a>
+                </header>
+                <div class="viewer-body">
+                    match kind {
+                        crate::files::ViewerKind::Image => <img class="viewer-media" src=(src) alt=(name)>,
+                        crate::files::ViewerKind::Video => <video class="viewer-media" src=(src) controls=""></video>,
+                        crate::files::ViewerKind::Audio => <audio class="viewer-media" src=(src) controls=""></audio>,
+                        crate::files::ViewerKind::Pdf => <object class="viewer-media viewer-pdf" data=(src) type="application/pdf"></object>,
+                    }
+                </div>
+            </div>
+        </a>
     }
 }
 

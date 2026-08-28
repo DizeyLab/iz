@@ -754,6 +754,7 @@ async fn rules_page(cx: &Cx) -> Result {
                     }
                 </div>
             </main>
+            (crate::dropdown::dropdown_script(cx).await?)
         </div>
     }
 }

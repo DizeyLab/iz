@@ -775,6 +775,29 @@ a {
 
 .modal-new-task { width: 480px; }
 
+// The in-app file viewer: same scrim/panel chrome as the task modal, rendered
+// as a later sibling of it so the task modal underneath hides while it is
+// open — one popup on screen at a time, the same rule the delete confirm
+// uses. `<a>` rather than `<div>` for the scrim itself: closing it is a plain
+// navigation (no script needed for outside-click), and the panel stops the
+// click from ever reaching that anchor.
+.viewer-scrim { text-decoration: none; color: inherit; cursor: default; }
+
+.modal-scrim:has(~ .viewer-scrim) { visibility: hidden; }
+
+.viewer { width: auto; max-width: min(90vw, 960px); }
+
+.viewer-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 24px 24px;
+}
+
+.viewer-media { max-width: 100%; max-height: 78vh; border-radius: 8px; }
+
+.viewer-pdf { width: 100%; height: 78vh; border: 1px solid var(--border); border-radius: 8px; }
+
 .new-task-form {
   display: flex;
   flex-direction: column;
@@ -1533,10 +1556,15 @@ a {
   margin-top: 10px;
 }
 
+// A button, not a text field: `.field-box`'s recessed `--field-bg` reads as
+// pressed here, so it sits back on `--surface` like `.quiet`/`.detail-delete`.
 .file-upload-box {
   position: relative;
   flex: none;
   max-width: 220px;
+  background: var(--surface);
+
+  &:hover { border-color: var(--accent); }
 }
 
 .file-upload-name { max-width: 160px; }
@@ -1690,9 +1718,10 @@ a {
 //
 // The open `<details>` becomes a scrim + centered panel, the same shape as
 // the task modal's `.modal-scrim`/`.modal` (main.scss above), with no script:
-// the backdrop is the open details' own `::before`, and clicking the
-// "Delete task" summary again (still reachable, raised above the backdrop)
-// is what closes it.
+// the backdrop is the open details' own `::before`. Closing is handled by
+// `escape_closes`/`card_menu_script` (outside click, Esc) — the trigger
+// summary is hidden while open (below) so it is not a second, floating
+// "Delete task" button on screen.
 
 .confirm-details[open] {
   position: relative;
@@ -1702,7 +1731,10 @@ a {
 // While the confirm is open, the modal panel behind it is not visible: one
 // popup on screen at a time. `visibility` (not `display`) so the scrim
 // keeps showing and the confirm — a fixed-position descendant that would
-// otherwise inherit the hidden visibility — is pulled back to visible.
+// otherwise inherit the hidden visibility — is pulled back to visible. The
+// summary trigger stays out of that "pulled back" set: it sits in normal
+// flow at its footer position, so leaving it visible reads as a second,
+// floating delete button.
 .modal:has(details.confirm-details[open]) {
   visibility: hidden;
 
@@ -1710,6 +1742,10 @@ a {
   details.confirm-details[open]::before,
   details.confirm-details[open] .confirm {
     visibility: visible;
+  }
+
+  details.confirm-details[open] > summary {
+    display: none;
   }
 }
 
@@ -1962,8 +1998,11 @@ a {
 
 // A <select> wearing the field-input box still shows the browser's own
 // arrow unless told otherwise. This draws the same chevron the rest of the
-// app uses, so a dropdown looks like a field, not an OS control.
-select.field-input {
+// app uses, so a dropdown looks like a field, not an OS control. Shared
+// with `.dd-trigger`, `dropdown.rs`'s button clone of this same select —
+// same chevron on the closed look it stands in for.
+select.field-input,
+.field-input.dd-trigger {
   appearance: none;
   -webkit-appearance: none;
   cursor: pointer;
@@ -1975,6 +2014,7 @@ select.field-input {
 
 // The browser's native option list ignores theme tokens by default — dark
 // mode showed the OS's white/blue list until these are set explicitly.
+// Belt-and-braces for any select `dropdown.rs` hasn't converted.
 option {
   background: var(--surface);
   color: var(--ink);
@@ -1989,35 +2029,62 @@ option:hover {
   background: var(--panel-sunken);
 }
 
-// Chromium's customizable select (`::picker(select)`) lets the popup itself
-// be styled instead of left to the OS. Guarded by @supports so Firefox
-// keeps the plain, already-themed option list above. Scoped to the app's
-// own select classes (not a bare `select` selector) so their closed-state
-// look — set by `.field-input`/`.status-select` above — stays exactly as
-// today; only the open popup changes.
-@supports selector(::picker(select)) {
-  select.field-input,
-  .status-select {
-    appearance: base-select;
-  }
+// -- house dropdown (dropdown.rs) --------------------------------------------
+//
+// `dropdown.rs` hides the native `<select>` and portals a trigger + panel
+// in its place, so no browser engine's own popup chrome ever shows — every
+// engine themes identically because none of them draw this one.
 
-  ::picker(select) {
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
-    padding: 4px;
-  }
+.dd-native { display: none; }
 
-  ::picker-icon {
-    display: none;
-  }
-
-  option {
-    padding: 6px 10px;
-    border-radius: 6px;
-  }
+// The trigger carries the select's own classes (`.status-select` or
+// `.field-input`), so its closed look is already right; this only resets
+// what a bare `<button>` adds on top of that.
+.dd-trigger {
+  display: flex;
+  align-items: center;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+
+.status-select.dd-trigger { padding: 0; }
+
+.dd-panel {
+  position: fixed;
+  z-index: 60;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(28, 27, 24, 0.18);
+  padding: 4px;
+  display: none;
+}
+
+.dd-panel.dd-open { display: block; }
+
+.dd-option {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--ink);
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover,
+  &:focus,
+  &.dd-option-active { background: var(--panel-sunken); outline: none; }
+}
+
+.dd-option-selected { background: var(--accent-tint); color: var(--accent-ink); }
 
 // A row that states a fact instead of pretending to be an editable field. An
 // empty box that silently does nothing is worse than a sentence.
@@ -2157,6 +2224,10 @@ option:hover {
 
 .field-role { flex-grow: 0; width: 140px; }
 
+// House rhythm (36px, matching `.primary`) for this row's fields, so the
+// role select and the "Add member" button share one height and baseline.
+.member-invite .field-input { height: 36px; }
+
 // The link exists once. It is shown once, and said to be shown once.
 .member-link {
   display: flex;
@@ -2274,12 +2345,46 @@ option:hover {
   border-color: var(--border-strong);
 }
 
-// A rule's verdict that queued a mail — the one outcome worth a look — reads
-// as the positive tint the rest of the app already uses for "connected".
-.rule-term-queued {
-  background: var(--positive-tint);
-  border-color: var(--positive-border);
-  color: var(--positive-ink);
+// A verdict or a queue state, toned so the eye can sort a page of them
+// without reading every word: sent/queued reads as the app's "connected"
+// green, failed/abandoned as its danger orange, held/pending as its warning
+// amber, and everything that is quietly not-a-failure (not matched, no
+// recipients, rule off) or is worse than a failure (the task is gone) stays
+// muted rather than competing for attention.
+.rule-term-owed,
+.rule-term-already_owed,
+.rule-term-sent {
+  background: var(--accent-tint);
+  border-color: var(--accent-border);
+  color: var(--accent-ink);
+}
+
+.rule-term-failed,
+.rule-term-abandoned {
+  background: var(--danger-tint);
+  border-color: var(--danger-border-alt);
+  color: var(--danger);
+}
+
+.rule-term-held,
+.rule-term-pending {
+  background: var(--warn-tint);
+  border-color: var(--warn-border);
+  color: var(--warn-ink);
+}
+
+.rule-term-not_matched,
+.rule-term-no_recipients,
+.rule-term-disabled {
+  background: var(--surface-sunken);
+  border-color: var(--border-strong);
+  color: var(--muted);
+}
+
+.rule-term-task_gone {
+  background: var(--danger-tint-soft);
+  border-color: var(--danger-border-soft);
+  color: var(--danger);
 }
 
 // One event and every rule's verdict on it, so the task and moment are said

@@ -189,7 +189,7 @@ impl Engine {
                         event.id(),
                         &transition.task_id,
                         MailOutcome::TaskGone,
-                        "task was deleted before the mail ran",
+                        "",
                         event.at(),
                     )
                     .await?;
@@ -198,14 +198,6 @@ impl Engine {
         };
         let rules = self.store.mail_rules(&facts.board_id).await?;
         let event = Event::Moved(transition.clone());
-        let columns = self.store.columns_for_board(&facts.board_id).await?;
-        let column_name = |id: &str| {
-            columns
-                .iter()
-                .find(|column| column.id == id)
-                .map(|column| column.name.clone())
-                .unwrap_or_else(|| "a column".to_string())
-        };
 
         for rule in &rules {
             if !rule.enabled {
@@ -232,11 +224,7 @@ impl Engine {
                     }
                 }
                 Trigger::StatusBecomes(watched) => {
-                    let detail = format!(
-                        "moved to {}, rule watches {}",
-                        column_name(&transition.to_column),
-                        column_name(watched)
-                    );
+                    let detail = format!("moved:{}:{}", transition.to_column, watched);
                     self.store
                         .record_mail_decision(
                             &rule.id,
@@ -258,7 +246,7 @@ impl Engine {
                             event.id(),
                             &transition.task_id,
                             MailOutcome::NotMatched,
-                            "not a status crossing",
+                            "not_status",
                             event.at(),
                         )
                         .await?;
@@ -286,14 +274,6 @@ impl Engine {
         }
         let rules = self.store.mail_rules(&freeing.board_id).await?;
         let event = Event::Freed(freeing.clone());
-        let columns = self.store.columns_for_board(&freeing.board_id).await?;
-        let column_name = |id: &str| {
-            columns
-                .iter()
-                .find(|column| column.id == id)
-                .map(|column| column.name.clone())
-                .unwrap_or_else(|| "a column".to_string())
-        };
 
         for rule in &rules {
             for task_id in freed {
@@ -315,8 +295,7 @@ impl Engine {
                         self.owe(rule, &event, task_id, &mut report).await?;
                     }
                     Trigger::StatusBecomes(watched) => {
-                        let detail =
-                            format!("freed a task, rule watches a move to {}", column_name(watched));
+                        let detail = format!("unblocked:{}", watched);
                         self.store
                             .record_mail_decision(
                                 &rule.id,
@@ -338,7 +317,7 @@ impl Engine {
                                 event.id(),
                                 task_id,
                                 MailOutcome::NotMatched,
-                                "not an unblocked event",
+                                "not_unblocked",
                                 event.at(),
                             )
                             .await?;
@@ -414,7 +393,7 @@ impl Engine {
                         happened.id(),
                         &event.task_id,
                         MailOutcome::TaskGone,
-                        "task was deleted before the mail ran",
+                        "",
                         happened.at(),
                     )
                     .await?;
@@ -423,14 +402,6 @@ impl Engine {
         };
         let rules = self.store.mail_rules(&facts.board_id).await?;
         let happened = Event::Happened(event.clone());
-        let columns = self.store.columns_for_board(&facts.board_id).await?;
-        let column_name = |id: &str| {
-            columns
-                .iter()
-                .find(|column| column.id == id)
-                .map(|column| column.name.clone())
-                .unwrap_or_else(|| "a column".to_string())
-        };
 
         for rule in &rules {
             if !rule.enabled {
@@ -452,13 +423,13 @@ impl Engine {
                 continue;
             }
             let watches = match &rule.trigger {
-                Trigger::StatusBecomes(column) => format!("a move to {}", column_name(column)),
-                Trigger::Unblocked => "its last blocker clearing".to_string(),
+                Trigger::StatusBecomes(column) => format!("status:{}", column),
+                Trigger::Unblocked => "unblocked".to_string(),
                 other => activity_kind_for(other)
-                    .map(|kind| kind.as_str().to_string())
+                    .map(|kind| format!("kind:{}", kind.as_str()))
                     .unwrap_or_default(),
             };
-            let detail = format!("{}, rule watches {}", event.kind.as_str(), watches);
+            let detail = format!("happened:{}:{}", event.kind.as_str(), watches);
             self.store
                 .record_mail_decision(
                     &rule.id,
@@ -499,9 +470,9 @@ impl Engine {
             .collect();
         if audience.is_empty() {
             let detail = if resolved_nobody {
-                "audience is empty"
+                "empty"
             } else {
-                "audience was only the actor"
+                "actor_only"
             };
             self.store
                 .record_mail_decision(

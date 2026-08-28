@@ -395,6 +395,12 @@ pub struct MailDecision {
     pub event_id: String,
     pub task_id: String,
     pub outcome: MailOutcome,
+    /// Empty when the outcome says everything, otherwise a machine token
+    /// (`empty`, `not_status`, `moved:<to_col_id>:<watch_col_id>`, ...) that
+    /// `logs.rs` renders in the viewer's language; column references are IDs,
+    /// never names, so a renamed or deleted column does not strand English in
+    /// the ledger. Rows written before this scheme carry English prose
+    /// instead and are shown as written — history does not get rewritten.
     pub detail: String,
     pub at: OffsetDateTime,
 }

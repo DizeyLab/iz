@@ -435,6 +435,18 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (e.key !== 'Escape') { return; } \
             var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
             if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
+            var viewer = document.querySelector('.viewer-scrim'); \
+            if (viewer) { \
+                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = viewer.getAttribute('href'); } \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
+            var confirmDelete = document.querySelector('details.confirm-details[open]'); \
+            if (confirmDelete && window.location.search.indexOf('confirm=delete') !== -1) { \
+                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
             var open = document.querySelectorAll('.edit-toggle:checked, details.confirm-details[open]'); \
             if (open.length) { \
                 open.forEach(function (el) { \
@@ -469,10 +481,13 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 }
 
 /// Which task, if any, `/` renders the detail modal open on, and the refusal
-/// (if any) a create or move landed back here with.
+/// (if any) a create or move landed back here with. `file` opens the viewer
+/// over that task's modal, the same nested query-param convention `confirm`
+/// already uses.
 #[query_params(error = redirect("/"))]
 struct BoardQuery {
     task: Option<String>,
+    file: Option<String>,
     refusal: Option<String>,
     on: Option<String>,
     sort: Option<String>,
@@ -586,10 +601,14 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         </main>
         if let Some(task_id) = &open_task {
             (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete")).await?)
+            if let Some(file_id) = &query.file {
+                (crate::detail::file_viewer_modal(cx, task_id, file_id).await?)
+            }
         }
         if open_new {
             (crate::detail::new_task_modal(cx, &all_columns, lang).await?)
         }
+        (crate::dropdown::dropdown_script(cx).await?)
         (card_menu_script(cx).await?)
     }
 }

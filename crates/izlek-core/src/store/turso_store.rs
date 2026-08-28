@@ -2909,7 +2909,7 @@ impl DetailReads for TursoStore {
         // must not drag five files through memory to print their names.
         let mut rows = conn
             .query(
-                "SELECT id, file_name, size_bytes, comment_id, uploaded_by \
+                "SELECT id, file_name, size_bytes, comment_id, uploaded_by, mime_type \
                  FROM attachment WHERE task_id = ?1 ORDER BY created_at, rowid",
                 params![task_id],
             )
@@ -2923,6 +2923,7 @@ impl DetailReads for TursoStore {
                 size_bytes: row.get::<i64>(2).map_err(backend)?.max(0) as u64,
                 comment_id: opt_text(&row, 3)?,
                 uploaded_by: text(&row, 4)?,
+                mime_type: text(&row, 5)?,
             });
         }
         Ok(out)

@@ -60,6 +60,8 @@ pub enum Key {
     RemoveThisLink,
     OnAComment,
     RemoveThisFile,
+    Download,
+    CloseTheFile,
     Esc,
     CloseThisTask,
     Status,
@@ -226,6 +228,11 @@ pub enum Key {
     ActDeleted,
     ActCommented,
     UnblockedWord,
+    AColumn,
+    AudienceEmpty,
+    AudienceActorOnly,
+    NotAStatusCrossing,
+    NotAnUnblockedEvent,
     TheSystem,
     NoDeadline,
     NoDescription,
@@ -320,6 +327,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (OnAComment, Tr) => "bir yoruma ekli",
         (RemoveThisFile, En) => "Remove this file",
         (RemoveThisFile, Tr) => "Bu dosyayı kaldır",
+        (Download, En) => "Download",
+        (Download, Tr) => "İndir",
+        (CloseTheFile, En) => "Close the file",
+        (CloseTheFile, Tr) => "Dosyayı kapat",
         (Esc, En) => "esc",
         (Esc, Tr) => "esc",
         (CloseThisTask, En) => "Close this task",
@@ -648,6 +659,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActCommented, Tr) => "yorum yaptı",
         (UnblockedWord, En) => "unblocked",
         (UnblockedWord, Tr) => "engeli kaldırıldı",
+        (AColumn, En) => "a column",
+        (AColumn, Tr) => "bir sütun",
+        (AudienceEmpty, En) => "audience is empty",
+        (AudienceEmpty, Tr) => "kitle boş",
+        (AudienceActorOnly, En) => "audience was only the actor",
+        (AudienceActorOnly, Tr) => "kitle sadece işlemi yapan kişiydi",
+        (NotAStatusCrossing, En) => "not a status crossing",
+        (NotAStatusCrossing, Tr) => "bir durum geçişi değil",
+        (NotAnUnblockedEvent, En) => "not an unblocked event",
+        (NotAnUnblockedEvent, Tr) => "engel kalkma olayı değil",
         (TheSystem, En) => "The system",
         (TheSystem, Tr) => "Sistem",
         (NoDeadline, En) => "no deadline",
@@ -838,5 +859,83 @@ pub fn moved_to_label(lang: Lang, column: &str) -> String {
     match lang {
         Lang::En => format!("moved to {column}"),
         Lang::Tr => format!("{column} sütununa taşındı"),
+    }
+}
+
+/// A crossing that did not match a `StatusBecomes` rule: it moved somewhere
+/// the rule does not watch.
+pub fn moved_not_watched_label(lang: Lang, to: &str, watched: &str) -> String {
+    match lang {
+        Lang::En => format!("moved to {to}, rule watches {watched}"),
+        Lang::Tr => format!("{to} sütununa taşındı, kural {watched} sütununu izliyor"),
+    }
+}
+
+/// A freed task whose freeing did not match a `StatusBecomes` rule.
+pub fn freed_not_watched_label(lang: Lang, watched: &str) -> String {
+    match lang {
+        Lang::En => format!("freed a task, rule watches a move to {watched}"),
+        Lang::Tr => format!("bir görevin engelini kaldırdı, kural {watched} sütununa taşınmasını izliyor"),
+    }
+}
+
+/// The short word for an activity kind, as it appears in a decision's detail
+/// — not the full activity-strip sentence, just the bare event name.
+pub fn activity_kind_word(lang: Lang, kind: &str) -> String {
+    match (kind, lang) {
+        ("created", Lang::En) => "created".to_string(),
+        ("created", Lang::Tr) => "oluşturuldu".to_string(),
+        ("retitled", Lang::En) => "retitled".to_string(),
+        ("retitled", Lang::Tr) => "yeniden adlandırıldı".to_string(),
+        ("described", Lang::En) => "described".to_string(),
+        ("described", Lang::Tr) => "açıklandı".to_string(),
+        ("deadline_set", Lang::En) => "deadline set".to_string(),
+        ("deadline_set", Lang::Tr) => "son tarih belirlendi".to_string(),
+        ("deadline_cleared", Lang::En) => "deadline cleared".to_string(),
+        ("deadline_cleared", Lang::Tr) => "son tarih kaldırıldı".to_string(),
+        ("assigned", Lang::En) => "assigned".to_string(),
+        ("assigned", Lang::Tr) => "atandı".to_string(),
+        ("unassigned", Lang::En) => "unassigned".to_string(),
+        ("unassigned", Lang::Tr) => "atama kaldırıldı".to_string(),
+        ("linked", Lang::En) => "linked".to_string(),
+        ("linked", Lang::Tr) => "bağlandı".to_string(),
+        ("unlinked", Lang::En) => "unlinked".to_string(),
+        ("unlinked", Lang::Tr) => "bağlantı kaldırıldı".to_string(),
+        ("moved", Lang::En) => "moved".to_string(),
+        ("moved", Lang::Tr) => "taşındı".to_string(),
+        ("unblocked", Lang::En) => "unblocked".to_string(),
+        ("unblocked", Lang::Tr) => "engeli kaldırıldı".to_string(),
+        ("deleted", Lang::En) => "deleted".to_string(),
+        ("deleted", Lang::Tr) => "silindi".to_string(),
+        ("commented", Lang::En) => "commented".to_string(),
+        ("commented", Lang::Tr) => "yorum yapıldı".to_string(),
+        (other, _) => other.to_string(),
+    }
+}
+
+/// An activity that did not match a rule: the activity's own word, and what
+/// the rule watches instead.
+pub fn happened_not_watched_label(lang: Lang, event_word: &str, watched: &str) -> String {
+    match lang {
+        Lang::En => format!("{event_word}, rule watches {watched}"),
+        Lang::Tr => format!("{event_word}, kural {watched} izliyor"),
+    }
+}
+
+/// The "what a rule watches" half of `happened_not_watched_label`, for a
+/// rule watching a status crossing.
+pub fn watches_move_phrase(lang: Lang, column: &str) -> String {
+    match lang {
+        Lang::En => format!("a move to {column}"),
+        Lang::Tr => format!("{column} sütununa taşınmasını"),
+    }
+}
+
+/// The "what a rule watches" half of `happened_not_watched_label`, for a
+/// rule watching its last blocker clear.
+pub fn watches_unblock_phrase(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "its last blocker clearing",
+        Lang::Tr => "son engelinin kalkmasını",
     }
 }

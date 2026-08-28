@@ -4226,7 +4226,8 @@ async fn a_deleted_task_still_leaves_a_task_gone_row() {
         .find(|d| d.rule_id == rule.id && d.task_id == task)
         .expect("the deleted task still left a row");
     assert_eq!(row.outcome, MailOutcome::TaskGone);
-    assert!(!row.detail.is_empty(), "the reason is not left blank");
+    // The outcome IS the reason; task_gone carries no detail token.
+    assert!(row.detail.is_empty(), "task_gone stores no detail token");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -4880,7 +4881,7 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
         .find(|d| d.event_id == commented_by_creator)
         .expect("the creator-only audience left a row");
     assert_eq!(row.outcome, MailOutcome::NoRecipients);
-    assert_eq!(row.detail, "audience was only the actor");
+    assert_eq!(row.detail, "actor_only");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

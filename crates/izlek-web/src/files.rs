@@ -9,7 +9,7 @@
 use time::OffsetDateTime;
 use topcoat::context::Cx;
 use topcoat::router::content::multipart::Multipart;
-use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, path_param, route};
+use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, path_param, query_params, route};
 
 use izlek_core::store::{NewAttachment, Store, User};
 
@@ -82,6 +82,22 @@ fn sniff(bytes: &[u8]) -> &'static str {
         "application/zip"
     } else if bytes.starts_with(&[0x1F, 0x8B]) {
         "application/gzip"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
+        "image/avif"
+    } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        "video/mp4"
+    } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        "video/webm"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
+        "audio/wav"
+    } else if bytes.starts_with(b"fLaC") {
+        "audio/flac"
+    } else if bytes.starts_with(b"OggS") {
+        "audio/ogg"
+    } else if bytes.starts_with(b"ID3") || bytes.starts_with(&[0xFF, 0xFB]) || bytes.starts_with(&[0xFF, 0xF3]) || bytes.starts_with(&[0xFF, 0xF2]) {
+        "audio/mpeg"
     } else if std::str::from_utf8(bytes).is_ok() {
         "text/plain"
     } else {
@@ -89,12 +105,16 @@ fn sniff(bytes: &[u8]) -> &'static str {
     }
 }
 
-/// The `Content-Disposition` header for one download: always `attachment`, so
-/// an uploaded HTML or SVG file is offered to save rather than run on Izlek's
-/// origin. The ASCII fallback keeps only characters no quoting scheme could
-/// turn into a delimiter or a control character; `filename*` carries the real
-/// name, percent-encoded, for browsers that read it.
-fn disposition_of(file_name: &str) -> String {
+/// The `Content-Disposition` header for one download. `inline` is only ever
+/// true for a mime type a browser renders on its own ([`renders_inline`]) and
+/// the caller did not ask for a forced download (`?dl=1`) — an uploaded HTML
+/// or SVG file stays `attachment` either way, so it is offered to save rather
+/// than run on Izlek's origin. The ASCII fallback keeps only characters no
+/// quoting scheme could turn into a delimiter or a control character;
+/// `filename*` carries the real name, percent-encoded, for browsers that read
+/// it.
+fn disposition_of(file_name: &str, inline: bool) -> String {
+    let kind = if inline { "inline" } else { "attachment" };
     let ascii: String = file_name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
@@ -108,11 +128,56 @@ fn disposition_of(file_name: &str) -> String {
             encoded.push_str(&format!("%{byte:02X}"));
         }
     }
-    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+    format!("{kind}; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
+/// Whether the browser renders this stored mime type on its own — image,
+/// video, audio, PDF or plain text — rather than only offering to save it.
+/// Trusts the stored mime alone; nothing here sniffs bytes a second time.
+fn renders_inline(mime_type: &str) -> bool {
+    mime_type.starts_with("image/")
+        || mime_type.starts_with("video/")
+        || mime_type.starts_with("audio/")
+        || mime_type == "application/pdf"
+        || mime_type == "text/plain"
+}
+
+/// The element the in-app viewer opens one attachment in, decided from its
+/// stored mime type alone. `None` means there is no overlay for it: a
+/// filename click downloads like any other attachment. Plain text renders
+/// inline in the browser ([`renders_inline`]) but has no viewer element of
+/// its own, so it is not a [`ViewerKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewerKind {
+    Image,
+    Video,
+    Audio,
+    Pdf,
+}
+
+pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
+    if mime_type.starts_with("image/") {
+        Some(ViewerKind::Image)
+    } else if mime_type.starts_with("video/") {
+        Some(ViewerKind::Video)
+    } else if mime_type.starts_with("audio/") {
+        Some(ViewerKind::Audio)
+    } else if mime_type == "application/pdf" {
+        Some(ViewerKind::Pdf)
+    } else {
+        None
+    }
 }
 
 fn not_found() -> (StatusCode, HeaderMap, Vec<u8>) {
     (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new())
+}
+
+/// `?dl=1` forces `attachment` on a type that would otherwise render inline
+/// — "download instead" stays an option even for a file the viewer can open.
+#[query_params(error = not_found)]
+struct DownloadQuery {
+    dl: Option<String>,
 }
 
 /// Takes one file onto a task. The route this hangs off already caps the
@@ -269,6 +334,9 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
         return Ok(not_found());
     };
 
+    let forced_download = query_params::<DownloadQuery>(cx)?.dl.is_some();
+    let inline = !forced_download && renders_inline(&row.mime_type);
+
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -276,7 +344,7 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&disposition_of(&row.file_name)).unwrap_or(HeaderValue::from_static("attachment")),
+        HeaderValue::from_str(&disposition_of(&row.file_name, inline)).unwrap_or(HeaderValue::from_static("attachment")),
     );
     Ok((StatusCode::OK, headers, bytes))
 }
@@ -294,6 +362,19 @@ mod tests {
     }
 
     #[test]
+    fn sniffs_the_media_types() {
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"), "video/mp4");
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00"), "image/avif");
+        assert_eq!(sniff(&[0x1A, 0x45, 0xDF, 0xA3, 0x00, 0x00]), "video/webm");
+        assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
+        assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WAVEfmt "), "audio/wav");
+        assert_eq!(sniff(b"fLaC\x00\x00\x00\x00"), "audio/flac");
+        assert_eq!(sniff(b"OggS\x00\x00\x00\x00"), "audio/ogg");
+        assert_eq!(sniff(b"ID3\x03\x00\x00\x00"), "audio/mpeg");
+        assert_eq!(sniff(&[0xFF, 0xFB, 0x90, 0x00]), "audio/mpeg");
+    }
+
+    #[test]
     fn labels_strip_the_path_and_the_control_characters() {
         assert_eq!(label_of("../../etc/passwd"), "passwd");
         assert_eq!(label_of(r"a\b.txt"), "b.txt");
@@ -302,7 +383,7 @@ mod tests {
 
     #[test]
     fn disposition_carries_no_quote_or_control_character() {
-        let header = disposition_of("a\"b\r\nX: y.txt");
+        let header = disposition_of("a\"b\r\nX: y.txt", false);
         assert!(!header.contains('\r'));
         assert!(!header.contains('\n'));
         assert_eq!(
@@ -313,7 +394,7 @@ mod tests {
 
     #[test]
     fn disposition_of_a_traversal_name_keeps_no_path_meaning() {
-        let header = disposition_of("../../etc/passwd");
+        let header = disposition_of("../../etc/passwd", false);
         assert_eq!(
             header,
             "attachment; filename=\".._.._etc_passwd\"; filename*=UTF-8''..%2F..%2Fetc%2Fpasswd"
@@ -322,10 +403,39 @@ mod tests {
 
     #[test]
     fn disposition_of_a_non_ascii_name_falls_back_and_percent_encodes() {
-        let header = disposition_of("résumé.pdf");
+        let header = disposition_of("résumé.pdf", false);
         assert_eq!(
             header,
             "attachment; filename=\"r_sum_.pdf\"; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf"
         );
+    }
+
+    #[test]
+    fn disposition_is_inline_only_when_asked_for() {
+        let header = disposition_of("photo.png", true);
+        assert!(header.starts_with("inline;"), "{header}");
+        let header = disposition_of("photo.png", false);
+        assert!(header.starts_with("attachment;"), "{header}");
+    }
+
+    #[test]
+    fn renders_inline_covers_the_browser_renderable_types_and_nothing_else() {
+        assert!(renders_inline("image/png"));
+        assert!(renders_inline("video/mp4"));
+        assert!(renders_inline("audio/mpeg"));
+        assert!(renders_inline("application/pdf"));
+        assert!(renders_inline("text/plain"));
+        assert!(!renders_inline("application/octet-stream"));
+        assert!(!renders_inline("application/zip"));
+    }
+
+    #[test]
+    fn viewer_kind_has_no_element_for_plain_text() {
+        assert_eq!(viewer_kind("image/png"), Some(ViewerKind::Image));
+        assert_eq!(viewer_kind("video/mp4"), Some(ViewerKind::Video));
+        assert_eq!(viewer_kind("audio/mpeg"), Some(ViewerKind::Audio));
+        assert_eq!(viewer_kind("application/pdf"), Some(ViewerKind::Pdf));
+        assert_eq!(viewer_kind("text/plain"), None);
+        assert_eq!(viewer_kind("application/octet-stream"), None);
     }
 }

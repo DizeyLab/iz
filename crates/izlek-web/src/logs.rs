@@ -24,8 +24,11 @@ use crate::server::{Refusal, accounts, require_admin};
 struct QueueLine {
     recipient: String,
     subject: String,
-    /// "pending" or "failed".
+    /// The localized word shown to the admin.
     state: String,
+    /// "pending"/"held"/"failed"/"sent"/"abandoned" — the chip's tone, not
+    /// its wording.
+    state_kind: String,
     attempts: u32,
     last_error: Option<String>,
     next_attempt: Option<String>,
@@ -36,6 +39,8 @@ struct QueueLine {
 struct RuleVerdict {
     rule: String,
     outcome: String,
+    /// `MailOutcome::as_str()` — the chip's tone, not its wording.
+    outcome_kind: String,
     detail: String,
 }
 
@@ -144,6 +149,88 @@ async fn event_happened(
     }
 }
 
+/// A decision's `detail` column, rendered in the viewer's language.
+///
+/// New rows carry a machine token (see `store::MailDecision::detail`);
+/// column references in it are IDs, resolved here against the rule's board,
+/// one fetch per board no matter how many decisions share it. A detail that
+/// is empty or does not parse as a known token — including every row a
+/// version before this scheme wrote — is shown exactly as stored.
+async fn decision_detail(
+    store: &std::sync::Arc<dyn izlek_core::store::Store>,
+    columns_cache: &mut std::collections::HashMap<String, Vec<izlek_core::board::Column>>,
+    board_id: Option<&str>,
+    outcome: izlek_core::store::MailOutcome,
+    detail: &str,
+    lang: Lang,
+) -> std::result::Result<String, izlek_core::store::StoreError> {
+    use izlek_core::store::MailOutcome;
+
+    if detail.is_empty() || !matches!(outcome, MailOutcome::NoRecipients | MailOutcome::NotMatched) {
+        return Ok(detail.to_string());
+    }
+    match (outcome, detail) {
+        (MailOutcome::NoRecipients, "empty") => return Ok(t(lang, Key::AudienceEmpty).to_string()),
+        (MailOutcome::NoRecipients, "actor_only") => {
+            return Ok(t(lang, Key::AudienceActorOnly).to_string());
+        }
+        (MailOutcome::NotMatched, "not_status") => {
+            return Ok(t(lang, Key::NotAStatusCrossing).to_string());
+        }
+        (MailOutcome::NotMatched, "not_unblocked") => {
+            return Ok(t(lang, Key::NotAnUnblockedEvent).to_string());
+        }
+        _ => {}
+    }
+    if outcome != MailOutcome::NotMatched {
+        return Ok(detail.to_string());
+    }
+    let Some(board_id) = board_id else {
+        return Ok(detail.to_string());
+    };
+    let columns = match columns_cache.get(board_id) {
+        Some(columns) => columns,
+        None => {
+            let columns = store.columns_for_board(board_id).await?;
+            columns_cache.insert(board_id.to_string(), columns);
+            columns_cache.get(board_id).expect("just inserted")
+        }
+    };
+    let name = |id: &str| {
+        columns
+            .iter()
+            .find(|column| column.id == id)
+            .map(|column| column.name.clone())
+            .unwrap_or_else(|| t(lang, Key::AColumn).to_string())
+    };
+    if let Some(rest) = detail.strip_prefix("moved:") {
+        let mut parts = rest.splitn(2, ':');
+        if let (Some(to), Some(watched)) = (parts.next(), parts.next()) {
+            return Ok(crate::i18n::moved_not_watched_label(lang, &name(to), &name(watched)));
+        }
+    }
+    if let Some(watched) = detail.strip_prefix("unblocked:") {
+        return Ok(crate::i18n::freed_not_watched_label(lang, &name(watched)));
+    }
+    if let Some(rest) = detail.strip_prefix("happened:") {
+        let mut parts = rest.splitn(2, ':');
+        let kind = parts.next().unwrap_or("");
+        let watches = parts.next().unwrap_or("");
+        let watched = if let Some(column) = watches.strip_prefix("status:") {
+            crate::i18n::watches_move_phrase(lang, &name(column))
+        } else if watches == "unblocked" {
+            crate::i18n::watches_unblock_phrase(lang).to_string()
+        } else if let Some(other_kind) = watches.strip_prefix("kind:") {
+            crate::i18n::activity_kind_word(lang, other_kind)
+        } else {
+            return Ok(detail.to_string());
+        };
+        let event_word = crate::i18n::activity_kind_word(lang, kind);
+        return Ok(crate::i18n::happened_not_watched_label(lang, &event_word, &watched));
+    }
+    Ok(detail.to_string())
+}
+
 /// The queue, the decisions, and the activity, admin only. Shared by the
 /// `/logs` page and the `/api/current_logs` route so both answer the same
 /// read the same way.
@@ -172,18 +259,20 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
                 None => t(lang, Key::RuleGone).to_string(),
             },
         };
+        let (state, state_kind) = match send.state {
+            SendState::Pending => (t(lang, Key::QueueStatePending), "pending"),
+            // A send the engine never attempted is only held — usually
+            // for want of a sender — not failed at anything.
+            SendState::Failed if send.attempts == 0 => (t(lang, Key::QueueStateHeld), "held"),
+            SendState::Failed => (t(lang, Key::QueueStateFailed), "failed"),
+            SendState::Sent => (t(lang, Key::QueueStateSent), "sent"),
+            SendState::Abandoned => (t(lang, Key::QueueStateAbandoned), "abandoned"),
+        };
         queue.push(QueueLine {
             recipient: send.recipient,
             subject,
-            state: match send.state {
-                SendState::Pending => t(lang, Key::QueueStatePending).to_string(),
-                // A send the engine never attempted is only held — usually
-                // for want of a sender — not failed at anything.
-                SendState::Failed if send.attempts == 0 => t(lang, Key::QueueStateHeld).to_string(),
-                SendState::Failed => t(lang, Key::QueueStateFailed).to_string(),
-                SendState::Sent => t(lang, Key::QueueStateSent).to_string(),
-                SendState::Abandoned => t(lang, Key::QueueStateAbandoned).to_string(),
-            },
+            state: state.to_string(),
+            state_kind: state_kind.to_string(),
             attempts: send.attempts,
             last_error: send.last_error,
             next_attempt: send
@@ -194,16 +283,28 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
 
     let raw_decisions = store.recent_mail_decisions(LIMIT).await?;
     let mut decisions: Vec<DecisionGroup> = Vec::new();
+    let mut columns_cache: std::collections::HashMap<String, Vec<izlek_core::board::Column>> =
+        std::collections::HashMap::new();
     for decision in raw_decisions {
-        let rule = store
-            .mail_rule(&decision.rule_id)
-            .await?
-            .map(|rule| rule.subject)
+        let rule = store.mail_rule(&decision.rule_id).await?;
+        let rule_label = rule
+            .as_ref()
+            .map(|rule| rule.subject.clone())
             .unwrap_or_else(|| t(lang, Key::RuleGone).to_string());
+        let detail = decision_detail(
+            &store,
+            &mut columns_cache,
+            rule.as_ref().map(|rule| rule.board_id.as_str()),
+            decision.outcome,
+            &decision.detail,
+            lang,
+        )
+        .await?;
         let verdict = RuleVerdict {
-            rule,
+            rule: rule_label,
             outcome: outcome_word(decision.outcome, lang).to_string(),
-            detail: decision.detail,
+            outcome_kind: decision.outcome.as_str().to_string(),
+            detail,
         };
         if let Some(group) = decisions.iter_mut().find(|g| g.event_id == decision.event_id) {
             group.verdicts.push(verdict);
@@ -316,18 +417,19 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                     <div class="panel-body">
                         <div class="rule-list">
                             for line in queue {
-                                let is_failed_or_held = line.state == t(lang, Key::QueueStateFailed) || line.state == t(lang, Key::QueueStateHeld);
+                                let is_failed_or_held = line.state_kind == "failed" || line.state_kind == "held";
                                 let state_note = if is_failed_or_held {
                                     line.last_error.unwrap_or_else(|| line.state.clone())
                                 } else {
                                     line.state.clone()
                                 };
+                                let chip_class = format!("rule-term rule-term-{}", line.state_kind);
                                 let next_attempt = line.next_attempt.unwrap_or_else(|| t(lang, Key::NoRetry).to_string());
                                 <div class="rule-row">
                                     <div class="rule-sentence">
                                         <span class="rule-term">(line.recipient)</span>
                                         <span>(line.subject)</span>
-                                        <span class="rule-term">(state_note)</span>
+                                        <span class=(chip_class)>(state_note)</span>
                                         <span>(crate::i18n::attempt_label(lang, line.attempts))</span>
                                     </div>
                                     <span class="rule-stamp">(next_attempt)</span>
@@ -358,11 +460,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                                     </div>
                                     <div class="decision-verdicts">
                                         for verdict in group.verdicts {
-                                            let chip_class = if verdict.outcome == t(lang, Key::OutcomeQueued) {
-                                                "rule-term rule-term-queued"
-                                            } else {
-                                                "rule-term"
-                                            };
+                                            let chip_class = format!("rule-term rule-term-{}", verdict.outcome_kind);
                                             <div class="decision-verdict">
                                                 <span class="rule-term">(verdict.rule)</span>
                                                 <span class=(chip_class)>(verdict.outcome)</span>

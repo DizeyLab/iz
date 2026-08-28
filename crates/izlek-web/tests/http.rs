@@ -703,6 +703,23 @@ async fn the_board_is_not_readable_without_a_session() {
     assert!(!html.contains("board-stage"), "a signed-out browser was shown the board: {html}");
 }
 
+/// The sort control still posts as a plain `<select name=sort>` — `dropdown.rs`
+/// only hides it and stands a trigger button in front, it never renames or
+/// drops the form field a `GET /?sort=` relies on.
+#[tokio::test]
+async fn the_board_sort_control_keeps_its_hidden_select_and_gets_a_dropdown_trigger() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+
+    let page = app.get("/", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("select class=\"status-select\" name=\"sort\""), "{html}");
+    // `dropdown.rs`'s script is what turns that hidden select into the
+    // house trigger + panel client-side; its presence is the page's only
+    // server-rendered proof the shell is wired in.
+    assert!(html.contains("dd-trigger"), "no dropdown script on the board page: {html}");
+}
+
 #[tokio::test]
 async fn a_viewer_who_posts_a_comment_anyway_is_refused() {
     let app = App::open().await;
@@ -1078,6 +1095,22 @@ async fn a_card_cannot_be_moved_into_another_boards_column() {
 // ---------------------------------------------------------------------------
 // Settings: sign-out, profile, limits, sender, test mail, resend
 // ---------------------------------------------------------------------------
+
+/// Settings has three `select.field-input`s (timezone, theme, language) plus
+/// a member-role `select.status-select` once there are members — the page
+/// carries no board.rs, so it has to wire `dropdown.rs`'s script in for
+/// itself; this proves it did, and that the theme select still posts as a
+/// plain named field.
+#[tokio::test]
+async fn settings_selects_keep_their_hidden_form_fields_and_get_a_dropdown_trigger() {
+    let app = App::open().await;
+    let cookie = admin(&app).await;
+
+    let page = app.get("/settings", Some(&cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("select class=\"field-input\" name=\"theme\""), "{html}");
+    assert!(html.contains("dd-trigger"), "no dropdown script on the settings page: {html}");
+}
 
 #[tokio::test]
 async fn signing_out_stops_the_session_being_worth_anything() {
@@ -2148,12 +2181,96 @@ async fn a_member_uploads_a_file_and_the_chip_comes_back() {
     let page = app.get(&format!("/?task={task}"), Some(&member)).await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(&format!("/files/{file_id}")), "no href to the new file: {html}");
+    assert!(html.contains(&format!("task={task}&amp;file={file_id}")), "no viewer href for the new file: {html}");
     assert!(html.contains("spec.png"));
 
     let download = app.get(&format!("/files/{file_id}"), Some(&member)).await;
     assert_eq!(download.status, StatusCode::OK);
     assert_eq!(download.bytes, png);
+}
+
+#[tokio::test]
+async fn an_image_downloads_inline_and_an_unrecognised_type_stays_attachment() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Two kinds of file").await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &png))).await;
+    let unknown = [0x00u8, 0x01, 0xFE, 0xFF, 0x02];
+    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("blob.bin", "application/octet-stream", &unknown)))
+        .await;
+
+    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let png_id = attachment_id_named(&snapshot.body, "spec.png");
+    let blob_id = attachment_id_named(&snapshot.body, "blob.bin");
+
+    let png_download = app.get(&format!("/files/{png_id}"), Some(&admin_cookie)).await;
+    assert_eq!(png_download.content_type.as_deref(), Some("image/png"));
+    assert!(
+        png_download.disposition.as_deref().unwrap_or_default().starts_with("inline;"),
+        "{:?}",
+        png_download.disposition
+    );
+
+    let blob_download = app.get(&format!("/files/{blob_id}"), Some(&admin_cookie)).await;
+    assert!(
+        blob_download.disposition.as_deref().unwrap_or_default().starts_with("attachment;"),
+        "{:?}",
+        blob_download.disposition
+    );
+}
+
+#[tokio::test]
+async fn dl_forces_a_download_of_an_otherwise_inline_type() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Forced download").await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &png))).await;
+    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let file_id = attachment_id_named(&snapshot.body, "spec.png");
+
+    let forced = app.get(&format!("/files/{file_id}?dl=1"), Some(&admin_cookie)).await;
+    assert!(
+        forced.disposition.as_deref().unwrap_or_default().starts_with("attachment;"),
+        "{:?}",
+        forced.disposition
+    );
+}
+
+#[tokio::test]
+async fn the_viewer_renders_in_page_for_a_renderable_file_and_ignores_a_foreign_or_missing_one() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Open it in place").await;
+    let other_task = a_task(&app, &admin_cookie, &column, "Not this one").await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &png))).await;
+    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let file_id = attachment_id_named(&snapshot.body, "spec.png");
+
+    let page = app.get(&format!("/?task={task}&file={file_id}"), Some(&admin_cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    // "viewer-body" marks the rendered overlay; "viewer-scrim" also appears as a
+    // string literal inside the Escape-handler script on every board page.
+    assert!(html.contains("viewer-body"), "no viewer overlay in the page: {html}");
+    assert!(html.contains(&format!("/files/{file_id}")), "viewer's <img> does not point at the file: {html}");
+
+    // A file id that exists but belongs to another task is refused the same
+    // silent way a made-up one is: no overlay, the task modal alone.
+    let wrong_task_page = app.get(&format!("/?task={other_task}&file={file_id}"), Some(&admin_cookie)).await;
+    assert!(!String::from_utf8_lossy(&wrong_task_page.bytes).contains("viewer-body"));
+
+    let missing_page = app.get(&format!("/?task={task}&file=anything"), Some(&admin_cookie)).await;
+    assert_eq!(missing_page.status, StatusCode::OK);
+    assert!(!String::from_utf8_lossy(&missing_page.bytes).contains("viewer-body"));
 }
 
 #[tokio::test]
