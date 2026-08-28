@@ -141,15 +141,34 @@ fn audience_of(word: &str) -> std::result::Result<Audience, Refusal> {
 /// this module does not reach into `crate::settings::Sender` so it stays
 /// independent of that screen's own shape.
 fn sender_connected(workspace: &Workspace) -> bool {
-    !workspace.smtp_host.as_deref().unwrap_or_default().trim().is_empty()
-        && !workspace.smtp_username.as_deref().unwrap_or_default().trim().is_empty()
-        && !workspace.smtp_from_address.as_deref().unwrap_or_default().trim().is_empty()
+    !workspace
+        .smtp_host
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+        && !workspace
+            .smtp_username
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        && !workspace
+            .smtp_from_address
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
         && workspace.smtp_password_set
 }
 
 /// Splits a trigger into the sentence halves the screen prints, ported
 /// verbatim from `current_rules`'s match in `izlek-web/src/rules.rs`.
-fn sentence_of(trigger: &Trigger, columns: &[Column], lang: Lang) -> (String, String, String, Option<String>) {
+fn sentence_of(
+    trigger: &Trigger,
+    columns: &[Column],
+    lang: Lang,
+) -> (String, String, String, Option<String>) {
     match trigger {
         Trigger::StatusBecomes(column_id) => (
             t(lang, Key::WhenStatusBecomes).to_string(),
@@ -169,12 +188,18 @@ fn sentence_of(trigger: &Trigger, columns: &[Column], lang: Lang) -> (String, St
             "unblocked".to_string(),
             None,
         ),
-        Trigger::Created => {
-            (t(lang, Key::WhenTaskCreated).to_string(), String::new(), "created".to_string(), None)
-        }
-        Trigger::Assigned => {
-            (t(lang, Key::WhenSomeoneAssigned).to_string(), String::new(), "assigned".to_string(), None)
-        }
+        Trigger::Created => (
+            t(lang, Key::WhenTaskCreated).to_string(),
+            String::new(),
+            "created".to_string(),
+            None,
+        ),
+        Trigger::Assigned => (
+            t(lang, Key::WhenSomeoneAssigned).to_string(),
+            String::new(),
+            "assigned".to_string(),
+            None,
+        ),
         Trigger::Unassigned => (
             t(lang, Key::WhenSomeoneUnassigned).to_string(),
             String::new(),
@@ -199,37 +224,65 @@ fn sentence_of(trigger: &Trigger, columns: &[Column], lang: Lang) -> (String, St
             "deadline_cleared".to_string(),
             None,
         ),
-        Trigger::Retitled => {
-            (t(lang, Key::WhenTaskRenamed).to_string(), String::new(), "retitled".to_string(), None)
-        }
-        Trigger::Linked => {
-            (t(lang, Key::WhenTaskLinked).to_string(), String::new(), "linked".to_string(), None)
-        }
+        Trigger::Retitled => (
+            t(lang, Key::WhenTaskRenamed).to_string(),
+            String::new(),
+            "retitled".to_string(),
+            None,
+        ),
+        Trigger::Linked => (
+            t(lang, Key::WhenTaskLinked).to_string(),
+            String::new(),
+            "linked".to_string(),
+            None,
+        ),
         Trigger::Unlinked => (
             t(lang, Key::WhenTaskUnlinked).to_string(),
             String::new(),
             "unlinked".to_string(),
             None,
         ),
-        Trigger::Deleted => {
-            (t(lang, Key::WhenTaskDeleted).to_string(), String::new(), "deleted".to_string(), None)
-        }
+        Trigger::Deleted => (
+            t(lang, Key::WhenTaskDeleted).to_string(),
+            String::new(),
+            "deleted".to_string(),
+            None,
+        ),
     }
 }
 
 /// Every rule on the board, switched-off ones included, with the columns a new
 /// rule may name — shared by the page and `current_rules`, so the two never
 /// drift apart.
-async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result<RulesSnapshot, Refusal> {
+async fn snapshot_of(
+    store: &Arc<dyn Store>,
+    user: &User,
+) -> std::result::Result<RulesSnapshot, Refusal> {
     let lang = Lang::from_code(&user.language);
     let zone = izlek_core::detail::parse_zone(&user.timezone);
-    let Some(board) = store.board(&user.workspace_id).await.map_err(|_| Refusal::Unavailable)? else {
+    let Some(board) = store
+        .board(&user.workspace_id)
+        .await
+        .map_err(|_| Refusal::Unavailable)?
+    else {
         return Err(Refusal::Unavailable);
     };
-    let columns = store.columns(&board.id).await.map_err(|_| Refusal::Unavailable)?;
-    let rules = store.mail_rules(&board.id).await.map_err(|_| Refusal::Unavailable)?;
-    let last_sent = store.mail_rule_last_sent(&board.id).await.map_err(|_| Refusal::Unavailable)?;
-    let last_decision = store.mail_rule_last_decision().await.map_err(|_| Refusal::Unavailable)?;
+    let columns = store
+        .columns(&board.id)
+        .await
+        .map_err(|_| Refusal::Unavailable)?;
+    let rules = store
+        .mail_rules(&board.id)
+        .await
+        .map_err(|_| Refusal::Unavailable)?;
+    let last_sent = store
+        .mail_rule_last_sent(&board.id)
+        .await
+        .map_err(|_| Refusal::Unavailable)?;
+    let last_decision = store
+        .mail_rule_last_decision()
+        .await
+        .map_err(|_| Refusal::Unavailable)?;
     let sender_connected = store
         .workspace()
         .await
@@ -268,7 +321,10 @@ async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result
         rules: lines,
         columns: columns
             .into_iter()
-            .map(|column| ColumnChoice { id: column.id, name: column.name })
+            .map(|column| ColumnChoice {
+                id: column.id,
+                name: column.name,
+            })
             .collect(),
         sender_connected,
     })
@@ -280,7 +336,10 @@ async fn snapshot_of(store: &Arc<dyn Store>, user: &User) -> std::result::Result
 /// A rule id is opaque and arrives from the browser, so "not yours" and "not a
 /// rule" are the same answer: neither tells the caller whether the id exists
 /// somewhere else.
-async fn rule_of_this_workspace(cx: &Cx, rule_id: &str) -> std::result::Result<Arc<dyn Store>, Refusal> {
+async fn rule_of_this_workspace(
+    cx: &Cx,
+    rule_id: &str,
+) -> std::result::Result<Arc<dyn Store>, Refusal> {
     let user = require_admin(cx).await?;
     let store = accounts(cx).store().clone();
     let board = store
@@ -326,7 +385,11 @@ fn back_to(cx: &Cx) -> String {
 type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
 
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
-    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, back_to(cx))], Json(refusal)))
+    Ok((
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, back_to(cx))],
+        Json(refusal),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -365,9 +428,15 @@ async fn create_rule(cx: &Cx, Form(input): Form<CreateRuleForm>) -> Redirect {
         Ok(Some(board)) => board,
         _ => return redirect(cx, Some(Refusal::Unavailable)),
     };
-    let column_id = if input.column_id.trim().is_empty() { None } else { Some(input.column_id) };
+    let column_id = if input.column_id.trim().is_empty() {
+        None
+    } else {
+        Some(input.column_id)
+    };
     if input.trigger == "status" {
-        let Some(column_id) = &column_id else { return redirect(cx, Some(Refusal::Forbidden)) };
+        let Some(column_id) = &column_id else {
+            return redirect(cx, Some(Refusal::Forbidden));
+        };
         let columns = match store.columns(&board.id).await {
             Ok(columns) => columns,
             Err(_) => return redirect(cx, Some(Refusal::Unavailable)),
@@ -438,9 +507,15 @@ async fn update_rule(cx: &Cx, Form(input): Form<UpdateRuleForm>) -> Redirect {
         Err(_) => return redirect(cx, Some(Refusal::Unavailable)),
     }
 
-    let column_id = if input.column_id.trim().is_empty() { None } else { Some(input.column_id) };
+    let column_id = if input.column_id.trim().is_empty() {
+        None
+    } else {
+        Some(input.column_id)
+    };
     if input.trigger == "status" {
-        let Some(column_id) = &column_id else { return redirect(cx, Some(Refusal::Forbidden)) };
+        let Some(column_id) = &column_id else {
+            return redirect(cx, Some(Refusal::Forbidden));
+        };
         let columns = match store.columns(&board.id).await {
             Ok(columns) => columns,
             Err(_) => return redirect(cx, Some(Refusal::Unavailable)),
@@ -483,7 +558,11 @@ async fn set_rule_enabled(cx: &Cx, Form(input): Form<SetRuleEnabledForm>) -> Red
         Ok(store) => store,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    if store.set_mail_rule_enabled(&input.rule_id, input.enabled == "true").await.is_err() {
+    if store
+        .set_mail_rule_enabled(&input.rule_id, input.enabled == "true")
+        .await
+        .is_err()
+    {
         return redirect(cx, Some(Refusal::Unavailable));
     }
     redirect(cx, None)
@@ -524,16 +603,32 @@ struct RulesQuery {
 /// server-side, from whichever trigger the form starts on (the existing
 /// rule's, or "status" for a fresh one), since there is no script to flip it
 /// as the admin changes the select.
-async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine>, refusal: Option<&Refusal>, lang: Lang) -> Result {
+async fn rule_form(
+    cx: &Cx,
+    columns: &[ColumnChoice],
+    existing: Option<&RuleLine>,
+    refusal: Option<&Refusal>,
+    lang: Lang,
+) -> Result {
     let is_edit = existing.is_some();
-    let action = if is_edit { "/api/update_rule" } else { "/api/create_rule" };
-    let trigger_kind = existing.map(|rule| rule.trigger_kind.as_str()).unwrap_or("status");
+    let action = if is_edit {
+        "/api/update_rule"
+    } else {
+        "/api/create_rule"
+    };
+    let trigger_kind = existing
+        .map(|rule| rule.trigger_kind.as_str())
+        .unwrap_or("status");
     let column_id = existing
         .and_then(|rule| rule.column_id.as_deref())
         .or_else(|| columns.first().map(|column| column.id.as_str()))
         .unwrap_or_default();
-    let subject = existing.map(|rule| rule.subject.as_str()).unwrap_or_default();
-    let audience_kind = existing.map(|rule| rule.audience_kind.as_str()).unwrap_or("assignees");
+    let subject = existing
+        .map(|rule| rule.subject.as_str())
+        .unwrap_or_default();
+    let audience_kind = existing
+        .map(|rule| rule.audience_kind.as_str())
+        .unwrap_or("assignees");
     let include_task_details = existing.is_some_and(|rule| rule.include_task_details);
 
     view! {
@@ -614,7 +709,12 @@ async fn rule_form(cx: &Cx, columns: &[ColumnChoice], existing: Option<&RuleLine
 /// The "New rule" control and the form inside it. A `<details>` rather than
 /// anything script-driven, so a browser with no script can still open it and
 /// post the form.
-async fn composer(cx: &Cx, columns: &[ColumnChoice], refusal: Option<&Refusal>, lang: Lang) -> Result {
+async fn composer(
+    cx: &Cx,
+    columns: &[ColumnChoice],
+    refusal: Option<&Refusal>,
+    lang: Lang,
+) -> Result {
     view! {
         cx =>
         <details class="rule-new">
@@ -626,7 +726,14 @@ async fn composer(cx: &Cx, columns: &[ColumnChoice], refusal: Option<&Refusal>, 
 
 /// One rule's row: the form in place of it when `editing`, its display
 /// otherwise.
-async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: bool, refusal: Option<&Refusal>, lang: Lang) -> Result {
+async fn rule_row(
+    cx: &Cx,
+    rule: &RuleLine,
+    columns: &[ColumnChoice],
+    editing: bool,
+    refusal: Option<&Refusal>,
+    lang: Lang,
+) -> Result {
     if editing {
         return view! {
             cx =>
@@ -636,14 +743,30 @@ async fn rule_row(cx: &Cx, rule: &RuleLine, columns: &[ColumnChoice], editing: b
         };
     }
 
-    let row_class = if rule.enabled { "rule-row" } else { "rule-row rule-row-off" };
-    let switch_class = if rule.enabled { "rule-switch rule-switch-on" } else { "rule-switch" };
-    let switch_label = if rule.enabled { t(lang, Key::SwitchRuleOff) } else { t(lang, Key::SwitchRuleOn) };
+    let row_class = if rule.enabled {
+        "rule-row"
+    } else {
+        "rule-row rule-row-off"
+    };
+    let switch_class = if rule.enabled {
+        "rule-switch rule-switch-on"
+    } else {
+        "rule-switch"
+    };
+    let switch_label = if rule.enabled {
+        t(lang, Key::SwitchRuleOff)
+    } else {
+        t(lang, Key::SwitchRuleOn)
+    };
     let stamp = rule
         .last_sent
         .as_ref()
         .map(|moment| crate::i18n::last_sent_label(lang, moment))
-        .or_else(|| rule.last_fired.as_ref().map(|moment| crate::i18n::last_fired_label(lang, moment)))
+        .or_else(|| {
+            rule.last_fired
+                .as_ref()
+                .map(|moment| crate::i18n::last_fired_label(lang, moment))
+        })
         .unwrap_or_else(|| t(lang, Key::NeverFired).to_string());
 
     view! {
@@ -719,7 +842,7 @@ async fn rules_page(cx: &Cx) -> Result {
             <span class="board-name">(t(lang, Key::MailRules))</span>
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Rules, lang).await?)
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
+            (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)
         </header>
 
         <div class="settings-shell">

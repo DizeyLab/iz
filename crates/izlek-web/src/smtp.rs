@@ -19,8 +19,8 @@
 
 use std::sync::Arc;
 
-use izlek_core::store::Store;
 use izlek_core::mail::{MailError, Mailer, Outgoing};
+use izlek_core::store::Store;
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};

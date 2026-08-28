@@ -17,7 +17,9 @@
 //! unchanged.
 
 use izlek_core::board::{DeadlineState, Person};
-use izlek_core::detail::{Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in, parse_zone};
+use izlek_core::detail::{
+    Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in, parse_zone,
+};
 use izlek_core::store::{Store, StoreError, User};
 use serde::{Deserialize, Serialize};
 use time::{Date, UtcOffset};
@@ -49,6 +51,7 @@ pub struct Me {
     pub email: String,
     pub role: izlek_core::Role,
     pub language: String,
+    pub has_photo: bool,
 }
 
 impl From<&User> for Me {
@@ -59,6 +62,7 @@ impl From<&User> for Me {
             email: user.email.clone(),
             role: user.role,
             language: user.language.clone(),
+            has_photo: user.has_photo,
         }
     }
 }
@@ -124,7 +128,11 @@ mod resolve_direction_tests {
 /// The task, if this person's workspace is the one holding it. A task in
 /// another workspace is not found rather than forbidden: the answer says
 /// nothing about whether the id is real.
-async fn task_of(store: &dyn Store, user: &User, task_id: &str) -> std::result::Result<TaskFacts, Refusal> {
+async fn task_of(
+    store: &dyn Store,
+    user: &User,
+    task_id: &str,
+) -> std::result::Result<TaskFacts, Refusal> {
     match store.task(task_id).await {
         Ok(Some(facts)) if facts.workspace_id == user.workspace_id => Ok(facts),
         Ok(_) => Err(Refusal::NotFound),
@@ -136,7 +144,10 @@ async fn task_of(store: &dyn Store, user: &User, task_id: &str) -> std::result::
 }
 
 /// The writer behind this request and the task they named.
-async fn writer_and_task(cx: &Cx, task_id: &str) -> std::result::Result<(User, TaskFacts), Refusal> {
+async fn writer_and_task(
+    cx: &Cx,
+    task_id: &str,
+) -> std::result::Result<(User, TaskFacts), Refusal> {
     let user = require_writer(cx).await?;
     let store = accounts(cx).store().clone();
     let facts = task_of(store.as_ref(), &user, task_id).await?;
@@ -157,7 +168,11 @@ fn back_to(cx: &Cx) -> String {
 }
 
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
-    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, back_to(cx))], Json(refusal)))
+    Ok((
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, back_to(cx))],
+        Json(refusal),
+    ))
 }
 
 // -- the ten calls --------------------------------------------------------
@@ -208,7 +223,10 @@ struct FileIdForm {
 /// Shared by the route and [`task_modal`], which calls it directly rather
 /// than going back through its own HTTP endpoint — the same shape `pages.rs`
 /// reads the store straight through for its own screens.
-async fn load_snapshot(cx: &Cx, task_id: &str) -> Result<std::result::Result<DetailSnapshot, Refusal>> {
+async fn load_snapshot(
+    cx: &Cx,
+    task_id: &str,
+) -> Result<std::result::Result<DetailSnapshot, Refusal>> {
     use izlek_core::detail::load;
     use time::OffsetDateTime;
 
@@ -258,7 +276,9 @@ async fn load_snapshot(cx: &Cx, task_id: &str) -> Result<std::result::Result<Det
         .as_ref()
         .map(|workspace| workspace.allowed_file_types.clone())
         .unwrap_or_default();
-    let attachment_limit_mb = workspace.map(|workspace| workspace.attachment_limit_bytes / MB).unwrap_or(0);
+    let attachment_limit_mb = workspace
+        .map(|workspace| workspace.attachment_limit_bytes / MB)
+        .unwrap_or(0);
 
     Ok(Ok(DetailSnapshot {
         detail,
@@ -275,7 +295,10 @@ async fn load_snapshot(cx: &Cx, task_id: &str) -> Result<std::result::Result<Det
 }
 
 #[route(POST "/api/fetch_task")]
-async fn fetch_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Result<Json<std::result::Result<DetailSnapshot, Refusal>>> {
+async fn fetch_task(
+    cx: &Cx,
+    Form(input): Form<TaskIdForm>,
+) -> Result<Json<std::result::Result<DetailSnapshot, Refusal>>> {
     Ok(Json(load_snapshot(cx, &input.task_id).await?))
 }
 
@@ -318,7 +341,14 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
 
     let store = accounts(cx).store().clone();
     let activity_ids = store
-        .save_task(&input.task_id, &title, &description, deadline, &user.id, OffsetDateTime::now_utc())
+        .save_task(
+            &input.task_id,
+            &title,
+            &description,
+            deadline,
+            &user.id,
+            OffsetDateTime::now_utc(),
+        )
         .await?;
     for activity_id in activity_ids {
         mail(cx).after_activity(store.clone(), activity_id);
@@ -350,7 +380,13 @@ async fn assign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
 
     store.assign_task(&input.task_id, &person.id).await?;
     let activity_id = store
-        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Assigned, &person.display_name, OffsetDateTime::now_utc())
+        .record_activity(
+            &input.task_id,
+            Some(&actor.id),
+            &ActivityKind::Assigned,
+            &person.display_name,
+            OffsetDateTime::now_utc(),
+        )
         .await?;
     mail(cx).after_activity(store, activity_id);
     redirect(cx, None)
@@ -375,7 +411,13 @@ async fn unassign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
     }
     store.unassign_task(&input.task_id, &person.id).await?;
     let activity_id = store
-        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Unassigned, &person.display_name, OffsetDateTime::now_utc())
+        .record_activity(
+            &input.task_id,
+            Some(&actor.id),
+            &ActivityKind::Unassigned,
+            &person.display_name,
+            OffsetDateTime::now_utc(),
+        )
         .await?;
     mail(cx).after_activity(store, activity_id);
     redirect(cx, None)
@@ -407,7 +449,13 @@ async fn link_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
         Err(error) => return Err(error.into()),
     }
     let activity_id = store
-        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Linked, &other.row.task_key, now)
+        .record_activity(
+            &input.task_id,
+            Some(&actor.id),
+            &ActivityKind::Linked,
+            &other.row.task_key,
+            now,
+        )
         .await?;
     mail(cx).after_activity(store, activity_id);
     redirect(cx, None)
@@ -434,7 +482,13 @@ async fn unlink_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
     let now = OffsetDateTime::now_utc();
     store.clear_dependency(&blocked, &blocking, now).await?;
     let activity_id = store
-        .record_activity(&input.task_id, Some(&actor.id), &ActivityKind::Unlinked, &other.row.task_key, now)
+        .record_activity(
+            &input.task_id,
+            Some(&actor.id),
+            &ActivityKind::Unlinked,
+            &other.row.task_key,
+            now,
+        )
         .await?;
     mail(cx).after_activity(store, activity_id);
     redirect(cx, None)
@@ -462,14 +516,19 @@ async fn post_comment(cx: &Cx, Form(input): Form<CommentForm>) -> Redirect {
         return redirect(cx, Some(Refusal::EmptyComment));
     }
 
-    let written = store.add_comment(&input.task_id, &user.id, body, OffsetDateTime::now_utc()).await?;
+    let written = store
+        .add_comment(&input.task_id, &user.id, body, OffsetDateTime::now_utc())
+        .await?;
     mail(cx).after_activity(store, written.activity_id);
     redirect(cx, None)
 }
 
 /// What a delete would take with it, for the confirmation step. Reads only.
 #[route(POST "/api/what_delete_costs")]
-async fn what_delete_costs(cx: &Cx, Form(input): Form<TaskIdForm>) -> Result<Json<std::result::Result<DeletionCost, Refusal>>> {
+async fn what_delete_costs(
+    cx: &Cx,
+    Form(input): Form<TaskIdForm>,
+) -> Result<Json<std::result::Result<DeletionCost, Refusal>>> {
     if let Err(refusal) = writer_and_task(cx, &input.task_id).await {
         return Ok(Json(Err(refusal)));
     }
@@ -491,7 +550,9 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
     let store = accounts(cx).store().clone();
-    let deletion = store.delete_task(&input.task_id, &user.id, OffsetDateTime::now_utc()).await?;
+    let deletion = store
+        .delete_task(&input.task_id, &user.id, OffsetDateTime::now_utc())
+        .await?;
     // A blocker being deleted unblocks whatever was waiting only on it, which
     // is the same news as the blocker finishing. The freeing is committed;
     // the send is a separate step, off the request.
@@ -501,7 +562,11 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
     mail(cx).after_activity(store, deletion.activity_id);
     // Deleted; the referring `/?task=<id>` no longer names anything, so land
     // on the board itself rather than reopening a dead modal.
-    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/".to_string())], Json(None)))
+    Ok((
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, "/".to_string())],
+        Json(None),
+    ))
 }
 
 /// Deletes an attachment's row and its bytes. A hard delete, unlike
@@ -659,20 +724,6 @@ pub(crate) mod glyph {
     }
 }
 
-/// A person as a circle. Ported from `izlek-web/src/board.rs`'s `Avatar`; that
-/// component has not crossed over into this crate yet, so this is a private
-/// copy rather than a shared one.
-async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
-    let initials = person.initials();
-    let tone = person.id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)) % 5;
-    view! {
-        cx =>
-        <span class=(class!("avatar", format!("avatar-tone-{tone}"), extra))>
-            (initials)
-        </span>
-    }
-}
-
 /// `Escape` for everything the task modal renders, topmost first: viewer →
 /// delete confirm (`confirm=delete` in URL) → open edit popovers → modal
 /// itself — one resolver at priority 90 on `window.__izlekEsc` (table on
@@ -768,7 +819,11 @@ async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) 
 async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
     let empty = task.description.trim().is_empty();
     let no_description = t(lang, Key::NoDescription).to_string();
-    let prose = if empty { no_description.clone() } else { task.description.clone() };
+    let prose = if empty {
+        no_description.clone()
+    } else {
+        task.description.clone()
+    };
 
     if !may_write {
         return view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> };
@@ -795,10 +850,18 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
     }
 }
 
-async fn deadline_control(cx: &Cx, task: &TaskDetail, today: Date, may_write: bool, lang: Lang) -> Result {
+async fn deadline_control(
+    cx: &Cx,
+    task: &TaskDetail,
+    today: Date,
+    may_write: bool,
+    lang: Lang,
+) -> Result {
     let overdue = task.is_overdue(today);
     let label = match task.deadline_parts(today) {
-        Some(parts) if parts.state == DeadlineState::Overdue => format!("{} · {}", parts.date, t(lang, Key::Overdue)),
+        Some(parts) if parts.state == DeadlineState::Overdue => {
+            format!("{} · {}", parts.date, t(lang, Key::Overdue))
+        }
         Some(parts) => parts.date,
         None => t(lang, Key::NoDeadline).to_string(),
     };
@@ -956,12 +1019,18 @@ async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
     view! { cx => <script>(Unescaped::new_unchecked(js))</script> }
 }
 
-async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool, lang: Lang) -> Result {
+async fn assignee_chip(
+    cx: &Cx,
+    task_id: &str,
+    person: &Person,
+    may_write: bool,
+    lang: Lang,
+) -> Result {
     let remove_title = crate::i18n::take_off_this_task(lang, &person.display_name);
     view! {
         cx =>
         <span class="assignee-chip">
-            (avatar(cx, person, "avatar-sm").await?)
+            (crate::layout::avatar(cx, person, "avatar-sm").await?)
             <span class="assignee-name">(person.display_name.clone())</span>
             if may_write {
                 <form class="assignee-drop" method="post" action="/api/unassign">
@@ -992,7 +1061,7 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) 
                             <input type="hidden" name="task_id" value=(task_id.to_string())>
                             <input type="hidden" name="user_id" value=(person.id.clone())>
                             <button class="pop-row" type="submit">
-                                (avatar(cx, person, "avatar-sm").await?)
+                                (crate::layout::avatar(cx, person, "avatar-sm").await?)
                                 <span class="pop-row-name">(person.display_name.clone())</span>
                             </button>
                         </form>
@@ -1052,7 +1121,14 @@ async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget], lang: Lang
     }
 }
 
-async fn dep_row(cx: &Cx, task_id: &str, edge: &DependencyEdge, direction: Direction, may_write: bool, lang: Lang) -> Result {
+async fn dep_row(
+    cx: &Cx,
+    task_id: &str,
+    edge: &DependencyEdge,
+    direction: Direction,
+    may_write: bool,
+    lang: Lang,
+) -> Result {
     let cleared = edge.is_cleared();
     let note = match direction {
         Direction::BlockedBy => edge.blocked_by_label(),
@@ -1128,7 +1204,7 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
     view! {
         cx =>
         <div class="comment">
-            (avatar(cx, &comment.author, "avatar-lg").await?)
+            (crate::layout::avatar(cx, &comment.author, "avatar-lg").await?)
             <div class="comment-said">
                 <div class="comment-head">
                     <span class="comment-who">(comment.author.display_name.clone())</span>
@@ -1152,7 +1228,10 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
             // a gone task id is the common case — so the language is read
             // the same way `board.rs`'s query-refusal branch does, English
             // only when there truly is nobody signed in to read one off of.
-            let lang = require_user(cx).await.map(|user| Lang::from_code(&user.language)).unwrap_or(Lang::En);
+            let lang = require_user(cx)
+                .await
+                .map(|user| Lang::from_code(&user.language))
+                .unwrap_or(Lang::En);
             return view! {
                 cx =>
                 <div class="modal-scrim">
@@ -1179,14 +1258,24 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
     let accept = (!allowed_file_types.is_empty())
-        .then(|| allowed_file_types.iter().map(|kind| format!(".{kind}")).collect::<Vec<_>>().join(","))
+        .then(|| {
+            allowed_file_types
+                .iter()
+                .map(|kind| format!(".{kind}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
         .unwrap_or_default();
 
     // The delete confirmation is computed eagerly rather than fetched on
     // demand: there is no script here to hold the intermediate "did they
     // click delete yet" state, so the cost is already known by the time the
     // disclosure opens.
-    let cost = if may_delete { accounts(cx).store().deletion_cost(&detail.id).await? } else { None };
+    let cost = if may_delete {
+        accounts(cx).store().deletion_cost(&detail.id).await?
+    } else {
+        None
+    };
 
     view! {
         cx =>

@@ -915,6 +915,19 @@ a {
   &-tone-4 { background: var(--avatar-tone-4); }
 }
 
+// A photo avatar is the same box with the picture where the tone fill was;
+// size and shape ride the shared .avatar classes.
+img.avatar {
+  object-fit: cover;
+  display: block;
+}
+
+.photo-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 // -- the card context menu ---------------------------------------------------
 //
 // A right-click opens this at the cursor; `card_menu_script` (board.rs) sets

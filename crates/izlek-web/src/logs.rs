@@ -166,7 +166,8 @@ async fn decision_detail(
 ) -> std::result::Result<String, izlek_core::store::StoreError> {
     use izlek_core::store::MailOutcome;
 
-    if detail.is_empty() || !matches!(outcome, MailOutcome::NoRecipients | MailOutcome::NotMatched) {
+    if detail.is_empty() || !matches!(outcome, MailOutcome::NoRecipients | MailOutcome::NotMatched)
+    {
         return Ok(detail.to_string());
     }
     match (outcome, detail) {
@@ -206,7 +207,11 @@ async fn decision_detail(
     if let Some(rest) = detail.strip_prefix("moved:") {
         let mut parts = rest.splitn(2, ':');
         if let (Some(to), Some(watched)) = (parts.next(), parts.next()) {
-            return Ok(crate::i18n::moved_not_watched_label(lang, &name(to), &name(watched)));
+            return Ok(crate::i18n::moved_not_watched_label(
+                lang,
+                &name(to),
+                &name(watched),
+            ));
         }
     }
     if let Some(watched) = detail.strip_prefix("unblocked:") {
@@ -226,7 +231,11 @@ async fn decision_detail(
             return Ok(detail.to_string());
         };
         let event_word = crate::i18n::activity_kind_word(lang, kind);
-        return Ok(crate::i18n::happened_not_watched_label(lang, &event_word, &watched));
+        return Ok(crate::i18n::happened_not_watched_label(
+            lang,
+            &event_word,
+            &watched,
+        ));
     }
     Ok(detail.to_string())
 }
@@ -306,7 +315,10 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
             outcome_kind: decision.outcome.as_str().to_string(),
             detail,
         };
-        if let Some(group) = decisions.iter_mut().find(|g| g.event_id == decision.event_id) {
+        if let Some(group) = decisions
+            .iter_mut()
+            .find(|g| g.event_id == decision.event_id)
+        {
             group.verdicts.push(verdict);
             continue;
         }
@@ -331,7 +343,9 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         .into_iter()
         .map(|line| ActivityRow {
             at: izlek_core::detail::moment_label_in(line.at, zone),
-            actor: line.actor_name.unwrap_or_else(|| t(lang, Key::TheSystem).to_string()),
+            actor: line
+                .actor_name
+                .unwrap_or_else(|| t(lang, Key::TheSystem).to_string()),
             sentence: activity_sentence(&line.kind, &line.detail, lang),
             title: line.title,
         })
@@ -395,7 +409,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
             <span class="board-name">(t(lang, Key::Logs))</span>
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Logs, lang).await?)
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &me.display_name, &me.email, me.role, lang).await?)
+            (crate::layout::user_menu(cx, &me, lang).await?)
         </header>
 
         <div class="settings-shell">

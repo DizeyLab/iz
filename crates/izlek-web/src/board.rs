@@ -6,7 +6,7 @@
 //! the server — a drag's only client-side memory is the browser's own drag
 //! session (`dataTransfer`), read back by the column that catches the drop.
 
-use izlek_core::board::{DeadlineState, Moved, Person, TaskCard};
+use izlek_core::board::{DeadlineState, Moved, TaskCard};
 use izlek_core::store::{NewTask, User};
 use time::{Date, OffsetDateTime};
 use topcoat::Result;
@@ -50,7 +50,13 @@ async fn move_card_shared(
         return Ok(Some(Refusal::Forbidden));
     }
     match store
-        .move_task(task_id, from_column_id, to_column_id, &user.id, OffsetDateTime::now_utc())
+        .move_task(
+            task_id,
+            from_column_id,
+            to_column_id,
+            &user.id,
+            OffsetDateTime::now_utc(),
+        )
         .await
     {
         Ok(Moved::Recorded(transition)) => {
@@ -154,7 +160,15 @@ struct CreateTaskForm {
 /// fields the procedure below trades over the wire.
 #[route(POST "/api/create_task")]
 async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
-    match create_task_shared(cx, &input.title, &input.column_id, &input.description, &input.deadline).await? {
+    match create_task_shared(
+        cx,
+        &input.title,
+        &input.column_id,
+        &input.description,
+        &input.deadline,
+    )
+    .await?
+    {
         Some(refusal) => redirect_refused(cx, "create_task", refusal),
         // Created; the referring `/?new=1` would reopen a blank new-task
         // modal, so land on the board itself instead.
@@ -173,7 +187,14 @@ struct MoveCardForm {
 /// and the drop handler in `card_menu_script` all post here.
 #[route(POST "/api/move_card")]
 async fn move_card(cx: &Cx, Form(input): Form<MoveCardForm>) -> Redirect {
-    match move_card_shared(cx, &input.task_id, &input.from_column_id, &input.to_column_id).await? {
+    match move_card_shared(
+        cx,
+        &input.task_id,
+        &input.from_column_id,
+        &input.to_column_id,
+    )
+    .await?
+    {
         Some(refusal) => redirect_refused(cx, "move_card", refusal),
         None => redirect(cx),
     }
@@ -232,8 +253,11 @@ async fn board_columns(cx: &Cx, sort: String) -> Result {
     let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
 
-    let all_columns: Vec<(String, String)> =
-        view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
+    let all_columns: Vec<(String, String)> = view_data
+        .columns
+        .iter()
+        .map(|column| (column.column.id.clone(), column.column.name.clone()))
+        .collect();
     let mut columns = Vec::new();
     for column in view_data.columns {
         columns.push(render_column(cx, column, today, may_write, &all_columns, lang).await?);
@@ -260,7 +284,19 @@ async fn render_column(
     let is_empty = column.cards.is_empty();
     let mut cards = Vec::new();
     for card in column.cards {
-        cards.push(render_card(cx, card, today, is_done_column, &column_id, may_write, all_columns, lang).await?);
+        cards.push(
+            render_card(
+                cx,
+                card,
+                today,
+                is_done_column,
+                &column_id,
+                may_write,
+                all_columns,
+                lang,
+            )
+            .await?,
+        );
     }
 
     view! {
@@ -307,15 +343,18 @@ async fn render_card(
     let comments = card.comment_count;
     let mut assignees = Vec::new();
     for person in card.assignees.iter() {
-        assignees.push(avatar(cx, person, "").await?);
+        assignees.push(crate::layout::avatar(cx, person, "").await?);
     }
     let has_assignees = !card.assignees.is_empty();
     let task_id = card.id.clone();
     let from_column = column_id.to_string();
     let href = format!("/?task={}", card.id);
     let menu_id = format!("card-menu-{}", card.id);
-    let move_targets: Vec<(String, String)> =
-        all_columns.iter().filter(|(id, _)| id != column_id).cloned().collect();
+    let move_targets: Vec<(String, String)> = all_columns
+        .iter()
+        .filter(|(id, _)| id != column_id)
+        .cloned()
+        .collect();
     view! {
         cx =>
         <a class="card" class:card-done=(done_column) href=(href.clone())
@@ -444,21 +483,6 @@ async fn card_menu_script(cx: &Cx) -> Result {
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
-pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
-    let initials = person.initials();
-    let tone = person
-        .id
-        .bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
-        % 5;
-    let class = format!("avatar avatar-tone-{tone} {extra}");
-    let name = person.display_name.clone();
-    view! {
-        cx =>
-        <span class=(class) data-name=(name)>(initials)</span>
-    }
-}
-
 /// Which task, if any, `/` renders the detail modal open on, and the refusal
 /// (if any) a create or move landed back here with. `file` opens the viewer
 /// over that task's modal, the same nested query-param convention `confirm`
@@ -502,8 +526,11 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
     let may_write = user.role.can_write_tasks();
-    let all_columns: Vec<(String, String)> =
-        view_data.columns.iter().map(|column| (column.column.id.clone(), column.column.name.clone())).collect();
+    let all_columns: Vec<(String, String)> = view_data
+        .columns
+        .iter()
+        .map(|column| (column.column.id.clone(), column.column.name.clone()))
+        .collect();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
     // `?task=X&new=1` together would render both modals at once — two
@@ -525,7 +552,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             </a>
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Board, lang).await?)
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &user.display_name, &user.email, user.role, lang).await?)
+            (crate::layout::user_menu(cx, &crate::detail::Me::from(user), lang).await?)
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>

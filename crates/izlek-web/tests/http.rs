@@ -37,7 +37,10 @@ use ulid::Ulid;
 /// looks beside `current_exe` and would miss it, so the path is given
 /// explicitly instead.
 fn asset_dir() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug/assets"))
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/debug/assets"
+    ))
 }
 
 /// A throwaway workspace: its own database file and its own router.
@@ -59,9 +62,15 @@ impl App {
         let accounts = Accounts::new(store.clone(), base_url);
         let router = Router::builder()
             .discover()
-            .layer(BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
+            .layer(
+                BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
+                    .at("/files"),
+            )
             .cookies()
-            .assets(AssetBundle::load_dir(asset_dir()).expect("run `topcoat asset bundle` before the http suite"))
+            .assets(
+                AssetBundle::load_dir(asset_dir())
+                    .expect("run `topcoat asset bundle` before the http suite"),
+            )
             .app_context(accounts)
             .app_context(mail)
             .build();
@@ -91,9 +100,15 @@ impl App {
         let accounts = Accounts::new(store.clone(), "https://izlek.sh");
         let router = Router::builder()
             .discover()
-            .layer(BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024).at("/files"))
+            .layer(
+                BodyLimit::max(izlek_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
+                    .at("/files"),
+            )
             .cookies()
-            .assets(AssetBundle::load_dir(asset_dir()).expect("run `topcoat asset bundle` before the http suite"))
+            .assets(
+                AssetBundle::load_dir(asset_dir())
+                    .expect("run `topcoat asset bundle` before the http suite"),
+            )
             .app_context(accounts)
             .app_context(Mail::sending(engine))
             .build();
@@ -104,7 +119,12 @@ impl App {
     /// single-tenant, so there is no id to guess and no JSON endpoint needed
     /// just to hand it back.
     async fn workspace_id(&self) -> String {
-        self.store.workspace().await.unwrap().expect("no workspace yet").id
+        self.store
+            .workspace()
+            .await
+            .unwrap()
+            .expect("no workspace yet")
+            .id
     }
 
     /// Posts a form the way a hydrated caller does: `Accept: application/json`,
@@ -128,7 +148,10 @@ impl App {
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
         }
-        let response = self.router.handle(request.body(Body::from(body)).unwrap()).await;
+        let response = self
+            .router
+            .handle(request.body(Body::from(body)).unwrap())
+            .await;
         Answer::from_response(response).await
     }
 
@@ -159,7 +182,10 @@ impl App {
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
         }
-        let response = self.router.handle(request.body(Body::from(body)).unwrap()).await;
+        let response = self
+            .router
+            .handle(request.body(Body::from(body)).unwrap())
+            .await;
         let mut answer = Answer::from_response(response).await;
         answer.session = None;
         answer
@@ -199,20 +225,20 @@ impl App {
         }
         body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
 
-        let mut request = Request::builder()
-            .method("POST")
-            .uri(path)
-            .header(
-                header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={BOUNDARY}"),
-            );
+        let mut request = Request::builder().method("POST").uri(path).header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        );
         if let Some(cookie) = cookie {
             request = request.header(
                 header::COOKIE,
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
         }
-        let response = self.router.handle(request.body(Body::from(body)).unwrap()).await;
+        let response = self
+            .router
+            .handle(request.body(Body::from(body)).unwrap())
+            .await;
         let mut answer = Answer::from_response(response).await;
         answer.session = None;
         answer
@@ -228,6 +254,22 @@ impl App {
     /// Like `get`, but with a `Range` header, for exercising the
     /// `/files/{id}` partial-content path.
     async fn get_with_range(&self, path: &str, cookie: Option<&str>, range: Option<&str>) -> Raw {
+        self.get_with(path, cookie, range, None).await
+    }
+
+    /// Like `get`, but with `If-None-Match`, for the `/photo/{user_id}`
+    /// revalidate path.
+    async fn get_with_if_none_match(&self, path: &str, cookie: Option<&str>, etag: &str) -> Raw {
+        self.get_with(path, cookie, None, Some(etag)).await
+    }
+
+    async fn get_with(
+        &self,
+        path: &str,
+        cookie: Option<&str>,
+        range: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> Raw {
         let mut request = Request::builder().method("GET").uri(path);
         if let Some(cookie) = cookie {
             request = request.header(
@@ -238,7 +280,13 @@ impl App {
         if let Some(range) = range {
             request = request.header(header::RANGE, range);
         }
-        let response = self.router.handle(request.body(Body::empty()).unwrap()).await;
+        if let Some(if_none_match) = if_none_match {
+            request = request.header(header::IF_NONE_MATCH, if_none_match);
+        }
+        let response = self
+            .router
+            .handle(request.body(Body::empty()).unwrap())
+            .await;
         let status = response.status();
         let content_type = response
             .headers()
@@ -260,8 +308,24 @@ impl App {
             .get(header::ACCEPT_RANGES)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Raw { status, content_type, disposition, content_range, accept_ranges, bytes }
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        Raw {
+            status,
+            content_type,
+            disposition,
+            content_range,
+            accept_ranges,
+            etag,
+            bytes,
+        }
     }
 }
 
@@ -279,6 +343,7 @@ struct Raw {
     disposition: Option<String>,
     content_range: Option<String>,
     accept_ranges: Option<String>,
+    etag: Option<String>,
     bytes: Vec<u8>,
 }
 
@@ -363,7 +428,10 @@ async fn sender_saved(app: &App, admin: &str) -> bool {
         )
         .await;
     answer.status == StatusCode::SEE_OTHER
-        && answer.location.as_deref().is_some_and(|location| !location.contains("refusal="))
+        && answer
+            .location
+            .as_deref()
+            .is_some_and(|location| !location.contains("refusal="))
 }
 
 /// Claims the workspace and returns the admin's session cookie.
@@ -440,15 +508,30 @@ async fn invited(app: &App, admin: &str, email: &str, name: &str, role: Role) ->
 /// server-rendered shard now), and the id is fixture setup, not the behavior
 /// under test.
 async fn first_column(app: &App) -> String {
-    columns_of(app).await.into_iter().next().expect("no columns on a fresh board")
+    columns_of(app)
+        .await
+        .into_iter()
+        .next()
+        .expect("no columns on a fresh board")
 }
 
 /// Every column id on the board, in order, read straight off the store — see
 /// [`first_column`] on why this bypasses HTTP.
 async fn columns_of(app: &App) -> Vec<String> {
     let workspace_id = app.workspace_id().await;
-    let board = app.store.board(&workspace_id).await.unwrap().expect("no board");
-    app.store.columns(&board.id).await.unwrap().into_iter().map(|c| c.id).collect()
+    let board = app
+        .store
+        .board(&workspace_id)
+        .await
+        .unwrap()
+        .expect("no board");
+    app.store
+        .columns(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect()
 }
 
 /// Makes a task and hands back its id, read straight off the store — there is
@@ -456,12 +539,19 @@ async fn columns_of(app: &App) -> Vec<String> {
 /// server-rendered shard now); the mutation itself is still a real HTTP post.
 async fn a_task(app: &App, cookie: &str, column: &str, title: &str) -> String {
     let answer = app
-        .post("/api/create_task", Some(cookie), &[("title", title), ("column_id", column)])
+        .post(
+            "/api/create_task",
+            Some(cookie),
+            &[("title", title), ("column_id", column)],
+        )
         .await;
     assert_eq!(answer.body, "", "the task was refused: {}", answer.body);
 
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     board
         .columns
         .iter()
@@ -503,7 +593,11 @@ async fn adding_a_member_mails_them_the_link() {
         .collect();
     assert_eq!(invites.len(), 1, "{invites:?}");
     assert!(
-        invites[0].body.as_deref().unwrap_or_default().contains("/join/"),
+        invites[0]
+            .body
+            .as_deref()
+            .unwrap_or_default()
+            .contains("/join/"),
         "{:?}",
         invites[0]
     );
@@ -555,7 +649,13 @@ async fn a_resend_queues_another_mail() {
 
     // `resend_link` has no hydrated action to answer with a value here: the
     // mailed address rides the redirect's query instead of a JSON body.
-    let resent = app.post("/api/resend_link", Some(&admin_cookie), &[("user_id", &sena_id)]).await;
+    let resent = app
+        .post(
+            "/api/resend_link",
+            Some(&admin_cookie),
+            &[("user_id", &sena_id)],
+        )
+        .await;
     assert_eq!(resent.status, StatusCode::SEE_OTHER, "{}", resent.body);
     let location = resent.location.expect("resend did not redirect");
     assert!(location.contains("mailed=sena%40izlek.sh"), "{location}");
@@ -585,16 +685,27 @@ async fn a_viewer_who_posts_to_create_task_anyway_is_refused() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert_eq!(answer.body, "");
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=create_task"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=create_task"),
         "{:?}",
         answer.location
     );
 
     // And the refusal is not cosmetic: the board is still empty.
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        board.columns.iter().flat_map(|c| &c.cards).all(|card| card.title != "Viewer should not get this"),
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .all(|card| card.title != "Viewer should not get this"),
         "the refused task was written anyway"
     );
 }
@@ -615,23 +726,37 @@ async fn a_member_may_create_a_task() {
         .await;
     assert_eq!(answer.body, "");
     assert!(
-        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "a create that worked said it was refused: {:?}",
         answer.location
     );
 
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     let card = board
         .columns
         .iter()
         .flat_map(|c| &c.cards)
         .find(|card| card.title == "Wire the deadline chip")
         .expect("new task is not on the board");
-    let tail = card.task_key.strip_prefix("DZ-").expect("key not shaped like DZ-<tail>");
-    assert!((5..=7).contains(&tail.len()), "key tail {tail} not 5..=7 chars");
+    let tail = card
+        .task_key
+        .strip_prefix("DZ-")
+        .expect("key not shaped like DZ-<tail>");
     assert!(
-        tail.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+        (5..=7).contains(&tail.len()),
+        "key tail {tail} not 5..=7 chars"
+    );
+    assert!(
+        tail.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
         "key tail {tail} not uppercase alnum"
     );
 }
@@ -679,14 +804,25 @@ async fn a_task_cannot_be_dropped_into_another_workspaces_column() {
         .await;
     assert_eq!(answer.body, "");
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=create_task"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=create_task"),
         "{:?}",
         answer.location
     );
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        board.columns.iter().flat_map(|c| &c.cards).all(|card| card.title != "Wrong column"),
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .all(|card| card.title != "Wrong column"),
         "the refused task was written anyway"
     );
 }
@@ -698,17 +834,32 @@ async fn a_card_needs_a_title() {
     let column = first_column(&app).await;
 
     let answer = app
-        .post("/api/create_task", Some(&admin), &[("title", "   "), ("column_id", &column)])
+        .post(
+            "/api/create_task",
+            Some(&admin),
+            &[("title", "   "), ("column_id", &column)],
+        )
         .await;
     assert_eq!(answer.body, "");
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=empty-title&on=create_task"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=empty-title&on=create_task"),
         "{:?}",
         answer.location
     );
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
-    assert_eq!(board.columns.iter().flat_map(|c| &c.cards).count(), 0, "a blank title was stored anyway");
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        board.columns.iter().flat_map(|c| &c.cards).count(),
+        0,
+        "a blank title was stored anyway"
+    );
 }
 
 #[tokio::test]
@@ -721,7 +872,10 @@ async fn the_board_is_not_readable_without_a_session() {
     // signed-out board page itself.
     let raw = app.get("/", None).await;
     let html = String::from_utf8_lossy(&raw.bytes);
-    assert!(!html.contains("board-stage"), "a signed-out browser was shown the board: {html}");
+    assert!(
+        !html.contains("board-stage"),
+        "a signed-out browser was shown the board: {html}"
+    );
 }
 
 /// The sort control still posts as a plain `<select name=sort>` — `dropdown.rs`
@@ -734,17 +888,32 @@ async fn the_board_sort_control_keeps_its_hidden_select_and_gets_a_dropdown_trig
 
     let page = app.get("/", Some(&admin)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("select class=\"status-select\" name=\"sort\""), "{html}");
+    assert!(
+        html.contains("select class=\"status-select\" name=\"sort\""),
+        "{html}"
+    );
     // `dropdown.rs`'s script is what turns that hidden select into the
     // house trigger + panel client-side; its presence is the page's only
     // server-rendered proof the shell is wired in.
-    assert!(html.contains("dd-trigger"), "no dropdown script on the board page: {html}");
+    assert!(
+        html.contains("dd-trigger"),
+        "no dropdown script on the board page: {html}"
+    );
     // `root_layout` emits `layout.rs`'s Escape manager on every page; the
     // registration below is proof the topbar `.user-menu` gets its close
     // path on the board page too.
-    assert!(html.contains("window.__izlekEsc"), "no escape manager on the board page: {html}");
-    assert!(html.contains("__izlekEsc.register(40"), "no escape script on the board page: {html}");
-    assert!(html.contains("closest('.user-menu')"), "no user-menu close path on the board page: {html}");
+    assert!(
+        html.contains("window.__izlekEsc"),
+        "no escape manager on the board page: {html}"
+    );
+    assert!(
+        html.contains("__izlekEsc.register(40"),
+        "no escape script on the board page: {html}"
+    );
+    assert!(
+        html.contains("closest('.user-menu')"),
+        "no user-menu close path on the board page: {html}"
+    );
 }
 
 #[tokio::test]
@@ -766,7 +935,9 @@ async fn a_viewer_who_posts_a_comment_anyway_is_refused() {
     assert_eq!(answer.body, "\"Forbidden\"");
 
     // The refusal is not cosmetic: nothing was written.
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
     assert!(
         !answer.body.contains("Viewers cannot say this"),
         "the refused comment was written anyway: {}",
@@ -791,7 +962,9 @@ async fn a_member_may_comment_and_the_author_is_the_session() {
         .await;
     assert_eq!(answer.body, "null", "a member was refused: {}", answer.body);
 
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
     assert!(answer.body.contains("Picker is narrow on purpose"));
     assert!(
         answer.body.contains("Kai Renner"),
@@ -812,16 +985,28 @@ async fn a_link_that_would_close_a_circle_is_refused_at_the_endpoint() {
         .post(
             "/api/link_tasks",
             Some(&admin),
-            &[("task_id", &second), ("other_id", &first), ("direction", "blocked_by")],
+            &[
+                ("task_id", &second),
+                ("other_id", &first),
+                ("direction", "blocked_by"),
+            ],
         )
         .await;
-    assert_eq!(answer.body, "null", "the first link was refused: {}", answer.body);
+    assert_eq!(
+        answer.body, "null",
+        "the first link was refused: {}",
+        answer.body
+    );
 
     let answer = app
         .post(
             "/api/link_tasks",
             Some(&admin),
-            &[("task_id", &first), ("other_id", &second), ("direction", "blocked_by")],
+            &[
+                ("task_id", &first),
+                ("other_id", &second),
+                ("direction", "blocked_by"),
+            ],
         )
         .await;
     assert_eq!(answer.body, "\"Cycle\"");
@@ -838,7 +1023,11 @@ async fn a_refusal_reaches_a_browser_with_no_script() {
     app.post(
         "/api/link_tasks",
         Some(&admin),
-        &[("task_id", &second), ("other_id", &first), ("direction", "blocked_by")],
+        &[
+            ("task_id", &second),
+            ("other_id", &first),
+            ("direction", "blocked_by"),
+        ],
     )
     .await;
 
@@ -849,7 +1038,11 @@ async fn a_refusal_reaches_a_browser_with_no_script() {
             "/api/link_tasks",
             Some(&admin),
             &format!("http://izlek.test/?task={first}"),
-            &[("task_id", &first), ("other_id", &second), ("direction", "blocked_by")],
+            &[
+                ("task_id", &first),
+                ("other_id", &second),
+                ("direction", "blocked_by"),
+            ],
         )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
@@ -877,12 +1070,19 @@ async fn a_call_that_was_not_refused_carries_nothing_back() {
             "/api/link_tasks",
             Some(&admin),
             "http://izlek.test/",
-            &[("task_id", &second), ("other_id", &first), ("direction", "blocked_by")],
+            &[
+                ("task_id", &second),
+                ("other_id", &first),
+                ("direction", "blocked_by"),
+            ],
         )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     let location = answer.location.expect("a redirect with nowhere to go");
-    assert!(!location.contains("refusal="), "a link that was made said it was refused: {location}");
+    assert!(
+        !location.contains("refusal="),
+        "a link that was made said it was refused: {location}"
+    );
 }
 
 #[tokio::test]
@@ -891,7 +1091,11 @@ async fn a_task_id_from_nowhere_is_not_found() {
     let admin = admin(&app).await;
 
     let answer = app
-        .post("/api/fetch_task", Some(&admin), &[("task_id", "00000000-0000-0000-0000-000000000000")])
+        .post(
+            "/api/fetch_task",
+            Some(&admin),
+            &[("task_id", "00000000-0000-0000-0000-000000000000")],
+        )
         .await;
     assert_eq!(answer.body, "{\"Err\":\"NotFound\"}");
 }
@@ -904,13 +1108,22 @@ async fn a_viewer_who_posts_a_delete_anyway_is_refused() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin, &column, "Viewers cannot remove this").await;
 
-    let answer = app.post("/api/delete_task", Some(&viewer), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/delete_task", Some(&viewer), &[("task_id", &task)])
+        .await;
     assert_eq!(answer.body, "\"Forbidden\"");
 
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        board.columns.iter().flat_map(|c| &c.cards).any(|card| card.title == "Viewers cannot remove this"),
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .any(|card| card.title == "Viewers cannot remove this"),
         "the refused delete happened anyway"
     );
 }
@@ -931,7 +1144,11 @@ async fn deleting_the_task_the_modal_came_from_lands_on_the_board_not_the_dead_m
         )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some("/"), "a deleted task's modal should not reopen");
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/"),
+        "a deleted task's modal should not reopen"
+    );
 }
 
 #[tokio::test]
@@ -943,25 +1160,53 @@ async fn a_member_may_delete_and_the_delete_is_soft() {
     let task = a_task(&app, &admin, &column, "Mistyped in a hurry").await;
 
     // What it would cost is a read: it says so and writes nothing.
-    let answer = app.post("/api/what_delete_costs", Some(&member), &[("task_id", &task)]).await;
-    assert!(answer.body.contains("Mistyped in a hurry"), "{}", answer.body);
-    let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let answer = app
+        .post(
+            "/api/what_delete_costs",
+            Some(&member),
+            &[("task_id", &task)],
+        )
+        .await;
     assert!(
-        board.columns.iter().flat_map(|c| &c.cards).any(|card| card.title == "Mistyped in a hurry"),
+        answer.body.contains("Mistyped in a hurry"),
+        "{}",
+        answer.body
+    );
+    let workspace_id = app.workspace_id().await;
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .any(|card| card.title == "Mistyped in a hurry"),
         "asking cost deleted it"
     );
 
-    let answer = app.post("/api/delete_task", Some(&member), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/delete_task", Some(&member), &[("task_id", &task)])
+        .await;
     assert_eq!(answer.body, "null", "a member was refused: {}", answer.body);
 
     // Gone from the board, and gone from the detail: soft is not visible.
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        board.columns.iter().flat_map(|c| &c.cards).all(|card| card.title != "Mistyped in a hurry"),
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .all(|card| card.title != "Mistyped in a hurry"),
         "the task is still on the board"
     );
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
     assert_eq!(answer.body, "{\"Err\":\"NotFound\"}");
 }
 
@@ -977,20 +1222,30 @@ async fn a_viewer_who_posts_a_move_anyway_is_refused() {
         .post(
             "/api/move_card",
             Some(&viewer),
-            &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])],
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
         )
         .await;
 
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert_eq!(answer.body, "");
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=move_card"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=move_card"),
         "{:?}",
         answer.location
     );
 
     // And nothing moved: the refusal is in the handler, not in the drawing.
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
     assert!(
         answer.body.contains(&columns[0]),
         "the refused move happened anyway: {}",
@@ -1010,17 +1265,27 @@ async fn a_member_may_move_a_card() {
         .post(
             "/api/move_card",
             Some(&member),
-            &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])],
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
         )
         .await;
     assert_eq!(answer.body, "");
     assert!(
-        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "a move that worked said it was refused: {:?}",
         answer.location
     );
 
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
     assert!(answer.body.contains("\"moved\""), "no move in the activity");
 }
 
@@ -1038,7 +1303,11 @@ async fn a_successful_move_never_redirects_off_site() {
             "/api/move_card",
             Some(&admin),
             "https://elsewhere.example/steal",
-            &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])],
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
         )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
@@ -1062,7 +1331,11 @@ async fn a_drop_decided_against_a_stale_board_is_refused() {
         .post(
             "/api/move_card",
             Some(&admin),
-            &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])],
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
         )
         .await;
     assert_eq!(first.body, "");
@@ -1071,18 +1344,28 @@ async fn a_drop_decided_against_a_stale_board_is_refused() {
         .post(
             "/api/move_card",
             Some(&member),
-            &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[2])],
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[2]),
+            ],
         )
         .await;
     assert_eq!(second.body, "");
     assert!(
-        second.location.as_deref().unwrap_or_default().contains("refusal=moved-already&on=move_card"),
+        second
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=moved-already&on=move_card"),
         "{:?}",
         second.location
     );
 
     // The winner's move stands, and there is exactly one crossing.
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
     assert_eq!(
         answer.body.matches("\"moved\"").count(),
         1,
@@ -1111,12 +1394,21 @@ async fn a_card_cannot_be_moved_into_another_boards_column() {
         .await;
     assert_eq!(answer.body, "");
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=move_card"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=move_card"),
         "{:?}",
         answer.location
     );
-    let answer = app.post("/api/fetch_task", Some(&admin), &[("task_id", &task)]).await;
-    assert!(answer.body.contains(&columns[0]), "the forbidden move happened anyway");
+    let answer = app
+        .post("/api/fetch_task", Some(&admin), &[("task_id", &task)])
+        .await;
+    assert!(
+        answer.body.contains(&columns[0]),
+        "the forbidden move happened anyway"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,10 +1427,22 @@ async fn settings_selects_keep_their_hidden_form_fields_and_get_a_dropdown_trigg
 
     let page = app.get("/settings", Some(&cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("select class=\"field-input\" name=\"theme\""), "{html}");
-    assert!(html.contains("dd-trigger"), "no dropdown script on the settings page: {html}");
-    assert!(html.contains("__izlekEsc.register(40"), "no escape script on the settings page: {html}");
-    assert!(html.contains("closest('.user-menu')"), "no user-menu close path on the settings page: {html}");
+    assert!(
+        html.contains("select class=\"field-input\" name=\"theme\""),
+        "{html}"
+    );
+    assert!(
+        html.contains("dd-trigger"),
+        "no dropdown script on the settings page: {html}"
+    );
+    assert!(
+        html.contains("__izlekEsc.register(40"),
+        "no escape script on the settings page: {html}"
+    );
+    assert!(
+        html.contains("closest('.user-menu')"),
+        "no user-menu close path on the settings page: {html}"
+    );
 }
 
 /// The rules and logs pages carry no `board.rs`, so like settings they wire
@@ -1151,12 +1455,21 @@ async fn the_rules_and_logs_pages_get_the_shared_escape_script() {
 
     let rules_page = app.get("/rules", Some(&cookie)).await;
     let rules_html = String::from_utf8_lossy(&rules_page.bytes);
-    assert!(rules_html.contains("__izlekEsc.register(40"), "no escape script on the rules page: {rules_html}");
-    assert!(rules_html.contains("details.rule-new[open]"), "escape script does not close the rule composer: {rules_html}");
+    assert!(
+        rules_html.contains("__izlekEsc.register(40"),
+        "no escape script on the rules page: {rules_html}"
+    );
+    assert!(
+        rules_html.contains("details.rule-new[open]"),
+        "escape script does not close the rule composer: {rules_html}"
+    );
 
     let logs_page = app.get("/logs", Some(&cookie)).await;
     let logs_html = String::from_utf8_lossy(&logs_page.bytes);
-    assert!(logs_html.contains("__izlekEsc.register(40"), "no escape script on the logs page: {logs_html}");
+    assert!(
+        logs_html.contains("__izlekEsc.register(40"),
+        "no escape script on the logs page: {logs_html}"
+    );
 }
 
 #[tokio::test]
@@ -1186,7 +1499,12 @@ async fn signing_out_without_script_lands_on_the_sign_in_page() {
     let cookie = admin(&app).await;
 
     let out = app
-        .post_without_script("/api/sign_out", Some(&cookie), "http://izlek.test/settings", &[])
+        .post_without_script(
+            "/api/sign_out",
+            Some(&cookie),
+            "http://izlek.test/settings",
+            &[],
+        )
         .await;
 
     assert_eq!(out.status, StatusCode::SEE_OTHER, "{}", out.body);
@@ -1213,10 +1531,20 @@ async fn saving_a_profile_renames_the_person_asking_and_nobody_else() {
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
 
-    let answer = app.post("/api/save_profile", Some(&member), &[("display_name", "Emre Y")]).await;
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&member),
+            &[("display_name", "Emre Y")],
+        )
+        .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert!(
-        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         answer.location
     );
@@ -1235,10 +1563,19 @@ async fn a_profile_cannot_be_saved_without_a_name() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    let answer = app.post("/api/save_profile", Some(&admin_cookie), &[("display_name", "   ")]).await;
+    let answer = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "   ")],
+        )
+        .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=empty-name&on=save_profile"), "{location}");
+    assert!(
+        location.contains("refusal=empty-name&on=save_profile"),
+        "{location}"
+    );
 
     let page = app.get(location, Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
@@ -1260,7 +1597,11 @@ async fn a_profile_can_change_its_own_email_and_stays_signed_in() {
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert!(
-        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         answer.location
     );
@@ -1286,7 +1627,10 @@ async fn a_profile_email_cannot_take_somebody_elses_address() {
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=address-taken&on=save_profile"), "{location}");
+    assert!(
+        location.contains("refusal=address-taken&on=save_profile"),
+        "{location}"
+    );
 
     let page = app.get(location, Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
@@ -1313,11 +1657,17 @@ async fn a_taken_email_refuses_the_whole_save_not_only_the_email() {
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=address-taken&on=save_profile"), "{location}");
+    assert!(
+        location.contains("refusal=address-taken&on=save_profile"),
+        "{location}"
+    );
 
     let mine = app.get("/settings", Some(&member)).await;
     let html = String::from_utf8_lossy(&mine.bytes);
-    assert!(html.contains("value=\"Emre\""), "the name changed anyway: {html}");
+    assert!(
+        html.contains("value=\"Emre\""),
+        "the name changed anyway: {html}"
+    );
 }
 
 #[tokio::test]
@@ -1325,10 +1675,16 @@ async fn a_signed_out_browser_cannot_rename_anybody() {
     let app = App::open().await;
     let _ = admin(&app).await;
 
-    let answer = app.post("/api/save_profile", None, &[("display_name", "Whoever")]).await;
+    let answer = app
+        .post("/api/save_profile", None, &[("display_name", "Whoever")])
+        .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=sign-in-first&on=save_profile"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=sign-in-first&on=save_profile"),
         "{:?}",
         answer.location
     );
@@ -1344,11 +1700,19 @@ async fn a_member_who_posts_new_limits_anyway_is_refused() {
         .post(
             "/api/save_limits",
             Some(&member),
-            &[("attachment_limit_mb", "400"), ("photo_limit_mb", "19"), ("allowed_file_types", "png")],
+            &[
+                ("attachment_limit_mb", "400"),
+                ("photo_limit_mb", "19"),
+                ("allowed_file_types", "png"),
+            ],
         )
         .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=save_limits"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=save_limits"),
         "{:?}",
         answer.location
     );
@@ -1367,11 +1731,19 @@ async fn an_admin_changes_the_limits_and_they_stay_changed() {
         .post(
             "/api/save_limits",
             Some(&admin_cookie),
-            &[("attachment_limit_mb", "10"), ("photo_limit_mb", "1"), ("allowed_file_types", ".PNG, png, pdf")],
+            &[
+                ("attachment_limit_mb", "10"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", ".PNG, png, pdf"),
+            ],
         )
         .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("saved=save_limits"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_limits"),
         "{:?}",
         answer.location
     );
@@ -1379,7 +1751,10 @@ async fn an_admin_changes_the_limits_and_they_stay_changed() {
     let workspace = app.store.workspace().await.unwrap().unwrap();
     assert_eq!(workspace.attachment_limit_bytes, 10 * 1024 * 1024);
     assert_eq!(workspace.photo_limit_bytes, 1024 * 1024);
-    assert_eq!(workspace.allowed_file_types, vec!["png".to_string(), "pdf".to_string()]);
+    assert_eq!(
+        workspace.allowed_file_types,
+        vec!["png".to_string(), "pdf".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -1392,11 +1767,18 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
             .post(
                 "/api/save_limits",
                 Some(&admin_cookie),
-                &[("attachment_limit_mb", attachment), ("photo_limit_mb", photo), ("allowed_file_types", "")],
+                &[
+                    ("attachment_limit_mb", attachment),
+                    ("photo_limit_mb", photo),
+                    ("allowed_file_types", ""),
+                ],
             )
             .await;
         let location = answer.location.as_deref().unwrap_or_default();
-        assert!(location.contains("refusal=bad-limit&on=save_limits"), "{attachment}/{photo}: {location}");
+        assert!(
+            location.contains("refusal=bad-limit&on=save_limits"),
+            "{attachment}/{photo}: {location}"
+        );
 
         let page = app.get(location, Some(&admin_cookie)).await;
         let html = String::from_utf8_lossy(&page.bytes);
@@ -1416,11 +1798,18 @@ async fn a_file_type_that_is_not_an_extension_is_refused() {
         .post(
             "/api/save_limits",
             Some(&admin_cookie),
-            &[("attachment_limit_mb", "25"), ("photo_limit_mb", "2"), ("allowed_file_types", "../etc/passwd")],
+            &[
+                ("attachment_limit_mb", "25"),
+                ("photo_limit_mb", "2"),
+                ("allowed_file_types", "../etc/passwd"),
+            ],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=bad-file-type&on=save_limits"), "{location}");
+    assert!(
+        location.contains("refusal=bad-file-type&on=save_limits"),
+        "{location}"
+    );
 
     let page = app.get(location, Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
@@ -1448,7 +1837,11 @@ async fn only_an_admin_may_write_the_sender() {
         )
         .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=save_sender"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=save_sender"),
         "{:?}",
         answer.location
     );
@@ -1481,7 +1874,11 @@ async fn a_signed_out_browser_may_not_write_the_sender() {
         )
         .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=sign-in-first&on=save_sender"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=sign-in-first&on=save_sender"),
         "{:?}",
         answer.location
     );
@@ -1511,14 +1908,21 @@ async fn an_edit_with_no_password_typed_keeps_the_stored_one() {
         )
         .await;
     assert!(
-        !answer.location.as_deref().unwrap_or_default().contains("refusal="),
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "an empty password field was refused: {:?}",
         answer.location
     );
 
     let workspace = app.store.workspace().await.unwrap().unwrap();
     assert_eq!(workspace.smtp_port, Some(587));
-    assert!(workspace.smtp_password_set, "an empty field blanked the password");
+    assert!(
+        workspace.smtp_password_set,
+        "an empty field blanked the password"
+    );
 }
 
 #[tokio::test]
@@ -1541,11 +1945,17 @@ async fn a_first_sender_with_no_password_is_refused_and_says_why() {
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=bad-sender&on=save_sender"), "{location}");
+    assert!(
+        location.contains("refusal=bad-sender&on=save_sender"),
+        "{location}"
+    );
 
     let page = app.get(location, Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("A password is needed the first time."), "{html}");
+    assert!(
+        html.contains("A password is needed the first time."),
+        "{html}"
+    );
 }
 
 #[tokio::test]
@@ -1560,11 +1970,27 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
             &[("host", "smtp.fastmail.com/inbox")],
             "The SMTP host is a host name, not an address or a URL.",
         ),
-        ("port", &[("port", "0")], "A port is a number between 1 and 65535."),
-        ("port", &[("port", "99999")], "A port is a number between 1 and 65535."),
+        (
+            "port",
+            &[("port", "0")],
+            "A port is a number between 1 and 65535.",
+        ),
+        (
+            "port",
+            &[("port", "99999")],
+            "A port is a number between 1 and 65535.",
+        ),
         ("username", &[("username", "")], "Give the SMTP username."),
-        ("from_address", &[("from_address", "board-at-izlek")], "That is not a from-address."),
-        ("from_address", &[("from_address", "board@izlek")], "That is not a from-address."),
+        (
+            "from_address",
+            &[("from_address", "board-at-izlek")],
+            "That is not a from-address.",
+        ),
+        (
+            "from_address",
+            &[("from_address", "board@izlek")],
+            "That is not a from-address.",
+        ),
     ];
     for (field, overrides, expected) in bad {
         let mut form: Vec<(&str, &str)> = vec![
@@ -1582,7 +2008,9 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
                 }
             }
         }
-        let answer = app.post("/api/save_sender", Some(&admin_cookie), &form).await;
+        let answer = app
+            .post("/api/save_sender", Some(&admin_cookie), &form)
+            .await;
         let location = answer.location.as_deref().unwrap_or_default();
         assert!(
             location.contains("refusal=bad-sender&on=save_sender"),
@@ -1603,7 +2031,11 @@ async fn a_member_may_not_press_the_test_button() {
 
     let answer = app.post("/api/send_test_mail", Some(&member), &[]).await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=send_test_mail"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=send_test_mail"),
         "{:?}",
         answer.location
     );
@@ -1617,7 +2049,11 @@ async fn a_viewer_may_not_press_the_test_button() {
 
     let answer = app.post("/api/send_test_mail", Some(&viewer), &[]).await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=send_test_mail"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=send_test_mail"),
         "{:?}",
         answer.location
     );
@@ -1629,7 +2065,11 @@ async fn a_signed_out_browser_may_not_press_the_test_button() {
 
     let answer = app.post("/api/send_test_mail", None, &[]).await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=sign-in-first&on=send_test_mail"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=sign-in-first&on=send_test_mail"),
         "{:?}",
         answer.location
     );
@@ -1640,16 +2080,25 @@ async fn testing_a_sender_that_was_never_filled_in_says_so_rather_than_sending()
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    let answer = app.post("/api/send_test_mail", Some(&admin_cookie), &[]).await;
+    let answer = app
+        .post("/api/send_test_mail", Some(&admin_cookie), &[])
+        .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=bad-sender&on=send_test_mail"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=bad-sender&on=send_test_mail"),
         "{:?}",
         answer.location
     );
 
     // Nothing was recorded either: the panel still has no test line to show.
     let workspace = app.store.workspace().await.unwrap().unwrap();
-    assert!(workspace.sender_test.is_none(), "a test with no sender recorded a result");
+    assert!(
+        workspace.sender_test.is_none(),
+        "a test with no sender recorded a result"
+    );
 }
 
 #[tokio::test]
@@ -1658,7 +2107,15 @@ async fn a_member_who_posts_a_resend_anyway_is_refused() {
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
     let mert = app
-        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@izlek.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
         .await;
     assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
     let workspace_id = app.workspace_id().await;
@@ -1672,13 +2129,27 @@ async fn a_member_who_posts_a_resend_anyway_is_refused() {
         .expect("no member row for mert")
         .id;
 
-    let answer = app.post("/api/resend_link", Some(&member), &[("user_id", &mert_id)]).await;
+    let answer = app
+        .post("/api/resend_link", Some(&member), &[("user_id", &mert_id)])
+        .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=resend_link"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=resend_link"),
         "{:?}",
         answer.location
     );
-    assert!(!answer.location.as_deref().unwrap_or_default().contains("mailed="), "{:?}", answer.location);
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("mailed="),
+        "{:?}",
+        answer.location
+    );
 }
 
 #[tokio::test]
@@ -1686,7 +2157,15 @@ async fn a_resent_link_opens_the_same_account() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let invitation = app
-        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@izlek.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
         .await;
     assert_eq!(invitation.status, StatusCode::OK, "{}", invitation.body);
     let workspace_id = app.workspace_id().await;
@@ -1700,18 +2179,40 @@ async fn a_resent_link_opens_the_same_account() {
         .expect("no member row for mert")
         .id;
 
-    let answer = app.post("/api/resend_link", Some(&admin_cookie), &[("user_id", &mert_id)]).await;
+    let answer = app
+        .post(
+            "/api/resend_link",
+            Some(&admin_cookie),
+            &[("user_id", &mert_id)],
+        )
+        .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("mailed=mert%40izlek.sh"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("mailed=mert%40izlek.sh"),
         "{:?}",
         answer.location
     );
     let token = queued_join_token(&app, "mert@izlek.sh").await;
 
-    let redeemed = app.post("/api/redeem_link", None, &[("token", &token), ("password", "lantern gravel spoon meadow")]).await;
+    let redeemed = app
+        .post(
+            "/api/redeem_link",
+            None,
+            &[
+                ("token", &token),
+                ("password", "lantern gravel spoon meadow"),
+            ],
+        )
+        .await;
     assert_eq!(redeemed.status, StatusCode::SEE_OTHER, "{}", redeemed.body);
     assert_eq!(redeemed.body, "null", "{}", redeemed.body);
-    assert!(redeemed.session.is_some(), "the resent link signed nobody in");
+    assert!(
+        redeemed.session.is_some(),
+        "the resent link signed nobody in"
+    );
 }
 
 #[tokio::test]
@@ -1719,7 +2220,15 @@ async fn an_admin_may_change_a_members_role_over_http() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let mert = app
-        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@izlek.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
         .await;
     assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
     let workspace_id = app.workspace_id().await;
@@ -1733,9 +2242,19 @@ async fn an_admin_may_change_a_members_role_over_http() {
         .expect("no member row for mert")
         .id;
 
-    let answer = app.post("/api/set_role", Some(&admin_cookie), &[("user_id", &mert_id), ("role", "viewer")]).await;
+    let answer = app
+        .post(
+            "/api/set_role",
+            Some(&admin_cookie),
+            &[("user_id", &mert_id), ("role", "viewer")],
+        )
+        .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("saved=set_role"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=set_role"),
         "{:?}",
         answer.location
     );
@@ -1756,15 +2275,29 @@ async fn the_owner_cannot_be_retargeted_over_http() {
         .expect("workspace has no owner")
         .id;
 
-    let answer = app.post("/api/set_role", Some(&admin_cookie), &[("user_id", &owner_id), ("role", "member")]).await;
+    let answer = app
+        .post(
+            "/api/set_role",
+            Some(&admin_cookie),
+            &[("user_id", &owner_id), ("role", "member")],
+        )
+        .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=set_role"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=set_role"),
         "{:?}",
         answer.location
     );
 
     let reloaded = app.store.user(&owner_id).await.unwrap().unwrap();
-    assert_eq!(reloaded.role, Role::Admin, "the owner's role changed anyway");
+    assert_eq!(
+        reloaded.role,
+        Role::Admin,
+        "the owner's role changed anyway"
+    );
 }
 
 #[tokio::test]
@@ -1773,7 +2306,15 @@ async fn a_non_admin_may_not_set_roles_over_http() {
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
     let mert = app
-        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@izlek.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
         .await;
     assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
     let workspace_id = app.workspace_id().await;
@@ -1787,23 +2328,45 @@ async fn a_non_admin_may_not_set_roles_over_http() {
         .expect("no member row for mert")
         .id;
 
-    let answer = app.post("/api/set_role", Some(&member), &[("user_id", &mert_id), ("role", "admin")]).await;
+    let answer = app
+        .post(
+            "/api/set_role",
+            Some(&member),
+            &[("user_id", &mert_id), ("role", "admin")],
+        )
+        .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("refusal=forbidden&on=set_role"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=set_role"),
         "{:?}",
         answer.location
     );
 
     let reloaded = app.store.user(&mert_id).await.unwrap().unwrap();
-    assert_eq!(reloaded.role, Role::Member, "role change was not really refused");
+    assert_eq!(
+        reloaded.role,
+        Role::Member,
+        "role change was not really refused"
+    );
 }
 
 #[tokio::test]
 async fn redeeming_a_link_lands_on_the_board_not_the_spent_join_page() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    app.post("/api/invite_member", Some(&admin_cookie), &[("email", "asli@izlek.sh"), ("display_name", "Asli"), ("role", "member")])
-        .await;
+    app.post(
+        "/api/invite_member",
+        Some(&admin_cookie),
+        &[
+            ("email", "asli@izlek.sh"),
+            ("display_name", "Asli"),
+            ("role", "member"),
+        ],
+    )
+    .await;
     let token = queued_join_token(&app, "asli@izlek.sh").await;
 
     let answer = app
@@ -1811,10 +2374,18 @@ async fn redeeming_a_link_lands_on_the_board_not_the_spent_join_page() {
             "/api/redeem_link",
             None,
             &format!("http://izlek.test/join/{token}"),
-            &[("token", &token), ("password", "lantern gravel spoon meadow")],
+            &[
+                ("token", &token),
+                ("password", "lantern gravel spoon meadow"),
+            ],
         )
         .await;
-    assert_eq!(answer.location.as_deref(), Some("/"), "{:?}", answer.location);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/"),
+        "{:?}",
+        answer.location
+    );
 }
 
 #[tokio::test]
@@ -1823,12 +2394,22 @@ async fn an_invitation_names_the_admin_who_made_it_and_not_the_invitee() {
     let admin_cookie = admin(&app).await;
 
     let answer = app
-        .post("/api/invite_member", Some(&admin_cookie), &[("email", "grace@izlek.sh"), ("display_name", "Grace Hopper"), ("role", "member")])
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[
+                ("email", "grace@izlek.sh"),
+                ("display_name", "Grace Hopper"),
+                ("role", "member"),
+            ],
+        )
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
     let token = queued_join_token(&app, "grace@izlek.sh").await;
 
-    let answer = app.post("/api/invitation", None, &[("token", token.as_str())]).await;
+    let answer = app
+        .post("/api/invitation", None, &[("token", token.as_str())])
+        .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
     assert!(
         answer.body.contains(r#""invited_by":"Ada Lovelace""#),
@@ -1911,14 +2492,25 @@ async fn an_admin_sees_who_has_a_password_and_never_a_hash() {
     let _ = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
     // Invited and never signed in: the account exists, the password does not.
     let answer = app
-        .post("/api/invite_member", Some(&admin_cookie), &[("email", "mert@izlek.sh"), ("display_name", "Mert"), ("role", "member")])
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[
+                ("email", "mert@izlek.sh"),
+                ("display_name", "Mert"),
+                ("role", "member"),
+            ],
+        )
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
 
     let page = app.get("/settings", Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("mert@izlek.sh"), "{html}");
-    assert!(html.contains("Resend mail"), "the un-signed-in member has no resend control: {html}");
+    assert!(
+        html.contains("Resend mail"),
+        "the un-signed-in member has no resend control: {html}"
+    );
     assert!(!html.contains("$argon2"), "a hash reached the page: {html}");
 }
 
@@ -1932,7 +2524,12 @@ async fn rule_written(app: &App, admin: &str, column_id: &str, subject: &str) ->
         .post(
             "/api/create_rule",
             Some(admin),
-            &[("trigger", "status"), ("column_id", column_id), ("subject", subject), ("audience", "assignees")],
+            &[
+                ("trigger", "status"),
+                ("column_id", column_id),
+                ("subject", subject),
+                ("audience", "assignees"),
+            ],
         )
         .await;
     answer.status == StatusCode::SEE_OTHER && answer.body == "null"
@@ -1959,12 +2556,30 @@ async fn an_admin_writes_a_rule_and_reads_it_back_as_a_sentence() {
 
     assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
 
-    let answer = app.post("/api/current_rules", Some(&admin_cookie), &[]).await;
-    assert!(answer.body.contains("\"when\":\"When status becomes\""), "{}", answer.body);
-    assert!(answer.body.contains("\"subject\":\"Task completed\""), "{}", answer.body);
-    assert!(answer.body.contains("\"audience\":\"assignees\""), "{}", answer.body);
+    let answer = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
+    assert!(
+        answer.body.contains("\"when\":\"When status becomes\""),
+        "{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("\"subject\":\"Task completed\""),
+        "{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("\"audience\":\"assignees\""),
+        "{}",
+        answer.body
+    );
     // Nothing has been sent, and the row says so rather than nothing at all.
-    assert!(answer.body.contains("\"last_sent\":null"), "{}", answer.body);
+    assert!(
+        answer.body.contains("\"last_sent\":null"),
+        "{}",
+        answer.body
+    );
 }
 
 #[tokio::test]
@@ -1977,7 +2592,12 @@ async fn a_rule_with_no_subject_is_refused_and_says_why() {
         .post(
             "/api/create_rule",
             Some(&admin_cookie),
-            &[("trigger", "status"), ("column_id", &column), ("subject", "   "), ("audience", "assignees")],
+            &[
+                ("trigger", "status"),
+                ("column_id", &column),
+                ("subject", "   "),
+                ("audience", "assignees"),
+            ],
         )
         .await;
     assert!(answer.body.contains("EmptySubject"), "{}", answer.body);
@@ -2002,7 +2622,9 @@ async fn a_rule_may_not_be_hung_off_a_column_that_is_not_on_this_board() {
         .await;
     assert!(answer.body.contains("Forbidden"), "{}", answer.body);
 
-    let seen = app.post("/api/current_rules", Some(&admin_cookie), &[]).await;
+    let seen = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
     assert!(seen.body.contains("\"rules\":[]"), "{}", seen.body);
 }
 
@@ -2016,7 +2638,12 @@ async fn an_audience_the_screen_never_offers_is_refused() {
         .post(
             "/api/create_rule",
             Some(&admin_cookie),
-            &[("trigger", "status"), ("column_id", &column), ("subject", "Task completed"), ("audience", "everyone-everywhere")],
+            &[
+                ("trigger", "status"),
+                ("column_id", &column),
+                ("subject", "Task completed"),
+                ("audience", "everyone-everywhere"),
+            ],
         )
         .await;
     assert!(answer.body.contains("Forbidden"), "{}", answer.body);
@@ -2030,13 +2657,25 @@ async fn switching_a_rule_off_leaves_it_listed_and_switched_off() {
     assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
     let rule = only_rule(&app, &admin_cookie).await;
 
-    let answer = app.post("/api/set_rule_enabled", Some(&admin_cookie), &[("rule_id", &rule), ("enabled", "false")]).await;
+    let answer = app
+        .post(
+            "/api/set_rule_enabled",
+            Some(&admin_cookie),
+            &[("rule_id", &rule), ("enabled", "false")],
+        )
+        .await;
     assert_eq!(answer.body, "null", "{}", answer.body);
 
     // The screen lists what exists, not what is live.
-    let seen = app.post("/api/current_rules", Some(&admin_cookie), &[]).await;
+    let seen = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
     assert!(seen.body.contains("\"enabled\":false"), "{}", seen.body);
-    assert!(seen.body.contains("\"subject\":\"Task completed\""), "{}", seen.body);
+    assert!(
+        seen.body.contains("\"subject\":\"Task completed\""),
+        "{}",
+        seen.body
+    );
 }
 
 #[tokio::test]
@@ -2046,7 +2685,13 @@ async fn a_rule_id_this_workspace_does_not_own_is_refused() {
     let stranger = Ulid::new().to_string();
 
     for path in ["/api/set_rule_enabled", "/api/delete_rule"] {
-        let answer = app.post(path, Some(&admin_cookie), &[("rule_id", &stranger), ("enabled", "false")]).await;
+        let answer = app
+            .post(
+                path,
+                Some(&admin_cookie),
+                &[("rule_id", &stranger), ("enabled", "false")],
+            )
+            .await;
         assert!(answer.body.contains("NotFound"), "{path}: {}", answer.body);
     }
 }
@@ -2059,10 +2704,18 @@ async fn deleting_a_rule_takes_it_off_the_screen() {
     assert!(rule_written(&app, &admin_cookie, &column, "Task completed").await);
     let rule = only_rule(&app, &admin_cookie).await;
 
-    let answer = app.post("/api/delete_rule", Some(&admin_cookie), &[("rule_id", &rule)]).await;
+    let answer = app
+        .post(
+            "/api/delete_rule",
+            Some(&admin_cookie),
+            &[("rule_id", &rule)],
+        )
+        .await;
     assert_eq!(answer.body, "null", "{}", answer.body);
 
-    let seen = app.post("/api/current_rules", Some(&admin_cookie), &[]).await;
+    let seen = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
     assert!(seen.body.contains("\"rules\":[]"), "{}", seen.body);
 }
 
@@ -2085,22 +2738,41 @@ async fn only_an_admin_may_read_or_write_the_rules() {
             .post(
                 "/api/create_rule",
                 Some(who),
-                &[("trigger", "status"), ("column_id", &column), ("subject", "Mail everyone about me"), ("audience", "board")],
+                &[
+                    ("trigger", "status"),
+                    ("column_id", &column),
+                    ("subject", "Mail everyone about me"),
+                    ("audience", "board"),
+                ],
             )
             .await;
         assert!(written.body.contains("Forbidden"), "{}", written.body);
 
-        let switched = app.post("/api/set_rule_enabled", Some(who), &[("rule_id", &rule), ("enabled", "false")]).await;
+        let switched = app
+            .post(
+                "/api/set_rule_enabled",
+                Some(who),
+                &[("rule_id", &rule), ("enabled", "false")],
+            )
+            .await;
         assert!(switched.body.contains("Forbidden"), "{}", switched.body);
 
-        let deleted = app.post("/api/delete_rule", Some(who), &[("rule_id", &rule)]).await;
+        let deleted = app
+            .post("/api/delete_rule", Some(who), &[("rule_id", &rule)])
+            .await;
         assert!(deleted.body.contains("Forbidden"), "{}", deleted.body);
     }
 
     // And the rule is untouched: still there, still on.
-    let seen = app.post("/api/current_rules", Some(&admin_cookie), &[]).await;
+    let seen = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
     assert!(seen.body.contains("\"enabled\":true"), "{}", seen.body);
-    assert!(!seen.body.contains("Mail everyone about me"), "{}", seen.body);
+    assert!(
+        !seen.body.contains("Mail everyone about me"),
+        "{}",
+        seen.body
+    );
 }
 
 #[tokio::test]
@@ -2115,13 +2787,25 @@ async fn a_signed_out_browser_may_not_touch_the_rules() {
         ("/api/current_rules", vec![] as Vec<(&str, &str)>),
         (
             "/api/create_rule",
-            vec![("trigger", "status"), ("column_id", column.as_str()), ("subject", "Task completed"), ("audience", "assignees")],
+            vec![
+                ("trigger", "status"),
+                ("column_id", column.as_str()),
+                ("subject", "Task completed"),
+                ("audience", "assignees"),
+            ],
         ),
-        ("/api/set_rule_enabled", vec![("rule_id", rule.as_str()), ("enabled", "false")]),
+        (
+            "/api/set_rule_enabled",
+            vec![("rule_id", rule.as_str()), ("enabled", "false")],
+        ),
         ("/api/delete_rule", vec![("rule_id", rule.as_str())]),
     ] {
         let answer = app.post(path, None, &form).await;
-        assert!(answer.body.contains("SignInFirst"), "{path}: {}", answer.body);
+        assert!(
+            answer.body.contains("SignInFirst"),
+            "{path}: {}",
+            answer.body
+        );
     }
 }
 
@@ -2151,11 +2835,19 @@ async fn the_files_section_is_on_the_detail_page() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Attach something to me").await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("multipart/form-data"), "no multipart upload form on the detail page");
-    assert!(html.contains(r#"action="/files""#), "the upload form does not post to /files");
+    assert!(
+        html.contains("multipart/form-data"),
+        "no multipart upload form on the detail page"
+    );
+    assert!(
+        html.contains(r#"action="/files""#),
+        "the upload form does not post to /files"
+    );
 }
 
 #[tokio::test]
@@ -2165,15 +2857,29 @@ async fn the_datepicker_shell_renders_in_both_task_modals() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Pick a date on me").await;
 
-    let detail = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let detail = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&detail.bytes);
-    assert!(html.contains("datepick-input"), "no datepicker shell on the task modal: {html}");
-    assert!(html.contains("datepick-grid"), "no datepicker grid on the task modal: {html}");
+    assert!(
+        html.contains("datepick-input"),
+        "no datepicker shell on the task modal: {html}"
+    );
+    assert!(
+        html.contains("datepick-grid"),
+        "no datepicker grid on the task modal: {html}"
+    );
 
     let new_task = app.get("/?new=1", Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&new_task.bytes);
-    assert!(html.contains("datepick-input"), "no datepicker shell on the new-task modal: {html}");
-    assert!(html.contains("datepick-grid"), "no datepicker grid on the new-task modal: {html}");
+    assert!(
+        html.contains("datepick-input"),
+        "no datepicker shell on the new-task modal: {html}"
+    );
+    assert!(
+        html.contains("datepick-grid"),
+        "no datepicker grid on the new-task modal: {html}"
+    );
 }
 
 /// The id of the file named `name` in a `/api/fetch_task` snapshot's body,
@@ -2196,39 +2902,74 @@ fn attachment_id_named(body: &str, name: &str) -> String {
 async fn a_viewer_who_posts_an_upload_anyway_is_refused() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let viewer = invited(&app, &admin_cookie, "quiet@izlek.sh", "Quiet Reader", Role::Viewer).await;
+    let viewer = invited(
+        &app,
+        &admin_cookie,
+        "quiet@izlek.sh",
+        "Quiet Reader",
+        Role::Viewer,
+    )
+    .await;
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Viewers cannot attach").await;
 
     let answer = app
-        .post_multipart("/files", Some(&viewer), &[("task_id", &task)], Some(("note.txt", "text/plain", b"hello")))
+        .post_multipart(
+            "/files",
+            Some(&viewer),
+            &[("task_id", &task)],
+            Some(("note.txt", "text/plain", b"hello")),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some("/?refusal=forbidden&on=upload_file"));
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/?refusal=forbidden&on=upload_file")
+    );
 }
 
 #[tokio::test]
 async fn a_member_uploads_a_file_and_the_chip_comes_back() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "mo@izlek.sh", "Mo Dubois", Role::Member).await;
+    let member = invited(
+        &app,
+        &admin_cookie,
+        "mo@izlek.sh",
+        "Mo Dubois",
+        Role::Member,
+    )
+    .await;
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Attach the spec").await;
 
     let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
     let answer = app
-        .post_multipart("/files", Some(&member), &[("task_id", &task)], Some(("spec.png", "image/png", &png)))
+        .post_multipart(
+            "/files",
+            Some(&member),
+            &[("task_id", &task)],
+            Some(("spec.png", "image/png", &png)),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some(format!("/?task={task}").as_str()));
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}").as_str())
+    );
 
-    let snapshot = app.post("/api/fetch_task", Some(&member), &[("task_id", &task)]).await;
+    let snapshot = app
+        .post("/api/fetch_task", Some(&member), &[("task_id", &task)])
+        .await;
     let file_id = attachment_id_named(&snapshot.body, "spec.png");
 
     let page = app.get(&format!("/?task={task}"), Some(&member)).await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(&format!("task={task}&amp;file={file_id}")), "no viewer href for the new file: {html}");
+    assert!(
+        html.contains(&format!("task={task}&amp;file={file_id}")),
+        "no viewer href for the new file: {html}"
+    );
     assert!(html.contains("spec.png"));
 
     let download = app.get(&format!("/files/{file_id}"), Some(&member)).await;
@@ -2244,26 +2985,55 @@ async fn an_image_downloads_inline_and_an_unrecognised_type_stays_attachment() {
     let task = a_task(&app, &admin_cookie, &column, "Two kinds of file").await;
 
     let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &png))).await;
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &png)),
+    )
+    .await;
     let unknown = [0x00u8, 0x01, 0xFE, 0xFF, 0x02];
-    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("blob.bin", "application/octet-stream", &unknown)))
-        .await;
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("blob.bin", "application/octet-stream", &unknown)),
+    )
+    .await;
 
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     let png_id = attachment_id_named(&snapshot.body, "spec.png");
     let blob_id = attachment_id_named(&snapshot.body, "blob.bin");
 
-    let png_download = app.get(&format!("/files/{png_id}"), Some(&admin_cookie)).await;
+    let png_download = app
+        .get(&format!("/files/{png_id}"), Some(&admin_cookie))
+        .await;
     assert_eq!(png_download.content_type.as_deref(), Some("image/png"));
     assert!(
-        png_download.disposition.as_deref().unwrap_or_default().starts_with("inline;"),
+        png_download
+            .disposition
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("inline;"),
         "{:?}",
         png_download.disposition
     );
 
-    let blob_download = app.get(&format!("/files/{blob_id}"), Some(&admin_cookie)).await;
+    let blob_download = app
+        .get(&format!("/files/{blob_id}"), Some(&admin_cookie))
+        .await;
     assert!(
-        blob_download.disposition.as_deref().unwrap_or_default().starts_with("attachment;"),
+        blob_download
+            .disposition
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("attachment;"),
         "{:?}",
         blob_download.disposition
     );
@@ -2277,13 +3047,31 @@ async fn dl_forces_a_download_of_an_otherwise_inline_type() {
     let task = a_task(&app, &admin_cookie, &column, "Forced download").await;
 
     let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &png))).await;
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &png)),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     let file_id = attachment_id_named(&snapshot.body, "spec.png");
 
-    let forced = app.get(&format!("/files/{file_id}?dl=1"), Some(&admin_cookie)).await;
+    let forced = app
+        .get(&format!("/files/{file_id}?dl=1"), Some(&admin_cookie))
+        .await;
     assert!(
-        forced.disposition.as_deref().unwrap_or_default().starts_with("attachment;"),
+        forced
+            .disposition
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("attachment;"),
         "{:?}",
         forced.disposition
     );
@@ -2299,35 +3087,70 @@ async fn a_range_request_answers_206_with_the_sliced_bytes_and_a_bad_range_answe
     let task = a_task(&app, &admin_cookie, &column, "Ranged download").await;
 
     let bytes = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &bytes))).await;
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &bytes)),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     let file_id = attachment_id_named(&snapshot.body, "spec.png");
     let total = bytes.len();
 
-    let no_range = app.get(&format!("/files/{file_id}"), Some(&admin_cookie)).await;
+    let no_range = app
+        .get(&format!("/files/{file_id}"), Some(&admin_cookie))
+        .await;
     assert_eq!(no_range.status, StatusCode::OK);
     assert_eq!(no_range.accept_ranges.as_deref(), Some("bytes"));
     assert_eq!(no_range.bytes, bytes);
 
     let first_four = app
-        .get_with_range(&format!("/files/{file_id}"), Some(&admin_cookie), Some("bytes=0-3"))
+        .get_with_range(
+            &format!("/files/{file_id}"),
+            Some(&admin_cookie),
+            Some("bytes=0-3"),
+        )
         .await;
     assert_eq!(first_four.status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(first_four.content_range.as_deref(), Some(format!("bytes 0-3/{total}").as_str()));
+    assert_eq!(
+        first_four.content_range.as_deref(),
+        Some(format!("bytes 0-3/{total}").as_str())
+    );
     assert_eq!(first_four.bytes, &bytes[0..4]);
 
     let last_two = app
-        .get_with_range(&format!("/files/{file_id}"), Some(&admin_cookie), Some("bytes=-2"))
+        .get_with_range(
+            &format!("/files/{file_id}"),
+            Some(&admin_cookie),
+            Some("bytes=-2"),
+        )
         .await;
     assert_eq!(last_two.status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(last_two.content_range.as_deref(), Some(format!("bytes {}-{}/{total}", total - 2, total - 1).as_str()));
+    assert_eq!(
+        last_two.content_range.as_deref(),
+        Some(format!("bytes {}-{}/{total}", total - 2, total - 1).as_str())
+    );
     assert_eq!(last_two.bytes, &bytes[total - 2..]);
 
     let out_of_range = app
-        .get_with_range(&format!("/files/{file_id}"), Some(&admin_cookie), Some(&format!("bytes={total}-{}", total + 10)))
+        .get_with_range(
+            &format!("/files/{file_id}"),
+            Some(&admin_cookie),
+            Some(&format!("bytes={total}-{}", total + 10)),
+        )
         .await;
     assert_eq!(out_of_range.status, StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(out_of_range.content_range.as_deref(), Some(format!("bytes */{total}").as_str()));
+    assert_eq!(
+        out_of_range.content_range.as_deref(),
+        Some(format!("bytes */{total}").as_str())
+    );
 }
 
 #[tokio::test]
@@ -2339,26 +3162,59 @@ async fn the_viewer_renders_in_page_for_a_renderable_file_and_ignores_a_foreign_
     let other_task = a_task(&app, &admin_cookie, &column, "Not this one").await;
 
     let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &png))).await;
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &png)),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     let file_id = attachment_id_named(&snapshot.body, "spec.png");
 
-    let page = app.get(&format!("/?task={task}&file={file_id}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(
+            &format!("/?task={task}&file={file_id}"),
+            Some(&admin_cookie),
+        )
+        .await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
     // "viewer-body" marks the rendered overlay; the viewer's Escape resolver
     // that escape_closes registers (priority 90) also appears here on task
     // pages only, not every board page.
-    assert!(html.contains("viewer-body"), "no viewer overlay in the page: {html}");
-    assert!(html.contains("__izlekEsc.register(90"), "no viewer escape resolver in the page: {html}");
-    assert!(html.contains(&format!("/files/{file_id}")), "viewer's <img> does not point at the file: {html}");
+    assert!(
+        html.contains("viewer-body"),
+        "no viewer overlay in the page: {html}"
+    );
+    assert!(
+        html.contains("__izlekEsc.register(90"),
+        "no viewer escape resolver in the page: {html}"
+    );
+    assert!(
+        html.contains(&format!("/files/{file_id}")),
+        "viewer's <img> does not point at the file: {html}"
+    );
 
     // A file id that exists but belongs to another task is refused the same
     // silent way a made-up one is: no overlay, the task modal alone.
-    let wrong_task_page = app.get(&format!("/?task={other_task}&file={file_id}"), Some(&admin_cookie)).await;
+    let wrong_task_page = app
+        .get(
+            &format!("/?task={other_task}&file={file_id}"),
+            Some(&admin_cookie),
+        )
+        .await;
     assert!(!String::from_utf8_lossy(&wrong_task_page.bytes).contains("viewer-body"));
 
-    let missing_page = app.get(&format!("/?task={task}&file=anything"), Some(&admin_cookie)).await;
+    let missing_page = app
+        .get(&format!("/?task={task}&file=anything"), Some(&admin_cookie))
+        .await;
     assert_eq!(missing_page.status, StatusCode::OK);
     assert!(!String::from_utf8_lossy(&missing_page.bytes).contains("viewer-body"));
 }
@@ -2374,19 +3230,45 @@ async fn a_file_past_the_workspace_limit_is_refused_before_it_is_kept() {
         .post(
             "/api/save_limits",
             Some(&admin_cookie),
-            &[("attachment_limit_mb", "1"), ("photo_limit_mb", "2"), ("allowed_file_types", "")],
+            &[
+                ("attachment_limit_mb", "1"),
+                ("photo_limit_mb", "2"),
+                ("allowed_file_types", ""),
+            ],
         )
         .await;
-    assert!(!answer.location.as_deref().unwrap_or_default().contains("refusal="), "{:?}", answer.location);
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
 
     let big = vec![0u8; 2 * 1024 * 1024];
     let answer = app
-        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("big.bin", "application/octet-stream", &big)))
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("big.bin", "application/octet-stream", &big)),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some(format!("/?task={task}&refusal=file-too-big&on=upload_file").as_str()));
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&refusal=file-too-big&on=upload_file").as_str())
+    );
 
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     assert!(snapshot.body.contains("\"files\":[]"), "{}", snapshot.body);
 }
 
@@ -2401,16 +3283,36 @@ async fn a_file_type_off_the_list_is_refused() {
         .post(
             "/api/save_limits",
             Some(&admin_cookie),
-            &[("attachment_limit_mb", "25"), ("photo_limit_mb", "2"), ("allowed_file_types", "png")],
+            &[
+                ("attachment_limit_mb", "25"),
+                ("photo_limit_mb", "2"),
+                ("allowed_file_types", "png"),
+            ],
         )
         .await;
-    assert!(!answer.location.as_deref().unwrap_or_default().contains("refusal="), "{:?}", answer.location);
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
 
     let answer = app
-        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("evil.exe", "application/octet-stream", b"MZ\x90\x00")))
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("evil.exe", "application/octet-stream", b"MZ\x90\x00")),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some(format!("/?task={task}&refusal=file-type&on=upload_file").as_str()));
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&refusal=file-type&on=upload_file").as_str())
+    );
 }
 
 #[tokio::test]
@@ -2421,10 +3323,22 @@ async fn an_empty_allowed_list_lets_anything_through() {
     let task = a_task(&app, &admin_cookie, &column, "Whatever shows up").await;
 
     let answer = app
-        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("anything.bin", "application/octet-stream", &[0x00, 0x01, 0x02])))
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some((
+                "anything.bin",
+                "application/octet-stream",
+                &[0x00, 0x01, 0x02],
+            )),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some(format!("/?task={task}").as_str()));
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}").as_str())
+    );
 }
 
 #[tokio::test]
@@ -2436,14 +3350,27 @@ async fn the_stored_type_is_what_the_bytes_are_not_what_the_upload_claimed() {
 
     let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     let answer = app
-        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("liar.pdf", "application/pdf", &png)))
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("liar.pdf", "application/pdf", &png)),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
 
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     let file_id = attachment_id_named(&snapshot.body, "liar.pdf");
 
-    let download = app.get(&format!("/files/{file_id}"), Some(&admin_cookie)).await;
+    let download = app
+        .get(&format!("/files/{file_id}"), Some(&admin_cookie))
+        .await;
     assert_eq!(download.content_type.as_deref(), Some("image/png"));
 }
 
@@ -2455,20 +3382,44 @@ async fn a_file_name_that_is_a_path_is_kept_as_a_label() {
     let task = a_task(&app, &admin_cookie, &column, "Filename tries to escape").await;
 
     let answer = app
-        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("../../etc/passwd", "text/plain", b"root:x:0:0")))
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("../../etc/passwd", "text/plain", b"root:x:0:0")),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
 
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
-    assert!(snapshot.body.contains("\"name\":\"passwd\""), "the stored name still has a path in it: {}", snapshot.body);
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    assert!(
+        snapshot.body.contains("\"name\":\"passwd\""),
+        "the stored name still has a path in it: {}",
+        snapshot.body
+    );
     let file_id = attachment_id_named(&snapshot.body, "passwd");
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(!html.contains("../../etc/passwd"), "the raw path leaked onto the chip: {html}");
+    assert!(
+        !html.contains("../../etc/passwd"),
+        "the raw path leaked onto the chip: {html}"
+    );
 
-    let download = app.get(&format!("/files/{file_id}"), Some(&admin_cookie)).await;
-    let disposition = download.disposition.expect("no content-disposition on the download");
+    let download = app
+        .get(&format!("/files/{file_id}"), Some(&admin_cookie))
+        .await;
+    let disposition = download
+        .disposition
+        .expect("no content-disposition on the download");
     assert!(!disposition.contains('\r'), "{disposition}");
     assert!(!disposition.contains('\n'), "{disposition}");
     assert!(!disposition.contains('/'), "{disposition}");
@@ -2488,13 +3439,22 @@ async fn a_file_from_another_workspace_is_not_found() {
     let column_b = first_column(&app_b).await;
     let task_b = a_task(&app_b, &admin_b, &column_b, "Lives in the other workspace").await;
     let answer = app_b
-        .post_multipart("/files", Some(&admin_b), &[("task_id", &task_b)], Some(("theirs.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])))
+        .post_multipart(
+            "/files",
+            Some(&admin_b),
+            &[("task_id", &task_b)],
+            Some(("theirs.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    let snapshot = app_b.post("/api/fetch_task", Some(&admin_b), &[("task_id", &task_b)]).await;
+    let snapshot = app_b
+        .post("/api/fetch_task", Some(&admin_b), &[("task_id", &task_b)])
+        .await;
     let file_id = attachment_id_named(&snapshot.body, "theirs.png");
 
-    let answer = app_a.get(&format!("/files/{file_id}"), Some(&admin_a)).await;
+    let answer = app_a
+        .get(&format!("/files/{file_id}"), Some(&admin_a))
+        .await;
     assert_eq!(answer.status, StatusCode::NOT_FOUND);
 }
 
@@ -2505,9 +3465,14 @@ async fn an_upload_without_a_file_is_refused() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Nothing was chosen").await;
 
-    let answer = app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], None).await;
+    let answer = app
+        .post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], None)
+        .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(answer.location.as_deref(), Some(format!("/?task={task}&refusal=no-file&on=upload_file").as_str()));
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&refusal=no-file&on=upload_file").as_str())
+    );
 }
 
 #[tokio::test]
@@ -2520,28 +3485,68 @@ async fn only_the_uploader_or_an_admin_may_delete_a_file() {
     let task = a_task(&app, &admin_cookie, &column, "Two uploaders, one task").await;
 
     let answer = app
-        .post_multipart("/files", Some(&member_a), &[("task_id", &task)], Some(("mine.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])))
+        .post_multipart(
+            "/files",
+            Some(&member_a),
+            &[("task_id", &task)],
+            Some(("mine.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     let answer = app
-        .post_multipart("/files", Some(&member_b), &[("task_id", &task)], Some(("theirs.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])))
+        .post_multipart(
+            "/files",
+            Some(&member_b),
+            &[("task_id", &task)],
+            Some(("theirs.png", "image/png", &[0x89, 0x50, 0x4E, 0x47])),
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
 
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     let file_a = attachment_id_named(&snapshot.body, "mine.png");
     let file_b = attachment_id_named(&snapshot.body, "theirs.png");
 
-    let answer = app.post("/api/delete_file", Some(&member_b), &[("file_id", &file_a)]).await;
+    let answer = app
+        .post("/api/delete_file", Some(&member_b), &[("file_id", &file_a)])
+        .await;
     assert_eq!(answer.body, "\"Forbidden\"", "{}", answer.body);
 
-    let answer = app.post("/api/delete_file", Some(&member_a), &[("file_id", &file_a)]).await;
-    assert_eq!(answer.body, "null", "the uploader was refused: {}", answer.body);
+    let answer = app
+        .post("/api/delete_file", Some(&member_a), &[("file_id", &file_a)])
+        .await;
+    assert_eq!(
+        answer.body, "null",
+        "the uploader was refused: {}",
+        answer.body
+    );
 
-    let answer = app.post("/api/delete_file", Some(&admin_cookie), &[("file_id", &file_b)]).await;
-    assert_eq!(answer.body, "null", "the admin was refused: {}", answer.body);
+    let answer = app
+        .post(
+            "/api/delete_file",
+            Some(&admin_cookie),
+            &[("file_id", &file_b)],
+        )
+        .await;
+    assert_eq!(
+        answer.body, "null",
+        "the admin was refused: {}",
+        answer.body
+    );
 
-    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
     assert!(snapshot.body.contains("\"files\":[]"), "{}", snapshot.body);
 }
 
@@ -2551,10 +3556,20 @@ async fn only_the_uploader_or_an_admin_may_delete_a_file() {
 
 /// The id of the assignable person on a task whose display name matches.
 async fn person_id(app: &App, cookie: &str, task_id: &str, name: &str) -> String {
-    let answer = app.post("/api/fetch_task", Some(cookie), &[("task_id", task_id)]).await;
+    let answer = app
+        .post("/api/fetch_task", Some(cookie), &[("task_id", task_id)])
+        .await;
     let needle = format!("\"display_name\":\"{name}\"");
-    let before = answer.body.split_once(&needle).map(|(head, _)| head).unwrap_or_else(|| panic!("no such person in {}", answer.body));
-    before.rsplit_once("\"id\":\"").and_then(|(_, rest)| rest.split('"').next()).expect("no id before the display name").to_string()
+    let before = answer
+        .body
+        .split_once(&needle)
+        .map(|(head, _)| head)
+        .unwrap_or_else(|| panic!("no such person in {}", answer.body));
+    before
+        .rsplit_once("\"id\":\"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no id before the display name")
+        .to_string()
 }
 
 /// Reads the admin's logs until the snapshot contains `needle`, since the
@@ -2596,7 +3611,13 @@ async fn an_admin_reads_the_logs() {
     let task = a_task(&app, &admin_cookie, &columns[0], "Ship it").await;
     let mate_id = person_id(&app, &admin_cookie, &task, "Emre").await;
 
-    let assigned = app.post("/api/assign", Some(&admin_cookie), &[("task_id", &task), ("user_id", &mate_id)]).await;
+    let assigned = app
+        .post(
+            "/api/assign",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("user_id", &mate_id)],
+        )
+        .await;
     assert_eq!(assigned.body, "null", "{}", assigned.body);
     assert!(rule_written(&app, &admin_cookie, &columns[1], "Task completed").await);
 
@@ -2604,30 +3625,59 @@ async fn an_admin_reads_the_logs() {
     // empties out to nobody, and the decision says so rather than owing a
     // mail that would only tell him what he just did.
     let moved = app
-        .post("/api/move_card", Some(&mate), &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])])
+        .post(
+            "/api/move_card",
+            Some(&mate),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
         .await;
     assert_eq!(moved.body, "");
 
     let snapshot = until_logs_contains(&app, &admin_cookie, "\"outcome\":\"nobody to mail\"").await;
     // The queue still carries Emre's invite mail — unrelated to this rule —
     // so the check is that the rule itself queued nothing, not an empty queue.
-    assert!(!snapshot.contains("\"subject\":\"Task completed\""), "{}", snapshot);
+    assert!(
+        !snapshot.contains("\"subject\":\"Task completed\""),
+        "{}",
+        snapshot
+    );
 
     // The admin drops it back and moves it again: this time the mover is not
     // the assignee, so the rule owes Emre a mail. With no sender configured
     // the send is not a failure — it waits in the queue.
     let back = app
-        .post("/api/move_card", Some(&admin_cookie), &[("task_id", &task), ("from_column_id", &columns[1]), ("to_column_id", &columns[0])])
+        .post(
+            "/api/move_card",
+            Some(&admin_cookie),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[1]),
+                ("to_column_id", &columns[0]),
+            ],
+        )
         .await;
     assert_eq!(back.body, "");
     let forward = app
-        .post("/api/move_card", Some(&admin_cookie), &[("task_id", &task), ("from_column_id", &columns[0]), ("to_column_id", &columns[1])])
+        .post(
+            "/api/move_card",
+            Some(&admin_cookie),
+            &[
+                ("task_id", &task),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", &columns[1]),
+            ],
+        )
         .await;
     assert_eq!(forward.body, "");
 
     // No sender means the send is held, not sent — the ledger stores that as
     // a failure with nothing spent, and the queue names the truth: held.
-    let snapshot = until_logs_contains(&app, &admin_cookie, "\"recipient\":\"emre@izlek.sh\"").await;
+    let snapshot =
+        until_logs_contains(&app, &admin_cookie, "\"recipient\":\"emre@izlek.sh\"").await;
     assert!(snapshot.contains("\"state\":\"held\""), "{}", snapshot);
     assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
 }
@@ -2636,8 +3686,15 @@ async fn an_admin_reads_the_logs() {
 /// a `/api/current_logs` body the way `person_id` reads an id.
 fn moment_for(body: &str, title: &str) -> String {
     let needle = format!("\"title\":\"{title}\"");
-    let before = body.split_once(&needle).map(|(head, _)| head).unwrap_or_else(|| panic!("no such title in {body}"));
-    before.rsplit_once("\"at\":\"").and_then(|(_, rest)| rest.split('"').next()).expect("no at before the title").to_string()
+    let before = body
+        .split_once(&needle)
+        .map(|(head, _)| head)
+        .unwrap_or_else(|| panic!("no such title in {body}"));
+    before
+        .rsplit_once("\"at\":\"")
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("no at before the title")
+        .to_string()
 }
 
 /// The hour out of a `moment_label`-shaped stamp like `"Aug 19 11:04"`.
@@ -2668,16 +3725,26 @@ async fn a_stamp_shifts_with_the_viewers_stored_timezone() {
         )
         .await;
     assert!(
-        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         saved.location
     );
 
-    let shifted = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    let shifted = app
+        .post("/api/current_logs", Some(&admin_cookie), &[])
+        .await;
     let shifted_at = moment_for(&shifted.body, "Ship it");
 
     assert_ne!(utc_at, shifted_at, "utc={utc_at} shifted={shifted_at}");
-    assert_eq!(hour_of(&shifted_at), (hour_of(&utc_at) + 3) % 24, "utc={utc_at} shifted={shifted_at}");
+    assert_eq!(
+        hour_of(&shifted_at),
+        (hour_of(&utc_at) + 3) % 24,
+        "utc={utc_at} shifted={shifted_at}"
+    );
 }
 
 /// The first `activity-stamp` span's text out of a task modal's HTML — the
@@ -2686,7 +3753,9 @@ fn activity_stamp_of(html: &str) -> &str {
     let (_, rest) = html
         .split_once(r#"class="activity-stamp">"#)
         .unwrap_or_else(|| panic!("no activity stamp in {html}"));
-    rest.split_once('<').map(|(stamp, _)| stamp).expect("unterminated activity stamp")
+    rest.split_once('<')
+        .map(|(stamp, _)| stamp)
+        .expect("unterminated activity stamp")
 }
 
 #[tokio::test]
@@ -2696,7 +3765,9 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     let utc_at = activity_stamp_of(&html).to_string();
 
@@ -2708,17 +3779,27 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
         )
         .await;
     assert!(
-        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         saved.location
     );
 
-    let shifted_page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let shifted_page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let shifted_html = String::from_utf8_lossy(&shifted_page.bytes);
     let shifted_at = activity_stamp_of(&shifted_html).to_string();
 
     assert_ne!(utc_at, shifted_at, "utc={utc_at} shifted={shifted_at}");
-    assert_eq!(hour_of(&shifted_at), (hour_of(&utc_at) + 3) % 24, "utc={utc_at} shifted={shifted_at}");
+    assert_eq!(
+        hour_of(&shifted_at),
+        (hour_of(&utc_at) + 3) % 24,
+        "utc={utc_at} shifted={shifted_at}"
+    );
 }
 
 #[tokio::test]
@@ -2730,11 +3811,17 @@ async fn an_unlisted_timezone_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("timezone", "Mars/Olympus_Mons")],
+            &[
+                ("display_name", "Ada Lovelace"),
+                ("timezone", "Mars/Olympus_Mons"),
+            ],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=bad-zone&on=save_profile"), "{location}");
+    assert!(
+        location.contains("refusal=bad-zone&on=save_profile"),
+        "{location}"
+    );
 }
 
 #[tokio::test]
@@ -2750,7 +3837,11 @@ async fn the_dark_theme_is_saved_and_marks_the_page() {
         )
         .await;
     assert!(
-        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         saved.location
     );
@@ -2773,7 +3864,11 @@ async fn turkish_is_saved_and_the_board_renders_in_turkish() {
         )
         .await;
     assert!(
-        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         saved.location
     );
@@ -2804,7 +3899,10 @@ async fn an_unlisted_language_is_refused() {
             &[("display_name", "Ada Lovelace"), ("language", "fr")],
         )
         .await;
-    assert_eq!(saved.location.as_deref(), Some("/settings?refusal=bad-language&on=save_profile"));
+    assert_eq!(
+        saved.location.as_deref(),
+        Some("/settings?refusal=bad-language&on=save_profile")
+    );
 }
 
 #[tokio::test]
@@ -2820,7 +3918,10 @@ async fn an_unlisted_theme_is_refused() {
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=bad-theme&on=save_profile"), "{location}");
+    assert!(
+        location.contains("refusal=bad-theme&on=save_profile"),
+        "{location}"
+    );
 }
 
 #[tokio::test]
@@ -2836,7 +3937,11 @@ async fn the_ledger_ui_is_saved_and_marks_the_page() {
         )
         .await;
     assert!(
-        !saved.location.as_deref().unwrap_or_default().contains("refusal="),
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
         "{:?}",
         saved.location
     );
@@ -2859,7 +3964,10 @@ async fn an_unlisted_ui_is_refused() {
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
-    assert!(location.contains("refusal=bad-ui&on=save_profile"), "{location}");
+    assert!(
+        location.contains("refusal=bad-ui&on=save_profile"),
+        "{location}"
+    );
 
     let page = app.get("/settings", Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
@@ -2880,7 +3988,12 @@ async fn creating_a_task_into_a_ruled_column_owes_mail() {
         .post(
             "/api/create_rule",
             Some(&admin_cookie),
-            &[("trigger", "status"), ("column_id", &column), ("subject", "New card"), ("audience", "board")],
+            &[
+                ("trigger", "status"),
+                ("column_id", &column),
+                ("subject", "New card"),
+                ("audience", "board"),
+            ],
         )
         .await;
     assert_eq!(written.body, "null", "{}", written.body);
@@ -2889,7 +4002,11 @@ async fn creating_a_task_into_a_ruled_column_owes_mail() {
     // Deniz creates the card, so the board audience (which excludes the
     // actor) resolves to the admin — the only other person on the board.
     let created = app
-        .post("/api/create_task", Some(&member), &[("title", "Ship it"), ("column_id", &column)])
+        .post(
+            "/api/create_task",
+            Some(&member),
+            &[("title", "Ship it"), ("column_id", &column)],
+        )
         .await;
     assert_eq!(created.body, "", "the task was refused: {}", created.body);
 
@@ -2902,7 +4019,12 @@ async fn the_topbar_nav_marks_the_active_page() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    for (path, active) in [("/", "/"), ("/rules", "/rules"), ("/logs", "/logs"), ("/settings", "/settings")] {
+    for (path, active) in [
+        ("/", "/"),
+        ("/rules", "/rules"),
+        ("/logs", "/logs"),
+        ("/settings", "/settings"),
+    ] {
         let page = app.get(path, Some(&admin_cookie)).await;
         assert_eq!(page.status, StatusCode::OK);
         let html = String::from_utf8_lossy(&page.bytes);
@@ -2912,7 +4034,10 @@ async fn the_topbar_nav_marks_the_active_page() {
             } else {
                 format!(r#"class="topbar-nav" href="{nav}""#)
             };
-            assert!(html.contains(&expected), "page {path} lacks `{expected}`: {html}");
+            assert!(
+                html.contains(&expected),
+                "page {path} lacks `{expected}`: {html}"
+            );
         }
     }
 
@@ -2931,7 +4056,12 @@ async fn the_topbar_nav_marks_the_active_page() {
 /// spawned task, so the row is not there yet when the triggering call
 /// returns. Bounded so a send that never arrives fails the test instead of
 /// hanging it.
-async fn until_rule_send_to(app: &App, rule_id: &str, recipient: &str, already: usize) -> izlek_core::store::MailSend {
+async fn until_rule_send_to(
+    app: &App,
+    rule_id: &str,
+    recipient: &str,
+    already: usize,
+) -> izlek_core::store::MailSend {
     for _ in 0..500 {
         let matching: Vec<_> = app
             .store
@@ -2939,7 +4069,11 @@ async fn until_rule_send_to(app: &App, rule_id: &str, recipient: &str, already: 
             .await
             .unwrap()
             .into_iter()
-            .filter(|send| send.kind == SendKind::Rule && send.rule_id.as_deref() == Some(rule_id) && send.recipient == recipient)
+            .filter(|send| {
+                send.kind == SendKind::Rule
+                    && send.rule_id.as_deref() == Some(rule_id)
+                    && send.recipient == recipient
+            })
             .collect();
         if matching.len() > already {
             return matching.into_iter().next().unwrap();
@@ -2962,33 +4096,57 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
     let task = a_task(&app, &admin_cookie, &column, "Ship the picker").await;
 
     let created = app
-        .post("/api/create_rule", Some(&admin_cookie), &[("trigger", "commented"), ("column_id", ""), ("subject", "Someone commented"), ("audience", "creator")])
+        .post(
+            "/api/create_rule",
+            Some(&admin_cookie),
+            &[
+                ("trigger", "commented"),
+                ("column_id", ""),
+                ("subject", "Someone commented"),
+                ("audience", "creator"),
+            ],
+        )
         .await;
     assert_eq!(created.body, "null", "{}", created.body);
     let rule = only_rule(&app, &admin_cookie).await;
 
     // A second member comments; the task's creator is the admin, not them.
-    let commented = app.post("/api/post_comment", Some(&member), &[("task_id", &task), ("body", "Looks good")]).await;
+    let commented = app
+        .post(
+            "/api/post_comment",
+            Some(&member),
+            &[("task_id", &task), ("body", "Looks good")],
+        )
+        .await;
     assert_eq!(commented.body, "null", "{}", commented.body);
 
     let send = until_rule_send_to(&app, &rule, "ada@izlek.sh", 0).await;
     assert_eq!(send.recipient, "ada@izlek.sh");
     assert!(
         app.store.mail_queue(50).await.unwrap().iter().all(|send| {
-            !(send.kind == SendKind::Rule && send.rule_id.as_deref() == Some(rule.as_str()) && send.recipient == "deniz@izlek.sh")
+            !(send.kind == SendKind::Rule
+                && send.rule_id.as_deref() == Some(rule.as_str())
+                && send.recipient == "deniz@izlek.sh")
         }),
         "the commenter was mailed instead of the creator"
     );
     let decisions = app.store.recent_mail_decisions(50).await.unwrap();
     assert!(
-        decisions.iter().any(|decision| decision.rule_id == rule && matches!(decision.outcome, izlek_core::store::MailOutcome::Owed)),
+        decisions.iter().any(|decision| decision.rule_id == rule
+            && matches!(decision.outcome, izlek_core::store::MailOutcome::Owed)),
         "the decisions ledger has no matched decision for the rule"
     );
 
     // The admin is put on the task so the rewritten rule's assignees audience
     // has someone to address once it fires on a rename.
     let admin_id = person_id(&app, &admin_cookie, &task, "Ada Lovelace").await;
-    let assigned = app.post("/api/assign", Some(&admin_cookie), &[("task_id", &task), ("user_id", &admin_id)]).await;
+    let assigned = app
+        .post(
+            "/api/assign",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("user_id", &admin_id)],
+        )
+        .await;
     assert_eq!(assigned.body, "null", "{}", assigned.body);
 
     // The rule is rewritten in place: same id, new trigger, subject and
@@ -2997,17 +4155,45 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
         .post(
             "/api/update_rule",
             Some(&admin_cookie),
-            &[("rule_id", &rule), ("trigger", "retitled"), ("column_id", ""), ("subject", "Renamed"), ("audience", "assignees")],
+            &[
+                ("rule_id", &rule),
+                ("trigger", "retitled"),
+                ("column_id", ""),
+                ("subject", "Renamed"),
+                ("audience", "assignees"),
+            ],
         )
         .await;
-    assert_eq!(updated.body, "null", "the rewrite was refused: {}", updated.body);
-    assert_eq!(only_rule(&app, &admin_cookie).await, rule, "a new rule was made instead of the old one rewritten");
+    assert_eq!(
+        updated.body, "null",
+        "the rewrite was refused: {}",
+        updated.body
+    );
+    assert_eq!(
+        only_rule(&app, &admin_cookie).await,
+        rule,
+        "a new rule was made instead of the old one rewritten"
+    );
 
-    let seen = app.post("/api/current_rules", Some(&admin_cookie), &[]).await;
-    assert!(seen.body.contains(&format!("\"id\":\"{rule}\"")), "{}", seen.body);
+    let seen = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
+    assert!(
+        seen.body.contains(&format!("\"id\":\"{rule}\"")),
+        "{}",
+        seen.body
+    );
     assert!(seen.body.contains("\"enabled\":true"), "{}", seen.body);
-    assert!(seen.body.contains("\"trigger_kind\":\"retitled\""), "{}", seen.body);
-    assert!(seen.body.contains("\"subject\":\"Renamed\""), "{}", seen.body);
+    assert!(
+        seen.body.contains("\"trigger_kind\":\"retitled\""),
+        "{}",
+        seen.body
+    );
+    assert!(
+        seen.body.contains("\"subject\":\"Renamed\""),
+        "{}",
+        seen.body
+    );
 
     // The second member renames the task; the rule now fires on retitle and
     // addresses the assignee — the admin — not the member who renamed it.
@@ -3017,15 +4203,27 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
         .await
         .unwrap()
         .iter()
-        .filter(|send| send.kind == SendKind::Rule && send.rule_id.as_deref() == Some(rule.as_str()) && send.recipient == "ada@izlek.sh")
+        .filter(|send| {
+            send.kind == SendKind::Rule
+                && send.rule_id.as_deref() == Some(rule.as_str())
+                && send.recipient == "ada@izlek.sh"
+        })
         .count();
-    let renamed = app.post("/api/save_task", Some(&member), &[("task_id", &task), ("title", "Ship the redesigned picker")]).await;
+    let renamed = app
+        .post(
+            "/api/save_task",
+            Some(&member),
+            &[("task_id", &task), ("title", "Ship the redesigned picker")],
+        )
+        .await;
     assert_eq!(renamed.body, "null", "{}", renamed.body);
 
     until_rule_send_to(&app, &rule, "ada@izlek.sh", already).await;
     assert!(
         app.store.mail_queue(50).await.unwrap().iter().all(|send| {
-            !(send.kind == SendKind::Rule && send.rule_id.as_deref() == Some(rule.as_str()) && send.recipient == "deniz@izlek.sh")
+            !(send.kind == SendKind::Rule
+                && send.rule_id.as_deref() == Some(rule.as_str())
+                && send.recipient == "deniz@izlek.sh")
         }),
         "the renamer was mailed instead of being excluded as the actor"
     );
@@ -3046,7 +4244,10 @@ async fn task_and_new_together_render_only_the_task_modal() {
     let raw = app.get(&format!("/?task={task}&new=1"), Some(&admin)).await;
     let html = String::from_utf8_lossy(&raw.bytes);
     assert_eq!(html.matches("class=\"modal-scrim\"").count(), 1, "{html}");
-    assert!(!html.contains("modal-new-task"), "the new-task modal rendered too: {html}");
+    assert!(
+        !html.contains("modal-new-task"),
+        "the new-task modal rendered too: {html}"
+    );
 }
 
 #[tokio::test]
@@ -3058,14 +4259,21 @@ async fn the_new_task_modal_opens_from_the_board_and_creates_into_the_chosen_col
 
     let raw = app.get("/?new=1", Some(&admin)).await;
     let html = String::from_utf8_lossy(&raw.bytes);
-    assert!(html.contains("modal-new-task"), "the new-task modal did not render: {html}");
+    assert!(
+        html.contains("modal-new-task"),
+        "the new-task modal did not render: {html}"
+    );
     assert!(
         html.contains(&format!("value=\"{column}\"")),
         "the column picker is missing a board column: {html}"
     );
 
     let answer = app
-        .post("/api/create_task", Some(&admin), &[("title", "Ship the new-task modal"), ("column_id", &column)])
+        .post(
+            "/api/create_task",
+            Some(&admin),
+            &[("title", "Ship the new-task modal"), ("column_id", &column)],
+        )
         .await;
     assert_eq!(answer.body, "", "the create was refused: {}", answer.body);
 
@@ -3079,15 +4287,225 @@ async fn the_new_task_modal_opens_from_the_board_and_creates_into_the_chosen_col
             &[("title", "Ship it, no script"), ("column_id", &column)],
         )
         .await;
-    assert_eq!(no_script.location.as_deref(), Some("/"), "{:?}", no_script.location);
+    assert_eq!(
+        no_script.location.as_deref(),
+        Some("/"),
+        "{:?}",
+        no_script.location
+    );
 
     let workspace_id = app.workspace_id().await;
-    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id).await.unwrap().unwrap();
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
     let card = board
         .columns
         .iter()
         .find(|c| c.column.id == column)
-        .and_then(|c| c.cards.iter().find(|card| card.title == "Ship the new-task modal"))
+        .and_then(|c| {
+            c.cards
+                .iter()
+                .find(|card| card.title == "Ship the new-task modal")
+        })
         .expect("the created task did not land in the chosen column");
     assert_eq!(card.title, "Ship the new-task modal");
+}
+/// A 1×1 transparent PNG: 67 real bytes, header to checksum, so it sniffs as
+/// `image/png` and survives a byte-for-byte round trip.
+const PNG: [u8; 67] = [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+/// The id of the account behind an email address, read straight off the store:
+/// fixture setup, not the behavior under test.
+async fn user_id(app: &App, email: &str) -> String {
+    app.store
+        .user_by_email(&app.workspace_id().await, email)
+        .await
+        .unwrap()
+        .expect("no such user")
+        .id
+}
+
+/// A profile photo uploads, and `GET /photo/{id}` serves those exact bytes
+/// back as `image/png`.
+#[tokio::test]
+async fn a_profile_photo_round_trips_back_as_the_same_bytes() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+
+    let answer = app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin),
+            &[],
+            Some(("me.png", "image/png", &PNG)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/settings?saved=profile_photo")
+    );
+
+    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
+    assert_eq!(photo.status, StatusCode::OK);
+    assert_eq!(photo.content_type.as_deref(), Some("image/png"));
+    assert_eq!(photo.bytes, PNG);
+}
+
+/// Text bytes wearing a `.png` name do not sniff as an image: refused on the
+/// redirect, and nothing stored to serve.
+#[tokio::test]
+async fn text_uploaded_as_a_photo_is_refused_and_stores_nothing() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+
+    let answer = app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin),
+            &[],
+            Some(("note.png", "image/png", b"just some words")),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/settings?refusal=not-an-image&on=profile_photo")
+    );
+
+    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
+    assert_eq!(photo.status, StatusCode::NOT_FOUND);
+}
+
+/// The workspace's photo cap is enforced on the way in, and an over-cap upload
+/// stores nothing.
+#[tokio::test]
+async fn a_photo_over_the_workspace_limit_is_refused_and_stores_nothing() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+    // The transport caps request bodies at 2 MiB (topcoat's default body
+    // limit), exactly a fresh workspace's photo limit, so against the shipped
+    // defaults the handler's own check can never fire. The admin lowers the
+    // limit first, the way the /files oversize test does, and the upload is
+    // sized just past that.
+    let answer = app
+        .post(
+            "/api/save_limits",
+            Some(&admin),
+            &[
+                ("attachment_limit_mb", "25"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", ""),
+            ],
+        )
+        .await;
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+
+    let limit = app
+        .store
+        .workspace()
+        .await
+        .unwrap()
+        .expect("no workspace after claiming")
+        .photo_limit_bytes as usize;
+    let big = vec![0u8; limit + 1];
+
+    let answer = app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin),
+            &[],
+            Some(("big.png", "image/png", &big)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/settings?refusal=file-too-big&on=profile_photo")
+    );
+
+    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
+    assert_eq!(photo.status, StatusCode::NOT_FOUND);
+}
+
+/// A photo belongs to its person, not to the uploader: everyone in the same
+/// workspace can see it.
+#[tokio::test]
+async fn a_photo_is_visible_to_other_workspace_members() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+    let member = invited(&app, &admin, "deniz@izlek.sh", "Deniz", Role::Member).await;
+
+    let answer = app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin),
+            &[],
+            Some(("me.png", "image/png", &PNG)),
+        )
+        .await;
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/settings?saved=profile_photo")
+    );
+
+    let photo = app.get(&format!("/photo/{admin_id}"), Some(&member)).await;
+    assert_eq!(photo.status, StatusCode::OK);
+    assert_eq!(photo.content_type.as_deref(), Some("image/png"));
+    assert_eq!(photo.bytes, PNG);
+}
+
+/// No such person, no photo: a stranger id is the not-found a person without a
+/// photo would see. A known photo carries an `ETag`, and a matching
+/// `If-None-Match` gets the empty 304.
+#[tokio::test]
+async fn an_unknown_photo_id_is_not_found_and_the_photo_revalidates_by_etag() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+
+    let answer = app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin),
+            &[],
+            Some(("me.png", "image/png", &PNG)),
+        )
+        .await;
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/settings?saved=profile_photo")
+    );
+
+    let stranger = app.get("/photo/does-not-exist", Some(&admin)).await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+
+    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
+    assert_eq!(photo.status, StatusCode::OK);
+    let etag = photo.etag.clone().expect("no ETag on the served photo");
+
+    let cached = app
+        .get_with_if_none_match(&format!("/photo/{admin_id}"), Some(&admin), &etag)
+        .await;
+    assert_eq!(cached.status, StatusCode::NOT_MODIFIED);
+    assert!(cached.bytes.is_empty());
 }
