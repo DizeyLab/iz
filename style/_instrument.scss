@@ -11,8 +11,7 @@
 
   // --- Instrument skin: chrome (topbar, wordmark, nav) -----------------------
 
-  // 44px chrome strip. Pairs with the .board-stage min-height below, which
-  // re-derives its calc from these two literals.
+  // 44px chrome strip.
   .topbar {
     height: 44px;
   }
@@ -21,24 +20,12 @@
     height: 40px;
   }
 
-  .board-stage {
-    min-height: calc(100vh - 44px - 40px);
-  }
-
-  // Wordmark and board name read as engraved panel labels: mono, uppercase,
-  // tracked wide.
+  // The wordmark reads as an engraved panel label: mono, uppercase, tracked
+  // wide.
   .wordmark-text {
     font-family: var(--font-mono);
     font-size: 13px;
     font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
-  .board-name {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
     letter-spacing: 0.12em;
     text-transform: uppercase;
   }

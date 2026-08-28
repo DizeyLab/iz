@@ -18,11 +18,6 @@
     font-weight: 600;
   }
 
-  .board-name {
-    font-family: var(--font-display);
-    font-size: 15px;
-  }
-
   .auth-title,
   .settings-title,
   .detail-title,
@@ -36,7 +31,7 @@
 
   .settings-title { font-size: 22px; }
   .panel-title { font-size: 15px; }
-  .card-title { font-size: 14px; }
+  .card-title { font-size: 16px; }
 
   // --- Ledger skin: rules & ornaments (no boxes) -------------------------------
 
@@ -83,7 +78,7 @@
     border-bottom: 1px solid var(--border);
     border-radius: 0;
     box-shadow: none;
-    padding: 10px 2px;
+    padding: 12px 2px 14px 2px;
     transition: border-color var(--dur-fast) var(--ease);
 
     &:hover {
@@ -96,6 +91,11 @@
     background: transparent;
 
     .card-title { text-decoration: line-through; }
+  }
+
+  // Ledger entries stack into a continuous ruled column — no gaps between rows.
+  .column-cards {
+    gap: 0;
   }
 
   .rule-row {
@@ -115,7 +115,10 @@
     border-bottom: 1px solid var(--rule-strong);
   }
 
-  .topbar-nav-on { box-shadow: inset 0 -2px 0 var(--rule-strong); }
+  .topbar-nav-on {
+    border-bottom: 2px solid var(--rule-strong);
+    box-shadow: none;
+  }
 
   // --- Ledger skin: chips as inked text ----------------------------------------
 

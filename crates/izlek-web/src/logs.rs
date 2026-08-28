@@ -391,8 +391,6 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                 <span class="wordmark-text">"izlek"</span>
                 <span class="wordmark-dot"></span>
             </a>
-            <div class="topbar-divider"></div>
-            <span class="board-name">(t(lang, Key::Logs))</span>
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Logs, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &me.display_name, &me.email, me.role, lang).await?)

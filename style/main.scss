@@ -325,6 +325,19 @@ body {
   font-size: 13px;
 }
 
+// The board page owns the viewport: chrome and the occasional refusal line
+// keep their natural height, the stage absorbs the rest, the document never
+// scrolls.
+body:has(.board-stage) {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  > * { flex: none; }
+  > .board-stage { flex: 1; min-height: 0; }
+}
+
 a {
   color: var(--accent);
   transition: color var(--dur-fast) var(--ease);
@@ -372,22 +385,22 @@ a {
   background: var(--border);
 }
 
-.board-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-
 .topbar-nav-links {
   display: flex;
   gap: 16px;
+  margin-left: auto;
 }
+
+// The spacer's flex-grow eats the free space before auto margins see any, so
+// inside the chrome the nav's auto margin does the pushing instead.
+.topbar > .spacer { display: none; }
 
 .topbar-nav {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--muted-soft);
+  color: var(--muted);
   text-decoration: none;
   padding-bottom: 2px;
 
@@ -683,14 +696,16 @@ a {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - var(--topbar-height) - 52px);
+  flex: 1;
+  min-height: 0;
   padding: 20px 24px 24px 24px;
 }
 
 .board-columns {
   flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 16px;
   align-items: stretch;
 }
@@ -730,8 +745,13 @@ a {
 .column-cards {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
 }
 
 .column-empty {
@@ -755,7 +775,7 @@ a {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 12px;
+  padding: 10px 12px;
   box-shadow: var(--shadow-1);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
