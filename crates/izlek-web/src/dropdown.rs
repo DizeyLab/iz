@@ -15,7 +15,9 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::view::{Unescaped, view};
 
-/// Emitted once per page that renders a `<select>`. Owns its own `Escape`
+/// Emitted once per page that renders a `<select>`; the enhancement is
+/// per-element and idempotent (`data-dd-done`), re-run on `izlek:wire` so
+/// selects arriving in a soft page swap get theirs too. Owns its own `Escape`
 /// handling (capture-phase, `stopImmediatePropagation` on an open panel)
 /// rather than routing through `board.rs`'s `card_menu_script` — on any
 /// page carrying both, this script must be emitted *before* that one so its
@@ -126,7 +128,9 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
             }, true);\
             document.addEventListener('click', closeAll);\
             window.addEventListener('scroll', closeAll, true);\
-            document.querySelectorAll('select.status-select, select.field-input').forEach(enhance);\
+            function enhanceAll() { document.querySelectorAll('select.status-select, select.field-input').forEach(enhance); }\
+            enhanceAll();\
+            document.addEventListener('izlek:wire', enhanceAll);\
         })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }

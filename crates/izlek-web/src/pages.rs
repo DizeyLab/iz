@@ -88,7 +88,7 @@ async fn setup_card(cx: &Cx) -> Result {
                         <div class="auth-title">(t(lang, Key::SetupTitle))</div>
                         <div class="auth-sub">(t(lang, Key::SetupSub))</div>
                     </div>
-                    <form method="post" action="/api/claim_workspace">
+                    <form method="post" action="/api/claim_workspace" data-hard="">
                         <label class="auth-field">
                             <span class="auth-label">(t(lang, Key::YourNameLabel))</span>
                             <input
@@ -150,7 +150,7 @@ async fn sign_in_card(cx: &Cx) -> Result {
                         <div class="auth-title">(t(lang, Key::SignInTitle))</div>
                         <div class="auth-sub">(t(lang, Key::SignInSub))</div>
                     </div>
-                    <form method="post" action="/api/sign_in">
+                    <form method="post" action="/api/sign_in" data-hard="">
                         <label class="auth-field">
                             <span class="auth-label">(t(lang, Key::EmailLabel))</span>
                             <input
@@ -212,7 +212,7 @@ async fn join_card(cx: &Cx, token: &str, person: Invited) -> Result {
                             <span class="auth-locked-value">(person.email)</span>
                         </div>
                     </div>
-                    <form method="post" action="/api/redeem_link">
+                    <form method="post" action="/api/redeem_link" data-hard="">
                         <input type="hidden" name="token" value=(token)>
                         <label class="auth-field">
                             <span class="auth-label">(t(lang, Key::NewPasswordLabel))</span>

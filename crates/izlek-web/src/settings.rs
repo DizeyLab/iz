@@ -23,7 +23,6 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
-use topcoat::runtime::Event;
 use topcoat::view::view;
 
 use izlek_core::store::{NewSender, SenderTest, User};
@@ -1058,13 +1057,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                                 } else {
                                                     <form method="post" action="/api/set_role" class="member-role status-form">
                                                         <input type="hidden" name="user_id" value=(member.id.clone())>
-                                                        <select class="status-select" name="role"
-                                                            // Saved in the background: nothing else on the page changes
-                                                            // on success, so a full reload would only flash. A refusal
-                                                            // still needs the redirect's banner, and a network error
-                                                            // falls back to the plain submit.
-                                                            @change=$(|e: Event| raw!("{ var f = ${e}.inner.target.form; fetch(f.action, { method: 'POST', body: new URLSearchParams(new FormData(f)) }).then(function (r) { if (!r.ok || r.url.indexOf('refusal=') !== -1) { window.location.href = r.url; } }, function () { f.requestSubmit(); }); }", ()))
-                                                        >
+                                                        <select class="status-select" name="role" data-autosubmit="">
                                                             <option value="member" selected=(member.role == izlek_core::Role::Member)>(t(lang, Key::RoleMemberOption))</option>
                                                             <option value="viewer" selected=(member.role == izlek_core::Role::Viewer)>(t(lang, Key::RoleViewerOption))</option>
                                                             <option value="admin" selected=(member.role == izlek_core::Role::Admin)>(t(lang, Key::RoleAdminOption))</option>

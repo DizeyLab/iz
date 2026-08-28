@@ -1,10 +1,10 @@
 //! The board, from the Main artboard.
 //!
-//! The whole column list is one shard: the server renders every column and
-//! card, and a drop re-runs it in place. There is no client board state to
-//! keep in sync with the server — a drag's only client-side memory is the
-//! browser's own drag session (`dataTransfer`), read back by the column that
-//! catches the drop.
+//! The server renders every column and card; a drop posts `/api/move_card`
+//! over `fetch` and swaps the redirected page in via `layout.rs`'s
+//! `soft_nav_script`. There is no client board state to keep in sync with
+//! the server — a drag's only client-side memory is the browser's own drag
+//! session (`dataTransfer`), read back by the column that catches the drop.
 
 use izlek_core::board::{DeadlineState, Moved, Person, TaskCard};
 use izlek_core::store::{NewTask, User};
@@ -14,7 +14,6 @@ use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
-use topcoat::runtime::{Event, procedure, shard};
 use topcoat::view::view;
 
 use crate::i18n::{Key, Lang, t};
@@ -170,28 +169,13 @@ struct MoveCardForm {
     to_column_id: String,
 }
 
-/// The same move the drop procedure performs, reachable without script.
+/// The one move path: the modal's status form, a card menu's "Move" rows
+/// and the drop handler in `card_menu_script` all post here.
 #[route(POST "/api/move_card")]
 async fn move_card(cx: &Cx, Form(input): Form<MoveCardForm>) -> Redirect {
     match move_card_shared(cx, &input.task_id, &input.from_column_id, &input.to_column_id).await? {
         Some(refusal) => redirect_refused(cx, "move_card", refusal),
         None => redirect(cx),
-    }
-}
-
-/// What a drop calls: performs the move and hands back a refusal code, if
-/// any, for the drop handler to leave alone. Callable with any arguments —
-/// the checks above are what actually guard it.
-#[procedure]
-async fn move_card_procedure(
-    cx: &Cx,
-    task_id: String,
-    from_column_id: String,
-    to_column_id: String,
-) -> Result<Result<bool, String>> {
-    match move_card_shared(cx, &task_id, &from_column_id, &to_column_id).await? {
-        Some(refusal) => Ok(Err(refusal.code().to_string())),
-        None => Ok(Ok(true)),
     }
 }
 
@@ -220,11 +204,8 @@ fn sort_column_cards(cards: &mut [TaskCard], sort: &str) {
     }
 }
 
-/// The whole column list. `version` carries no meaning of its own — bumping
-/// it is what tells the browser to ask for this again after a drop lands.
-#[shard]
-async fn board_columns(cx: &Cx, version: f64, sort: String) -> Result {
-    let _ = version;
+/// The whole column list.
+async fn board_columns(cx: &Cx, sort: String) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => {
@@ -297,11 +278,9 @@ async fn render_column(
     }
 }
 
-// The `@dragstart`/`@contextmenu` handlers below never read `e` as ordinary
-// Rust — the `raw!` macro resolves `${e}` through its own name table, keyed
-// on the closure param's identifier text, not through the generated closure
-// body.
-#[allow(unused_variables)]
+// Drag and the context menu are delegated document listeners in
+// `card_menu_script`, reading the card's `data-task-id`/`data-from-column`
+// — per-element handlers would die when a soft submit swaps the board in.
 async fn render_card(
     cx: &Cx,
     card: TaskCard,
@@ -337,27 +316,13 @@ async fn render_card(
     let menu_id = format!("card-menu-{}", card.id);
     let move_targets: Vec<(String, String)> =
         all_columns.iter().filter(|(id, _)| id != column_id).cloned().collect();
-    // `raw!` interpolation only takes a bare identifier, and it moves what it
-    // takes — one clone per site that also needs the value afterward.
-    let drag_task_id = task_id.clone();
-    let drag_from_column = from_column.clone();
-    let open_menu_id = menu_id.clone();
-
     view! {
         cx =>
         <a class="card" class:card-done=(done_column) href=(href.clone())
             draggable=(if may_write { "true" } else { "false" })
-            @dragstart=$(|e: Event| raw!(
-                "(() => { ${e}.inner.dataTransfer.setData('izlek-task', ${drag_task_id}); ${e}.inner.dataTransfer.setData('izlek-from', ${drag_from_column}); })()",
-                ()
-            ))
-            @contextmenu=$(|e: Event| {
-                e.prevent_default();
-                raw!(
-                    "(() => { window.__izlekOpenCardMenu(${e}.inner, ${open_menu_id}); })()",
-                    ()
-                )
-            })
+            data-task-id=(task_id.clone())
+            data-from-column=(from_column.clone())
+            data-menu-id=(menu_id.clone())
         >
             <div class="card-keys">
                 <span class="card-key">(card.task_key.clone())</span>
@@ -439,7 +404,32 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
             var menu = document.querySelector('.card-menu-open'); \
             if (menu) { closeCardMenus(); e.stopImmediatePropagation(); return; } \
-        }, true)";
+        }, true); \
+        document.addEventListener('contextmenu', function (e) { \
+            var card = e.target.closest ? e.target.closest('.card[data-menu-id]') : null; \
+            if (!card) { return; } \
+            e.preventDefault(); \
+            window.__izlekOpenCardMenu(e, card.dataset.menuId); \
+        }); \
+        document.addEventListener('dragstart', function (e) { \
+            var card = e.target.closest ? e.target.closest('.card[data-task-id]') : null; \
+            if (!card) { return; } \
+            e.dataTransfer.setData('izlek-task', card.dataset.taskId); \
+            e.dataTransfer.setData('izlek-from', card.dataset.fromColumn); \
+        }); \
+        document.addEventListener('dragover', function (e) { \
+            if (e.target.closest && e.target.closest('.board-columns')) { e.preventDefault(); } \
+        }); \
+        document.addEventListener('drop', function (e) { \
+            var column = e.target.closest ? e.target.closest('.column-cards') : null; \
+            if (!column) { return; } \
+            e.preventDefault(); \
+            var task = e.dataTransfer.getData('izlek-task'); \
+            var from = e.dataTransfer.getData('izlek-from'); \
+            if (task && window.__izlekPost) { \
+                window.__izlekPost('/api/move_card', { task_id: task, from_column_id: from, to_column_id: column.id }); \
+            } \
+        })";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -532,9 +522,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             }
             <form class="field-box field-box-sort" method="get" action="/">
                 <span class="field-text">(t(lang, Key::Sort))</span>
-                <select class="status-select" name="sort"
-                    @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))
-                >
+                <select class="status-select" name="sort" data-autosubmit="">
                     for key in SORT_KEYS {
                         <option value=(key) selected=(key == sort)>(sort_label(key, lang))</option>
                     }
@@ -553,28 +541,8 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <p class="field-error">(refusal.message_in(lang))</p>
         }
         <main class="board-stage">
-            signal version = 0.0;
-            <div class="board-columns"
-                @dragover=$(|e: Event| e.prevent_default())
-                @drop=$(async move |e: Event| {
-                    e.prevent_default();
-                    // The drop can land on a card's inner text or icon, not
-                    // just the column's own surface — walk up to the column
-                    // that actually owns the id, rather than trusting the
-                    // exact element under the pointer to carry one.
-                    let to = raw!(
-                        "cx.hydrate((() => { var col = ${e}.inner.target.closest('.column-cards'); return col ? col.id : ''; })())",
-                        "".to_owned()
-                    );
-                    let task_id = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-task'))", "".to_owned());
-                    let from = raw!("cx.hydrate(${e}.inner.dataTransfer.getData('izlek-from'))", "".to_owned());
-                    if !task_id.is_empty() {
-                        let _result = move_card_procedure(task_id, from, to).await;
-                        version.set(version.get() + 1.0);
-                    }
-                })
-            >
-                board_columns(version: $(version.get()), sort: $(sort))
+            <div class="board-columns">
+                (board_columns(cx, sort.clone()).await?)
             </div>
         </main>
         if let Some(task_id) = &open_task {

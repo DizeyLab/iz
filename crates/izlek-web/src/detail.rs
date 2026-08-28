@@ -26,7 +26,6 @@ use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, route};
-use topcoat::runtime::Event;
 use topcoat::view::{class, view};
 
 use crate::i18n::{Key, Lang, t};
@@ -535,20 +534,17 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
 // Wasm-escapes from the old version, each simplified to a plain form post
 // rather than ported to a runtime signal (noted at each site below):
 //
-// - StatusControl's and the file input's `on:change` auto-submit are back as
-//   a one-line `@change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))`
-//   — a literal `@change="this.form.requestSubmit()"` runs immediately at
-//   attribute-scan time rather than on the event (topcoat's `data-topcoat-on:`
-//   handlers always call through the compiled-closure/`raw!` path; a bare JS
-//   string is evaluated once with no event or `this` bound) — and the
-//   "Move"/"Attach" buttons stay for a browser without script.
-// - The modal scrim's click-to-close is back the same way: the scrim's own
-//   `@click` is a closure calling `raw!("window.location.href='/'", ())`,
-//   its inner `.modal` stops propagation with
-//   `@click=$(|e: Event| e.stop_propagation())`. The window `Escape`
-//   listener lives only in `board.rs`'s `card_menu_script` — this modal is
-//   always rendered alongside it. The X glyph and the footer "Close" button
-//   (plain links/buttons, no script) still work on their own.
+// - StatusControl's and the file input's `on:change` auto-submit are the
+//   `data-autosubmit` attribute (and the file input's own class), read by
+//   `layout.rs`'s `soft_nav_script` through one delegated `change`
+//   listener — a per-element handler would die when a soft submit swaps
+//   the page in — and the "Move"/"Attach" buttons stay for a browser
+//   without script.
+// - The modal scrim's click-to-close is `soft_nav_script`'s delegated
+//   click listener (a click whose target is the scrim itself closes; a
+//   click inside `.modal` never has the scrim as target, so no
+//   stop-propagation is needed). The X glyph and the footer "Close" link
+//   route through the same soft close.
 // - DeadlineControl's hand-built calendar grid (`js_sys::Date` for "today",
 //   month navigation, per-day buttons) is replaced with a native
 //   `<input type="date">` inside the same CSS-only edit-toggle popover —
@@ -681,33 +677,32 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 /// `Escape` for everything the task modal renders, topmost first: viewer →
 /// delete confirm (`confirm=delete` in URL) → open edit popovers → modal
 /// itself; datepick and card menu stay `board.rs`'s — this capture listener
-/// registers first (inline in modal markup) and stops the key, and
-/// `__izlekLeaving` is one navigation per document, `pageshow` releases it.
-/// Focused native media controls swallow `Escape` before the page ever
-/// sees the key, so focus landing on the viewer's audio/video is moved
-/// straight back to the panel. Every branch that navigates must
-/// `preventDefault()` first: a real Escape's browser default is
-/// stop-loading, which cancels the navigation the handler just started
-/// (and would leave `__izlekLeaving` latched true, deadening every
-/// later press). Synthetic keys carry no default, so only a live
-/// keyboard ever showed it.
+/// registers first (inline in modal markup) and stops the key. Closing
+/// never navigates: `layout.rs`'s `__izlekCloseViewer`/`__izlekCloseModal`
+/// drop the overlay's DOM and rewrite the URL, the board underneath is
+/// already rendered. Focused native media controls swallow `Escape` before
+/// the page ever sees the key, so focus landing on the viewer's
+/// audio/video is moved straight back to the panel. Every closing branch
+/// still calls `preventDefault()`: a real Escape's browser default is
+/// stop-loading (it once cancelled the navigation these branches used to
+/// start; synthetic keys carry no default, so only a live keyboard ever
+/// showed it).
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         document.addEventListener('keydown', function (e) { \
             if (e.key !== 'Escape') { return; } \
             if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return; } \
-            var viewer = document.querySelector('.viewer-scrim'); \
-            if (viewer) { \
+            if (document.querySelector('.viewer-scrim')) { \
                 e.preventDefault(); \
-                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = viewer.querySelector('.viewer-close').getAttribute('href'); } \
+                window.__izlekCloseViewer(); \
                 e.stopImmediatePropagation(); \
                 return; \
             } \
             var confirm = document.querySelector('details.confirm-details[open]'); \
             if (confirm && window.location.search.indexOf('confirm=delete') !== -1) { \
                 e.preventDefault(); \
-                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
+                window.__izlekCloseModal(); \
                 e.stopImmediatePropagation(); \
                 return; \
             } \
@@ -724,18 +719,17 @@ async fn escape_closes(cx: &Cx) -> Result {
             } \
             if (document.querySelector('.modal-scrim')) { \
                 e.preventDefault(); \
-                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
+                window.__izlekCloseModal(); \
                 e.stopImmediatePropagation(); \
             } \
         }, true); \
-        document.addEventListener('pageshow', function () { window.__izlekLeaving = false; }); \
         document.addEventListener('focusin', function (e) { \
             var media = e.target; \
             if (media.tagName !== 'AUDIO' && media.tagName !== 'VIDEO') { return; } \
             var panel = media.closest('.viewer'); \
             if (panel) { panel.focus(); } \
         }, true); \
-        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { if (window.location.search.indexOf('confirm=delete') !== -1 && !window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } else { confirm.removeAttribute('open'); } } }, true); \
+        document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { if (window.location.search.indexOf('confirm=delete') !== -1) { window.__izlekCloseModal(); } else { confirm.removeAttribute('open'); } } }, true); \
         document.addEventListener('click', function (e) { \
             document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
                 if (toggle.closest('.datepick-pop')) { return; } \
@@ -1152,10 +1146,6 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
 /// dependencies, files, comments, activity and delete, exactly as the
 /// artboard draws them. Wiring `?task=<id>` on the board page is a later
 /// integration slice — this only renders the fragment.
-// Two `@change` handlers below never read `e` as ordinary Rust — the
-// `raw!` macro resolves `${e}` through its own name table, keyed on the
-// closure param's identifier text, not through the generated closure body.
-#[allow(unused_variables)]
 pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
@@ -1167,8 +1157,8 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
             let lang = require_user(cx).await.map(|user| Lang::from_code(&user.language)).unwrap_or(Lang::En);
             return view! {
                 cx =>
-                <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
-                    <div class="modal" @click=$(|e: Event| e.stop_propagation())><p class="modal-note">(refusal.message_in(lang))</p></div>
+                <div class="modal-scrim">
+                    <div class="modal"><p class="modal-note">(refusal.message_in(lang))</p></div>
                 </div>
                 (escape_closes(cx).await?)
             };
@@ -1202,8 +1192,8 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
 
     view! {
         cx =>
-        <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
-            <div class="modal" tabindex="-1" @click=$(|e: Event| e.stop_propagation())>
+        <div class="modal-scrim">
+            <div class="modal" tabindex="-1">
                 <header class="detail-head">
                     <div class="detail-headline">
                         <span class="detail-key">(detail.task_key.clone())</span>
@@ -1221,7 +1211,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
                                 <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
                                 <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
-                                <select class="status-select" name="to_column_id" @change=$(|e: Event| raw!("${e}.inner.target.form.requestSubmit()", ()))>
+                                <select class="status-select" name="to_column_id" data-autosubmit="">
                                     for column in &detail.columns {
                                         <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
                                     }
@@ -1301,10 +1291,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                             <label class="field-box file-upload-box">
                                 (glyph::plus(cx).await?)
                                 <span class="field-text file-upload-name">(t(lang, Key::File))</span>
-                                <input class="file-upload-input" type="file" name="file" accept=(accept) required="" @change=$(|e: Event| raw!(
-                                    "(() => { var input = ${e}.inner.target; var name = input.closest('label').querySelector('.file-upload-name'); if (input.files && input.files[0]) { name.textContent = input.files[0].name; } input.form.requestSubmit(); })()",
-                                    ()
-                                ))>
+                                <input class="file-upload-input" type="file" name="file" accept=(accept) required="">
                             </label>
                         </form>
                         (refused(cx, "upload_file", lang).await?)
@@ -1392,12 +1379,19 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
 /// The house audio player: play toggle, clock, seek bar over a hidden
 /// `<audio>` — native controls live in the browser's own chrome, ignore the
 /// theme, and swallow `Escape` while focused, so the viewer draws its own.
+/// Wiring is per-player and idempotent (`data-wired`), re-run on
+/// `izlek:wire` so a player arriving in a soft page swap — where inline
+/// scripts never execute — still gets its controls.
 async fn audio_player_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
-            var player = document.querySelector('.audio-player'); \
-            if (!player) { return; } \
+            if (window.__izlekAudioWired) { return; } \
+            window.__izlekAudioWired = true; \
+            function wireAll() { document.querySelectorAll('.audio-player').forEach(wirePlayer); } \
+            function wirePlayer(player) { \
+            if (player.dataset.wired) { return; } \
+            player.dataset.wired = '1'; \
             var audio = player.querySelector('.audio-el'); \
             var play = player.querySelector('.audio-play'); \
             var seek = player.querySelector('.audio-seek'); \
@@ -1428,6 +1422,9 @@ async fn audio_player_script(cx: &Cx) -> Result {
             seek.addEventListener('input', function () { \
                 if (audio.duration) { audio.currentTime = seek.value / 1000 * audio.duration; } \
             }); \
+            } \
+            wireAll(); \
+            document.addEventListener('izlek:wire', wireAll); \
         })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
@@ -1504,8 +1501,8 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result 
 pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -> Result {
     view! {
         cx =>
-        <div class="modal-scrim" @click=$(|_e: Event| raw!("window.location.href='/'", ()))>
-            <div class="modal modal-new-task" tabindex="-1" @click=$(|e: Event| e.stop_propagation())>
+        <div class="modal-scrim">
+            <div class="modal modal-new-task" tabindex="-1">
                 <header class="detail-head">
                     <span class="detail-headline">(t(lang, Key::NewTask))</span>
                     <span class="detail-esc">(t(lang, Key::Esc))</span>

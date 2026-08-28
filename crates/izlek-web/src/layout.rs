@@ -35,12 +35,157 @@ pub async fn user_menu(cx: &Cx, display_name: &str, email: &str, role: izlek_cor
                 <div class="user-menu-role">(t(lang, role_key))</div>
                 <div class="user-menu-divider"></div>
                 <a class="user-menu-item" href="/settings">(t(lang, Key::Settings))</a>
-                <form class="user-menu-item-form" method="post" action="/api/sign_out">
+                <form class="user-menu-item-form" method="post" action="/api/sign_out" data-hard="">
                     <button class="user-menu-item" type="submit">(t(lang, Key::SignOut))</button>
                 </form>
             </div>
         </div>
     }
+}
+
+/// The page-swap machinery that keeps every mutation on the same document.
+///
+/// Every `/api/*` mutation is a plain form post answered with a 303 — sound
+/// without script, but a full navigation repaints the whole page for a
+/// one-field change. This script, emitted first in `<body>` on every page,
+/// intercepts those submits (capture-phase, so `requestSubmit()` from any
+/// auto-submit control lands here too), replays them over `fetch`, and swaps
+/// the redirected page's `<body>` children in place — same bytes the hard
+/// navigation would have shown, no reload. Refusal banners and saved chips
+/// arrive with the swap because the redirect URL's query params rendered
+/// them server-side; `history.replaceState` keeps the address bar honest.
+///
+/// Swapped-in nodes carry no live `<script>` (parser-inserted only) and no
+/// topcoat hydration — the runtime walks the document once at load and
+/// exposes no re-hydrate entry — so every behavior on this app is a
+/// document-level delegated listener that survives the swap, and the
+/// `izlek:wire` event re-runs the idempotent per-element enhancers
+/// (`dropdown.rs`, the audio player) over the new nodes.
+///
+/// Forms that must really navigate (sign-in/out, claim, redeem: the session
+/// cookie and the whole page identity change) opt out with `data-hard`.
+/// Overlay closes never hit the server at all: the board is already
+/// rendered under the modal, so `__izlekCloseModal`/`__izlekCloseViewer`
+/// drop the overlay's DOM and rewrite the URL.
+///
+/// The click-forwarder at the end is the repo-wide fix for the dead-zone
+/// class the member-role select first showed: any click inside a
+/// `.field-box`/`.status-form`/`.member-role` that misses the `.dd-trigger`
+/// (label, chevron glyph, box padding) is forwarded to the trigger.
+pub async fn soft_nav_script(cx: &Cx) -> Result {
+    const JS: &str = "\
+        (function () { \
+            if (window.__izlekSoft) { return; } \
+            window.__izlekSoft = true; \
+            function wire() { document.dispatchEvent(new Event('izlek:wire')); } \
+            function swap(html, url) { \
+                var doc = new DOMParser().parseFromString(html, 'text/html'); \
+                var x = window.scrollX, y = window.scrollY; \
+                document.body.replaceChildren(); \
+                while (doc.body.firstChild) { document.body.appendChild(doc.body.firstChild); } \
+                var root = doc.documentElement; \
+                if (root.getAttribute('lang')) { document.documentElement.setAttribute('lang', root.getAttribute('lang')); } \
+                if (root.hasAttribute('data-theme')) { document.documentElement.setAttribute('data-theme', root.getAttribute('data-theme')); } \
+                else { document.documentElement.removeAttribute('data-theme'); } \
+                if (url) { history.replaceState(null, '', url); } \
+                window.scrollTo(x, y); \
+                wire(); \
+            } \
+            function sweepPanels() { \
+                document.querySelectorAll('.dd-panel').forEach(function (panel) { \
+                    if (panel.__ddTrigger && !document.contains(panel.__ddTrigger)) { panel.remove(); } \
+                }); \
+            } \
+            window.__izlekGo = function (url) { \
+                fetch(url).then( \
+                    function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
+                    function () { window.location.href = url; } \
+                ); \
+            }; \
+            window.__izlekPost = function (action, fields) { \
+                fetch(action, { method: 'POST', body: new URLSearchParams(fields) }).then( \
+                    function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
+                    function () {} \
+                ); \
+            }; \
+            window.__izlekCloseViewer = function () { \
+                var scrim = document.querySelector('.viewer-scrim'); \
+                if (!scrim) { return false; } \
+                var back = scrim.querySelector('.viewer-close').getAttribute('href'); \
+                scrim.remove(); \
+                sweepPanels(); \
+                history.replaceState(null, '', back); \
+                var modal = document.querySelector('.modal'); \
+                if (modal) { modal.focus(); } \
+                return true; \
+            }; \
+            window.__izlekCloseModal = function () { \
+                var scrims = document.querySelectorAll('.modal-scrim'); \
+                if (!scrims.length) { return false; } \
+                scrims.forEach(function (el) { el.remove(); }); \
+                sweepPanels(); \
+                var u = new URL(window.location.href); \
+                ['task', 'file', 'confirm', 'new', 'refusal', 'on'].forEach(function (k) { u.searchParams.delete(k); }); \
+                var q = u.searchParams.toString(); \
+                history.replaceState(null, '', u.pathname + (q ? '?' + q : '')); \
+                return true; \
+            }; \
+            document.addEventListener('submit', function (e) { \
+                var form = e.target; \
+                if (!form || form.hasAttribute('data-hard')) { return; } \
+                var method = (form.getAttribute('method') || 'get').toLowerCase(); \
+                if (method !== 'post') { \
+                    e.preventDefault(); \
+                    var q = new URLSearchParams(new FormData(form)).toString(); \
+                    window.__izlekGo((form.getAttribute('action') || window.location.pathname) + (q ? '?' + q : '')); \
+                    return; \
+                } \
+                e.preventDefault(); \
+                var data = e.submitter ? new FormData(form, e.submitter) : new FormData(form); \
+                var multipart = (form.getAttribute('enctype') || '').indexOf('multipart') !== -1; \
+                fetch(form.getAttribute('action'), { method: 'POST', body: multipart ? data : new URLSearchParams(data) }).then( \
+                    function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
+                    function () { form.submit(); } \
+                ); \
+            }, true); \
+            document.addEventListener('change', function (e) { \
+                var control = e.target; \
+                if (control.classList && control.classList.contains('file-upload-input')) { \
+                    var name = control.closest('label').querySelector('.file-upload-name'); \
+                    if (control.files && control.files[0]) { name.textContent = control.files[0].name; } \
+                    control.form.requestSubmit(); \
+                    return; \
+                } \
+                if (control.hasAttribute && control.hasAttribute('data-autosubmit')) { control.form.requestSubmit(); } \
+            }); \
+            document.addEventListener('click', function (e) { \
+                var link = e.target.closest ? e.target.closest('a') : null; \
+                if (link) { \
+                    if (link.classList.contains('viewer-close') || (link.classList.contains('detail-close') && link.closest('.viewer-scrim'))) { \
+                        e.preventDefault(); \
+                        window.__izlekCloseViewer(); \
+                        return; \
+                    } \
+                    if (link.getAttribute('href') === '/' && link.closest('.modal-scrim')) { \
+                        e.preventDefault(); \
+                        window.__izlekCloseModal(); \
+                        return; \
+                    } \
+                } \
+                if (e.target.classList && e.target.classList.contains('modal-scrim')) { \
+                    if (e.target.classList.contains('viewer-scrim')) { window.__izlekCloseViewer(); } \
+                    else { window.__izlekCloseModal(); } \
+                } \
+            }, true); \
+            document.addEventListener('click', function (e) { \
+                if (e.target.closest && e.target.closest('.dd-trigger, .dd-panel, button, a, input, select, textarea')) { return; } \
+                var box = e.target.closest ? e.target.closest('.field-box, .status-form, .member-role') : null; \
+                if (!box) { return; } \
+                var trigger = box.querySelector('.dd-trigger'); \
+                if (trigger) { e.stopImmediatePropagation(); trigger.click(); } \
+            }); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
 /// The one `Escape` path shared by every page that has no `board.rs`
@@ -70,7 +215,7 @@ pub async fn escape_script(cx: &Cx) -> Result {
             if (composer) { composer.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
             if (document.querySelector('.rule-new-body[action=\"/api/update_rule\"]')) { \
                 e.preventDefault(); \
-                window.location.href = '/rules'; \
+                if (window.__izlekGo) { window.__izlekGo('/rules'); } else { window.location.href = '/rules'; } \
                 e.stopImmediatePropagation(); \
             } \
         }, true); \
@@ -132,6 +277,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                 topcoat::dev::script()
             </head>
             <body>
+                (soft_nav_script(cx).await?)
                 (content)
             </body>
         </html>
