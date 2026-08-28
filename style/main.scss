@@ -439,7 +439,7 @@ a {
   form {
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 20px;
   }
 }
 
@@ -465,7 +465,6 @@ a {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 20px;
 }
 
 .auth-label {
@@ -495,7 +494,7 @@ a {
 }
 
 .auth-submit {
-  height: 42px;
+  height: var(--control-h-lg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -691,7 +690,7 @@ a {
 .board-columns {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 16px;
   align-items: stretch;
 }
@@ -1125,14 +1124,13 @@ a {
 .new-task-form {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
   padding: 20px 24px 24px;
 }
 
 .new-task-row {
   display: flex;
   gap: 16px;
-  margin-top: 20px;
 }
 
 .new-task-foot {
@@ -1179,7 +1177,7 @@ a {
 
 .edit-save,
 .comment-post {
-  height: 28px;
+  height: var(--control-h);
   padding: 0 12px;
   border: none;
   border-radius: var(--radius);
@@ -1334,7 +1332,7 @@ a {
 .title-input {
   flex: 1;
   min-width: 0;
-  height: 32px;
+  height: var(--control-h);
   padding: 0 8px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -1410,7 +1408,7 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 36px;
+  height: var(--control-h);
   padding: 0 10px;
   background: var(--field-bg);
   border: 1px solid var(--border-strong);
@@ -1654,8 +1652,8 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--control-h);
+  height: var(--control-h);
   border: 1px dashed var(--border-strong);
   border-radius: 50%;
   color: var(--muted-soft);
@@ -2006,7 +2004,7 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 36px;
+  height: var(--control-h);
   padding: 0 14px;
   border: 1px solid var(--danger-border);
   border-radius: var(--radius);
@@ -2173,7 +2171,7 @@ a {
   padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
 
 .panel-lede {
@@ -2210,31 +2208,20 @@ a {
   gap: 6px;
   flex-grow: 1;
   min-width: 0;
-  margin-top: 20px;
 }
 
 .field-row {
   display: flex;
   gap: 16px;
-  margin-top: 20px;
 }
 
-// A field's own top margin gives real separation from whatever sits above it
-// — a sibling field, a lede, a foot. The first field in a container needs
-// none (the container's own padding already stands off), and a field that
-// is one of a row's two columns takes its spacing from the row instead, or
-// the pair would drift out of line with each other.
-.field:first-child,
-.auth-field:first-child,
-.rule-field:first-child,
-.field-row:first-child,
-.new-task-row:first-child {
-  margin-top: 0;
-}
-
-.field-row > .field,
-.new-task-row > .field {
-  margin-top: 0;
+// Fields carry no top margin of their own: each wrapping container is a
+// flex column whose gap is the spacing. The one unclassed form — its id is
+// load-bearing for the foot's `form=` submit — is named directly here.
+#sender-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .field-narrow { flex-grow: 0; width: 120px; }
@@ -2408,7 +2395,7 @@ input[type="radio"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 36px;
+  height: var(--control-h);
   padding: 0 16px;
   background: var(--accent);
   border: 1px solid var(--accent);
@@ -2518,7 +2505,7 @@ input[type="radio"] {
 .quiet {
   display: inline-flex;
   align-items: center;
-  height: 28px;
+  height: var(--control-h);
   padding: 0 10px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
@@ -2561,9 +2548,9 @@ input[type="radio"] {
 
 .field-role { flex-grow: 0; width: 140px; }
 
-// House rhythm (36px, matching `.primary`) for this row's fields, so the
+// One control height, matching `.primary`, for this row's fields, so the
 // role select and the "Add member" button share one height and baseline.
-.member-invite .field-input { height: 36px; }
+.member-invite .field-input { height: var(--control-h); }
 
 // The link exists once. It is shown once, and said to be shown once.
 .member-link {
@@ -2795,7 +2782,7 @@ input[type="radio"] {
 .rule-new-open {
   display: flex;
   align-items: center;
-  height: 44px;
+  height: var(--control-h);
   padding: 0 16px;
   font-size: 13px;
   font-weight: 600;
@@ -2810,7 +2797,7 @@ input[type="radio"] {
 .rule-new-body {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;
   padding: 0 16px 16px;
   border-top: 1px solid var(--border);
   padding-top: 16px;
@@ -2820,5 +2807,4 @@ input[type="radio"] {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 20px;
 }
