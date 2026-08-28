@@ -998,6 +998,22 @@ a {
 
 .modal-new-task { width: 480px; }
 
+// The task-detail modal is a right side panel: fixed to the viewport's right
+// edge at full height. Its markup shares `.modal` with the new-task modal and
+// the viewer, which stay centered, so the panel is `.modal` minus those two.
+.modal:not(.modal-new-task):not(.viewer) {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: 560px;
+  max-width: 100vw;
+  max-height: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+
+  @media (max-width: 640px) { width: 100vw; }
+}
+
 // The in-app file viewer: same scrim/panel chrome as the task modal, rendered
 // as a later sibling of it so the task modal underneath hides while it is
 // open — one popup on screen at a time, the same rule the delete confirm
