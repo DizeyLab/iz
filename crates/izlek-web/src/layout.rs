@@ -69,6 +69,7 @@ pub async fn escape_script(cx: &Cx) -> Result {
             var composer = document.querySelector('details.rule-new[open]'); \
             if (composer) { composer.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
             if (document.querySelector('.rule-new-body[action=\"/api/update_rule\"]')) { \
+                e.preventDefault(); \
                 window.location.href = '/rules'; \
                 e.stopImmediatePropagation(); \
             } \

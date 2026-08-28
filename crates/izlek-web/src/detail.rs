@@ -685,7 +685,12 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 /// `__izlekLeaving` is one navigation per document, `pageshow` releases it.
 /// Focused native media controls swallow `Escape` before the page ever
 /// sees the key, so focus landing on the viewer's audio/video is moved
-/// straight back to the panel.
+/// straight back to the panel. Every branch that navigates must
+/// `preventDefault()` first: a real Escape's browser default is
+/// stop-loading, which cancels the navigation the handler just started
+/// (and would leave `__izlekLeaving` latched true, deadening every
+/// later press). Synthetic keys carry no default, so only a live
+/// keyboard ever showed it.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -694,12 +699,14 @@ async fn escape_closes(cx: &Cx) -> Result {
             if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return; } \
             var viewer = document.querySelector('.viewer-scrim'); \
             if (viewer) { \
+                e.preventDefault(); \
                 if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = viewer.querySelector('.viewer-close').getAttribute('href'); } \
                 e.stopImmediatePropagation(); \
                 return; \
             } \
             var confirm = document.querySelector('details.confirm-details[open]'); \
             if (confirm && window.location.search.indexOf('confirm=delete') !== -1) { \
+                e.preventDefault(); \
                 if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
                 e.stopImmediatePropagation(); \
                 return; \
@@ -715,9 +722,9 @@ async fn escape_closes(cx: &Cx) -> Result {
                 e.stopImmediatePropagation(); \
                 return; \
             } \
-            if (document.querySelector('.modal-scrim') && !window.__izlekLeaving) { \
-                window.__izlekLeaving = true; \
-                window.location.href = '/'; \
+            if (document.querySelector('.modal-scrim')) { \
+                e.preventDefault(); \
+                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
                 e.stopImmediatePropagation(); \
             } \
         }, true); \
