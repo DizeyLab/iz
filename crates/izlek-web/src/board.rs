@@ -413,15 +413,13 @@ async fn render_card(
 /// open; a plain document click closes it again. Rendered once — every
 /// card's `@contextmenu` calls into this same global, by the menu's id.
 ///
-/// Also holds the board page's own `Escape` listener: a single capture-phase
-/// handler layered topmost-first (datepicker panel, then confirm popup, then
-/// any other open `.edit-toggle` — rename, describe, assignee, link popovers
-/// — then card menu, then the modal itself) so one press closes exactly the
-/// topmost overlay and never falls through to close two at once. The other
-/// overlay scripts (`datepicker_script`, `escape_closes`) keep only their
-/// click/outside-click logic. The topbar `.user-menu` is handled one script
-/// earlier, by `layout::escape_script`, registered before this one so its
-/// blur wins over anything below.
+/// Also holds the board page's own `Escape` listener — now only the
+/// datepicker panel and the card menu: viewer, delete confirm, open edit
+/// popovers and the modal itself belong to `detail::escape_closes`, which
+/// registers first (inline in the modal markup) and stops the key. The
+/// topbar `.user-menu` is handled one script earlier, by
+/// `layout::escape_script`, registered before this one so its blur wins
+/// over anything below.
 async fn card_menu_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -439,33 +437,9 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (e.key !== 'Escape') { return; } \
             var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
             if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
-            var viewer = document.querySelector('.viewer-scrim'); \
-            if (viewer) { \
-                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = viewer.getAttribute('href'); } \
-                e.stopImmediatePropagation(); \
-                return; \
-            } \
-            var confirmDelete = document.querySelector('details.confirm-details[open]'); \
-            if (confirmDelete && window.location.search.indexOf('confirm=delete') !== -1) { \
-                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
-                e.stopImmediatePropagation(); \
-                return; \
-            } \
-            var open = document.querySelectorAll('.edit-toggle:checked, details.confirm-details[open]'); \
-            if (open.length) { \
-                open.forEach(function (el) { \
-                    if (el.tagName === 'DETAILS') { el.removeAttribute('open'); } else { el.checked = false; } \
-                }); \
-                e.stopImmediatePropagation(); \
-                return; \
-            } \
             var menu = document.querySelector('.card-menu-open'); \
             if (menu) { closeCardMenus(); e.stopImmediatePropagation(); return; } \
-            if (document.querySelector('.modal-scrim') && !window.__izlekLeaving) { \
-                window.__izlekLeaving = true; \
-                window.location.href = '/'; \
-            } \
-        }, true);";
+        }, true)";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 

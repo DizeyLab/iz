@@ -1065,6 +1065,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                                             <option value="viewer" selected=(member.role == izlek_core::Role::Viewer)>(t(lang, Key::RoleViewerOption))</option>
                                                             <option value="admin" selected=(member.role == izlek_core::Role::Admin)>(t(lang, Key::RoleAdminOption))</option>
                                                         </select>
+                                                            (crate::detail::glyph::chevron(cx).await?)
                                                     </form>
                                                 }
                                             </td>

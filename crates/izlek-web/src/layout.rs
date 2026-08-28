@@ -46,28 +46,36 @@ pub async fn user_menu(cx: &Cx, display_name: &str, email: &str, role: izlek_cor
 /// The one `Escape` path shared by every page that has no `board.rs`
 /// overlay chain of its own (settings, mail rules, logs) — plus board
 /// itself, whose `card_menu_script` never looks at `.user-menu`. Closes,
-/// in order: the topbar `.user-menu` panel (blurring the focused element
-/// so `:focus-within` releases it — nothing else pins it open), then a
-/// `.rule-new` composer left open on the rules page. Never touches
+/// in order: the topbar `.user-menu` panel — hover-open included, pinned
+/// shut by a `user-menu-esc` class that a `mouseenter` inside the menu
+/// clears — then a `.rule-new` composer left open on the rules page, then
+/// a rules edit row (navigating back to `/rules`). Never touches
 /// `details.confirm-details`; that flow stays `board.rs`'s alone. Must be
 /// emitted *after* `dropdown_script` (an open dd-panel wins the press) and
 /// *before* `card_menu_script` where both are present (the user-menu blur
 /// wins over board's other popups).
 pub async fn escape_script(cx: &Cx) -> Result {
     const JS: &str = "\
-        document.addEventListener('keydown', function (e) {\
-            if (e.key !== 'Escape') { return; }\
-            var focused = document.activeElement;\
-            if (focused && focused.closest('.user-menu')) {\
-                focused.blur();\
-                e.stopImmediatePropagation();\
-                return;\
-            }\
-            var composer = document.querySelector('details.rule-new[open]');\
-            if (composer) {\
-                composer.removeAttribute('open');\
-                e.stopImmediatePropagation();\
-            }\
+        document.addEventListener('keydown', function (e) { \
+            if (e.key !== 'Escape') { return; } \
+            var menu = document.querySelector('.user-menu'); \
+            if (menu && (menu.matches(':hover') || menu.contains(document.activeElement))) { \
+                menu.classList.add('user-menu-esc'); \
+                var focused = document.activeElement; \
+                if (focused && focused.closest('.user-menu')) { focused.blur(); } \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
+            var composer = document.querySelector('details.rule-new[open]'); \
+            if (composer) { composer.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
+            if (document.querySelector('.rule-new-body[action=\"/api/update_rule\"]')) { \
+                window.location.href = '/rules'; \
+                e.stopImmediatePropagation(); \
+            } \
+        }, true); \
+        document.addEventListener('mouseenter', function (e) { \
+            var menu = e.target.closest ? e.target.closest('.user-menu') : null; \
+            if (menu) { menu.classList.remove('user-menu-esc'); } \
         }, true);";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }

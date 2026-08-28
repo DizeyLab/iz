@@ -33,8 +33,14 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
             }\
             function place(panel, trigger) {\
                 var r = trigger.getBoundingClientRect();\
-                panel.style.left = r.left + 'px';\
-                panel.style.top = (r.bottom + 4) + 'px';\
+                var h = panel.offsetHeight;\
+                var w = panel.offsetWidth;\
+                var top = r.bottom + 4;\
+                if (top + h > window.innerHeight && r.top - h - 4 >= 0) { top = r.top - h - 4; }\
+                top = Math.max(4, Math.min(top, window.innerHeight - h - 4));\
+                var left = Math.max(4, Math.min(r.left, window.innerWidth - w - 4));\
+                panel.style.left = left + 'px';\
+                panel.style.top = top + 'px';\
                 panel.style.minWidth = r.width + 'px';\
             }\
             function activate(panel, row) {\
@@ -55,8 +61,8 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
             }\
             function openPanel(select, trigger, panel) {\
                 closeAll();\
-                place(panel, trigger);\
                 panel.classList.add('dd-open');\
+                place(panel, trigger);\
                 trigger.setAttribute('aria-expanded', 'true');\
                 activate(panel, panel.querySelector('.dd-option-selected') || panel.querySelector('.dd-option'));\
             }\

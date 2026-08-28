@@ -561,7 +561,7 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
 /// The artboard's glyphs, drawn rather than typed — copied verbatim from the
 /// old UI's `detail.rs` `glyph` module. A missing character in a font is a
 /// hole in the design; an inline path is the same shape everywhere.
-mod glyph {
+pub(crate) mod glyph {
     use topcoat::Result;
     use topcoat::context::Cx;
     use topcoat::view::view;
@@ -657,12 +657,47 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     }
 }
 
-/// The confirm-details outside-click closer. `Escape` for every overlay
-/// (this one included) is handled centrally by `board.rs`'s
-/// `card_menu_script`, which is always mounted alongside this modal.
+/// `Escape` for everything the task modal renders, topmost first: viewer →
+/// delete confirm (`confirm=delete` in URL) → open edit popovers → modal
+/// itself; datepick and card menu stay `board.rs`'s — this capture listener
+/// registers first (inline in modal markup) and stops the key, and
+/// `__izlekLeaving` is one navigation per document, `pageshow` releases it.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
+        document.addEventListener('keydown', function (e) { \
+            if (e.key !== 'Escape') { return; } \
+            if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return; } \
+            var viewer = document.querySelector('.viewer-scrim'); \
+            if (viewer) { \
+                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = viewer.querySelector('.viewer-close').getAttribute('href'); } \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
+            var confirm = document.querySelector('details.confirm-details[open]'); \
+            if (confirm && window.location.search.indexOf('confirm=delete') !== -1) { \
+                if (!window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
+            var toggled = false; \
+            document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
+                if (toggle.closest('.datepick-pop')) { return; } \
+                var edit = toggle.closest('.edit'); \
+                if (edit) { toggle.checked = false; toggled = true; } \
+            }); \
+            if (toggled || confirm) { \
+                if (confirm) { confirm.removeAttribute('open'); } \
+                e.stopImmediatePropagation(); \
+                return; \
+            } \
+            if (document.querySelector('.modal-scrim') && !window.__izlekLeaving) { \
+                window.__izlekLeaving = true; \
+                window.location.href = '/'; \
+                e.stopImmediatePropagation(); \
+            } \
+        }, true); \
+        document.addEventListener('pageshow', function () { window.__izlekLeaving = false; }); \
         document.addEventListener('click', function (e) { var confirm = document.querySelector('details.confirm-details[open]'); if (!confirm) { return; } var panel = confirm.querySelector('.confirm'); if (panel && !panel.contains(e.target) && !e.target.closest('summary')) { if (window.location.search.indexOf('confirm=delete') !== -1 && !window.__izlekLeaving) { window.__izlekLeaving = true; window.location.href = '/'; } else { confirm.removeAttribute('open'); } } }, true); \
         document.addEventListener('click', function (e) { \
             document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
@@ -1350,8 +1385,9 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result 
     let name = attachment.file_name.clone();
     view! {
         cx =>
-        <a class="modal-scrim viewer-scrim" href=(close_href.clone())>
-            <div class="modal viewer" tabindex="-1" @click=$(|e: Event| e.stop_propagation())>
+        <div class="modal-scrim viewer-scrim">
+            <a class="viewer-close" href=(close_href.clone()) aria-label=(t(lang, Key::CloseTheFile))></a>
+            <div class="modal viewer">
                 <header class="detail-head">
                     <span class="detail-headline"><span class="detail-key">(name.clone())</span></span>
                     <a class="quiet" href=(download_href)>(t(lang, Key::Download))</a>
@@ -1367,7 +1403,7 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result 
                     }
                 </div>
             </div>
-        </a>
+        </div>
     }
 }
 

@@ -398,6 +398,7 @@ a {
   opacity: 1;
   pointer-events: auto;
 }
+.user-menu.user-menu-esc .user-menu-panel { visibility: hidden; opacity: 0; pointer-events: none; }
 
 .user-menu-name {
   padding: 4px 14px 0;
@@ -811,14 +812,14 @@ a {
 // The in-app file viewer: same scrim/panel chrome as the task modal, rendered
 // as a later sibling of it so the task modal underneath hides while it is
 // open — one popup on screen at a time, the same rule the delete confirm
-// uses. `<a>` rather than `<div>` for the scrim itself: closing it is a plain
-// navigation (no script needed for outside-click), and the panel stops the
-// click from ever reaching that anchor.
-.viewer-scrim { text-decoration: none; color: inherit; cursor: default; }
+// uses. Closing is a `.viewer-close` anchor stretched over the whole scrim
+// under the panel — outside clicks land on it and navigate, clicks on the
+// media land on the panel above it and stay.
+.viewer-close { position: absolute; inset: 0; cursor: default; }
 
 .modal-scrim:has(~ .viewer-scrim) { visibility: hidden; }
 
-.viewer { width: auto; max-width: min(90vw, 960px); }
+.viewer { position: relative; width: auto; max-width: min(90vw, 960px); }
 
 .viewer-body {
   display: flex;
@@ -1615,19 +1616,24 @@ a {
   max-width: 220px;
   background: var(--surface);
   transition: border-color var(--dur-fast) var(--ease);
+  cursor: pointer;
 
   &:hover { border-color: var(--accent); }
+
+  &:has(.file-upload-input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
 }
 
 .file-upload-name { max-width: 160px; }
 
 .file-upload-input {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  width: 1px;
+  height: 1px;
+  clip-path: inset(50%);
   opacity: 0;
-  cursor: pointer;
 }
 
 // -- comments ---------------------------------------------------------------

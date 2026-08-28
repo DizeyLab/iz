@@ -2342,8 +2342,9 @@ async fn the_viewer_renders_in_page_for_a_renderable_file_and_ignores_a_foreign_
     let page = app.get(&format!("/?task={task}&file={file_id}"), Some(&admin_cookie)).await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
-    // "viewer-body" marks the rendered overlay; "viewer-scrim" also appears as a
-    // string literal inside the Escape-handler script on every board page.
+    // "viewer-body" marks the rendered overlay; "viewer-scrim" also appears
+    // as a string literal inside the Escape-handler script that escape_closes
+    // inlines on task pages only, not every board page.
     assert!(html.contains("viewer-body"), "no viewer overlay in the page: {html}");
     assert!(html.contains(&format!("/files/{file_id}")), "viewer's <img> does not point at the file: {html}");
 
