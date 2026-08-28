@@ -56,7 +56,6 @@ CREATE TABLE board (
     workspace_id TEXT NOT NULL REFERENCES workspace(id),
     name         TEXT NOT NULL,
     task_prefix  TEXT NOT NULL DEFAULT 'DZ',
-    next_task_no INTEGER NOT NULL DEFAULT 1,
     created_at   TEXT NOT NULL
 );
 

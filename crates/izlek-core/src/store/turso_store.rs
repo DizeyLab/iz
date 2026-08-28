@@ -1274,9 +1274,9 @@ impl Store for TursoStore {
         let deadline = new.deadline.map(day_text).transpose()?;
 
         let mut conn = self.tx_conn().await?;
-        // IMMEDIATE: the key comes off a counter, so the read of next_task_no
-        // and the write that bumps it must not be interleaved with another
-        // writer's pair.
+        // IMMEDIATE: the task row, its activity and its transition land as one
+        // write set; taking the write lock up front avoids a deferred-upgrade
+        // deadlock against a concurrent writer.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
