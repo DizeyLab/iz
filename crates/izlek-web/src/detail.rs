@@ -1156,7 +1156,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
             return view! {
                 cx =>
                 <div class="modal-scrim">
-                    <div class="modal"><p class="modal-note">(refusal.message_in(lang))</p></div>
+                    <div class="modal modal-task"><p class="modal-note">(refusal.message_in(lang))</p></div>
                 </div>
                 (escape_closes(cx).await?)
             };
@@ -1191,19 +1191,10 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
     view! {
         cx =>
         <div class="modal-scrim">
-            <div class="modal" tabindex="-1">
+            <div class="modal modal-task" tabindex="-1">
                 <header class="detail-head">
-                    <div class="detail-headline">
-                        <span class="detail-key">(detail.task_key.clone())</span>
-                        (title_control(cx, &detail, may_write, lang).await?)
-                    </div>
-                    <span class="detail-esc">(t(lang, Key::Esc))</span>
-                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
-                </header>
-
-                <div class="detail-fields">
-                    <div class="detail-field">
-                        <span class="detail-label">(t(lang, Key::Status))</span>
+                    <span class="detail-key">(detail.task_key.clone())</span>
+                    <span class="detail-state">
                         if may_write {
                             <form class="status-form" method="post" action="/api/move_card">
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
@@ -1222,150 +1213,183 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                 <span class="field-text">(detail.column.name.clone())</span>
                             </span>
                         }
-                        (refused(cx, "move_card", lang).await?)
-                    </div>
-                    <div class="detail-field">
-                        <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
-                        <div class="detail-assignees">
-                            for person in &detail.assignees {
-                                (assignee_chip(cx, &detail.id, person, may_write, lang).await?)
+                    </span>
+                    <div class="spacer"></div>
+                    <span class="detail-esc">(t(lang, Key::Esc))</span>
+                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
+                    <a class="quiet detail-board" href="/">(format!("<- {}", t(lang, Key::NavBoard)))</a>
+                </header>
+
+                <div class="detail-body">
+                    (title_control(cx, &detail, may_write, lang).await?)
+
+                    <div class="detail-fields">
+                        <div class="detail-field detail-field-status">
+                            <span class="detail-label">(t(lang, Key::Status))</span>
+                            if may_write {
+                                <form class="status-form" method="post" action="/api/move_card">
+                                    <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                    <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
+                                    <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
+                                    <select class="status-select" name="to_column_id" data-autosubmit="">
+                                        for column in &detail.columns {
+                                            <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
+                                        }
+                                    </select>
+                                    (glyph::chevron(cx).await?)
+                                </form>
+                            } else {
+                                <span class="field-box">
+                                    <span class="status-dot"></span>
+                                    <span class="field-text">(detail.column.name.clone())</span>
+                                </span>
                             }
+                        </div>
+                        <div class="detail-field">
+                            <span class="detail-label">(t(lang, Key::Deadline))</span>
+                            (deadline_control(cx, &detail, today, may_write, lang).await?)
+                        </div>
+                        <div class="detail-field">
+                            <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
+                            <div class="detail-assignees">
+                                for person in &detail.assignees {
+                                    (assignee_chip(cx, &detail.id, person, may_write, lang).await?)
+                                }
+                                <div class="spacer"></div>
+                                if may_write {
+                                    (assignee_picker(cx, &detail.id, &unassigned, lang).await?)
+                                }
+                            </div>
+                        </div>
+                    </div>
+                    (refused(cx, "move_card", lang).await?)
+
+                    <section class="detail-block">
+                        <span class="detail-label">(t(lang, Key::Description))</span>
+                        (description_control(cx, &detail, may_write, lang).await?)
+                    </section>
+
+                    <section class="detail-block">
+                        <div class="detail-block-head">
+                            <span class="detail-label">(t(lang, Key::Dependencies))</span>
                             <div class="spacer"></div>
                             if may_write {
-                                (assignee_picker(cx, &detail.id, &unassigned, lang).await?)
+                                (link_picker(cx, &detail.id, &linkable, lang).await?)
                             }
                         </div>
-                    </div>
-                    <div class="detail-field">
-                        <span class="detail-label">(t(lang, Key::Deadline))</span>
-                        (deadline_control(cx, &detail, today, may_write, lang).await?)
-                    </div>
+                        if has_deps {
+                            <div class="dep-list">
+                                for edge in &detail.blocked_by {
+                                    (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?)
+                                }
+                                for edge in &detail.blocks {
+                                    (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
+                                }
+                            </div>
+                        } else {
+                            <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
+                        }
+                    </section>
+
+                    <section class="detail-block">
+                        <div class="detail-block-head">
+                            <span class="detail-label">(t(lang, Key::Files))</span>
+                            <span class="detail-count">(detail.files.len())</span>
+                        </div>
+                        if !detail.files.is_empty() {
+                            <div class="file-list">
+                                for file in &detail.files {
+                                    (file_chip(cx, &detail.id, file, &me, may_write, lang).await?)
+                                }
+                            </div>
+                        }
+                        (refused(cx, "delete_file", lang).await?)
+                        if may_comment {
+                            <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
+                                <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                <label class="field-box file-upload-box">
+                                    (glyph::plus(cx).await?)
+                                    <span class="field-text file-upload-name">(t(lang, Key::File))</span>
+                                    <input class="file-upload-input" type="file" name="file" accept=(accept) required="">
+                                </label>
+                            </form>
+                            (refused(cx, "upload_file", lang).await?)
+                        }
+                    </section>
+
+                    <section class="detail-block">
+                        <div class="detail-block-head">
+                            <span class="detail-label">(t(lang, Key::Comments))</span>
+                            <span class="detail-count">(detail.comments.len())</span>
+                        </div>
+                        <div class="comment-list">
+                            for entry in &detail.comments {
+                                (comment_row(cx, entry, zone).await?)
+                            }
+                        </div>
+                    </section>
+
+                    <section class="detail-block">
+                        <span class="detail-label">(t(lang, Key::Activity))</span>
+                        <div class="activity-list">
+                            for entry in &detail.activity {
+                                <div class="activity-line">
+                                    <span class="activity-stamp">(entry.moment_in(zone))</span>
+                                    <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "Izlek".to_string()))</strong>
+                                    <span class="activity-what">(entry.sentence())</span>
+                                </div>
+                            }
+                        </div>
+                    </section>
+
+                    (refused(cx, "delete_task", lang).await?)
+
+                    <footer class="detail-foot">
+                        if may_delete {
+                            match cost {
+                                Some(cost) => {
+                                    let freed = cost.frees.join(", ");
+                                    <details class="confirm-details" open=(confirm_delete)>
+                                        <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
+                                        <div class="confirm">
+                                            <div class="confirm-title">(format!("{} — {}?", cost.task_key, cost.title))</div>
+                                            <ul class="confirm-list">
+                                                if cost.comment_count > 0 {
+                                                    <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
+                                                }
+                                                if cost.link_count > 0 {
+                                                    <li>(if cost.link_count == 1 { t(lang, Key::DependencyStopsApplying).to_string() } else { format!("{} {}", cost.link_count, t(lang, Key::DependenciesStopApplying)) })</li>
+                                                }
+                                                if !freed.is_empty() {
+                                                    <li>(format!("{freed} {}", t(lang, Key::StopsBeingBlocked)))</li>
+                                                }
+                                            </ul>
+                                            <form class="detail-delete-form" method="post" action="/api/delete_task">
+                                                <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                                <button class="detail-delete detail-delete-sure" type="submit">(t(lang, Key::DeleteTask))</button>
+                                            </form>
+                                        </div>
+                                    </details>
+                                },
+                                None => <p class="detail-quiet">(t(lang, Key::ThisTaskCannotBeDeleted))</p>,
+                            }
+                        }
+                        <div class="spacer"></div>
+                        <a class="quiet" href="/">(t(lang, Key::Close))</a>
+                    </footer>
                 </div>
 
-                <section class="detail-block">
-                    <span class="detail-label">(t(lang, Key::Description))</span>
-                    (description_control(cx, &detail, may_write, lang).await?)
-                </section>
-
-                <section class="detail-block">
-                    <div class="detail-block-head">
-                        <span class="detail-label">(t(lang, Key::Dependencies))</span>
-                        <div class="spacer"></div>
-                        if may_write {
-                            (link_picker(cx, &detail.id, &linkable, lang).await?)
-                        }
-                    </div>
-                    if has_deps {
-                        <div class="dep-list">
-                            for edge in &detail.blocked_by {
-                                (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?)
-                            }
-                            for edge in &detail.blocks {
-                                (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
-                            }
+                if may_comment {
+                    <form class="comment-composer" method="post" action="/api/post_comment">
+                        <input type="hidden" name="task_id" value=(detail.id.clone())>
+                        <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder=(t(lang, Key::WriteAComment)) required=""></textarea>
+                        <div class="comment-row">
+                            <div class="spacer"></div>
+                            <button class="comment-post" type="submit">(t(lang, Key::Comment))</button>
                         </div>
-                    } else {
-                        <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
-                    }
-                </section>
-
-                <section class="detail-block">
-                    <div class="detail-block-head">
-                        <span class="detail-label">(t(lang, Key::Files))</span>
-                        <span class="detail-count">(detail.files.len())</span>
-                    </div>
-                    if !detail.files.is_empty() {
-                        <div class="file-list">
-                            for file in &detail.files {
-                                (file_chip(cx, &detail.id, file, &me, may_write, lang).await?)
-                            }
-                        </div>
-                    }
-                    (refused(cx, "delete_file", lang).await?)
-                    if may_comment {
-                        <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
-                            <input type="hidden" name="task_id" value=(detail.id.clone())>
-                            <label class="field-box file-upload-box">
-                                (glyph::plus(cx).await?)
-                                <span class="field-text file-upload-name">(t(lang, Key::File))</span>
-                                <input class="file-upload-input" type="file" name="file" accept=(accept) required="">
-                            </label>
-                        </form>
-                        (refused(cx, "upload_file", lang).await?)
-                    }
-                </section>
-
-                <section class="detail-block">
-                    <div class="detail-block-head">
-                        <span class="detail-label">(t(lang, Key::Comments))</span>
-                        <span class="detail-count">(detail.comments.len())</span>
-                    </div>
-                    <div class="comment-list">
-                        for entry in &detail.comments {
-                            (comment_row(cx, entry, zone).await?)
-                        }
-                    </div>
-                    if may_comment {
-                        <form class="comment-composer" method="post" action="/api/post_comment">
-                            <input type="hidden" name="task_id" value=(detail.id.clone())>
-                            <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder=(t(lang, Key::WriteAComment)) required=""></textarea>
-                            <div class="comment-row">
-                                <div class="spacer"></div>
-                                <button class="comment-post" type="submit">(t(lang, Key::Comment))</button>
-                            </div>
-                        </form>
-                        (refused(cx, "post_comment", lang).await?)
-                    }
-                </section>
-
-                <section class="detail-block">
-                    <span class="detail-label">(t(lang, Key::Activity))</span>
-                    <div class="activity-list">
-                        for entry in &detail.activity {
-                            <div class="activity-line">
-                                <span class="activity-stamp">(entry.moment_in(zone))</span>
-                                <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "Izlek".to_string()))</strong>
-                                <span class="activity-what">(entry.sentence())</span>
-                            </div>
-                        }
-                    </div>
-                </section>
-
-                (refused(cx, "delete_task", lang).await?)
-
-                <footer class="detail-foot">
-                    if may_delete {
-                        match cost {
-                            Some(cost) => {
-                                let freed = cost.frees.join(", ");
-                                <details class="confirm-details" open=(confirm_delete)>
-                                    <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
-                                    <div class="confirm">
-                                        <div class="confirm-title">(format!("{} — {}?", cost.task_key, cost.title))</div>
-                                        <ul class="confirm-list">
-                                            if cost.comment_count > 0 {
-                                                <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
-                                            }
-                                            if cost.link_count > 0 {
-                                                <li>(if cost.link_count == 1 { t(lang, Key::DependencyStopsApplying).to_string() } else { format!("{} {}", cost.link_count, t(lang, Key::DependenciesStopApplying)) })</li>
-                                            }
-                                            if !freed.is_empty() {
-                                                <li>(format!("{freed} {}", t(lang, Key::StopsBeingBlocked)))</li>
-                                            }
-                                        </ul>
-                                        <form class="detail-delete-form" method="post" action="/api/delete_task">
-                                            <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                            <button class="detail-delete detail-delete-sure" type="submit">(t(lang, Key::DeleteTask))</button>
-                                        </form>
-                                    </div>
-                                </details>
-                            },
-                            None => <p class="detail-quiet">(t(lang, Key::ThisTaskCannotBeDeleted))</p>,
-                        }
-                    }
-                    <div class="spacer"></div>
-                    <a class="quiet" href="/">(t(lang, Key::Close))</a>
-                </footer>
+                    </form>
+                    (refused(cx, "post_comment", lang).await?)
+                }
             </div>
         </div>
         (datepicker_script(cx, lang).await?)

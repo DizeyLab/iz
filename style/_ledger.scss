@@ -245,3 +245,178 @@
 
   .rule-switch-on { background: var(--ink); }
 }
+
+// -- task detail: its own page ------------------------------------------------
+// No chrome, no floating card: the modal opens as an opaque paper page. The
+// scrim carries the paper ground and the invisible panning; the column is
+// static content on top of it, so nothing inside ever scrolls or shows a
+// scrollbar.
+[data-ui="ledger"] .modal-scrim:has(> .modal-task) {
+  background: var(--bg);
+  justify-content: center;
+  padding: 36px 40px;
+}
+
+[data-ui="ledger"] .modal-task {
+  position: static;
+  width: 720px;
+  max-width: 100%;
+  max-height: none;
+  overflow: visible;
+  display: block;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+[data-ui="ledger"] .detail-body {
+  overflow: visible;
+}
+
+// Meta row: key + state chip left, `<- Board` right. The panel chrome — Esc
+// hint, close cross — and the body's status fieldbox (the chip already says
+// it) are suppressed.
+[data-ui="ledger"] .modal-task .detail-head {
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+}
+
+[data-ui="ledger"] .modal-task .detail-esc,
+[data-ui="ledger"] .modal-task .detail-close,
+[data-ui="ledger"] .detail-body .detail-field-status {
+  display: none;
+}
+
+// Dependency rows lose the card chrome - the page reads as ruled paper.
+[data-ui="ledger"] .dep-row {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+[data-ui="ledger"] .modal-task .detail-key {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+[data-ui="ledger"] .detail-state {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+[data-ui="ledger"] .detail-state .field-box,
+[data-ui="ledger"] .detail-state .status-form {
+  height: auto;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font: inherit;
+  color: var(--ink);
+}
+
+[data-ui="ledger"] .detail-state .status-select {
+  width: auto;
+  flex: none;
+  font: inherit;
+  text-transform: uppercase;
+}
+
+[data-ui="ledger"] .detail-state .status-dot {
+  display: none;
+}
+
+[data-ui="ledger"] .detail-board {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  height: auto;
+}
+
+// Serif title over a heavy rule; the edit form gets the same rule so the
+// title area holds still while editing.
+[data-ui="ledger"] .detail-body .detail-title,
+[data-ui="ledger"] .title-form {
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--ink);
+}
+
+[data-ui="ledger"] .detail-title {
+  font-family: var(--font-serif, Georgia, serif);
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+[data-ui="ledger"] .title-input {
+  height: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--font-serif, Georgia, serif);
+  font-size: 32px;
+  font-weight: 400;
+}
+
+// Hairline ruled rows instead of boxed controls.
+[data-ui="ledger"] .detail-fields {
+  display: block;
+  padding: 0;
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+[data-ui="ledger"] .detail-field {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+[data-ui="ledger"] .detail-field > .detail-label {
+  flex: none;
+  width: 130px;
+}
+
+[data-ui="ledger"] .detail-field .field-box,
+[data-ui="ledger"] .detail-field .status-form {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  height: auto;
+}
+
+[data-ui="ledger"] .detail-field .status-dot {
+  display: none;
+}
+
+// Long-form sections run as prose on paper.
+[data-ui="ledger"] .detail-block {
+  margin-top: 24px;
+}
+
+[data-ui="ledger"] .comment-list {
+  border-top: 1px solid var(--border);
+}
+
+// Composer sits in the flow at the end of the page — the body above is
+// static, so it simply follows the sections.
+[data-ui="ledger"] .comment-composer {
+  padding: 20px 0 0;
+}
