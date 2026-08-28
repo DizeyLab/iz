@@ -538,8 +538,7 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
 //   `data-autosubmit` attribute (and the file input's own class), read by
 //   `layout.rs`'s `soft_nav_script` through one delegated `change`
 //   listener — a per-element handler would die when a soft submit swaps
-//   the page in — and the "Move"/"Attach" buttons stay for a browser
-//   without script.
+//   the page in.
 // - The modal scrim's click-to-close is `soft_nav_script`'s delegated
 //   click listener (a click whose target is the scrim itself closes; a
 //   click inside `.modal` never has the scrim as target, so no
@@ -668,7 +667,7 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     let tone = person.id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32)) % 5;
     view! {
         cx =>
-        <span class=(class!("avatar", format!("avatar-tone-{tone}"), extra)) title=(person.display_name.clone())>
+        <span class=(class!("avatar", format!("avatar-tone-{tone}"), extra))>
             (initials)
         </span>
     }
@@ -690,6 +689,9 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
+        (function () { \
+        if (window.__izlekEscModal) { return; } \
+        window.__izlekEscModal = true; \
         document.addEventListener('keydown', function (e) { \
             if (e.key !== 'Escape') { return; } \
             if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return; } \
@@ -736,7 +738,8 @@ async fn escape_closes(cx: &Cx) -> Result {
                 var edit = toggle.closest('.edit'); \
                 if (edit && !edit.contains(e.target)) { toggle.checked = false; } \
             }); \
-        }, true);";
+        }, true); \
+        })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -883,6 +886,8 @@ async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
     let (months, weekdays) = datepicker_js_literals(lang);
     let js = format!(
         "(function() {{\
+            if (window.__izlekDatepick) {{ return; }}\
+            window.__izlekDatepick = true;\
             var MONTHS = {months};\
             var WEEKDAYS = {weekdays};\
             function pad(n) {{ return String(n).padStart(2, '0'); }}\
@@ -962,7 +967,7 @@ async fn assignee_chip(cx: &Cx, task_id: &str, person: &Person, may_write: bool,
     let remove_title = crate::i18n::take_off_this_task(lang, &person.display_name);
     view! {
         cx =>
-        <span class="assignee-chip" title=(person.display_name.clone())>
+        <span class="assignee-chip">
             (avatar(cx, person, "avatar-sm").await?)
             <span class="assignee-name">(person.display_name.clone())</span>
             if may_write {
@@ -988,7 +993,7 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) 
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(put_aria)>
             <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>(glyph::plus(cx).await?)</label>
             <div class="edit-form pop-panel">
-                <div class="pop-list">
+                <div class="pop-list pop-list-scroll">
                     for person in people {
                         <form class="pop-row-form" method="post" action="/api/assign">
                             <input type="hidden" name="task_id" value=(task_id.to_string())>
@@ -1217,7 +1222,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                     }
                                 </select>
                                 (glyph::chevron(cx).await?)
-                                <button class="status-go" type="submit">(t(lang, Key::Move))</button>
                             </form>
                         } else {
                             <span class="field-box">
@@ -1307,18 +1311,18 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                         for entry in &detail.comments {
                             (comment_row(cx, entry, zone).await?)
                         }
-                        if may_comment {
-                            <form class="comment-composer" method="post" action="/api/post_comment">
-                                <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder=(t(lang, Key::WriteAComment)) required=""></textarea>
-                                <div class="comment-row">
-                                    <div class="spacer"></div>
-                                    <button class="comment-post" type="submit">(t(lang, Key::Comment))</button>
-                                </div>
-                            </form>
-                            (refused(cx, "post_comment", lang).await?)
-                        }
                     </div>
+                    if may_comment {
+                        <form class="comment-composer" method="post" action="/api/post_comment">
+                            <input type="hidden" name="task_id" value=(detail.id.clone())>
+                            <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder=(t(lang, Key::WriteAComment)) required=""></textarea>
+                            <div class="comment-row">
+                                <div class="spacer"></div>
+                                <button class="comment-post" type="submit">(t(lang, Key::Comment))</button>
+                            </div>
+                        </form>
+                        (refused(cx, "post_comment", lang).await?)
+                    }
                 </section>
 
                 <section class="detail-block">

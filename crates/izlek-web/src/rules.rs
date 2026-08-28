@@ -687,7 +687,7 @@ async fn rules_page(cx: &Cx) -> Result {
             return view! {
                 <main class="scaffold-note">
                     <p>(refusal.message())</p>
-                    <p><a href="/">"Back to the board"</a></p>
+                    <p><a href="/">(t(Lang::En, Key::BackToBoard))</a></p>
                 </main>
             };
         }
@@ -700,7 +700,7 @@ async fn rules_page(cx: &Cx) -> Result {
             return view! {
                 <main class="scaffold-note">
                     <p>(refusal.message_in(lang))</p>
-                    <p><a href="/">"Back to the board"</a></p>
+                    <p><a href="/">(t(lang, Key::BackToBoard))</a></p>
                 </main>
             };
         }
@@ -738,6 +738,7 @@ async fn rules_page(cx: &Cx) -> Result {
                 if !snapshot.sender_connected {
                     <p class="rules-quiet">
                         (t(lang, Key::NoSenderConnectedPrefix))
+                        (" ")
                         <a href="/settings">(t(lang, Key::NavSettings))</a>
                     </p>
                 }

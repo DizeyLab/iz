@@ -341,7 +341,7 @@ async fn render_card(
                 <div class="avatars">
                     for person in assignees { (person) }
                     if !has_assignees {
-                        <span class="avatar avatar-none" role="img" aria-label=(t(lang, Key::NobodyAssignedAria)) title=(t(lang, Key::NobodyAssignedTitle))></span>
+                        <span class="avatar avatar-none" role="img" aria-label=(t(lang, Key::NobodyAssignedAria)) data-name=(t(lang, Key::NobodyAssignedTitle))></span>
                     }
                 </div>
             </div>
@@ -388,6 +388,9 @@ async fn render_card(
 async fn card_menu_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
+        (function () { \
+        if (window.__izlekCardMenu) { return; } \
+        window.__izlekCardMenu = true; \
         function closeCardMenus() { document.querySelectorAll('.card-menu-open').forEach(function (el) { el.classList.remove('card-menu-open'); }); } \
         window.__izlekOpenCardMenu = function (e, id) { \
             closeCardMenus(); \
@@ -429,7 +432,8 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (task && window.__izlekPost) { \
                 window.__izlekPost('/api/move_card', { task_id: task, from_column_id: from, to_column_id: column.id }); \
             } \
-        })";
+        }); \
+        })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -441,10 +445,10 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
         % 5;
     let class = format!("avatar avatar-tone-{tone} {extra}");
-    let title = person.display_name.clone();
+    let name = person.display_name.clone();
     view! {
         cx =>
-        <span class=(class) title=(title)>(initials)</span>
+        <span class=(class) data-name=(name)>(initials)</span>
     }
 }
 

@@ -55,12 +55,13 @@ pub async fn user_menu(cx: &Cx, display_name: &str, email: &str, role: izlek_cor
 /// arrive with the swap because the redirect URL's query params rendered
 /// them server-side; `history.replaceState` keeps the address bar honest.
 ///
-/// Swapped-in nodes carry no live `<script>` (parser-inserted only) and no
-/// topcoat hydration — the runtime walks the document once at load and
-/// exposes no re-hydrate entry — so every behavior on this app is a
-/// document-level delegated listener that survives the swap, and the
-/// `izlek:wire` event re-runs the idempotent per-element enhancers
-/// (`dropdown.rs`, the audio player) over the new nodes.
+/// Swapped-in `<script>` nodes are inert (parser-inserted only), so
+/// `swap()` re-creates each one as a fresh element, which runs it; every
+/// emitted script carries a one-shot `window.__izlek*` guard, so that
+/// re-execution never stacks duplicate document-level listeners. There
+/// is no topcoat re-hydrate entry, so per-element behavior is re-run by
+/// the `izlek:wire` event (`dropdown.rs`, the audio player) over the new
+/// nodes.
 ///
 /// Forms that must really navigate (sign-in/out, claim, redeem: the session
 /// cookie and the whole page identity change) opt out with `data-hard`.
@@ -72,23 +73,44 @@ pub async fn user_menu(cx: &Cx, display_name: &str, email: &str, role: izlek_cor
 /// class the member-role select first showed: any click inside a
 /// `.field-box`/`.status-form`/`.member-role` that misses the `.dd-trigger`
 /// (label, chevron glyph, box padding) is forwarded to the trigger.
+///
+/// Ordinary same-origin links get the same treatment: a delegated capture
+/// click listener — registered after the close/scrim one, and skipped when
+/// that one already `preventDefault`ed — fetches the href and swaps it in,
+/// then `history.pushState`s, so board cards and file chips no longer
+/// reload the page. Raw `/files/` byte routes, `download`/`target`/
+/// `data-hard` links and modified clicks (ctrl/meta/shift/alt, non-left
+/// button) stay browser-native. `popstate` replays the same fetch without
+/// pushing. Fresh-URL navigations pass `swap`'s third argument to scroll
+/// to top; in-place swaps (form posts, back) keep the scroll position.
+/// `wire()` also pins every `.comment-list` to its bottom, on initial
+/// load (DOMContentLoaded) included.
 pub async fn soft_nav_script(cx: &Cx) -> Result {
     const JS: &str = "\
         (function () { \
             if (window.__izlekSoft) { return; } \
             window.__izlekSoft = true; \
-            function wire() { document.dispatchEvent(new Event('izlek:wire')); } \
-            function swap(html, url) { \
+            function wire() { \
+                document.querySelectorAll('.comment-list').forEach(function (list) { list.scrollTop = list.scrollHeight; }); \
+                document.dispatchEvent(new Event('izlek:wire')); \
+            } \
+            function swap(html, url, fresh) { \
                 var doc = new DOMParser().parseFromString(html, 'text/html'); \
                 var x = window.scrollX, y = window.scrollY; \
                 document.body.replaceChildren(); \
                 while (doc.body.firstChild) { document.body.appendChild(doc.body.firstChild); } \
+                document.body.querySelectorAll('script').forEach(function (old) { \
+                    var live = document.createElement('script'); \
+                    if (old.hasAttribute('src')) { live.setAttribute('src', old.getAttribute('src')); } \
+                    live.textContent = old.textContent; \
+                    old.replaceWith(live); \
+                }); \
                 var root = doc.documentElement; \
                 if (root.getAttribute('lang')) { document.documentElement.setAttribute('lang', root.getAttribute('lang')); } \
                 if (root.hasAttribute('data-theme')) { document.documentElement.setAttribute('data-theme', root.getAttribute('data-theme')); } \
                 else { document.documentElement.removeAttribute('data-theme'); } \
                 if (url) { history.replaceState(null, '', url); } \
-                window.scrollTo(x, y); \
+                window.scrollTo(fresh ? 0 : x, fresh ? 0 : y); \
                 wire(); \
             } \
             function sweepPanels() { \
@@ -177,6 +199,19 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                     else { window.__izlekCloseModal(); } \
                 } \
             }, true); \
+            window.addEventListener('popstate', function () { window.__izlekGo(window.location.href); }); \
+            document.addEventListener('click', function (e) { \
+                if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; } \
+                var link = e.target.closest ? e.target.closest('a') : null; \
+                if (!link || link.hasAttribute('download') || link.hasAttribute('target') || link.hasAttribute('data-hard')) { return; } \
+                var href = link.getAttribute('href'); \
+                if (!href || href.charAt(0) !== '/' || href.indexOf('/files/') === 0) { return; } \
+                e.preventDefault(); \
+                fetch(href).then( \
+                    function (r) { return r.text().then(function (t) { swap(t, null, true); history.pushState(null, '', r.url); }); }, \
+                    function () { window.location.href = href; } \
+                ); \
+            }, true); \
             document.addEventListener('click', function (e) { \
                 if (e.target.closest && e.target.closest('.dd-trigger, .dd-panel, button, a, input, select, textarea')) { return; } \
                 var box = e.target.closest ? e.target.closest('.field-box, .status-form, .member-role') : null; \
@@ -184,6 +219,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 var trigger = box.querySelector('.dd-trigger'); \
                 if (trigger) { e.stopImmediatePropagation(); trigger.click(); } \
             }); \
+            if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', wire); } else { wire(); } \
         })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
@@ -201,6 +237,9 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
 /// wins over board's other popups).
 pub async fn escape_script(cx: &Cx) -> Result {
     const JS: &str = "\
+        (function () { \
+        if (window.__izlekEscTop) { return; } \
+        window.__izlekEscTop = true; \
         document.addEventListener('keydown', function (e) { \
             if (e.key !== 'Escape') { return; } \
             var menu = document.querySelector('.user-menu'); \
@@ -222,7 +261,8 @@ pub async fn escape_script(cx: &Cx) -> Result {
         document.addEventListener('mouseenter', function (e) { \
             var menu = e.target.closest ? e.target.closest('.user-menu') : null; \
             if (menu) { menu.classList.remove('user-menu-esc'); } \
-        }, true);";
+        }, true); \
+        })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
@@ -269,7 +309,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
                 <link
                     rel="stylesheet"
-                    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+                    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
                 >
                 <title>"Izlek"</title>
                 <link rel="stylesheet" href=(STYLE)>

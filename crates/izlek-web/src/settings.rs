@@ -741,7 +741,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 cx =>
                 <main class="scaffold-note">
                     <p>(refusal.message())</p>
-                    <p><a href="/">"Back to the board"</a></p>
+                    <p><a href="/">(t(Lang::En, Key::BackToBoard))</a></p>
                 </main>
             };
         }

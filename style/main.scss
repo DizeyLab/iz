@@ -7,7 +7,7 @@
   --border-strong: #e0ddd4;
   --ink: #1c1b18;
   --muted: #6f6b63;
-  --muted-soft: #8a8578;
+  --muted-soft: #726d61;
   --accent: #46557b;
   --accent-tint: #eef0f5;
   --accent-ink: #2f3c5c;
@@ -19,9 +19,7 @@
   --row-hover: #f3f1ea;
   --panel-sunken: #f2f0ea;
   --border-soft: #d5d1c7;
-  --border-faint: #f0eee7;
   --scrim: rgba(28, 27, 24, 0.46);
-  --on-strong: #fffefb;
 
   --danger: #a04a24;
   --danger-tint: #f9ece4;
@@ -53,7 +51,7 @@
   --violet-border: #ddc4ec;
   --violet-ink: #6a3f82;
 
-  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-sans: system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   --radius: 6px;
@@ -81,7 +79,7 @@
   --border-strong: #30363d;
   --ink: #e6edf3;
   --muted: #8b949e;
-  --muted-soft: #6e7681;
+  --muted-soft: #8b949e;
   --accent: #8b9dd9;
   --accent-tint: #1c2c4f;
   --accent-ink: #b7c4e8;
@@ -93,11 +91,9 @@
   --row-hover: #1c2129;
   --panel-sunken: #141920;
   --border-soft: #1d232b;
-  --border-faint: #191f26;
   --scrim: rgba(0, 0, 0, 0.75);
-  --on-strong: #f0f6fc;
 
-  --danger: #b35449;
+  --danger: #d97b6e;
   --danger-tint: #3a1a13;
   --danger-tint-soft: #2c221f;
   --danger-tint-alt: #1d1113;
@@ -270,28 +266,6 @@ a {
   color: var(--muted-soft);
 }
 
-.auth-input {
-  height: 40px;
-  padding: 0 12px;
-  background: var(--field-bg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  color: var(--ink);
-
-  &:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-    background: var(--surface);
-    border-color: var(--accent);
-  }
-}
-
-.auth-input-mono {
-  font-family: var(--font-mono);
-}
-
 // The address an invited member signs in as: shown, never edited.
 .auth-locked {
   display: flex;
@@ -356,11 +330,6 @@ a {
 
 .spacer { flex-grow: 1; }
 
-.board-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-
 .user-menu { position: relative; }
 
 .user-menu-trigger {
@@ -392,6 +361,7 @@ a {
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease), visibility var(--dur-fast) var(--ease);
 }
 
 .user-menu:hover .user-menu-panel,
@@ -442,7 +412,7 @@ a {
   text-decoration: none;
   text-align: left;
   cursor: pointer;
-  transition: background-color, color var(--dur-fast) var(--ease);
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); color: var(--ink); }
 }
@@ -469,25 +439,6 @@ a {
   gap: 2px;
 }
 
-.segment {
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-  background: transparent;
-  border: none;
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.segment-on {
-  font-weight: 600;
-  color: var(--ink);
-  background: var(--surface);
-  box-shadow: var(--shadow-1);
-}
-
 .chip {
   display: flex;
   align-items: center;
@@ -499,13 +450,11 @@ a {
 
   &-overdue {
     background: var(--danger-tint);
-    border: 1px solid var(--danger-border-alt);
     color: var(--danger);
   }
 
   &-blocked {
     background: var(--warn-tint);
-    border: 1px solid var(--warn-border);
     color: var(--warn-ink);
   }
 
@@ -516,10 +465,10 @@ a {
     text-transform: capitalize;
   }
 
-  &-role { background: var(--accent-tint); border: 1px solid var(--accent-border); color: var(--accent-ink); }
+  &-role { background: var(--surface-sunken); border: 1px solid var(--border-strong); color: var(--ink-soft); }
   &-admin { background: var(--panel-sunken); border: 1px solid var(--border-strong); color: var(--muted); }
-  &-connected { background: var(--positive-tint); border: 1px solid var(--positive-border); color: var(--positive-ink); }
-  &-off { background: var(--warn-tint); border: 1px solid var(--warn-border); color: var(--warn-ink); }
+  &-connected { background: var(--positive-tint); color: var(--positive-ink); }
+  &-off { background: var(--warn-tint); color: var(--warn-ink); }
 }
 
 .board-stage {
@@ -690,6 +639,12 @@ a {
 .avatars {
   display: flex;
   align-items: center;
+  min-width: 0;
+  overflow: hidden;
+
+  // The data-name tooltip pokes above the row; hovering drops the clip so it
+  // is not cut off by the overlap truncation.
+  &:has(.avatar:hover) { overflow: visible; }
 }
 
 .avatar {
@@ -703,6 +658,7 @@ a {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
 
   & + & { margin-left: -8px; }
 
@@ -727,6 +683,26 @@ a {
     border: none;
     font-size: 11px;
     flex: none;
+  }
+
+  // A bare avatar carries `data-name`; hovering raises a house tooltip in
+  // place of the native `title`.
+  &[data-name]:hover::after {
+    content: attr(data-name);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 3px 8px;
+    font-size: 11px;
+    color: var(--ink-soft);
+    box-shadow: var(--shadow-2);
+    white-space: nowrap;
+    z-index: 30;
+    pointer-events: none;
   }
 
   &-tone-0 { background: var(--accent); }
@@ -792,6 +768,8 @@ a {
 .modal {
   width: 780px;
   max-width: 100%;
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -932,13 +910,6 @@ a {
   margin-top: 20px;
 }
 
-.new-task-date {
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  color: inherit;
-}
-
 .new-task-foot {
   display: flex;
   align-items: center;
@@ -981,16 +952,20 @@ a {
   margin-top: 8px;
 }
 
-.edit-save {
+.edit-save,
+.comment-post {
   height: 28px;
   padding: 0 12px;
   border: none;
   border-radius: var(--radius);
-  background: var(--ink);
+  background: var(--accent);
   color: var(--surface);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+
+  &:hover { background: var(--accent-strong); }
 
   &:disabled { opacity: 0.5; cursor: default; }
 }
@@ -999,6 +974,9 @@ a {
   font-size: 12px;
   color: var(--muted);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease);
+
+  &:hover { color: var(--ink); }
 }
 
 // A popover is the same machinery, floated.
@@ -1045,7 +1023,7 @@ a {
   border-radius: var(--radius-sm);
   background: transparent;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--ink);
   text-align: left;
   text-decoration: none;
@@ -1189,7 +1167,7 @@ a {
 .detail-label {
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--muted-soft);
 }
 
@@ -1202,7 +1180,8 @@ a {
 
 // Every value in the field row wears the same box, so a `<select>`, a label
 // and a plain span all line up at 36px.
-.field-box {
+.field-box,
+.status-form {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1211,6 +1190,12 @@ a {
   background: var(--field-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.field-box {
   font-size: 13px;
   color: var(--ink);
   cursor: pointer;
@@ -1240,17 +1225,6 @@ a {
   color: var(--muted-soft);
 }
 
-.status-form {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 10px;
-  background: var(--field-bg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-}
-
 .status-dot {
   flex: none;
   width: 8px;
@@ -1277,18 +1251,6 @@ a {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
-}
-
-.status-go {
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  font-family: inherit;
-  font-size: 11px;
-  color: var(--muted);
-  cursor: pointer;
 }
 
 .detail-overdue {
@@ -1388,12 +1350,12 @@ a {
   border: none;
   background: transparent;
   font-family: inherit;
-  font-size: 11px;
-  color: var(--accent);
+  font-size: 12px;
+  color: var(--muted);
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease);
 
-  &:hover { color: var(--accent-ink); }
+  &:hover { color: var(--ink); }
 }
 
 // -- assignees --------------------------------------------------------------
@@ -1473,7 +1435,7 @@ a {
   border-radius: 50%;
   color: var(--muted-soft);
   cursor: pointer;
-  transition: color, border-color var(--dur-fast) var(--ease);
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 
   &:hover { color: var(--ink); border-color: var(--muted-soft); }
 }
@@ -1534,7 +1496,8 @@ a {
 
 // -- dependencies -----------------------------------------------------------
 
-.dep-chip {
+.dep-chip,
+.file-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1545,6 +1508,9 @@ a {
   background: var(--surface);
   font-size: 12px;
   color: var(--muted);
+}
+
+.dep-chip {
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease);
 
@@ -1638,19 +1604,6 @@ a {
   gap: 8px;
 }
 
-.file-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  font-size: 12px;
-  color: var(--muted);
-}
-
 .file-chip-name {
   color: inherit;
   text-decoration: none;
@@ -1729,6 +1682,8 @@ a {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .comment {
@@ -1772,7 +1727,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 2px;
+  margin-top: 14px;
 }
 
 .comment-input { font-size: 13px; }
@@ -1781,20 +1736,6 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.comment-post {
-  height: 30px;
-  padding: 0 14px;
-  border: none;
-  border-radius: var(--radius);
-  background: var(--ink);
-  color: var(--surface);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-
-  &:disabled { opacity: 0.5; cursor: default; }
 }
 
 // -- activity ---------------------------------------------------------------
@@ -1960,7 +1901,7 @@ a {
   font-weight: 500;
   color: var(--ink-soft);
   text-decoration: none;
-  transition: background-color, color var(--dur-fast) var(--ease);
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--surface-sunken); color: var(--ink); }
 
@@ -2093,6 +2034,7 @@ a {
   color: var(--muted-soft);
 }
 
+.auth-input,
 .field-input {
   height: 40px;
   padding: 0 12px;
@@ -2116,6 +2058,10 @@ a {
   }
 }
 
+.auth-input-mono {
+  font-family: var(--font-mono);
+}
+
 // A <select> wearing the field-input box still shows the browser's own
 // arrow unless told otherwise. This draws the same chevron the rest of the
 // app uses, so a dropdown looks like a field, not an OS control. Shared
@@ -2127,9 +2073,18 @@ select.field-input,
   -webkit-appearance: none;
   cursor: pointer;
   padding-right: 32px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16' fill='none' stroke='%238a8578' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16' fill='none' stroke='%23726d61' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
+}
+
+// Dark theme's lighter muted ink, baked into a second copy of the chevron:
+// a data-URI can't read custom properties.
+[data-theme="dark"] {
+  select.field-input,
+  .field-input.dd-trigger {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 16 16' fill='none' stroke='%238b949e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  }
 }
 
 // The browser's native option list ignores theme tokens by default — dark
@@ -2147,6 +2102,11 @@ option:checked {
 
 option:hover {
   background: var(--panel-sunken);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
 }
 
 // -- house dropdown (dropdown.rs) --------------------------------------------
@@ -2247,9 +2207,32 @@ option:hover {
   font-weight: 600;
   text-decoration: none;
   cursor: pointer;
-  transition: background-color, border-color, color var(--dur-fast) var(--ease);
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--surface); }
+}
+
+// Buttons wear the same keyboard-focus ring as fields. Ring only: the field
+// recipe's background/border-color swap would invert the solid buttons —
+// their own label is var(--surface) — into invisibility.
+.primary:focus-visible,
+.quiet:focus-visible,
+.quiet-danger:focus-visible,
+.auth-submit:focus-visible,
+.edit-save:focus-visible,
+.comment-post:focus-visible,
+.detail-delete:focus-visible,
+.datepick-nav:focus-visible,
+.datepick-day:focus-visible,
+.datepick-action:focus-visible,
+.audio-play:focus-visible,
+.rule-switch:focus-visible,
+.assignee-add:focus-visible,
+.pop-row:focus-visible,
+.dd-option:focus-visible,
+.user-menu-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 // -- the member list --------------------------------------------------------
@@ -2330,12 +2313,12 @@ option:hover {
   border-radius: var(--radius);
   font-family: var(--font-sans);
   font-size: 12px;
-  color: var(--accent);
+  color: var(--ink-soft);
   text-decoration: none;
   cursor: pointer;
-  transition: border-color, color var(--dur-fast) var(--ease);
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 
-  &:hover { border-color: var(--accent); color: var(--accent-ink); }
+  &:hover { border-color: var(--accent); color: var(--accent); }
 }
 
 // Danger modifier for a `.quiet` button — the "Delete" action in a rule row.
@@ -2413,6 +2396,12 @@ option:hover {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+// The logs pages reuse the rules list but bound its height.
+.rule-list-scroll {
+  max-height: 360px;
+  overflow-y: auto;
 }
 
 .rule-row {

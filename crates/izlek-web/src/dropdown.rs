@@ -26,6 +26,8 @@ use topcoat::view::{Unescaped, view};
 pub async fn dropdown_script(cx: &Cx) -> Result {
     const JS: &str = "\
         (function () {\
+            if (window.__izlekDd) { return; }\
+            window.__izlekDd = true;\
             function opts(select) { return Array.prototype.slice.call(select.options); }\
             function closeAll() {\
                 document.querySelectorAll('.dd-panel.dd-open').forEach(function (panel) {\
