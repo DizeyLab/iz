@@ -739,9 +739,12 @@ async fn the_board_sort_control_keeps_its_hidden_select_and_gets_a_dropdown_trig
     // house trigger + panel client-side; its presence is the page's only
     // server-rendered proof the shell is wired in.
     assert!(html.contains("dd-trigger"), "no dropdown script on the board page: {html}");
-    // `layout.rs`'s shared Escape handler — proof the topbar `.user-menu`
-    // gets its close path on the board page too.
-    assert!(html.contains("closest('.user-menu')"), "no escape script on the board page: {html}");
+    // `root_layout` emits `layout.rs`'s Escape manager on every page; the
+    // registration below is proof the topbar `.user-menu` gets its close
+    // path on the board page too.
+    assert!(html.contains("window.__izlekEsc"), "no escape manager on the board page: {html}");
+    assert!(html.contains("__izlekEsc.register(40"), "no escape script on the board page: {html}");
+    assert!(html.contains("closest('.user-menu')"), "no user-menu close path on the board page: {html}");
 }
 
 #[tokio::test]
@@ -1134,7 +1137,8 @@ async fn settings_selects_keep_their_hidden_form_fields_and_get_a_dropdown_trigg
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("select class=\"field-input\" name=\"theme\""), "{html}");
     assert!(html.contains("dd-trigger"), "no dropdown script on the settings page: {html}");
-    assert!(html.contains("closest('.user-menu')"), "no escape script on the settings page: {html}");
+    assert!(html.contains("__izlekEsc.register(40"), "no escape script on the settings page: {html}");
+    assert!(html.contains("closest('.user-menu')"), "no user-menu close path on the settings page: {html}");
 }
 
 /// The rules and logs pages carry no `board.rs`, so like settings they wire
@@ -1147,12 +1151,12 @@ async fn the_rules_and_logs_pages_get_the_shared_escape_script() {
 
     let rules_page = app.get("/rules", Some(&cookie)).await;
     let rules_html = String::from_utf8_lossy(&rules_page.bytes);
-    assert!(rules_html.contains("closest('.user-menu')"), "no escape script on the rules page: {rules_html}");
+    assert!(rules_html.contains("__izlekEsc.register(40"), "no escape script on the rules page: {rules_html}");
     assert!(rules_html.contains("details.rule-new[open]"), "escape script does not close the rule composer: {rules_html}");
 
     let logs_page = app.get("/logs", Some(&cookie)).await;
     let logs_html = String::from_utf8_lossy(&logs_page.bytes);
-    assert!(logs_html.contains("closest('.user-menu')"), "no escape script on the logs page: {logs_html}");
+    assert!(logs_html.contains("__izlekEsc.register(40"), "no escape script on the logs page: {logs_html}");
 }
 
 #[tokio::test]
@@ -2342,10 +2346,11 @@ async fn the_viewer_renders_in_page_for_a_renderable_file_and_ignores_a_foreign_
     let page = app.get(&format!("/?task={task}&file={file_id}"), Some(&admin_cookie)).await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
-    // "viewer-body" marks the rendered overlay; "viewer-scrim" also appears
-    // as a string literal inside the Escape-handler script that escape_closes
-    // inlines on task pages only, not every board page.
+    // "viewer-body" marks the rendered overlay; the viewer's Escape resolver
+    // that escape_closes registers (priority 90) also appears here on task
+    // pages only, not every board page.
     assert!(html.contains("viewer-body"), "no viewer overlay in the page: {html}");
+    assert!(html.contains("__izlekEsc.register(90"), "no viewer escape resolver in the page: {html}");
     assert!(html.contains(&format!("/files/{file_id}")), "viewer's <img> does not point at the file: {html}");
 
     // A file id that exists but belongs to another task is refused the same

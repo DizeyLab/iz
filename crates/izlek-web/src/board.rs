@@ -378,13 +378,12 @@ async fn render_card(
 /// open; a plain document click closes it again. Rendered once — every
 /// card's `@contextmenu` calls into this same global, by the menu's id.
 ///
-/// Also holds the board page's own `Escape` listener — now only the
-/// datepicker panel and the card menu: viewer, delete confirm, open edit
-/// popovers and the modal itself belong to `detail::escape_closes`, which
-/// registers first (inline in the modal markup) and stops the key. The
-/// topbar `.user-menu` is handled one script earlier, by
-/// `layout::escape_script`, registered before this one so its blur wins
-/// over anything below.
+/// Also registers the board page's own `Escape` resolvers on
+/// `window.__izlekEsc`: the datepicker panel (priority 100, above the modal
+/// chain — `detail::escape_closes` used to defer to it) and the card menu
+/// (priority 10). Viewer, delete confirm, open edit popovers and the modal
+/// itself stay `detail::escape_closes`'s at priority 90; the whole order
+/// lives in the table on `layout.rs`'s `escape_manager_script`.
 async fn card_menu_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -401,13 +400,18 @@ async fn card_menu_script(cx: &Cx) -> Result {
             menu.classList.add('card-menu-open'); \
         }; \
         document.addEventListener('click', closeCardMenus); \
-        document.addEventListener('keydown', function (e) { \
-            if (e.key !== 'Escape') { return; } \
+        window.__izlekEsc.register(100, function () { \
             var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
-            if (datepick) { datepick.checked = false; e.stopImmediatePropagation(); return; } \
+            if (!datepick) { return false; } \
+            datepick.checked = false; \
+            return true; \
+        }); \
+        window.__izlekEsc.register(10, function () { \
             var menu = document.querySelector('.card-menu-open'); \
-            if (menu) { closeCardMenus(); e.stopImmediatePropagation(); return; } \
-        }, true); \
+            if (!menu) { return false; } \
+            closeCardMenus(); \
+            return true; \
+        }); \
         document.addEventListener('contextmenu', function (e) { \
             var card = e.target.closest ? e.target.closest('.card[data-menu-id]') : null; \
             if (!card) { return; } \

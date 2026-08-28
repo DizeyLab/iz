@@ -276,40 +276,83 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
-/// The one `Escape` path shared by every page that has no `board.rs`
-/// overlay chain of its own (settings, mail rules, logs) — plus board
-/// itself, whose `card_menu_script` never looks at `.user-menu`. Closes,
-/// in order: the topbar `.user-menu` panel — hover-open included, pinned
-/// shut by a `user-menu-esc` class that a `mouseenter` inside the menu
-/// clears — then a `.rule-new` composer left open on the rules page, then
-/// a rules edit row (navigating back to `/rules`). Never touches
-/// `details.confirm-details`; that flow stays `board.rs`'s alone. Must be
-/// emitted *after* `dropdown_script` (an open dd-panel wins the press) and
-/// *before* `card_menu_script` where both are present (the user-menu blur
-/// wins over board's other popups).
+/// The one document-level capture `keydown` listener for `Escape`, emitted
+/// once from `root_layout` before every page's own scripts. Owners install
+/// no listeners of their own; their scripts call
+/// `window.__izlekEsc.register(priority, fn)` and on `Escape` the manager
+/// runs the resolvers highest-priority first — the first to return true
+/// closes its surface and the manager stops the key. Every consuming press
+/// gets `preventDefault()`: a real Escape's browser default is stop-loading
+/// (it once cancelled the navigation these branches used to start; synthetic
+/// keys carry no default, so only a live keyboard ever showed it).
+///
+/// The table below is the whole precedence order, topmost first; a resolver
+/// whose surface is absent returns false so lower layers get the press. It
+/// reproduces what the four former listeners' registration order produced
+/// per page (the modal's inline `escape_closes` registered before the board
+/// page's trailing scripts, `dropdown_script` before `escape_script` on
+/// settings/rules, `escape_script` before `card_menu_script` on the board):
+///
+/// | prio | closes | registered by |
+/// |------|--------|---------------|
+/// | 100 | the datepicker popover | `board.rs`'s `card_menu_script` |
+/// | 90 | the viewer, then the delete confirm, then non-datepick edit popovers, then the task modal | `detail.rs`'s `escape_closes` |
+/// | 50 | the open dropdown panel (refocusing its trigger) | `dropdown.rs`'s `dropdown_script` |
+/// | 40 | the topbar `.user-menu` (pin+blur), then the rules composer, then a rules edit row (back to `/rules`) | `layout.rs`'s `escape_script` |
+/// | 10 | the card context menu | `board.rs`'s `card_menu_script` |
+pub async fn escape_manager_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+        if (window.__izlekEsc) { return; } \
+        window.__izlekEsc = { \
+            resolvers: [], \
+            register: function (priority, fn) { \
+                window.__izlekEsc.resolvers.push({ priority: priority, fn: fn }); \
+                window.__izlekEsc.resolvers.sort(function (a, b) { return b.priority - a.priority; }); \
+            } \
+        }; \
+        document.addEventListener('keydown', function (e) { \
+            if (e.key !== 'Escape') { return; } \
+            for (var i = 0; i < window.__izlekEsc.resolvers.length; i++) { \
+                if (window.__izlekEsc.resolvers[i].fn(e)) { \
+                    e.preventDefault(); \
+                    e.stopImmediatePropagation(); \
+                    return; \
+                } \
+            } \
+        }, true); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+/// Registers the topbar/rules `Escape` resolvers on `window.__izlekEsc`
+/// (priority 40 — the table is on `escape_manager_script`): the topbar
+/// `.user-menu` panel — hover-open included, pinned shut by a
+/// `user-menu-esc` class that a `mouseenter` inside the menu clears — then
+/// a `.rule-new` composer left open on the rules page, then a rules edit
+/// row (navigating back to `/rules`). Never touches
+/// `details.confirm-details`; that flow stays `detail.rs`'s.
 pub async fn escape_script(cx: &Cx) -> Result {
     const JS: &str = "\
         (function () { \
         if (window.__izlekEscTop) { return; } \
         window.__izlekEscTop = true; \
-        document.addEventListener('keydown', function (e) { \
-            if (e.key !== 'Escape') { return; } \
+        window.__izlekEsc.register(40, function () { \
             var menu = document.querySelector('.user-menu'); \
             if (menu && (menu.matches(':hover') || menu.contains(document.activeElement))) { \
                 menu.classList.add('user-menu-esc'); \
                 var focused = document.activeElement; \
                 if (focused && focused.closest('.user-menu')) { focused.blur(); } \
-                e.stopImmediatePropagation(); \
-                return; \
+                return true; \
             } \
             var composer = document.querySelector('details.rule-new[open]'); \
-            if (composer) { composer.removeAttribute('open'); e.stopImmediatePropagation(); return; } \
+            if (composer) { composer.removeAttribute('open'); return true; } \
             if (document.querySelector('.rule-new-body[action=\"/api/update_rule\"]')) { \
-                e.preventDefault(); \
                 if (window.__izlekGo) { window.__izlekGo('/rules'); } else { window.location.href = '/rules'; } \
-                e.stopImmediatePropagation(); \
+                return true; \
             } \
-        }, true); \
+            return false; \
+        }); \
         document.addEventListener('mouseenter', function (e) { \
             var menu = e.target.closest ? e.target.closest('.user-menu') : null; \
             if (menu) { menu.classList.remove('user-menu-esc'); } \
@@ -370,6 +413,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                 topcoat::dev::script()
             </head>
             <body>
+                (escape_manager_script(cx).await?)
                 (soft_nav_script(cx).await?)
                 (content)
             </body>

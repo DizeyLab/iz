@@ -17,12 +17,10 @@ use topcoat::view::{Unescaped, view};
 
 /// Emitted once per page that renders a `<select>`; the enhancement is
 /// per-element and idempotent (`data-dd-done`), re-run on `izlek:wire` so
-/// selects arriving in a soft page swap get theirs too. Owns its own `Escape`
-/// handling (capture-phase, `stopImmediatePropagation` on an open panel)
-/// rather than routing through `board.rs`'s `card_menu_script` — on any
-/// page carrying both, this script must be emitted *before* that one so its
-/// document-level capture listener, registered first, runs first and can
-/// swallow the key before the board's own overlay chain sees it.
+/// selects arriving in a soft page swap get theirs too. Owns its own
+/// `Escape` resolver on `window.__izlekEsc` (priority 50 — an open panel
+/// closes before the topbar and card-menu layers below it; the whole order
+/// lives in the table on `layout.rs`'s `escape_manager_script`).
 pub async fn dropdown_script(cx: &Cx) -> Result {
     const JS: &str = "\
         (function () {\
@@ -119,15 +117,14 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                     if (row) { pick(select, trigger, panel, row); }\
                 });\
             }\
-            document.addEventListener('keydown', function (e) {\
-                if (e.key !== 'Escape') { return; }\
+            window.__izlekEsc.register(50, function () {\
                 var panel = document.querySelector('.dd-panel.dd-open');\
-                if (!panel) { return; }\
+                if (!panel) { return false; }\
                 var trigger = panel.__ddTrigger;\
                 closeAll();\
                 if (trigger) { trigger.focus(); }\
-                e.stopImmediatePropagation();\
-            }, true);\
+                return true;\
+            });\
             document.addEventListener('click', closeAll);\
             window.addEventListener('scroll', closeAll, true);\
             function enhanceAll() { document.querySelectorAll('select.status-select, select.field-input').forEach(enhance); }\

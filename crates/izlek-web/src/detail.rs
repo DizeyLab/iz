@@ -675,38 +675,30 @@ async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
 
 /// `Escape` for everything the task modal renders, topmost first: viewer →
 /// delete confirm (`confirm=delete` in URL) → open edit popovers → modal
-/// itself; datepick and card menu stay `board.rs`'s — this capture listener
-/// registers first (inline in modal markup) and stops the key. Closing
-/// never navigates: `layout.rs`'s `__izlekCloseViewer`/`__izlekCloseModal`
-/// drop the overlay's DOM and rewrite the URL, the board underneath is
-/// already rendered. Focused native media controls swallow `Escape` before
-/// the page ever sees the key, so focus landing on the viewer's
-/// audio/video is moved straight back to the panel. Every closing branch
-/// still calls `preventDefault()`: a real Escape's browser default is
-/// stop-loading (it once cancelled the navigation these branches used to
-/// start; synthetic keys carry no default, so only a live keyboard ever
-/// showed it).
+/// itself — one resolver at priority 90 on `window.__izlekEsc` (table on
+/// `layout.rs`'s `escape_manager_script`); an open datepick popover returns
+/// false, leaving it to `board.rs`'s priority-100 resolver. Closing never
+/// navigates: `layout.rs`'s `__izlekCloseViewer`/`__izlekCloseModal` drop
+/// the overlay's DOM and rewrite the URL, the board underneath is already
+/// rendered. Focused native media controls swallow `Escape` before the page
+/// ever sees the key, so focus landing on the viewer's audio/video is moved
+/// straight back to the panel.
 async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
         if (window.__izlekEscModal) { return; } \
         window.__izlekEscModal = true; \
-        document.addEventListener('keydown', function (e) { \
-            if (e.key !== 'Escape') { return; } \
-            if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return; } \
+        window.__izlekEsc.register(90, function () { \
+            if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return false; } \
             if (document.querySelector('.viewer-scrim')) { \
-                e.preventDefault(); \
                 window.__izlekCloseViewer(); \
-                e.stopImmediatePropagation(); \
-                return; \
+                return true; \
             } \
             var confirm = document.querySelector('details.confirm-details[open]'); \
             if (confirm && window.location.search.indexOf('confirm=delete') !== -1) { \
-                e.preventDefault(); \
                 window.__izlekCloseModal(); \
-                e.stopImmediatePropagation(); \
-                return; \
+                return true; \
             } \
             var toggled = false; \
             document.querySelectorAll('.edit-toggle:checked').forEach(function (toggle) { \
@@ -716,15 +708,14 @@ async fn escape_closes(cx: &Cx) -> Result {
             }); \
             if (toggled || confirm) { \
                 if (confirm) { confirm.removeAttribute('open'); } \
-                e.stopImmediatePropagation(); \
-                return; \
+                return true; \
             } \
             if (document.querySelector('.modal-scrim')) { \
-                e.preventDefault(); \
                 window.__izlekCloseModal(); \
-                e.stopImmediatePropagation(); \
+                return true; \
             } \
-        }, true); \
+            return false; \
+        }); \
         document.addEventListener('focusin', function (e) { \
             var media = e.target; \
             if (media.tagName !== 'AUDIO' && media.tagName !== 'VIDEO') { return; } \
@@ -879,7 +870,9 @@ async fn datepicker_grid(cx: &Cx, name: &str, value: &str, lang: Lang) -> Result
 /// nav, day pick, Clear/Today, and closes a panel on outside click —
 /// registered in the capture phase so a stray click never reaches
 /// `escape_closes`'s confirm-closing listener while a panel is open.
-/// `Escape` itself is handled centrally by `board.rs`'s `card_menu_script`.
+/// `Escape` closes the panel through the datepick resolver `board.rs`'s
+/// `card_menu_script` registers (priority 100 — see the table on
+/// `layout.rs`'s `escape_manager_script`).
 async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
     use crate::i18n::datepicker_js_literals;
     use topcoat::view::Unescaped;
