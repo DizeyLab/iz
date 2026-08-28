@@ -1116,5 +1116,6 @@ async fn settings_page(cx: &Cx) -> Result {
             </main>
         </div>
         (crate::dropdown::dropdown_script(cx).await?)
+        (crate::layout::escape_script(cx).await?)
     }
 }

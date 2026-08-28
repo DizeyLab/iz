@@ -411,13 +411,15 @@ async fn render_card(
 /// open; a plain document click closes it again. Rendered once — every
 /// card's `@contextmenu` calls into this same global, by the menu's id.
 ///
-/// Also holds the board page's one `Escape` listener: a single capture-phase
+/// Also holds the board page's own `Escape` listener: a single capture-phase
 /// handler layered topmost-first (datepicker panel, then confirm popup, then
 /// any other open `.edit-toggle` — rename, describe, assignee, link popovers
 /// — then card menu, then the modal itself) so one press closes exactly the
 /// topmost overlay and never falls through to close two at once. The other
 /// overlay scripts (`datepicker_script`, `escape_closes`) keep only their
-/// click/outside-click logic; this is the only place `Escape` is handled.
+/// click/outside-click logic. The topbar `.user-menu` is handled one script
+/// earlier, by `layout::escape_script`, registered before this one so its
+/// blur wins over anything below.
 async fn card_menu_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -609,6 +611,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             (crate::detail::new_task_modal(cx, &all_columns, lang).await?)
         }
         (crate::dropdown::dropdown_script(cx).await?)
+        (crate::layout::escape_script(cx).await?)
         (card_menu_script(cx).await?)
     }
 }

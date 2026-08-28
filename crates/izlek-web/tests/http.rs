@@ -222,12 +222,21 @@ impl App {
     /// forcing JSON, an optional cookie, and the raw bytes back untouched — a
     /// download's body is not always UTF-8.
     async fn get(&self, path: &str, cookie: Option<&str>) -> Raw {
+        self.get_with_range(path, cookie, None).await
+    }
+
+    /// Like `get`, but with a `Range` header, for exercising the
+    /// `/files/{id}` partial-content path.
+    async fn get_with_range(&self, path: &str, cookie: Option<&str>, range: Option<&str>) -> Raw {
         let mut request = Request::builder().method("GET").uri(path);
         if let Some(cookie) = cookie {
             request = request.header(
                 header::COOKIE,
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
+        }
+        if let Some(range) = range {
+            request = request.header(header::RANGE, range);
         }
         let response = self.router.handle(request.body(Body::empty()).unwrap()).await;
         let status = response.status();
@@ -241,8 +250,18 @@ impl App {
             .get(header::CONTENT_DISPOSITION)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+        let content_range = response
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let accept_ranges = response
+            .headers()
+            .get(header::ACCEPT_RANGES)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec();
-        Raw { status, content_type, disposition, bytes }
+        Raw { status, content_type, disposition, content_range, accept_ranges, bytes }
     }
 }
 
@@ -258,6 +277,8 @@ struct Raw {
     status: StatusCode,
     content_type: Option<String>,
     disposition: Option<String>,
+    content_range: Option<String>,
+    accept_ranges: Option<String>,
     bytes: Vec<u8>,
 }
 
@@ -718,6 +739,9 @@ async fn the_board_sort_control_keeps_its_hidden_select_and_gets_a_dropdown_trig
     // house trigger + panel client-side; its presence is the page's only
     // server-rendered proof the shell is wired in.
     assert!(html.contains("dd-trigger"), "no dropdown script on the board page: {html}");
+    // `layout.rs`'s shared Escape handler — proof the topbar `.user-menu`
+    // gets its close path on the board page too.
+    assert!(html.contains("closest('.user-menu')"), "no escape script on the board page: {html}");
 }
 
 #[tokio::test]
@@ -1110,6 +1134,25 @@ async fn settings_selects_keep_their_hidden_form_fields_and_get_a_dropdown_trigg
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("select class=\"field-input\" name=\"theme\""), "{html}");
     assert!(html.contains("dd-trigger"), "no dropdown script on the settings page: {html}");
+    assert!(html.contains("closest('.user-menu')"), "no escape script on the settings page: {html}");
+}
+
+/// The rules and logs pages carry no `board.rs`, so like settings they wire
+/// `layout.rs`'s shared Escape script in for themselves — rules also closes
+/// its `<details class="rule-new">` composer on the same press.
+#[tokio::test]
+async fn the_rules_and_logs_pages_get_the_shared_escape_script() {
+    let app = App::open().await;
+    let cookie = admin(&app).await;
+
+    let rules_page = app.get("/rules", Some(&cookie)).await;
+    let rules_html = String::from_utf8_lossy(&rules_page.bytes);
+    assert!(rules_html.contains("closest('.user-menu')"), "no escape script on the rules page: {rules_html}");
+    assert!(rules_html.contains("details.rule-new[open]"), "escape script does not close the rule composer: {rules_html}");
+
+    let logs_page = app.get("/logs", Some(&cookie)).await;
+    let logs_html = String::from_utf8_lossy(&logs_page.bytes);
+    assert!(logs_html.contains("closest('.user-menu')"), "no escape script on the logs page: {logs_html}");
 }
 
 #[tokio::test]
@@ -2240,6 +2283,47 @@ async fn dl_forces_a_download_of_an_otherwise_inline_type() {
         "{:?}",
         forced.disposition
     );
+}
+
+// Safari refuses to play `<video>`/`<audio>` without a `206` answer to its
+// own `Range` probe on the download route.
+#[tokio::test]
+async fn a_range_request_answers_206_with_the_sliced_bytes_and_a_bad_range_answers_416() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ranged download").await;
+
+    let bytes = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart("/files", Some(&admin_cookie), &[("task_id", &task)], Some(("spec.png", "image/png", &bytes))).await;
+    let snapshot = app.post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)]).await;
+    let file_id = attachment_id_named(&snapshot.body, "spec.png");
+    let total = bytes.len();
+
+    let no_range = app.get(&format!("/files/{file_id}"), Some(&admin_cookie)).await;
+    assert_eq!(no_range.status, StatusCode::OK);
+    assert_eq!(no_range.accept_ranges.as_deref(), Some("bytes"));
+    assert_eq!(no_range.bytes, bytes);
+
+    let first_four = app
+        .get_with_range(&format!("/files/{file_id}"), Some(&admin_cookie), Some("bytes=0-3"))
+        .await;
+    assert_eq!(first_four.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(first_four.content_range.as_deref(), Some(format!("bytes 0-3/{total}").as_str()));
+    assert_eq!(first_four.bytes, &bytes[0..4]);
+
+    let last_two = app
+        .get_with_range(&format!("/files/{file_id}"), Some(&admin_cookie), Some("bytes=-2"))
+        .await;
+    assert_eq!(last_two.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(last_two.content_range.as_deref(), Some(format!("bytes {}-{}/{total}", total - 2, total - 1).as_str()));
+    assert_eq!(last_two.bytes, &bytes[total - 2..]);
+
+    let out_of_range = app
+        .get_with_range(&format!("/files/{file_id}"), Some(&admin_cookie), Some(&format!("bytes={total}-{}", total + 10)))
+        .await;
+    assert_eq!(out_of_range.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(out_of_range.content_range.as_deref(), Some(format!("bytes */{total}").as_str()));
 }
 
 #[tokio::test]

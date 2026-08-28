@@ -9,6 +9,7 @@
 use time::OffsetDateTime;
 use topcoat::context::Cx;
 use topcoat::router::content::multipart::Multipart;
+use topcoat::router::request::headers as request_headers;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, path_param, query_params, route};
 
 use izlek_core::store::{NewAttachment, Store, User};
@@ -84,6 +85,15 @@ fn sniff(bytes: &[u8]) -> &'static str {
         "application/gzip"
     } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
         "image/avif"
+    } else if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(&bytes[8..12], b"heic" | b"heix" | b"hevc" | b"heif" | b"mif1" | b"msf1")
+    {
+        // Apple's HEIC container reuses the ISO-BMFF `ftyp` box video shares;
+        // the brand at bytes 8..12 is what tells a photo from a video apart.
+        "image/heic"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"qt  " {
+        "video/quicktime"
     } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
         "video/mp4"
     } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
@@ -134,12 +144,15 @@ fn disposition_of(file_name: &str, inline: bool) -> String {
 /// Whether the browser renders this stored mime type on its own — image,
 /// video, audio, PDF or plain text — rather than only offering to save it.
 /// Trusts the stored mime alone; nothing here sniffs bytes a second time.
+/// `image/heic` is excluded: no browser engine decodes it, so it stays a
+/// download link rather than a broken `<img>`.
 fn renders_inline(mime_type: &str) -> bool {
-    mime_type.starts_with("image/")
-        || mime_type.starts_with("video/")
-        || mime_type.starts_with("audio/")
-        || mime_type == "application/pdf"
-        || mime_type == "text/plain"
+    mime_type != "image/heic"
+        && (mime_type.starts_with("image/")
+            || mime_type.starts_with("video/")
+            || mime_type.starts_with("audio/")
+            || mime_type == "application/pdf"
+            || mime_type == "text/plain")
 }
 
 /// The element the in-app viewer opens one attachment in, decided from its
@@ -156,7 +169,9 @@ pub(crate) enum ViewerKind {
 }
 
 pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
-    if mime_type.starts_with("image/") {
+    if mime_type == "image/heic" {
+        None
+    } else if mime_type.starts_with("image/") {
         Some(ViewerKind::Image)
     } else if mime_type.starts_with("video/") {
         Some(ViewerKind::Video)
@@ -171,6 +186,43 @@ pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
 
 fn not_found() -> (StatusCode, HeaderMap, Vec<u8>) {
     (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new())
+}
+
+/// A single-range `Range: bytes=...` request resolved against `total` bytes,
+/// as `(start, end)` inclusive. `None` for anything this does not parse as
+/// exactly one `bytes=` range (a multi-range header included) — the caller
+/// falls back to a full `200` response, which is always a valid answer to a
+/// `Range` request. `Some(None)` would be needless: an unsatisfiable range
+/// (start at or past `total`, or an empty file) is reported as `Err(())` so
+/// the caller can answer `416` instead of serving nonsense bytes.
+fn parse_range(header: &str, total: u64) -> Option<Result<(u64, u64), ()>> {
+    let spec = header.strip_prefix("bytes=")?;
+    if spec.contains(',') || total == 0 {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    if start.is_empty() {
+        // `bytes=-N`: the last N bytes.
+        let suffix: u64 = end.parse().ok()?;
+        if suffix == 0 {
+            return Some(Err(()));
+        }
+        let start = total.saturating_sub(suffix);
+        return Some(Ok((start, total - 1)));
+    }
+    let start: u64 = start.parse().ok()?;
+    if start >= total {
+        return Some(Err(()));
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<u64>().ok()?.min(total - 1)
+    };
+    if end < start {
+        return Some(Err(()));
+    }
+    Some(Ok((start, end)))
 }
 
 /// `?dl=1` forces `attachment` on a type that would otherwise render inline
@@ -346,7 +398,32 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&disposition_of(&row.file_name, inline)).unwrap_or(HeaderValue::from_static("attachment")),
     );
-    Ok((StatusCode::OK, headers, bytes))
+    // Safari refuses to play a `<video>`/`<audio>` element without a `206`
+    // reply to its own `Range` probe; every other engine loses instant seek
+    // without one. Sent on every response, not only media — harmless either
+    // way and one less type to special-case.
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+
+    let total = bytes.len() as u64;
+    let range = request_headers(cx).get(header::RANGE).and_then(|v| v.to_str().ok());
+    match range.and_then(|r| parse_range(r, total)) {
+        Some(Ok((start, end))) => {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).unwrap(),
+            );
+            Ok((StatusCode::PARTIAL_CONTENT, headers, slice))
+        }
+        Some(Err(())) => {
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{total}")).unwrap(),
+            );
+            Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers, Vec::new()))
+        }
+        None => Ok((StatusCode::OK, headers, bytes)),
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +442,9 @@ mod tests {
     fn sniffs_the_media_types() {
         assert_eq!(sniff(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"), "video/mp4");
         assert_eq!(sniff(b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00"), "image/avif");
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"), "image/heic");
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00"), "image/heic");
+        assert_eq!(sniff(b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"), "video/quicktime");
         assert_eq!(sniff(&[0x1A, 0x45, 0xDF, 0xA3, 0x00, 0x00]), "video/webm");
         assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
         assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WAVEfmt "), "audio/wav");
@@ -427,6 +507,8 @@ mod tests {
         assert!(renders_inline("text/plain"));
         assert!(!renders_inline("application/octet-stream"));
         assert!(!renders_inline("application/zip"));
+        assert!(!renders_inline("image/heic"), "no browser decodes heic");
+        assert!(renders_inline("video/quicktime"));
     }
 
     #[test]
@@ -437,5 +519,24 @@ mod tests {
         assert_eq!(viewer_kind("application/pdf"), Some(ViewerKind::Pdf));
         assert_eq!(viewer_kind("text/plain"), None);
         assert_eq!(viewer_kind("application/octet-stream"), None);
+        assert_eq!(viewer_kind("image/heic"), None, "no decoder, no viewer element");
+        assert_eq!(viewer_kind("video/quicktime"), Some(ViewerKind::Video));
+    }
+
+    #[test]
+    fn range_parses_start_end_suffix_and_open_ended() {
+        assert_eq!(parse_range("bytes=0-3", 10), Some(Ok((0, 3))));
+        assert_eq!(parse_range("bytes=-2", 10), Some(Ok((8, 9))));
+        assert_eq!(parse_range("bytes=5-", 10), Some(Ok((5, 9))));
+        assert_eq!(parse_range("bytes=5-100", 10), Some(Ok((5, 9))), "end clamps to the last byte");
+    }
+
+    #[test]
+    fn range_is_unsatisfiable_past_the_end_and_ignored_when_multi_range_or_malformed() {
+        assert_eq!(parse_range("bytes=10-20", 10), Some(Err(())));
+        assert_eq!(parse_range("bytes=-0", 10), Some(Err(())));
+        assert_eq!(parse_range("bytes=0-3,5-8", 10), None, "multi-range falls back to a full body");
+        assert_eq!(parse_range("nonsense", 10), None);
+        assert_eq!(parse_range("bytes=0-3", 0), None, "an empty file has no range to satisfy");
     }
 }

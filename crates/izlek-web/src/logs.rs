@@ -501,5 +501,6 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                 </section>
             </main>
         </div>
+        (crate::layout::escape_script(cx).await?)
     }
 }

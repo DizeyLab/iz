@@ -48,7 +48,11 @@
   --avatar-tone-3: #7b4655;
   --avatar-tone-4: #46707b;
 
-  --font-sans: 'Schibsted Grotesk', 'Segoe UI', system-ui, sans-serif;
+  --violet-tint: #f1eaf7;
+  --violet-border: #ddc4ec;
+  --violet-ink: #6a3f82;
+
+  --font-sans: 'Inter', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   --radius: 6px;
@@ -67,7 +71,7 @@
   --muted: #8b949e;
   --muted-soft: #6e7681;
   --accent: #8b9dd9;
-  --accent-tint: #1c2333;
+  --accent-tint: #1c2c4f;
   --accent-ink: #b7c4e8;
 
   --field-bg: #10151c;
@@ -82,15 +86,15 @@
   --on-strong: #f0f6fc;
 
   --danger: #b35449;
-  --danger-tint: #221316;
-  --danger-tint-soft: #1f1214;
+  --danger-tint: #3a1a13;
+  --danger-tint-soft: #2c221f;
   --danger-tint-alt: #1d1113;
   --danger-border: #57302e;
-  --danger-border-soft: #3f2626;
+  --danger-border-soft: #4a3230;
   --danger-border-alt: #3a2323;
 
   --warn-ink: #c69a4e;
-  --warn-tint: #221c10;
+  --warn-tint: #2e2410;
   --warn-tint-soft: #1e190e;
   --warn-border: #57452a;
 
@@ -106,6 +110,10 @@
   --avatar-tone-1: #937d58;
   --avatar-tone-3: #96606e;
   --avatar-tone-4: #5b93a1;
+
+  --violet-tint: #2e1f42;
+  --violet-border: #513a6e;
+  --violet-ink: #cba8ea;
 }
 
 * { box-sizing: border-box; }
@@ -2330,27 +2338,30 @@ option:hover {
 }
 
 // One chosen word inside the sentence: a column, a subject, an audience.
+// Identity, not state — a neutral outline so the toned verdict chips below
+// stand out next to it instead of blending in.
 .rule-term {
   display: inline-flex;
   align-items: center;
   padding: 3px 8px;
-  background: var(--accent-tint);
-  border: 1px solid var(--accent-border-strong);
+  background: transparent;
+  border: 1px solid var(--border-strong);
   border-radius: 5px;
   font-weight: 500;
+  color: var(--ink);
 }
 
 .rule-row-off .rule-term {
-  background: var(--surface-sunken);
-  border-color: var(--border-strong);
+  border-color: var(--border-soft);
+  color: var(--muted-soft);
 }
 
 // A verdict or a queue state, toned so the eye can sort a page of them
-// without reading every word: sent/queued reads as the app's "connected"
-// green, failed/abandoned as its danger orange, held/pending as its warning
-// amber, and everything that is quietly not-a-failure (not matched, no
-// recipients, rule off) or is worse than a failure (the task is gone) stays
-// muted rather than competing for attention.
+// without reading every word: sent/queued reads as the app's accent blue,
+// failed/abandoned as its danger orange, held/pending as its warning amber,
+// no recipients gets its own violet tone, and everything that is quietly
+// not-a-failure (not matched, rule off) stays muted rather than competing
+// for attention.
 .rule-term-owed,
 .rule-term-already_owed,
 .rule-term-sent {
@@ -2374,11 +2385,16 @@ option:hover {
 }
 
 .rule-term-not_matched,
-.rule-term-no_recipients,
 .rule-term-disabled {
   background: var(--surface-sunken);
   border-color: var(--border-strong);
   color: var(--muted);
+}
+
+.rule-term-no_recipients {
+  background: var(--violet-tint);
+  border-color: var(--violet-border);
+  color: var(--violet-ink);
 }
 
 .rule-term-task_gone {
