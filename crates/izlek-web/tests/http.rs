@@ -1517,9 +1517,14 @@ async fn taking_a_task_in_and_letting_it_out_are_the_same_form() {
     // The subtask kept its column: being taken in is not a move.
     let page = app.get(&format!("/?task={loose}"), Some(&admin)).await;
     let page = String::from_utf8_lossy(&page.bytes);
+    // The way back up: a link that names the whole, not a caption.
     assert!(
-        page.contains("Part of"),
-        "the part does not name its whole"
+        page.contains("detail-parent") && page.contains(&format!("/?task={parent}")),
+        "the part does not link back to its whole"
+    );
+    assert!(
+        page.contains("Ship the exporter"),
+        "the link back does not name the task it goes to"
     );
 
     let released = app
@@ -1697,6 +1702,62 @@ async fn a_parents_own_part_is_not_offered_as_a_blocker() {
     assert!(
         page.contains(&stranger),
         "an unrelated task vanished from the page"
+    );
+}
+
+#[tokio::test]
+async fn a_file_input_without_a_name_label_still_submits() {
+    // The shared change handler used to read `.file-upload-name` out of the
+    // input's label and set its text. The profile photo's label holds an
+    // avatar and no such span, so the read threw and the submit that came
+    // after it never ran — the photo silently never uploaded. The handler
+    // tolerates a missing name now; this holds both halves of that.
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let page = app.get("/settings", Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+
+    assert!(
+        page.contains("avatar-upload"),
+        "the profile photo control is gone"
+    );
+    assert!(
+        page.contains("var name = label ? label.querySelector('.file-upload-name') : null"),
+        "the file-input handler assumes a name label again"
+    );
+    assert!(
+        page.contains("if (name && control.files && control.files[0])"),
+        "the name write is unguarded again"
+    );
+}
+
+#[tokio::test]
+async fn the_whole_control_box_opens_its_dropdown() {
+    // A status control is a box holding a dot, the trigger and a chevron.
+    // Listening on the trigger alone leaves every other part of the box dead
+    // where it looks clickable. The delegated listener walks up to whatever
+    // *directly* contains a single trigger, which pins the hit area to the
+    // visual box and needs no markup to opt in.
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let task = a_task(&app, &admin, &columns[0], "Anything").await;
+    let page = app.get(&format!("/?task={task}"), Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+
+    assert!(
+        page.contains("found[0].parentNode === box"),
+        "the dropdown hit area is back to the button alone"
+    );
+    assert!(
+        page.contains("trigger.__ddPanel = panel"),
+        "a delegated click can no longer reach the panel"
+    );
+    // The box really is a box with siblings around the select — which is the
+    // shape that made the button-only listener wrong in the first place.
+    assert!(
+        page.contains("status-dot") && page.contains("status-select"),
+        "the status control changed shape"
     );
 }
 

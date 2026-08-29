@@ -946,6 +946,19 @@ pub(crate) mod glyph {
         }
     }
 
+    /// An open part. Deliberately not the padlock: a dependency row's lock
+    /// means "something is in front of this", and a subtask that is simply
+    /// unfinished is not blocked by anything.
+    pub async fn ring(cx: &Cx) -> Result {
+        view! {
+            cx =>
+            <svg class="glyph" width="12" height="12" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                <circle cx="8" cy="8" r="5"></circle>
+            </svg>
+        }
+    }
+
     pub async fn tick(cx: &Cx) -> Result {
         view! {
             cx =>
@@ -1409,12 +1422,18 @@ async fn subtask_row(
     }
     view! {
         cx =>
-        <div class=(class!("dep-row", "subtask-row-done" if done))>
-            if done { (glyph::tick(cx).await?) } else { (glyph::lock(cx).await?) }
-            <a class="dep-key" href=(href.clone())>(part.task_key.clone())</a>
-            <a class="dep-title" href=(href)>(part.title.clone())</a>
+        <div class=(class!("subtask-row", "subtask-row-done" if done))>
+            // One link, not two: the key and the title are the same target,
+            // so the whole of the row's text is the way in.
+            <a class="subtask-open" href=(href)>
+                <span class="subtask-mark">
+                    if done { (glyph::tick(cx).await?) } else { (glyph::ring(cx).await?) }
+                </span>
+                <span class="subtask-key">(part.task_key.clone())</span>
+                <span class="subtask-title">(part.title.clone())</span>
+            </a>
             <div class="spacer"></div>
-            <span class="dep-note">(status)</span>
+            <span class="subtask-status">(status)</span>
             <div class="avatars">
                 for face in faces { (face) }
             </div>
@@ -1683,7 +1702,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                         <div class="detail-headline">
                             if let Some(parent) = detail.parent.clone() {
                                 <a class="detail-parent" href=(format!("/?task={}", parent.id))>
-                                    (format!("{} {}", t(lang, Key::PartOf), parent.task_key))
+                                    <span class="detail-parent-arrow">"\u{2190}"</span>
+                                    <span class="detail-parent-key">(parent.task_key.clone())</span>
+                                    <span class="detail-parent-title">(parent.title.clone())</span>
                                 </a>
                             }
                             <span class="detail-key">(detail.task_key.clone())</span>

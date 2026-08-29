@@ -262,8 +262,9 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
             document.addEventListener('change', function (e) { \
                 var control = e.target; \
                 if (control.classList && control.classList.contains('file-upload-input')) { \
-                    var name = control.closest('label').querySelector('.file-upload-name'); \
-                    if (control.files && control.files[0]) { name.textContent = control.files[0].name; } \
+                    var label = control.closest('label'); \
+                    var name = label ? label.querySelector('.file-upload-name') : null; \
+                    if (name && control.files && control.files[0]) { name.textContent = control.files[0].name; } \
                     control.form.requestSubmit(); \
                     return; \
                 } \

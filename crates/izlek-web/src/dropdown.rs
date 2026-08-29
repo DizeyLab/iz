@@ -10,6 +10,33 @@
 //! visible trigger — same closed look as the select it replaces — and a
 //! `position: fixed` panel of option rows, portaled onto `<body>`, stands
 //! in for the OS popup.
+//!
+//! ## The whole box is the hit area
+//!
+//! The trigger is one child among several inside a control box — a status
+//! dot before it, a chevron after it, the box's own padding around all of
+//! them — so a button-only listener leaves dead zones exactly where the
+//! control looks clickable. That bug has been fixed one control at a time
+//! before; this is the version that cannot come back. A delegated listener
+//! walks up from whatever was clicked and, on finding the element that
+//! *directly* contains a single `.dd-trigger`, opens that trigger's panel.
+//!
+//! "Directly contains" is the whole of the rule: it pins the hit area to
+//! the visual box and no further, so a click on a field's outer row or on
+//! the modal around it does not reach in and open something. Nothing has to
+//! be marked up for this to work — a new control gets it by existing, which
+//! is what makes it structural rather than another remembered convention.
+//!
+//! Anything else genuinely interactive keeps its own click — a link, a
+//! button, a text field. `<label>` is deliberately *not* on that list: the
+//! new-task modal wraps its status box in one, and bailing on labels put
+//! every dead zone straight back.
+//!
+//! The delegated click also calls `preventDefault`. A `<label>` forwards a
+//! click to the control it labels, so without it the browser delivered a
+//! *second* click straight to the trigger, which toggled the panel shut
+//! again in the same gesture — opening and closing looked exactly like the
+//! dead zone the delegation was added to remove.
 
 use topcoat::Result;
 use topcoat::context::Cx;
@@ -115,6 +142,8 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 panel.className = 'dd-panel';\
                 panel.setAttribute('role', 'listbox');\
                 panel.__ddTrigger = trigger;\
+                trigger.__ddPanel = panel;\
+                trigger.__ddSelect = select;\
                 var allOpts = opts(select);\
                 var search = null;\
                 if (allOpts.length > 7 || select.hasAttribute('data-search')) {\
@@ -189,6 +218,25 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 if (trigger) { trigger.focus(); }\
                 return true;\
             });\
+            document.addEventListener('click', function (e) {\
+                var el = e.target;\
+                if (!el || !el.closest) { return; }\
+                if (el.closest('.dd-panel') || el.closest('.dd-trigger')) { return; }\
+                if (el.closest('a, button, input:not([type=hidden]), textarea')) { return; }\
+                var box = el.nodeType === 1 ? el : el.parentNode;\
+                for (var depth = 0; depth < 3 && box && box.querySelectorAll; depth++) {\
+                    var found = box.querySelectorAll('.dd-trigger');\
+                    if (found.length === 1 && found[0].parentNode === box && found[0].__ddPanel) {\
+                        var t = found[0];\
+                        e.stopPropagation();\
+                        e.preventDefault();\
+                        if (t.__ddPanel.classList.contains('dd-open')) { closeAll(); }\
+                        else { openPanel(t.__ddSelect, t, t.__ddPanel); }\
+                        return;\
+                    }\
+                    box = box.parentNode;\
+                }\
+            }, true);\
             document.addEventListener('click', closeAll);\
             window.addEventListener('scroll', function (e) {\
                 var t = e.target;\
