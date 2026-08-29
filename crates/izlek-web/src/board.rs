@@ -343,6 +343,8 @@ async fn render_card(
         None => t(lang, Key::NoDeadline).to_string(),
     };
     let comments = card.comment_count;
+    let subtasks = card.subtask_label();
+    let subtasks_open = card.holds_on_subtasks();
     let mut assignees = Vec::new();
     for person in card.assignees.iter() {
         assignees.push(crate::layout::avatar(cx, person, "").await?);
@@ -377,6 +379,9 @@ async fn render_card(
                 <span class="card-deadline" class:card-deadline-overdue=(overdue) class:card-deadline-none=(!dated)>
                     (deadline)
                 </span>
+                if let Some(parts) = subtasks.clone() {
+                    <span class="card-subtasks" class:card-subtasks-open=(subtasks_open)>(format!("{parts} \u{2630}"))</span>
+                }
                 if comments > 0 { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
                 <div class="spacer"></div>
                 <div class="avatars">
@@ -620,6 +625,8 @@ mod sort_tests {
             comment_count: 0,
             blocked_by: Vec::new(),
             blocks: Vec::new(),
+            subtask_total: 0,
+            subtask_done: 0,
         }
     }
 

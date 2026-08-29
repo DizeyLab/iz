@@ -365,6 +365,9 @@ pub enum Refusal {
     /// carries it, and a number cannot survive the round trip through the
     /// address bar that a browser without script makes.
     SubtasksOpen,
+    /// Subtasks go one level deep: the task named as a parent is itself a
+    /// part, or the task being filed already has parts of its own.
+    NotNestable,
     /// No such task — or none this account may see. Deliberately one answer for
     /// both.
     NotFound,
@@ -415,6 +418,7 @@ impl Refusal {
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
             Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
             Refusal::SubtasksOpen => "Subtasks are still open.".to_string(),
+            Refusal::NotNestable => "Subtasks go one level deep.".to_string(),
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::NoSuchMember => "No such member.".to_string(),
             Refusal::Unavailable => "Something went wrong.".to_string(),
@@ -445,6 +449,7 @@ impl Refusal {
             Refusal::Cycle => "Bu bağlantı görevi kendi arkasına koyar.".to_string(),
             Refusal::MovedAlready => "Bu kartı başka biri zaten taşıdı.".to_string(),
             Refusal::SubtasksOpen => "Alt görevler hâlâ açık.".to_string(),
+            Refusal::NotNestable => "Alt görevler tek seviyedir.".to_string(),
             Refusal::NotFound => "Böyle bir görev yok.".to_string(),
             Refusal::NoSuchMember => "Böyle bir üye yok.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
@@ -520,6 +525,7 @@ impl Refusal {
             "cycle" => Refusal::Cycle,
             "moved-already" => Refusal::MovedAlready,
             "subtasks-open" => Refusal::SubtasksOpen,
+            "not-nestable" => Refusal::NotNestable,
             "not-found" => Refusal::NotFound,
             "no-such-member" => Refusal::NoSuchMember,
             "unavailable" => Refusal::Unavailable,
@@ -574,6 +580,7 @@ impl Refusal {
             Refusal::Cycle => "cycle",
             Refusal::MovedAlready => "moved-already",
             Refusal::SubtasksOpen => "subtasks-open",
+            Refusal::NotNestable => "not-nestable",
             Refusal::NotFound => "not-found",
             Refusal::NoSuchMember => "no-such-member",
             Refusal::Unavailable => "unavailable",
@@ -852,6 +859,7 @@ mod refusal_message_tests {
             Refusal::Cycle,
             Refusal::MovedAlready,
             Refusal::SubtasksOpen,
+            Refusal::NotNestable,
             Refusal::NotFound,
             Refusal::NoSuchMember,
             Refusal::Unavailable,

@@ -37,6 +37,11 @@ pub struct TaskRow {
     pub deadline: Option<Date>,
     pub position: f64,
     pub done_at: Option<OffsetDateTime>,
+    /// The task this one is a subtask of. A row with a parent gets no card of
+    /// its own on the board — it is counted on its parent's instead — but it
+    /// is still read with the rest, because a key it owns can appear on
+    /// somebody else's card as a blocker.
+    pub parent_id: Option<String>,
 }
 
 /// One card crossing from one column into another, as it was written.
@@ -123,11 +128,28 @@ pub struct TaskCard {
     pub blocked_by: Vec<String>,
     /// Keys of the tasks waiting on this one.
     pub blocks: Vec<String>,
+    /// How many subtasks this card has, and how many of them are finished.
+    /// Both are zero for a card with none, which is what hides the chip.
+    pub subtask_total: u32,
+    pub subtask_done: u32,
 }
 
 impl TaskCard {
     pub fn is_done(&self) -> bool {
         self.done_at.is_some()
+    }
+
+    /// The `2/5` the card wears, or nothing when the task has no parts. It is
+    /// also the only place the count appears when a move is refused, which is
+    /// why the refusal itself does not carry one.
+    pub fn subtask_label(&self) -> Option<String> {
+        (self.subtask_total > 0)
+            .then(|| format!("{}/{}", self.subtask_done, self.subtask_total))
+    }
+
+    /// Whether finishing this card is currently refused.
+    pub fn holds_on_subtasks(&self) -> bool {
+        self.subtask_done < self.subtask_total
     }
 
     /// Blocked means something unfinished is in front of it. A finished task is
@@ -306,13 +328,41 @@ pub fn assemble(
         }
     }
 
+    // A subtask is counted on its parent's card, never given one of its own.
+    let mut subtask_total: HashMap<&str, u32> = HashMap::new();
+    let mut subtask_done: HashMap<&str, u32> = HashMap::new();
+    for task in &tasks {
+        if let Some(parent) = task.parent_id.as_deref() {
+            *subtask_total.entry(parent).or_default() += 1;
+            if task.done_at.is_some() {
+                *subtask_done.entry(parent).or_default() += 1;
+            }
+        }
+    }
+    let subtask_total: HashMap<String, u32> = subtask_total
+        .into_iter()
+        .map(|(id, n)| (id.to_string(), n))
+        .collect();
+    let subtask_done: HashMap<String, u32> = subtask_done
+        .into_iter()
+        .map(|(id, n)| (id.to_string(), n))
+        .collect();
+
     let mut cards: HashMap<String, Vec<TaskCard>> = HashMap::new();
     for task in tasks {
+        // Read with the rest so its key can appear as a blocker chip, but the
+        // board is a board of tasks: a subtask reaches its page through its
+        // parent's.
+        if task.parent_id.is_some() {
+            continue;
+        }
         let card = TaskCard {
             comment_count: counts.get(&task.id).copied().unwrap_or(0),
             assignees: people.remove(&task.id).unwrap_or_default(),
             blocked_by: blocked_by.remove(&task.id).unwrap_or_default(),
             blocks: blocks.remove(&task.id).unwrap_or_default(),
+            subtask_total: subtask_total.get(&task.id).copied().unwrap_or(0),
+            subtask_done: subtask_done.get(&task.id).copied().unwrap_or(0),
             id: task.id,
             task_key: task.task_key,
             title: task.title,

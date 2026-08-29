@@ -155,6 +155,8 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang
         ActivityKind::Unassigned => crate::i18n::unassigned_label(lang, detail),
         ActivityKind::Linked => crate::i18n::linked_label(lang, detail),
         ActivityKind::Unlinked => crate::i18n::unlinked_label(lang, detail),
+        ActivityKind::Parented => crate::i18n::parented_label(lang, detail),
+        ActivityKind::Unparented => crate::i18n::unparented_label(lang, detail),
         ActivityKind::Moved => crate::i18n::moved_label(lang, detail),
         ActivityKind::Unblocked => crate::i18n::unblocked_label(lang, detail),
         ActivityKind::Deleted => t(lang, Key::ActDeleted).to_string(),

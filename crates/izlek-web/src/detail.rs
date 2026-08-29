@@ -77,6 +77,10 @@ pub struct DetailSnapshot {
     /// shift into this, the same as `/logs` does.
     pub zone: UtcOffset,
     pub linkable: Vec<LinkTarget>,
+    /// Tasks this one could take in as parts: the board's other top-level
+    /// tasks that have no parts of their own. Empty when this task is itself
+    /// a part — subtasks go one level deep.
+    pub adoptable: Vec<LinkTarget>,
     pub may_write: bool,
     pub may_comment: bool,
     pub may_delete: bool,
@@ -235,6 +239,21 @@ struct LinkForm {
 }
 
 #[derive(Deserialize)]
+struct NewSubtaskForm {
+    parent_id: String,
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct ParentForm {
+    task_id: String,
+    /// Empty means "let it out": the same form both ways, because parenting
+    /// and promoting are the same single write.
+    #[serde(default)]
+    parent_id: String,
+}
+
+#[derive(Deserialize)]
 struct CommentForm {
     task_id: String,
     body: String,
@@ -272,6 +291,7 @@ async fn load_snapshot(
     // already on either end of a live link with this one. A cleared edge is
     // not a link any more, so its task comes back to the picker.
     let mut linkable = Vec::new();
+    let mut adoptable = Vec::new();
     if let Some(board) = store.board(&user.workspace_id).await? {
         let taken: Vec<&str> = detail
             .blocked_by
@@ -280,7 +300,28 @@ async fn load_snapshot(
             .filter(|edge| edge.cleared_at.is_none())
             .map(|edge| edge.task_id.as_str())
             .collect();
-        for task in store.tasks_for_board(&board.id).await? {
+        let tasks = store.tasks_for_board(&board.id).await?;
+        // Who already has parts, so the picker does not offer a task whose
+        // own children would become grandchildren.
+        let parents: Vec<&str> = tasks
+            .iter()
+            .filter_map(|task| task.parent_id.as_deref())
+            .collect();
+        for task in &tasks {
+            let is_self = task.id == detail.id;
+            if detail.parent.is_none()
+                && !is_self
+                && task.parent_id.is_none()
+                && !parents.contains(&task.id.as_str())
+            {
+                adoptable.push(LinkTarget {
+                    id: task.id.clone(),
+                    task_key: task.task_key.clone(),
+                    title: task.title.clone(),
+                });
+            }
+        }
+        for task in tasks {
             if task.id == detail.id || taken.contains(&task.id.as_str()) {
                 continue;
             }
@@ -290,6 +331,7 @@ async fn load_snapshot(
                 title: task.title,
             });
         }
+        adoptable.sort_by(|a, b| a.id.cmp(&b.id));
         // Sorted by id, not `task_key`: the key's tail is a random ULID
         // suffix now, not a counter, so only the id (a ULID itself) still
         // orders these by creation time.
@@ -375,6 +417,7 @@ async fn load_snapshot(
     Ok(Ok(DetailSnapshot {
         detail,
         linkable,
+        adoptable,
         may_write,
         may_comment: user.role.can_comment(),
         may_delete: may_write,
@@ -582,6 +625,104 @@ async fn unlink_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
             &ActivityKind::Unlinked,
             &other.row.task_key,
             now,
+        )
+        .await?;
+    mail(cx).after_activity(store, activity_id);
+    redirect(cx, None)
+}
+
+/// Opens a new task already filed under this one. It starts in the board's
+/// first column, the way a card dropped on the board's first column would.
+#[route(POST "/api/create_subtask")]
+async fn create_subtask(cx: &Cx, Form(input): Form<NewSubtaskForm>) -> Redirect {
+    use izlek_core::store::NewTask;
+
+    let (actor, parent) = match writer_and_task(cx, &input.parent_id).await {
+        Ok(pair) => pair,
+        Err(refusal) => return redirect(cx, Some(refusal)),
+    };
+    let title = input.title.trim();
+    if title.is_empty() {
+        return redirect(cx, Some(Refusal::EmptyTitle));
+    }
+    let store = accounts(cx).store().clone();
+    let columns = store.columns(&parent.board_id).await?;
+    let Some(first) = columns.iter().min_by_key(|column| column.position) else {
+        return redirect(cx, Some(Refusal::NotFound));
+    };
+    let created = match store
+        .create_task(NewTask {
+            board_id: &parent.board_id,
+            column_id: &first.id,
+            parent_id: Some(&input.parent_id),
+            title,
+            description: "",
+            deadline: None,
+            created_by: &actor.id,
+        })
+        .await
+    {
+        Ok(created) => created,
+        Err(StoreError::NotNestable) => return redirect(cx, Some(Refusal::NotNestable)),
+        Err(error) => return Err(error.into()),
+    };
+    mail(cx).after_activity(store.clone(), created.activity_id);
+    mail(cx).after(created.transition);
+    redirect(cx, None)
+}
+
+/// Files a task under another one, or lets it out again — an empty
+/// `parent_id` is the second. One handler, because it is one write.
+#[route(POST "/api/set_parent")]
+async fn set_parent(cx: &Cx, Form(input): Form<ParentForm>) -> Redirect {
+    use izlek_core::detail::ActivityKind;
+    use time::OffsetDateTime;
+
+    let (actor, task) = match writer_and_task(cx, &input.task_id).await {
+        Ok(pair) => pair,
+        Err(refusal) => return redirect(cx, Some(refusal)),
+    };
+    let store = accounts(cx).store().clone();
+    let wanted = input.parent_id.trim();
+
+    // Whichever end is not the task itself has to be a task this person may
+    // see, so the key the activity line names is one they already have.
+    let (parent_id, other_key) = if wanted.is_empty() {
+        let Some(had) = task.row.parent_id.clone() else {
+            return redirect(cx, None);
+        };
+        match task_of(store.as_ref(), &actor, &had).await {
+            Ok(facts) => (None, facts.row.task_key),
+            Err(refusal) => return redirect(cx, Some(refusal)),
+        }
+    } else {
+        match task_of(store.as_ref(), &actor, wanted).await {
+            Ok(facts) => (Some(facts.row.id.clone()), facts.row.task_key),
+            Err(refusal) => return redirect(cx, Some(refusal)),
+        }
+    };
+
+    match store.set_parent(&input.task_id, parent_id.as_deref()).await {
+        Ok(()) => {}
+        Err(StoreError::NotNestable) => return redirect(cx, Some(Refusal::NotNestable)),
+        Err(StoreError::OtherBoard) => return redirect(cx, Some(Refusal::Forbidden)),
+        Err(StoreError::Cycle) => return redirect(cx, Some(Refusal::Cycle)),
+        Err(StoreError::NotFound) => return redirect(cx, Some(Refusal::NotFound)),
+        Err(error) => return Err(error.into()),
+    }
+
+    let kind = if parent_id.is_some() {
+        ActivityKind::Parented
+    } else {
+        ActivityKind::Unparented
+    };
+    let activity_id = store
+        .record_activity(
+            &input.task_id,
+            Some(&actor.id),
+            &kind,
+            &other_key,
+            OffsetDateTime::now_utc(),
         )
         .await?;
     mail(cx).after_activity(store, activity_id);
@@ -1231,6 +1372,88 @@ async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget], lang: Lang
     }
 }
 
+/// One part on its parent's page: its key, its title, who holds it, and the
+/// button that lets it out. The status is the column's name, read off the
+/// board's columns the page already has.
+async fn subtask_row(
+    cx: &Cx,
+    part: &izlek_core::detail::SubtaskLine,
+    columns: &[izlek_core::Column],
+    may_write: bool,
+    lang: Lang,
+) -> Result {
+    let done = part.is_done();
+    let status = columns
+        .iter()
+        .find(|column| column.id == part.column_id)
+        .map(|column| column.name.clone())
+        .unwrap_or_default();
+    let href = format!("/?task={}", part.id);
+    let release_title = t(lang, Key::ReleaseThisPart);
+    let mut faces = Vec::new();
+    for person in &part.assignees {
+        faces.push(crate::layout::avatar(cx, person, "").await?);
+    }
+    view! {
+        cx =>
+        <div class=(class!("dep-row", "subtask-row-done" if done))>
+            if done { (glyph::tick(cx).await?) } else { (glyph::lock(cx).await?) }
+            <a class="dep-key" href=(href.clone())>(part.task_key.clone())</a>
+            <a class="dep-title" href=(href)>(part.title.clone())</a>
+            <div class="spacer"></div>
+            <span class="dep-note">(status)</span>
+            <div class="avatars">
+                for face in faces { (face) }
+            </div>
+            if may_write {
+                <form class="dep-unlink-form" method="post" action="/api/set_parent">
+                    <input type="hidden" name="task_id" value=(part.id.clone())>
+                    <input type="hidden" name="parent_id" value="">
+                    <button class="dep-unlink" type="submit" title=(release_title)>(glyph::cross(cx).await?)</button>
+                </form>
+            }
+        </div>
+    }
+}
+
+/// Takes an existing task in as a part. The same shape as `link_picker`, and
+/// absent for the same reason: with nothing to offer it shows nothing.
+async fn adopt_picker(cx: &Cx, task_id: &str, adoptable: &[LinkTarget], lang: Lang) -> Result {
+    if adoptable.is_empty() {
+        return view! { cx => };
+    }
+    let toggle = format!("adopt-{task_id}");
+    let aria = t(lang, Key::MakeAPart);
+    view! {
+        cx =>
+        <div class="edit edit-pop link-pop">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(aria)>
+            <label class="dep-chip edit-view edit-hit" for=(toggle.clone())>
+                (glyph::plus(cx).await?)
+                <span class="dep-chip-text">(t(lang, Key::MakeAPart))</span>
+            </label>
+            <div class="edit-form pop-panel pop-panel-wide">
+                <form class="pop-form" method="post" action="/api/set_parent">
+                    <input type="hidden" name="parent_id" value=(task_id.to_string())>
+                    <div class="pop-list pop-list-scroll">
+                        for target in adoptable {
+                            <label class="pick-row">
+                                <input type="radio" name="task_id" value=(target.id.clone()) required="">
+                                <span class="dep-key">(target.task_key.clone())</span>
+                                <span class="pick-title">(target.title.clone())</span>
+                            </label>
+                        }
+                    </div>
+                    <div class="edit-row">
+                        <button class="edit-save" type="submit">(t(lang, Key::ExistingTask))</button>
+                        <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
+                    </div>
+                </form>
+            </div>
+        </div>
+    }
+}
+
 async fn dep_row(
     cx: &Cx,
     task_id: &str,
@@ -1402,6 +1625,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
         today,
         zone,
         linkable,
+        adoptable,
         may_write,
         may_comment,
         may_delete,
@@ -1413,6 +1637,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
     let lang = Lang::from_code(&me.language);
 
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
+    let done_parts = detail.subtasks.iter().filter(|part| part.is_done()).count();
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
     let accept = (!allowed_file_types.is_empty())
         .then(|| {
@@ -1443,6 +1668,11 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 <div class="detail-mast">
                     <header class="detail-head">
                         <div class="detail-headline">
+                            if let Some(parent) = detail.parent.clone() {
+                                <a class="detail-parent" href=(format!("/?task={}", parent.id))>
+                                    (format!("{} {}", t(lang, Key::PartOf), parent.task_key))
+                                </a>
+                            }
                             <span class="detail-key">(detail.task_key.clone())</span>
                             (title_control(cx, &detail, may_write, lang).await?)
                         </div>
@@ -1556,6 +1786,43 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 <div class="detail-body">
                     if tab == Tab::Task {
 
+
+                    if detail.parent.is_none() {
+                        <section class="detail-block">
+                            <div class="detail-block-head">
+                                <span class="detail-label">(t(lang, Key::Subtasks))</span>
+                                if !detail.subtasks.is_empty() {
+                                    <span class="detail-count">(format!("{}/{}", done_parts, detail.subtasks.len()))</span>
+                                }
+                                <div class="spacer"></div>
+                                if may_write {
+                                    (adopt_picker(cx, &detail.id, &adoptable, lang).await?)
+                                }
+                            </div>
+                            if may_write {
+                                <form class="subtask-new" method="post" action="/api/create_subtask">
+                                    <input type="hidden" name="parent_id" value=(detail.id.clone())>
+                                    <label class="field-box subtask-new-box">
+                                        (glyph::plus(cx).await?)
+                                        <input class="field-input" type="text" name="title"
+                                            placeholder=(t(lang, Key::NewSubtask)) required="" maxlength="200">
+                                    </label>
+                                    <button class="edit-save" type="submit">(t(lang, Key::AddSubtask))</button>
+                                </form>
+                            }
+                            (refused(cx, "create_subtask", lang).await?)
+                            (refused(cx, "set_parent", lang).await?)
+                            if detail.subtasks.is_empty() {
+                                <p class="detail-prose detail-prose-empty">(t(lang, Key::NoSubtasks))</p>
+                            } else {
+                                <div class="dep-list">
+                                    for part in &detail.subtasks {
+                                        (subtask_row(cx, part, &detail.columns, may_write, lang).await?)
+                                    }
+                                </div>
+                            }
+                        </section>
+                    }
 
                     <section class="detail-block">
                         <span class="detail-label">(t(lang, Key::Description))</span>
@@ -1682,6 +1949,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                         <ul class="confirm-list">
                                             if cost.comment_count > 0 {
                                                 <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
+                                            }
+                                            if cost.subtask_count > 0 {
+                                                <li>(if cost.subtask_count == 1 { t(lang, Key::SubtaskGoesWithIt).to_string() } else { format!("{} {}", cost.subtask_count, t(lang, Key::SubtasksGoWithIt)) })</li>
                                             }
                                             if cost.link_count > 0 {
                                                 <li>(if cost.link_count == 1 { t(lang, Key::DependencyStopsApplying).to_string() } else { format!("{} {}", cost.link_count, t(lang, Key::DependenciesStopApplying)) })</li>

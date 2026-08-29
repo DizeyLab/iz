@@ -858,11 +858,16 @@ a {
   }
 }
 
-.card-comments {
+.card-comments,
+.card-subtasks {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
 }
+
+/// Parts still open is the same warning the blocker chips carry: this card
+/// cannot reach the done column yet.
+.card-subtasks-open { color: var(--warn-ink); }
 
 .avatars {
   display: flex;
@@ -1441,6 +1446,18 @@ img.avatar {
   color: var(--muted-soft);
 }
 
+// A subtask says whose part it is above its own key, so the page it opens on
+// still names the work it belongs to.
+.detail-parent {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  text-decoration: none;
+
+  &:hover { color: var(--ink); }
+}
+
 .detail-title {
   margin: 0;
   font-size: 18px;
@@ -1924,6 +1941,28 @@ img.avatar {
   border-radius: var(--radius-md);
   background: var(--field-bg);
   font-size: 13px;
+}
+
+// A finished part reads back the way a finished card does: still there,
+// still legible, plainly no longer in the way.
+.subtask-row-done {
+  .dep-key,
+  .dep-title,
+  .dep-note { color: var(--muted-soft); }
+
+  .dep-title { text-decoration: line-through; }
+}
+
+.subtask-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.subtask-new-box {
+  flex: 1;
+  min-width: 0;
 }
 
 .dep-row-waiting {

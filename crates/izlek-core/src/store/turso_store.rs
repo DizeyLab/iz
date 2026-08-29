@@ -24,7 +24,7 @@ use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
 use crate::detail::{
     ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, FileLine,
-    TaskFacts,
+    SubtaskLine, TaskFacts,
 };
 use time::Date;
 use time::format_description::BorrowedFormatItem;
@@ -1466,6 +1466,7 @@ impl Store for TursoStore {
                 deadline: new.deadline,
                 position,
                 done_at: None,
+                parent_id: new.parent_id.map(str::to_string),
             },
             activity_id,
             transition: Transition {
@@ -1588,6 +1589,7 @@ impl Store for TursoStore {
                 deadline: opt_day(&row, 4)?,
                 position: row.get::<f64>(5).unwrap_or(0.0),
                 done_at: opt_stamp(&row, 6)?,
+                parent_id: Some(parent_id.to_string()),
             });
         }
         Ok(out)
@@ -1627,6 +1629,24 @@ impl Store for TursoStore {
             return Err(StoreError::Cycle);
         }
         let stamp = stamp(at)?;
+
+        // A parent and its own part are already related, and the board would
+        // draw the relationship twice: once as a chip, once as the count.
+        {
+            let conn = self.conn.lock().await;
+            let mut rows = conn
+                .query(
+                    "SELECT 1 FROM task WHERE (id = ?1 AND parent_id = ?2) \
+                     OR (id = ?2 AND parent_id = ?1) LIMIT 1",
+                    params![blocked_task_id, blocking_task_id],
+                )
+                .await
+                .map_err(backend)?;
+            let related = rows.next().await.map_err(backend)?.is_some();
+            if related {
+                return Err(StoreError::Cycle);
+            }
+        }
 
         let mut conn = self.tx_conn().await?;
         // IMMEDIATE: the reachability read and the insert that invalidates it
@@ -2196,6 +2216,15 @@ impl Store for TursoStore {
                 params![task_id, stamp.clone()],
             )
             .await?;
+            // The parts go with the whole, in the same write. A subtask that
+            // outlived its parent would be unreachable: the board does not
+            // show it, and the page that did is gone.
+            tx.execute(
+                "UPDATE task SET deleted_at = ?2, updated_at = ?2 \
+                 WHERE parent_id = ?1 AND deleted_at IS NULL",
+                params![task_id, stamp.clone()],
+            )
+            .await?;
             let deleted_activity_id = Ulid::new().to_string();
             tx.execute(
                 "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
@@ -2324,17 +2353,20 @@ impl Store for TursoStore {
                   ON t.id = CASE WHEN d.blocked_task_id = ?1 \
                                  THEN d.blocking_task_id ELSE d.blocked_task_id END \
                   WHERE (d.blocked_task_id = ?1 OR d.blocking_task_id = ?1) \
-                  AND d.cleared_at IS NULL AND t.deleted_at IS NULL)",
+                  AND d.cleared_at IS NULL AND t.deleted_at IS NULL), \
+                 (SELECT COUNT(*) FROM task \
+                  WHERE parent_id = ?1 AND deleted_at IS NULL)",
                 params![task_id],
             )
             .await
             .map_err(backend)?;
-        let (comment_count, link_count) = match rows.next().await.map_err(backend)? {
+        let (comment_count, link_count, subtask_count) = match rows.next().await.map_err(backend)? {
             Some(row) => (
                 row.get::<i64>(0).map_err(backend)?.max(0) as u32,
                 row.get::<i64>(1).map_err(backend)?.max(0) as u32,
+                row.get::<i64>(2).map_err(backend)?.max(0) as u32,
             ),
-            None => (0, 0),
+            None => (0, 0, 0),
         };
         drop(rows);
 
@@ -2366,6 +2398,7 @@ impl Store for TursoStore {
             comment_count,
             link_count,
             frees,
+            subtask_count,
         }))
     }
 
@@ -3289,7 +3322,7 @@ impl DetailReads for TursoStore {
         let row = self
             .one_row(
                 "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.position, \
-                 t.done_at, t.description, t.board_id, b.workspace_id \
+                 t.done_at, t.description, t.board_id, b.workspace_id, t.parent_id \
                  FROM task t JOIN board b ON b.id = t.board_id \
                  WHERE t.id = ?1 AND t.deleted_at IS NULL",
                 params![task_id],
@@ -3305,6 +3338,7 @@ impl DetailReads for TursoStore {
                 deadline: opt_day(&row, 4)?,
                 position: row.get::<f64>(5).map_err(backend)?,
                 done_at: opt_stamp(&row, 6)?,
+                parent_id: opt_text(&row, 10)?,
             },
             description: text(&row, 7)?,
             board_id: text(&row, 8)?,
@@ -3486,6 +3520,65 @@ impl DetailReads for TursoStore {
         }
         Ok(out)
     }
+
+    async fn family_for_task(&self, task_id: &str) -> Result<Vec<(bool, SubtaskLine)>> {
+        let conn = self.conn.lock().await;
+        // One query for both directions, and one for the assignees too: the
+        // LEFT JOIN repeats a task's row once per person it points at, and the
+        // fold below puts them back together. A task detail is not allowed to
+        // cost a query per subtask.
+        let mut rows = conn
+            .query(
+                "SELECT t.id, t.task_key, t.title, t.column_id, t.done_at, t.parent_id, \
+                 u.id, u.display_name, (u.photo IS NOT NULL) \
+                 FROM task t \
+                 LEFT JOIN task_assignee a ON a.task_id = t.id \
+                 LEFT JOIN user u ON u.id = a.user_id \
+                 WHERE t.deleted_at IS NULL AND ( \
+                   t.parent_id = ?1 \
+                   OR t.id = (SELECT parent_id FROM task WHERE id = ?1) \
+                 ) \
+                 ORDER BY t.created_at, u.display_name",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+
+        let mut out: Vec<(bool, SubtaskLine)> = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let id = text(&row, 0)?;
+            // A row whose parent is the task we asked about is one of its
+            // parts; anything else this query can return is the parent.
+            let is_parent = opt_text(&row, 5)?.as_deref() != Some(task_id);
+            let person = match opt_text(&row, 6)? {
+                Some(user_id) => Some(Person {
+                    id: user_id,
+                    display_name: text(&row, 7)?,
+                    has_photo: row.get::<i64>(8).map_err(backend)? != 0,
+                }),
+                None => None,
+            };
+            match out.last_mut() {
+                Some((_, line)) if line.id == id => {
+                    if let Some(person) = person {
+                        line.assignees.push(person);
+                    }
+                }
+                _ => out.push((
+                    is_parent,
+                    SubtaskLine {
+                        id,
+                        task_key: text(&row, 1)?,
+                        title: text(&row, 2)?,
+                        column_id: text(&row, 3)?,
+                        done_at: opt_stamp(&row, 4)?,
+                        assignees: person.into_iter().collect(),
+                    },
+                )),
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait]
@@ -3534,7 +3627,7 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT id, task_key, title, column_id, deadline, position, done_at \
+                "SELECT id, task_key, title, column_id, deadline, position, done_at, parent_id \
                  FROM task WHERE board_id = ?1 AND deleted_at IS NULL",
                 params![board_id],
             )
@@ -3550,6 +3643,7 @@ impl BoardReads for TursoStore {
                 deadline: opt_day(&row, 4)?,
                 position: row.get::<f64>(5).map_err(backend)?,
                 done_at: opt_stamp(&row, 6)?,
+                parent_id: opt_text(&row, 7)?,
             });
         }
         Ok(out)

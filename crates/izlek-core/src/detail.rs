@@ -99,6 +99,25 @@ impl FileLine {
 
 /// What deleting a task would take with it. The confirmation step says this
 /// out loud before the button fires.
+/// One row in the subtask list on a task's page, and the "part of DZ-14" line
+/// on a subtask's own page — the same shape both ways, because a subtask and
+/// its parent are the same kind of thing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtaskLine {
+    pub id: String,
+    pub task_key: String,
+    pub title: String,
+    pub column_id: String,
+    pub done_at: Option<OffsetDateTime>,
+    pub assignees: Vec<Person>,
+}
+
+impl SubtaskLine {
+    pub fn is_done(&self) -> bool {
+        self.done_at.is_some()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletionCost {
     pub task_key: String,
@@ -108,6 +127,9 @@ pub struct DeletionCost {
     pub link_count: u32,
     /// Keys of the tasks that would have nothing in front of them afterwards.
     pub frees: Vec<String>,
+    /// How many subtasks would go with it. A part has no meaning once the
+    /// whole is gone, so deleting a parent deletes them too.
+    pub subtask_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,6 +155,10 @@ pub enum ActivityKind {
     Unassigned,
     Linked,
     Unlinked,
+    /// Filed under another task, and let out of it again. The detail is the
+    /// other task's key both ways.
+    Parented,
+    Unparented,
     Moved,
     Unblocked,
     Deleted,
@@ -169,6 +195,8 @@ impl ActivityKind {
     pub fn as_str(&self) -> &str {
         match self {
             ActivityKind::Commented => "commented",
+            ActivityKind::Parented => "parented",
+            ActivityKind::Unparented => "unparented",
             ActivityKind::WorkspaceClaimed => "workspace_claimed",
             ActivityKind::Invited => "invited",
             ActivityKind::LinkResent => "link_resent",
@@ -216,6 +244,8 @@ impl ActivityKind {
             "unassigned" => ActivityKind::Unassigned,
             "linked" => ActivityKind::Linked,
             "unlinked" => ActivityKind::Unlinked,
+            "parented" => ActivityKind::Parented,
+            "unparented" => ActivityKind::Unparented,
             "moved" => ActivityKind::Moved,
             "unblocked" => ActivityKind::Unblocked,
             "deleted" => ActivityKind::Deleted,
@@ -272,6 +302,8 @@ impl ActivityEntry {
             ActivityKind::Unassigned => format!("unassigned {detail}"),
             ActivityKind::Linked => format!("linked {detail}"),
             ActivityKind::Unlinked => format!("unlinked {detail}"),
+            ActivityKind::Parented => format!("made this a part of {detail}"),
+            ActivityKind::Unparented => format!("released this from {detail}"),
             ActivityKind::Moved => format!("moved {detail}"),
             ActivityKind::Unblocked => format!("unblocked this task — {detail}"),
             ActivityKind::Deleted => "deleted this task".to_string(),
@@ -412,6 +444,10 @@ pub struct TaskDetail {
     /// Files hung off this task, oldest first.
     pub files: Vec<FileLine>,
     pub activity: Vec<ActivityEntry>,
+    /// The task this one is a part of, when it is one.
+    pub parent: Option<SubtaskLine>,
+    /// The parts of this task, oldest first. Always empty for a subtask.
+    pub subtasks: Vec<SubtaskLine>,
 }
 
 impl TaskDetail {
@@ -483,7 +519,7 @@ pub use reads::{DetailReads, load};
 mod reads {
     use async_trait::async_trait;
 
-    use super::{ActivityEntry, Comment, DependencyEdge, FileLine, TaskDetail, TaskFacts};
+    use super::{ActivityEntry, Comment, DependencyEdge, FileLine, SubtaskLine, TaskDetail, TaskFacts};
     use crate::board::{Column, Person};
     use crate::store::Result;
 
@@ -515,14 +551,21 @@ mod reads {
         async fn files_for_task(&self, task_id: &str) -> Result<Vec<FileLine>>;
 
         async fn activity_for_task(&self, task_id: &str) -> Result<Vec<ActivityEntry>>;
+
+        /// A task's parent and its subtasks in one read: `true` marks the
+        /// parent. One of the two is always empty — a subtask has a parent and
+        /// no children, a parent has children and no parent of its own — but
+        /// the query is the same either way, so it is one query either way.
+        async fn family_for_task(&self, task_id: &str) -> Result<Vec<(bool, SubtaskLine)>>;
     }
 
-    /// Loads one task detail in eight queries — the task, the board's columns,
+    /// Loads one task detail in nine queries — the task, the board's columns,
     /// its assignees, the workspace's writers, both directions of its
-    /// dependencies, its comments, its files and its activity.
+    /// dependencies, its comments, its files, its activity, and its family.
     ///
-    /// Eight, not eight-plus-one-per-comment: `a_task_detail_costs_eight_
-    /// queries_whatever_it_carries` in `tests/store.rs` holds that line.
+    /// Nine, not nine-plus-one-per-comment or -per-subtask: `a_task_detail_
+    /// costs_nine_queries_whatever_it_carries` in `tests/store.rs` holds that
+    /// line.
     pub async fn load(
         reads: &dyn DetailReads,
         workspace_id: &str,
@@ -544,6 +587,17 @@ mod reads {
         let comments = reads.comments_for_task(task_id).await?;
         let files = reads.files_for_task(task_id).await?;
         let activity = reads.activity_for_task(task_id).await?;
+        let family = reads.family_for_task(task_id).await?;
+
+        let mut parent = None;
+        let mut subtasks = Vec::new();
+        for (is_parent, line) in family {
+            if is_parent {
+                parent = Some(line);
+            } else {
+                subtasks.push(line);
+            }
+        }
 
         let Some(column) = columns
             .iter()
@@ -578,6 +632,8 @@ mod reads {
             comments,
             files,
             activity,
+            parent,
+            subtasks,
         }))
     }
 }

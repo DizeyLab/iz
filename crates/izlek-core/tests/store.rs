@@ -405,6 +405,170 @@ async fn a_promoted_subtask_stops_holding_its_parent() {
 }
 
 #[tokio::test]
+async fn the_board_counts_subtasks_instead_of_carding_them() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
+    let cards: Vec<&izlek_core::board::TaskCard> =
+        board.columns.iter().flat_map(|c| &c.cards).collect();
+    assert_eq!(cards.len(), 1, "the subtask took a card of its own");
+    assert_eq!(cards[0].id, parent);
+    assert_eq!(cards[0].subtask_total, 1);
+    assert_eq!(cards[0].subtask_done, 0);
+    assert_eq!(cards[0].subtask_label().as_deref(), Some("0/1"));
+    assert!(cards[0].holds_on_subtasks());
+
+    moved_to(&scratch.store, &workspace, &child, "Backlog", "Done", &admin).await;
+    let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
+    let card = board
+        .columns
+        .iter()
+        .flat_map(|c| &c.cards)
+        .find(|card| card.id == parent)
+        .unwrap();
+    assert_eq!(card.subtask_label().as_deref(), Some("1/1"));
+    assert!(!card.holds_on_subtasks());
+}
+
+#[tokio::test]
+async fn a_card_with_no_parts_wears_no_chip() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    add_task(&scratch.store, &workspace, "Backlog", "Alone", None, &admin).await;
+
+    let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
+    let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+    assert_eq!(card.subtask_label(), None);
+    assert!(!card.holds_on_subtasks());
+}
+
+#[tokio::test]
+async fn a_subtask_blocking_a_card_still_names_itself_on_it() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (_parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+    let other = add_task(&scratch.store, &workspace, "Backlog", "Waiting", None, &admin).await;
+    scratch
+        .store
+        .add_dependency(&other, &child, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    // The subtask has no card, but its key is real and the chip has to show
+    // it: dropping the row would leave the blocked card looking free.
+    let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
+    let waiting = board
+        .columns
+        .iter()
+        .flat_map(|c| &c.cards)
+        .find(|card| card.id == other)
+        .unwrap();
+    assert_eq!(waiting.blocked_by.len(), 1);
+    assert!(waiting.is_blocked());
+}
+
+#[tokio::test]
+async fn a_parent_and_its_own_part_are_not_linked_as_well() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+    let now = OffsetDateTime::now_utc();
+
+    assert!(matches!(
+        scratch.store.add_dependency(&parent, &child, now).await,
+        Err(StoreError::Cycle)
+    ));
+    assert!(matches!(
+        scratch.store.add_dependency(&child, &parent, now).await,
+        Err(StoreError::Cycle)
+    ));
+}
+
+#[tokio::test]
+async fn a_task_detail_carries_its_family_both_ways() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+    scratch.store.assign_task(&child, &admin).await.unwrap();
+
+    let whole = load_detail(&scratch.store, &workspace, &parent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(whole.parent.is_none());
+    assert_eq!(whole.subtasks.len(), 1);
+    assert_eq!(whole.subtasks[0].id, child);
+    assert_eq!(whole.subtasks[0].assignees.len(), 1);
+    assert!(!whole.subtasks[0].is_done());
+
+    let part = load_detail(&scratch.store, &workspace, &child)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(part.parent.as_ref().unwrap().id, parent);
+    assert!(
+        part.subtasks.is_empty(),
+        "a subtask has no parts of its own"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_parent_says_what_it_takes_and_takes_it() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    let cost = scratch
+        .store
+        .deletion_cost(&parent)
+        .await
+        .unwrap()
+        .expect("the parent is there to delete");
+    assert_eq!(cost.subtask_count, 1);
+
+    scratch
+        .store
+        .delete_task(&parent, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    // The part went with the whole, in the same write. A subtask that
+    // outlived its parent would be unreachable.
+    assert!(
+        load_detail(&scratch.store, &workspace, &child)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
+    assert_eq!(board.columns.iter().flat_map(|c| &c.cards).count(), 0);
+}
+
+#[tokio::test]
+async fn deleting_a_subtask_leaves_its_parent_standing() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    scratch
+        .store
+        .delete_task(&child, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let whole = load_detail(&scratch.store, &workspace, &parent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(whole.subtasks.is_empty());
+    let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
+    let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+    assert_eq!(card.subtask_label(), None);
+}
+
+#[tokio::test]
 async fn the_first_account_owns_the_workspace() {
     let scratch = Scratch::open().await;
     assert!(scratch.store.workspace().await.unwrap().is_none());
@@ -2553,6 +2717,14 @@ impl DetailReads for CountingDetail<'_> {
         self.tick();
         self.inner.activity_for_task(task_id).await
     }
+
+    async fn family_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(bool, izlek_core::detail::SubtaskLine)>, StoreError> {
+        self.tick();
+        self.inner.family_for_task(task_id).await
+    }
 }
 
 #[tokio::test]
@@ -2867,7 +3039,7 @@ async fn saving_a_task_records_only_what_changed() {
 }
 
 #[tokio::test]
-async fn a_task_detail_costs_eight_queries_whatever_it_carries() {
+async fn a_task_detail_costs_nine_queries_whatever_it_carries() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
     let now = OffsetDateTime::now_utc();
@@ -2875,11 +3047,12 @@ async fn a_task_detail_costs_eight_queries_whatever_it_carries() {
     let bare = add_task(store, &workspace, "Backlog", "bare", None, &admin).await;
     let counted = CountingDetail::new(store);
     load_detail(&counted, &workspace, &bare).await.unwrap();
-    assert_eq!(counted.count(), 8, "a task with nothing hung off it");
+    assert_eq!(counted.count(), 9, "a task with nothing hung off it");
 
     // Twenty comments, twenty activity lines, twenty people who could be
-    // assigned and twenty tasks on the other end of a dependency — the four
-    // things a naive detail query fans out on.
+    // assigned, twenty tasks on the other end of a dependency and twenty
+    // subtasks each with an assignee — the things a naive detail query fans
+    // out on.
     let heavy = add_task(store, &workspace, "Backlog", "heavy", None, &admin).await;
     for n in 0..20 {
         let person = store
@@ -2910,6 +3083,10 @@ async fn a_task_detail_costs_eight_queries_whatever_it_carries() {
         let neighbour =
             add_task(store, &workspace, "Backlog", &format!("n{n}"), None, &admin).await;
         store.add_dependency(&neighbour, &heavy, now).await.unwrap();
+
+        let part = add_task(store, &workspace, "Backlog", &format!("p{n}"), None, &admin).await;
+        store.set_parent(&part, Some(&heavy)).await.unwrap();
+        store.assign_task(&part, &person.id).await.unwrap();
     }
 
     let counted = CountingDetail::new(store);
@@ -2920,12 +3097,21 @@ async fn a_task_detail_costs_eight_queries_whatever_it_carries() {
     assert_eq!(detail.comments.len(), 20);
     assert_eq!(detail.assignees.len(), 20);
     assert_eq!(detail.blocks.len(), 20);
+    assert_eq!(detail.subtasks.len(), 20);
+    assert!(detail.parent.is_none());
+    assert!(
+        detail
+            .subtasks
+            .iter()
+            .all(|part| part.assignees.len() == 1),
+        "a subtask row carries who holds it"
+    );
     // Twenty comments (each its own Commented line), twenty moves, plus the
     // line create_task wrote.
     assert_eq!(detail.activity.len(), 41);
     assert_eq!(
         counted.count(),
-        8,
+        9,
         "the round trips a detail costs must not follow what it carries"
     );
 }

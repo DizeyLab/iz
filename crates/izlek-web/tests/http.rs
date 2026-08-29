@@ -1430,6 +1430,209 @@ async fn a_card_with_open_subtasks_is_refused_the_done_column() {
 }
 
 #[tokio::test]
+async fn a_subtask_is_opened_from_its_parents_page_and_shows_up_there() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+
+    let made = app
+        .post(
+            "/api/create_subtask",
+            Some(&admin),
+            &[("parent_id", &parent), ("title", "Write the CSV writer")],
+        )
+        .await;
+    assert_eq!(made.body, "null", "the subtask was refused: {}", made.body);
+
+    // The parent's page lists it; the board does not card it.
+    let page = app.get(&format!("/?task={parent}"), Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        page.contains("Write the CSV writer"),
+        "the subtask is not on its parent's page"
+    );
+
+    let workspace_id = app.workspace_id().await;
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let cards: Vec<_> = board.columns.iter().flat_map(|c| &c.cards).collect();
+    assert_eq!(cards.len(), 1, "the subtask took a card of its own");
+    assert_eq!(cards[0].subtask_label().as_deref(), Some("0/1"));
+}
+
+#[tokio::test]
+async fn a_subtask_with_nothing_in_its_title_is_refused() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+
+    // Posted the way a browser without script does, so the refusal has to
+    // survive the round trip through the address bar.
+    let empty = app
+        .post_without_script(
+            "/api/create_subtask",
+            Some(&admin),
+            &format!("http://izlek.sh/?task={parent}"),
+            &[("parent_id", &parent), ("title", "   ")],
+        )
+        .await;
+    assert!(
+        empty
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=empty-title&on=create_subtask"),
+        "{:?}",
+        empty.location
+    );
+}
+
+#[tokio::test]
+async fn taking_a_task_in_and_letting_it_out_are_the_same_form() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+    let loose = a_task(&app, &admin, &columns[1], "Write the CSV writer").await;
+
+    let taken = app
+        .post(
+            "/api/set_parent",
+            Some(&admin),
+            &[("task_id", &loose), ("parent_id", &parent)],
+        )
+        .await;
+    assert_eq!(taken.body, "null", "taking it in was refused: {}", taken.body);
+    let workspace_id = app.workspace_id().await;
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(board.columns.iter().flat_map(|c| &c.cards).count(), 1);
+
+    // The subtask kept its column: being taken in is not a move.
+    let page = app.get(&format!("/?task={loose}"), Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        page.contains("Part of"),
+        "the part does not name its whole"
+    );
+
+    let released = app
+        .post(
+            "/api/set_parent",
+            Some(&admin),
+            &[("task_id", &loose), ("parent_id", "")],
+        )
+        .await;
+    assert_eq!(released.body, "null", "letting it out was refused: {}", released.body);
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        board.columns.iter().flat_map(|c| &c.cards).count(),
+        2,
+        "the released task did not come back to the board"
+    );
+}
+
+#[tokio::test]
+async fn a_second_level_of_subtask_is_refused_at_the_door() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+    let child = a_task(&app, &admin, &columns[0], "Write the CSV writer").await;
+    let loose = a_task(&app, &admin, &columns[0], "Loose").await;
+    app.store.set_parent(&child, Some(&parent)).await.unwrap();
+
+    let refused = app
+        .post_without_script(
+            "/api/create_subtask",
+            Some(&admin),
+            &format!("http://izlek.sh/?task={child}"),
+            &[("parent_id", &child), ("title", "Deeper")],
+        )
+        .await;
+    assert!(
+        refused
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=not-nestable&on=create_subtask"),
+        "{:?}",
+        refused.location
+    );
+
+    let also_refused = app
+        .post_without_script(
+            "/api/set_parent",
+            Some(&admin),
+            &format!("http://izlek.sh/?task={child}"),
+            &[("task_id", &loose), ("parent_id", &child)],
+        )
+        .await;
+    assert!(
+        also_refused
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=not-nestable&on=set_parent"),
+        "{:?}",
+        also_refused.location
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_may_not_open_or_move_a_subtask() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let watcher = invited(&app, &admin, "kay@izlek.sh", "Kay Watcher", Role::Viewer).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+
+    let refused = app
+        .post_without_script(
+            "/api/create_subtask",
+            Some(&watcher),
+            &format!("http://izlek.sh/?task={parent}"),
+            &[("parent_id", &parent), ("title", "Not yours")],
+        )
+        .await;
+    assert!(
+        refused
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden"),
+        "{:?}",
+        refused.location
+    );
+
+    let also = app
+        .post_without_script(
+            "/api/set_parent",
+            Some(&watcher),
+            &format!("http://izlek.sh/?task={parent}"),
+            &[("task_id", &parent), ("parent_id", "")],
+        )
+        .await;
+    assert!(
+        also.location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden"),
+        "{:?}",
+        also.location
+    );
+}
+
+#[tokio::test]
 async fn a_drop_decided_against_a_stale_board_is_refused() {
     let app = App::open().await;
     let admin = admin(&app).await;

@@ -671,6 +671,12 @@ impl Engine {
                 ActivityKind::Retitled => format!("{} renamed it.", actor),
                 ActivityKind::Linked => format!("{} linked {}.", actor, activity.detail),
                 ActivityKind::Unlinked => format!("{} unlinked {}.", actor, activity.detail),
+                ActivityKind::Parented => {
+                    format!("{} made it a part of {}.", actor, activity.detail)
+                }
+                ActivityKind::Unparented => {
+                    format!("{} released it from {}.", actor, activity.detail)
+                }
                 ActivityKind::Deleted => format!("{} deleted it.", actor),
                 // Never a wired trigger — `activity_kind_for` never maps to
                 // these — and account/admin kinds have no task to be mailed

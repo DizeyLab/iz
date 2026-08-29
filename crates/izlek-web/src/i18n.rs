@@ -283,6 +283,16 @@ pub enum Key {
     NoTasks,
     NoDescription,
     NoDependencies,
+    Subtasks,
+    SubtaskGoesWithIt,
+    SubtasksGoWithIt,
+    NoSubtasks,
+    NewSubtask,
+    AddSubtask,
+    PartOf,
+    MakeAPart,
+    ReleaseThisPart,
+    ExistingTask,
     DonePrefix,
     Clear,
     Today,
@@ -822,6 +832,26 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (NoDescription, Tr) => "açıklama yok",
         (NoDependencies, En) => "no dependencies",
         (NoDependencies, Tr) => "bağımlılık yok",
+        (SubtaskGoesWithIt, En) => "its subtask goes with it",
+        (SubtaskGoesWithIt, Tr) => "alt görevi de silinir",
+        (SubtasksGoWithIt, En) => "subtasks go with it",
+        (SubtasksGoWithIt, Tr) => "alt görevi de silinir",
+        (Subtasks, En) => "Subtasks",
+        (Subtasks, Tr) => "Alt görevler",
+        (NoSubtasks, En) => "no subtasks",
+        (NoSubtasks, Tr) => "alt görev yok",
+        (NewSubtask, En) => "Subtask",
+        (NewSubtask, Tr) => "Alt görev",
+        (AddSubtask, En) => "Add",
+        (AddSubtask, Tr) => "Ekle",
+        (PartOf, En) => "Part of",
+        (PartOf, Tr) => "Şunun parçası:",
+        (MakeAPart, En) => "Take an existing task",
+        (MakeAPart, Tr) => "Var olan görevi al",
+        (ReleaseThisPart, En) => "Release this subtask",
+        (ReleaseThisPart, Tr) => "Bu alt görevi serbest bırak",
+        (ExistingTask, En) => "Take",
+        (ExistingTask, Tr) => "Al",
         (DonePrefix, En) => "done ",
         (DonePrefix, Tr) => "bitti ",
         (Clear, En) => "Clear",
@@ -993,6 +1023,20 @@ pub fn linked_label(lang: Lang, detail: &str) -> String {
     match lang {
         Lang::En => format!("linked {detail}"),
         Lang::Tr => format!("{detail} bağladı"),
+    }
+}
+
+pub fn parented_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("made this a part of {detail}"),
+        Lang::Tr => format!("bunu {detail} görevinin parçası yaptı"),
+    }
+}
+
+pub fn unparented_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("released this from {detail}"),
+        Lang::Tr => format!("bunu {detail} görevinden çıkardı"),
     }
 }
 
