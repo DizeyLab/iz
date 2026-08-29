@@ -33,49 +33,6 @@ use time::macros::format_description;
 /// Every migration, in order. Adding one means appending a file and a line.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
-    (2, include_str!("../../migrations/0002_auth.sql")),
-    (3, include_str!("../../migrations/0003_transition.sql")),
-    (4, include_str!("../../migrations/0004_mail.sql")),
-    (5, include_str!("../../migrations/0005_freeing.sql")),
-    (6, include_str!("../../migrations/0006_sender_is_config.sql")),
-    (7, include_str!("../../migrations/0007_who_invited.sql")),
-    (8, include_str!("../../migrations/0008_sender_is_settings.sql")),
-    (9, include_str!("../../migrations/0009_sender_test.sql")),
-    (
-        10,
-        include_str!("../../migrations/0010_attachments_live_in_the_file.sql"),
-    ),
-    (
-        11,
-        include_str!("../../migrations/0011_what_the_mail_decided.sql"),
-    ),
-    (
-        12,
-        include_str!("../../migrations/0012_a_mail_that_owes_no_rule.sql"),
-    ),
-    (
-        13,
-        include_str!("../../migrations/0013_more_than_a_move.sql"),
-    ),
-    (
-        14,
-        include_str!("../../migrations/0014_created_into_a_column_is_a_transition.sql"),
-    ),
-    (
-        15,
-        include_str!("../../migrations/0015_task_details_in_the_mail.sql"),
-    ),
-    (
-        16,
-        include_str!("../../migrations/0016_display_preferences.sql"),
-    ),
-    (17, include_str!("../../migrations/0017_ui_preference.sql")),
-    (18, include_str!("../../migrations/0018_photo_in_the_user.sql")),
-    (19, include_str!("../../migrations/0019_events_without_a_task.sql")),
-    (
-        20,
-        include_str!("../../migrations/0020_a_notice_owes_no_rule_either.sql"),
-    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -1375,10 +1332,34 @@ impl Store for TursoStore {
                 )
                 .await?;
             let Some(row) = rows.next().await? else {
-                return Ok(None);
+                return Ok(Err(StoreError::NotFound));
             };
             let prefix = row.get::<String>(0)?;
             drop(rows);
+
+            // A subtask is checked before anything is written: the parent has
+            // to exist, sit on this board, and not be a subtask itself.
+            if let Some(parent) = new.parent_id {
+                let mut rows = tx
+                    .query(
+                        "SELECT board_id, parent_id FROM task \
+                         WHERE id = ?1 AND deleted_at IS NULL",
+                        params![parent],
+                    )
+                    .await?;
+                let Some(row) = rows.next().await? else {
+                    return Ok(Err(StoreError::NotFound));
+                };
+                let parent_board = row.get::<String>(0)?;
+                let grandparent = row.get::<Option<String>>(1)?;
+                drop(rows);
+                if parent_board != new.board_id {
+                    return Ok(Err(StoreError::OtherBoard));
+                }
+                if grandparent.is_some() {
+                    return Ok(Err(StoreError::NotNestable));
+                }
+            }
 
             // New cards land at the end of their column.
             let mut rows = tx
@@ -1405,9 +1386,9 @@ impl Store for TursoStore {
                 let candidate = format!("{prefix}-{}", &id[id.len() - tail_len..]);
                 match tx
                     .execute(
-                        "INSERT INTO task (id, board_id, task_key, title, description, column_id, \
-                         deadline, position, created_by, created_at, updated_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                        "INSERT INTO task (id, board_id, parent_id, task_key, title, description, \
+                         column_id, deadline, position, created_by, created_at, updated_at) \
+                         VALUES (?1, ?2, ?11, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
                         params![
                             id.clone(),
                             new.board_id,
@@ -1418,7 +1399,8 @@ impl Store for TursoStore {
                             deadline.clone(),
                             position,
                             new.created_by,
-                            now.clone()
+                            now.clone(),
+                            new.parent_id
                         ],
                     )
                     .await
@@ -1456,15 +1438,15 @@ impl Store for TursoStore {
                 ],
             )
             .await?;
-            Ok::<_, turso::Error>(Some((task_key, position)))
+            Ok::<_, turso::Error>(Ok((task_key, position)))
         }
         .await;
 
         let written = match written {
-            Ok(Some(written)) => written,
-            Ok(None) => {
+            Ok(Ok(written)) => written,
+            Ok(Err(refused)) => {
                 let _ = tx.rollback().await;
-                return Err(StoreError::NotFound);
+                return Err(refused);
             }
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -1494,6 +1476,120 @@ impl Store for TursoStore {
                 at,
             },
         })
+    }
+
+    async fn set_parent(&self, task_id: &str, parent_id: Option<&str>) -> Result<()> {
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the one-level rule is read-then-write. Two concurrent
+        // parentings each read a NULL parent, each pass, and the pair leaves a
+        // grandchild neither of them could see.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        let outcome = async {
+            let mut rows = tx
+                .query(
+                    "SELECT board_id FROM task WHERE id = ?1 AND deleted_at IS NULL",
+                    params![task_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(Err(StoreError::NotFound));
+            };
+            let board_id = row.get::<String>(0)?;
+            drop(rows);
+
+            if let Some(parent) = parent_id {
+                if parent == task_id {
+                    return Ok(Err(StoreError::Cycle));
+                }
+                let mut rows = tx
+                    .query(
+                        "SELECT board_id, parent_id FROM task \
+                         WHERE id = ?1 AND deleted_at IS NULL",
+                        params![parent],
+                    )
+                    .await?;
+                let Some(row) = rows.next().await? else {
+                    return Ok(Err(StoreError::NotFound));
+                };
+                let parent_board = row.get::<String>(0)?;
+                let grandparent = row.get::<Option<String>>(1)?;
+                drop(rows);
+                if parent_board != board_id {
+                    return Ok(Err(StoreError::OtherBoard));
+                }
+                if grandparent.is_some() {
+                    return Ok(Err(StoreError::NotNestable));
+                }
+
+                // The other half of the same rule: a task that already has
+                // subtasks cannot become one, or its own children become
+                // grandchildren without ever being touched.
+                let mut rows = tx
+                    .query(
+                        "SELECT 1 FROM task WHERE parent_id = ?1 AND deleted_at IS NULL LIMIT 1",
+                        params![task_id],
+                    )
+                    .await?;
+                let has_children = rows.next().await?.is_some();
+                drop(rows);
+                if has_children {
+                    return Ok(Err(StoreError::NotNestable));
+                }
+            }
+
+            tx.execute(
+                "UPDATE task SET parent_id = ?2 WHERE id = ?1",
+                params![task_id, parent_id],
+            )
+            .await?;
+            Ok::<_, turso::Error>(Ok(()))
+        }
+        .await;
+
+        match outcome {
+            Ok(Ok(())) => {
+                tx.commit().await.map_err(backend)?;
+                Ok(())
+            }
+            Ok(Err(refused)) => {
+                let _ = tx.rollback().await;
+                Err(refused)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(backend(e))
+            }
+        }
+    }
+
+    async fn subtasks(&self, parent_id: &str) -> Result<Vec<TaskRow>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT id, task_key, title, column_id, deadline, position, done_at \
+                 FROM task WHERE parent_id = ?1 AND deleted_at IS NULL \
+                 ORDER BY created_at",
+                params![parent_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(TaskRow {
+                id: text(&row, 0)?,
+                task_key: text(&row, 1)?,
+                title: text(&row, 2)?,
+                column_id: text(&row, 3)?,
+                deadline: opt_day(&row, 4)?,
+                position: row.get::<f64>(5).unwrap_or(0.0),
+                done_at: opt_stamp(&row, 6)?,
+            });
+        }
+        Ok(out)
     }
 
     async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()> {

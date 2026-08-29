@@ -33,6 +33,13 @@ pub enum StoreError {
     /// The dependency asked for would put a task behind itself.
     #[error("that link would make a circle")]
     Cycle,
+    /// Subtasks are one level deep. Either the would-be parent is itself a
+    /// subtask, or the task being parented already has subtasks of its own.
+    #[error("subtasks go one level deep")]
+    NotNestable,
+    /// A parent and its subtask live on the same board.
+    #[error("that task is on another board")]
+    OtherBoard,
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -209,6 +216,9 @@ impl Session {
 pub struct NewTask<'a> {
     pub board_id: &'a str,
     pub column_id: &'a str,
+    /// The task this one is a subtask of, if any. It must be on the same
+    /// board and must not itself be a subtask.
+    pub parent_id: Option<&'a str>,
     pub title: &'a str,
     pub description: &'a str,
     pub deadline: Option<time::Date>,
@@ -740,6 +750,21 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn create_task(&self, new: NewTask<'_>) -> Result<TaskCreated>;
 
     /// Idempotent: assigning someone twice is not an error.
+    /// Makes `task_id` a subtask of `parent_id`, or `None` to promote it back
+    /// to a task of its own. Both directions are one write: that is the whole
+    /// reason a subtask is a task with a parent rather than a row in a table
+    /// of its own.
+    ///
+    /// Refuses with [`StoreError::NotNestable`] when the move would make two
+    /// levels — the parent is already somebody's subtask, or the task being
+    /// parented has subtasks of its own — and with [`StoreError::OtherBoard`]
+    /// when the two are not on the same board.
+    async fn set_parent(&self, task_id: &str, parent_id: Option<&str>) -> Result<()>;
+
+    /// The live subtasks of `parent_id`, oldest first. Empty for a task that
+    /// has none, and for a subtask, which cannot have any.
+    async fn subtasks(&self, parent_id: &str) -> Result<Vec<TaskRow>>;
+
     async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()>;
 
     async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()>;

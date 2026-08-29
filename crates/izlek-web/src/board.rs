@@ -110,6 +110,7 @@ async fn create_task_shared(
         .create_task(NewTask {
             board_id: &board.id,
             column_id,
+            parent_id: None,
             title,
             description: description.trim(),
             deadline,
