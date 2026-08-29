@@ -35,6 +35,11 @@
     box-shadow: inset 0 -2px 0 var(--accent);
   }
 
+  // Active detail tab underlines in accent, same idiom as the topbar nav.
+  .detail-tab-on {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
   // --- Instrument skin: board (ruled columns) --------------------------------
 
   // Columns are not floating wells; they are panels separated by hairline
@@ -210,13 +215,18 @@
   box-shadow: var(--shadow-3);
 }
 
-// Header: key left, Esc and the close cross right. The header's own state
-// chip is suppressed — status lives in the body's field grid.
+// Header: key + title left (stacked), Esc and the close cross right. The
+// header's own state chip is suppressed — status lives in the body's field
+// grid. The tab strip sits directly under it, so the header itself carries
+// no bottom rule any more.
 [data-ui="instrument"] .modal-task .detail-head {
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--border);
+}
+
+[data-ui="instrument"] .detail-tabs {
+  padding: 0 16px;
 }
 
 [data-ui="instrument"] .detail-state,

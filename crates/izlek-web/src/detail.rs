@@ -1328,9 +1328,54 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
 
 /// The task modal's markup: title, description, assignees, deadline,
 /// dependencies, files, comments, activity and delete, exactly as the
+/// Which region of the task detail panel is showing. Only one is drawn at a
+/// time; a `tab=` name it does not recognize falls back to `Task`, same as
+/// `logs.rs`/`settings.rs`'s own rail sections.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Task,
+    Files,
+    Comments,
+    Activity,
+    Mail,
+}
+
+impl Tab {
+    pub fn from_query(tab: Option<&str>) -> Tab {
+        match tab {
+            Some("files") => Tab::Files,
+            Some("comments") => Tab::Comments,
+            Some("activity") => Tab::Activity,
+            Some("mail") => Tab::Mail,
+            _ => Tab::Task,
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Tab::Task => "task",
+            Tab::Files => "files",
+            Tab::Comments => "comments",
+            Tab::Activity => "activity",
+            Tab::Mail => "mail",
+        }
+    }
+}
+
+/// The class a tab link wears: lit on the tab it points to when that is the
+/// one showing, plain otherwise — same idiom as `logs.rs`/`settings.rs`'s
+/// `rail_class`.
+fn tab_class(current: Tab, target: Tab) -> &'static str {
+    if current == target {
+        "detail-tab detail-tab-on"
+    } else {
+        "detail-tab"
+    }
+}
+
 /// artboard draws them. Wiring `?task=<id>` on the board page is a later
 /// integration slice — this only renders the fragment.
-pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result {
+pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) -> Result {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
@@ -1394,7 +1439,10 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
         <div class="modal-scrim">
             <div class="modal modal-task" tabindex="-1">
                 <header class="detail-head">
-                    <span class="detail-key">(detail.task_key.clone())</span>
+                    <div class="detail-headline">
+                        <span class="detail-key">(detail.task_key.clone())</span>
+                        (title_control(cx, &detail, may_write, lang).await?)
+                    </div>
                     <span class="detail-state">
                         if may_write {
                             <form class="status-form" method="post" action="/api/move_card">
@@ -1421,9 +1469,22 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                     <a class="quiet detail-board" href="/">(format!("<- {}", t(lang, Key::NavBoard)))</a>
                 </header>
 
-                <div class="detail-body">
-                    (title_control(cx, &detail, may_write, lang).await?)
+                <nav class="detail-tabs">
+                    <a class=(tab_class(tab, Tab::Task)) href=(format!("/?task={}&tab={}", detail.id, Tab::Task.slug()))>(t(lang, Key::TabTask))</a>
+                    <a class=(tab_class(tab, Tab::Files)) href=(format!("/?task={}&tab={}", detail.id, Tab::Files.slug()))>
+                        (t(lang, Key::Files))
+                        if !detail.files.is_empty() { <span class="detail-tab-count">(detail.files.len())</span> }
+                    </a>
+                    <a class=(tab_class(tab, Tab::Comments)) href=(format!("/?task={}&tab={}", detail.id, Tab::Comments.slug()))>
+                        (t(lang, Key::Comments))
+                        if !detail.comments.is_empty() { <span class="detail-tab-count">(detail.comments.len())</span> }
+                    </a>
+                    <a class=(tab_class(tab, Tab::Activity)) href=(format!("/?task={}&tab={}", detail.id, Tab::Activity.slug()))>(t(lang, Key::Activity))</a>
+                    <a class=(tab_class(tab, Tab::Mail)) href=(format!("/?task={}&tab={}", detail.id, Tab::Mail.slug()))>(t(lang, Key::TabMail))</a>
+                </nav>
 
+                <div class="detail-body">
+                    if tab == Tab::Task {
                     <div class="detail-fields">
                         <div class="detail-field detail-field-status">
                             <span class="detail-label">(t(lang, Key::Status))</span>
@@ -1491,7 +1552,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                             <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
                         }
                     </section>
+                    }
 
+                    if tab == Tab::Files {
                     <section class="detail-block">
                         <div class="detail-block-head">
                             <span class="detail-label">(t(lang, Key::Files))</span>
@@ -1517,7 +1580,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                             (refused(cx, "upload_file", lang).await?)
                         }
                     </section>
+                    }
 
+                    if tab == Tab::Comments {
                     <section class="detail-block">
                         <div class="detail-block-head">
                             <span class="detail-label">(t(lang, Key::Comments))</span>
@@ -1529,7 +1594,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                             }
                         </div>
                     </section>
+                    }
 
+                    if tab == Tab::Activity {
                     <section class="detail-block">
                         <span class="detail-label">(t(lang, Key::Activity))</span>
                         <div class="activity-list">
@@ -1542,7 +1609,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                             }
                         </div>
                     </section>
+                    }
 
+                    if tab == Tab::Mail {
                     <section class="detail-block">
                         <span class="detail-label">(t(lang, Key::Notifications))</span>
                         <div class="activity-list">
@@ -1585,6 +1654,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                             }
                         </div>
                     </section>
+                    }
 
                     (refused(cx, "delete_task", lang).await?)
 
@@ -1623,7 +1693,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                     </footer>
                 </div>
 
-                if may_comment {
+                if tab == Tab::Comments && may_comment {
                     <form class="comment-composer" method="post" action="/api/post_comment">
                         <input type="hidden" name="task_id" value=(detail.id.clone())>
                         <textarea class="detail-textarea comment-input" name="body" rows="3" placeholder=(t(lang, Key::WriteAComment)) required=""></textarea>

@@ -2866,7 +2866,7 @@ async fn the_files_section_is_on_the_detail_page() {
     let task = a_task(&app, &admin_cookie, &column, "Attach something to me").await;
 
     let page = app
-        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .get(&format!("/?task={task}&tab=files"), Some(&admin_cookie))
         .await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
@@ -2993,7 +2993,7 @@ async fn a_member_uploads_a_file_and_the_chip_comes_back() {
         .await;
     let file_id = attachment_id_named(&snapshot.body, "spec.png");
 
-    let page = app.get(&format!("/?task={task}"), Some(&member)).await;
+    let page = app.get(&format!("/?task={task}&tab=files"), Some(&member)).await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
@@ -3795,8 +3795,9 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
 
+    // Activity lives behind its own tab now, so the stamp is asked for there.
     let page = app
-        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .get(&format!("/?task={task}&tab=activity"), Some(&admin_cookie))
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
     let utc_at = activity_stamp_of(&html).to_string();
@@ -3819,7 +3820,7 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
     );
 
     let shifted_page = app
-        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .get(&format!("/?task={task}&tab=activity"), Some(&admin_cookie))
         .await;
     let shifted_html = String::from_utf8_lossy(&shifted_page.bytes);
     let shifted_at = activity_stamp_of(&shifted_html).to_string();
@@ -5274,7 +5275,7 @@ async fn a_tasks_notifications_show_the_recipient_and_the_rule_name_is_admin_onl
     let (task, _send_id) =
         a_task_with_a_notification(&app, &admin_cookie, "Wraps up the sprint").await;
 
-    let member_page = app.get(&format!("/?task={task}"), Some(&member)).await;
+    let member_page = app.get(&format!("/?task={task}&tab=mail"), Some(&member)).await;
     let member_html = String::from_utf8_lossy(&member_page.bytes);
     assert!(member_html.contains("ada@izlek.sh"), "{member_html}");
     assert!(
@@ -5286,7 +5287,7 @@ async fn a_tasks_notifications_show_the_recipient_and_the_rule_name_is_admin_onl
         "a member was shown the rule's name: {member_html}"
     );
 
-    let admin_page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let admin_page = app.get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie)).await;
     let admin_html = String::from_utf8_lossy(&admin_page.bytes);
     assert!(admin_html.contains("ada@izlek.sh"), "{admin_html}");
     assert!(admin_html.contains("Wraps up the sprint"), "{admin_html}");
@@ -5301,7 +5302,7 @@ async fn a_task_with_no_mail_shows_the_quiet_notifications_line() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Nobody mails me").await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app.get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("NOTIFICATIONS"), "{html}");
     assert!(html.contains("Nothing yet."), "{html}");
@@ -5563,4 +5564,202 @@ async fn an_unknown_recipient_refuses_and_never_broadcasts() {
 
     let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+}
+
+
+/// The markup inside a single tab anchor: found by its `tab=<slug>` href, up
+/// to that anchor's own closing tag — for asserting a `detail-tab-count`
+/// span is (or is not) inside the one tab it belongs to, not just somewhere
+/// on the page.
+fn tab_anchor<'a>(html: &'a str, slug: &str) -> &'a str {
+    let needle = format!("&amp;tab={slug}\">");
+    let (_, after) = html
+        .split_once(&needle)
+        .unwrap_or_else(|| panic!("no {slug} tab anchor: {html}"));
+    after
+        .split_once("</a>")
+        .map(|(inner, _)| inner)
+        .expect("unterminated tab anchor")
+}
+
+#[tokio::test]
+async fn opening_the_task_with_no_tab_shows_the_task_region_and_the_strip() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Land on the task tab").await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"class="detail-tabs""#),
+        "no tab strip: {html}"
+    );
+    assert!(
+        html.contains(r#"class="detail-fields""#),
+        "no task fields grid: {html}"
+    );
+    assert!(
+        !html.contains("comment-composer"),
+        "composer shown on the task tab: {html}"
+    );
+}
+
+#[tokio::test]
+async fn each_tab_renders_only_its_own_region() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Walk every tab").await;
+
+    let files = app
+        .get(&format!("/?task={task}&tab=files"), Some(&admin_cookie))
+        .await;
+    let files_html = String::from_utf8_lossy(&files.bytes);
+    assert!(
+        files_html.contains("multipart/form-data"),
+        "no files region: {files_html}"
+    );
+    assert!(
+        !files_html.contains("comment-composer"),
+        "composer shown on the files tab: {files_html}"
+    );
+
+    let comments = app
+        .get(&format!("/?task={task}&tab=comments"), Some(&admin_cookie))
+        .await;
+    let comments_html = String::from_utf8_lossy(&comments.bytes);
+    assert!(
+        comments_html.contains("comment-composer"),
+        "no composer on the comments tab: {comments_html}"
+    );
+
+    let activity = app
+        .get(&format!("/?task={task}&tab=activity"), Some(&admin_cookie))
+        .await;
+    let activity_html = String::from_utf8_lossy(&activity.bytes);
+    assert!(
+        activity_html.contains("activity-stamp"),
+        "no activity stamp: {activity_html}"
+    );
+
+    let mail = app
+        .get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie))
+        .await;
+    let mail_html = String::from_utf8_lossy(&mail.bytes);
+    assert!(
+        mail_html.contains("NOTIFICATIONS"),
+        "no notifications heading: {mail_html}"
+    );
+}
+
+#[tokio::test]
+async fn a_tab_name_it_does_not_know_falls_back_to_the_task_region() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Land on garbage").await;
+
+    let page = app
+        .get(&format!("/?task={task}&tab=zzz"), Some(&admin_cookie))
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"class="detail-fields""#),
+        "garbage tab did not fall back to the task region: {html}"
+    );
+}
+
+#[tokio::test]
+async fn the_tab_strip_counts_files_and_comments_and_is_silent_when_there_are_none() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Nothing attached yet").await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        !tab_anchor(&html, "files").contains("detail-tab-count"),
+        "count shown with no files: {html}"
+    );
+    assert!(
+        !tab_anchor(&html, "comments").contains("detail-tab-count"),
+        "count shown with no comments: {html}"
+    );
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &png)),
+    )
+    .await;
+    app.post(
+        "/api/post_comment",
+        Some(&admin_cookie),
+        &[("task_id", &task), ("body", "One comment")],
+    )
+    .await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        tab_anchor(&html, "files").contains(r#"class="detail-tab-count">1<"#),
+        "no file count of 1: {html}"
+    );
+    assert!(
+        tab_anchor(&html, "comments").contains(r#"class="detail-tab-count">1<"#),
+        "no comment count of 1: {html}"
+    );
+}
+
+#[tokio::test]
+async fn the_title_renders_on_every_tab() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Carry my title everywhere").await;
+
+    for tab in ["task", "files"] {
+        let page = app
+            .get(&format!("/?task={task}&tab={tab}"), Some(&admin_cookie))
+            .await;
+        let html = String::from_utf8_lossy(&page.bytes);
+        assert!(
+            html.contains(r#"class="detail-headline""#),
+            "no headline on tab={tab}: {html}"
+        );
+        assert!(
+            html.contains("Carry my title everywhere"),
+            "no title text on tab={tab}: {html}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_member_who_may_only_read_still_gets_the_tab_strip() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(
+        &app,
+        &admin_cookie,
+        "reads@izlek.sh",
+        "Reader Only",
+        Role::Member,
+    )
+    .await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "A member can still see this").await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&member)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"class="detail-tabs""#),
+        "no tab strip for a member: {html}"
+    );
 }

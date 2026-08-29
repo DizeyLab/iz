@@ -1392,6 +1392,29 @@ img.avatar {
   min-width: 0;
 }
 
+// -- tab strip ----------------------------------------------------------
+
+.detail-tabs {
+  display: flex;
+  gap: 2px;
+  flex: none;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-tab {
+  padding: 9px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.detail-tab-on { color: var(--ink); }
+
+.detail-tab-count { margin-left: 4px; color: var(--muted-soft); }
+
 .detail-key {
   display: block;
   font-family: var(--font-mono);
