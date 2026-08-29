@@ -339,7 +339,7 @@ async fn snapshot_of(
 async fn rule_of_this_workspace(
     cx: &Cx,
     rule_id: &str,
-) -> std::result::Result<Arc<dyn Store>, Refusal> {
+) -> std::result::Result<(Arc<dyn Store>, User, izlek_core::store::MailRule), Refusal> {
     let user = require_admin(cx).await?;
     let store = accounts(cx).store().clone();
     let board = store
@@ -355,7 +355,7 @@ async fn rule_of_this_workspace(
     if rule.board_id != board.id {
         return Err(Refusal::NotFound);
     }
-    Ok(store)
+    Ok((store, user, rule))
 }
 
 /// Every rule on the board, as JSON — kept for callers that post rather than
@@ -463,6 +463,14 @@ async fn create_rule(cx: &Cx, Form(input): Form<CreateRuleForm>) -> Redirect {
     {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    let _ = store
+        .record_event(
+            Some(&user.id),
+            &izlek_core::detail::ActivityKind::RuleCreated,
+            &subject,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await?;
     redirect(cx, None)
 }
 
@@ -541,6 +549,14 @@ async fn update_rule(cx: &Cx, Form(input): Form<UpdateRuleForm>) -> Redirect {
     {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    let _ = store
+        .record_event(
+            Some(&user.id),
+            &izlek_core::detail::ActivityKind::RuleEdited,
+            &subject,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await?;
     redirect(cx, None)
 }
 
@@ -554,8 +570,8 @@ struct SetRuleEnabledForm {
 /// it already owes has been written to the ledger and is still owed.
 #[route(POST "/api/set_rule_enabled")]
 async fn set_rule_enabled(cx: &Cx, Form(input): Form<SetRuleEnabledForm>) -> Redirect {
-    let store = match rule_of_this_workspace(cx, &input.rule_id).await {
-        Ok(store) => store,
+    let (store, user, rule) = match rule_of_this_workspace(cx, &input.rule_id).await {
+        Ok(triple) => triple,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
     if store
@@ -565,6 +581,14 @@ async fn set_rule_enabled(cx: &Cx, Form(input): Form<SetRuleEnabledForm>) -> Red
     {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    let _ = store
+        .record_event(
+            Some(&user.id),
+            &izlek_core::detail::ActivityKind::RuleToggled,
+            &rule.subject,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await?;
     redirect(cx, None)
 }
 
@@ -577,13 +601,21 @@ struct DeleteRuleForm {
 /// gone, the record of what went out is not.
 #[route(POST "/api/delete_rule")]
 async fn delete_rule(cx: &Cx, Form(input): Form<DeleteRuleForm>) -> Redirect {
-    let store = match rule_of_this_workspace(cx, &input.rule_id).await {
-        Ok(store) => store,
+    let (store, user, rule) = match rule_of_this_workspace(cx, &input.rule_id).await {
+        Ok(triple) => triple,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
     if store.delete_mail_rule(&input.rule_id).await.is_err() {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    let _ = store
+        .record_event(
+            Some(&user.id),
+            &izlek_core::detail::ActivityKind::RuleDeleted,
+            &rule.subject,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await?;
     redirect(cx, None)
 }
 

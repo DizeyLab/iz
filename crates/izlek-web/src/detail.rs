@@ -591,6 +591,15 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
     }
 
     store.delete_attachment(&input.file_id).await?;
+    let _ = store
+        .record_activity(
+            &attachment.task_id,
+            Some(&user.id),
+            &izlek_core::detail::ActivityKind::FileRemoved,
+            &attachment.file_name,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await?;
     redirect(cx, None)
 }
 

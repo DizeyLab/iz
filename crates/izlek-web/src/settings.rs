@@ -25,6 +25,7 @@ use topcoat::router::content::Form;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
 use topcoat::view::view;
 
+use izlek_core::detail::ActivityKind;
 use izlek_core::store::{NewSender, SenderTest, User};
 
 use crate::i18n::{Key, Lang, t};
@@ -311,7 +312,18 @@ async fn save_limits(
         )
         .await;
     let refusal = match outcome {
-        Ok(()) => None,
+        Ok(()) => {
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&admin.id),
+                    &ActivityKind::LimitsSaved,
+                    "",
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
+            None
+        }
         Err(problem) => {
             eprintln!("store error: {problem}");
             Some(Refusal::Unavailable)
@@ -404,7 +416,17 @@ async fn save_sender(
         )
         .await;
     let refusal = match outcome {
-        Ok(()) => None,
+        Ok(()) => {
+            let _ = store
+                .record_event(
+                    Some(&admin.id),
+                    &ActivityKind::SenderSaved,
+                    "",
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
+            None
+        }
         Err(problem) => {
             eprintln!("store error: {problem}");
             Some(Refusal::Unavailable)
@@ -465,12 +487,23 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
             error: Some(problem.message.clone()),
         },
     };
+    let sent = test.error.is_none();
     if let Err(problem) = store.record_sender_test(&admin.workspace_id, test).await {
         eprintln!("store error: {problem}");
         return Ok(saved_or_refused(
             "send_test_mail",
             Some(Refusal::Unavailable),
         ));
+    }
+    if sent {
+        let _ = store
+            .record_event(
+                Some(&admin.id),
+                &ActivityKind::TestMailSent,
+                "",
+                time::OffsetDateTime::now_utc(),
+            )
+            .await?;
     }
     Ok(saved_or_refused("send_test_mail", None))
 }
@@ -588,7 +621,17 @@ async fn save_profile(
         )
         .and(store.set_email(&user.id, &user.workspace_id, &email).await);
     let refusal = match outcome {
-        Ok(()) => None,
+        Ok(()) => {
+            let _ = store
+                .record_event(
+                    Some(&user.id),
+                    &ActivityKind::ProfileSaved,
+                    "",
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
+            None
+        }
         Err(izlek_core::store::StoreError::Conflict("account")) => Some(Refusal::AddressTaken),
         Err(problem) => {
             eprintln!("store error: {problem}");
@@ -621,6 +664,15 @@ async fn resend_link(
     match accounts(cx).resend_invitation(&admin, &input.user_id).await {
         Ok(invitation) => {
             mail(cx).after_invite();
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&admin.id),
+                    &ActivityKind::LinkResent,
+                    &invitation.user.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             Ok(redirect_to(&format!(
                 "mailed={}",
                 encode_q(&invitation.user.email)
@@ -647,11 +699,27 @@ async fn set_role(
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("set_role", Some(refusal))),
     };
+    let store = accounts(cx).store().clone();
     match accounts(cx)
         .set_role(&admin, &input.user_id, input.role)
         .await
     {
-        Ok(()) => Ok(saved_or_refused("set_role", None)),
+        Ok(()) => {
+            let name = store
+                .user(&input.user_id)
+                .await?
+                .map(|member| member.display_name)
+                .unwrap_or_default();
+            let _ = store
+                .record_event(
+                    Some(&admin.id),
+                    &ActivityKind::RoleChanged,
+                    &format!("{name} -> {}", input.role.as_str()),
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
+            Ok(saved_or_refused("set_role", None))
+        }
         Err(error) => Ok(saved_or_refused("set_role", Some(error.into()))),
     }
 }

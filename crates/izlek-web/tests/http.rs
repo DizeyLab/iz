@@ -4593,3 +4593,32 @@ async fn the_nav_hides_rules_and_logs_from_a_member() {
     assert!(!member_html.contains("href=\"/rules\""));
     assert!(!member_html.contains("href=\"/logs\""));
 }
+
+/// Account events ride the same feed as task events: the admin's own
+/// sign-in and an invite show up beside a created task, each on its actor.
+#[tokio::test]
+async fn account_events_ride_the_activity_feed() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let columns = columns_of(&app).await;
+    a_task(&app, &admin_cookie, &columns[0], "Ship it").await;
+
+    let fresh = app
+        .post(
+            "/api/sign_in",
+            None,
+            &[
+                ("email", "ada@izlek.sh"),
+                ("password", "correct horse battery staple"),
+            ],
+        )
+        .await;
+    let admin_cookie = fresh.session.expect("signing in set no session cookie");
+
+    let body = until_logs_contains(&app, &admin_cookie, "invited emre@izlek.sh").await;
+    assert!(body.contains("signed in"), "{body}");
+    assert!(body.contains("claimed the workspace"), "{body}");
+    assert!(body.contains("\"sentence\":\"joined\""), "{body}");
+    assert!(body.contains("Ship it"), "{body}");
+}

@@ -372,6 +372,18 @@ async fn upload(
         })
         .await;
 
+    if added.is_ok() && comment_id.is_none() {
+        let _ = store
+            .record_activity(
+                &task_id,
+                Some(&user.id),
+                &izlek_core::detail::ActivityKind::FileAdded,
+                &label,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+    }
+
     Ok(match added {
         Ok(_) => back_to(&task_id, None),
         Err(_) => back_to(&task_id, Some(Refusal::NotFound)),

@@ -8,6 +8,7 @@
 //! redirect's query.
 
 use izlek_core::accounts::SESSION_LIFETIME;
+use izlek_core::detail::ActivityKind;
 use serde::{Deserialize, Serialize};
 use topcoat::Result;
 use topcoat::context::Cx;
@@ -110,6 +111,15 @@ async fn claim_workspace(cx: &Cx, Form(input): Form<ClaimWorkspaceForm>) -> Redi
     {
         Ok((_workspace, signed_in)) => {
             set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&signed_in.user.id),
+                    &ActivityKind::WorkspaceClaimed,
+                    WORKSPACE_NAME,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             redirect(cx, None)
         }
         Err(error) => redirect(cx, Some(error.into())),
@@ -132,9 +142,29 @@ async fn sign_in(cx: &Cx, Form(input): Form<SignInForm>) -> Redirect {
     {
         Ok(signed_in) => {
             set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&signed_in.user.id),
+                    &ActivityKind::SignedIn,
+                    &input.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             redirect(cx, None)
         }
-        Err(error) => redirect(cx, Some(error.into())),
+        Err(error) => {
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    None,
+                    &ActivityKind::SignInFailed,
+                    &input.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
+            redirect(cx, Some(error.into()))
+        }
     }
 }
 
@@ -144,6 +174,17 @@ async fn sign_in(cx: &Cx, Form(input): Form<SignInForm>) -> Redirect {
 #[route(POST "/api/sign_out")]
 async fn sign_out(cx: &Cx) -> Result<(StatusCode, [(HeaderName, &'static str); 1])> {
     if let Some(presented) = presented_session(cx) {
+        if let Ok(user) = require_user(cx).await {
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&user.id),
+                    &ActivityKind::SignedOut,
+                    "",
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await;
+        }
         let _ = accounts(cx).sign_out(&presented).await;
     }
     clear_session_cookie(cx);
@@ -166,6 +207,15 @@ async fn redeem_link(cx: &Cx, Form(input): Form<RedeemLinkForm>) -> Redirect {
     {
         Ok(signed_in) => {
             set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&signed_in.user.id),
+                    &ActivityKind::Joined,
+                    &signed_in.user.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             // Redeemed; the referring `/join/{token}` now names a spent
             // link, which would show "no longer works" to someone who just
             // signed in, so land on the board itself instead.
@@ -199,6 +249,15 @@ async fn change_password(cx: &Cx, Form(input): Form<ChangePasswordForm>) -> Redi
     {
         Ok(signed_in) => {
             set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&signed_in.user.id),
+                    &ActivityKind::PasswordChanged,
+                    "",
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             redirect(cx, None)
         }
         Err(error) => redirect(cx, Some(error.into())),
@@ -233,6 +292,15 @@ async fn invite_member(cx: &Cx, Form(input): Form<InviteMemberForm>) -> Result<R
     {
         Ok(made) => {
             mail(cx).after_invite();
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&admin.id),
+                    &ActivityKind::Invited,
+                    &input.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             invite_answer(cx, has_referer, Ok(made.user.email))
         }
         Err(error) => invite_answer(cx, has_referer, Err(error.into())),

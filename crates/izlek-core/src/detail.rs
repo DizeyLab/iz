@@ -137,6 +137,27 @@ pub enum ActivityKind {
     Unblocked,
     Deleted,
     Commented,
+    /// Account and admin moments: they belong to the workspace, not to any
+    /// one task, and ride the same trail with no task attached.
+    WorkspaceClaimed,
+    Invited,
+    LinkResent,
+    Joined,
+    SignedIn,
+    SignedOut,
+    SignInFailed,
+    PasswordChanged,
+    RoleChanged,
+    ProfileSaved,
+    SenderSaved,
+    LimitsSaved,
+    TestMailSent,
+    RuleCreated,
+    RuleEdited,
+    RuleToggled,
+    RuleDeleted,
+    FileAdded,
+    FileRemoved,
     /// A kind written by a newer version than the one reading it. The stored
     /// detail is shown as-is rather than dropping the row.
     Other(String),
@@ -145,6 +166,26 @@ pub enum ActivityKind {
 impl ActivityKind {
     pub fn as_str(&self) -> &str {
         match self {
+            ActivityKind::Commented => "commented",
+            ActivityKind::WorkspaceClaimed => "workspace_claimed",
+            ActivityKind::Invited => "invited",
+            ActivityKind::LinkResent => "link_resent",
+            ActivityKind::Joined => "joined",
+            ActivityKind::SignedIn => "signed_in",
+            ActivityKind::SignedOut => "signed_out",
+            ActivityKind::SignInFailed => "sign_in_failed",
+            ActivityKind::PasswordChanged => "password_changed",
+            ActivityKind::RoleChanged => "role_changed",
+            ActivityKind::ProfileSaved => "profile_saved",
+            ActivityKind::SenderSaved => "sender_saved",
+            ActivityKind::LimitsSaved => "limits_saved",
+            ActivityKind::TestMailSent => "test_mail_sent",
+            ActivityKind::RuleCreated => "rule_created",
+            ActivityKind::RuleEdited => "rule_edited",
+            ActivityKind::RuleToggled => "rule_toggled",
+            ActivityKind::RuleDeleted => "rule_deleted",
+            ActivityKind::FileAdded => "file_added",
+            ActivityKind::FileRemoved => "file_removed",
             ActivityKind::Created => "created",
             ActivityKind::Retitled => "retitled",
             ActivityKind::Described => "described",
@@ -157,7 +198,6 @@ impl ActivityKind {
             ActivityKind::Moved => "moved",
             ActivityKind::Unblocked => "unblocked",
             ActivityKind::Deleted => "deleted",
-            ActivityKind::Commented => "commented",
             ActivityKind::Other(raw) => raw,
         }
     }
@@ -177,6 +217,25 @@ impl ActivityKind {
             "unblocked" => ActivityKind::Unblocked,
             "deleted" => ActivityKind::Deleted,
             "commented" => ActivityKind::Commented,
+            "workspace_claimed" => ActivityKind::WorkspaceClaimed,
+            "invited" => ActivityKind::Invited,
+            "link_resent" => ActivityKind::LinkResent,
+            "joined" => ActivityKind::Joined,
+            "signed_in" => ActivityKind::SignedIn,
+            "signed_out" => ActivityKind::SignedOut,
+            "sign_in_failed" => ActivityKind::SignInFailed,
+            "password_changed" => ActivityKind::PasswordChanged,
+            "role_changed" => ActivityKind::RoleChanged,
+            "profile_saved" => ActivityKind::ProfileSaved,
+            "sender_saved" => ActivityKind::SenderSaved,
+            "limits_saved" => ActivityKind::LimitsSaved,
+            "test_mail_sent" => ActivityKind::TestMailSent,
+            "rule_created" => ActivityKind::RuleCreated,
+            "rule_edited" => ActivityKind::RuleEdited,
+            "rule_toggled" => ActivityKind::RuleToggled,
+            "rule_deleted" => ActivityKind::RuleDeleted,
+            "file_added" => ActivityKind::FileAdded,
+            "file_removed" => ActivityKind::FileRemoved,
             other => ActivityKind::Other(other.to_string()),
         }
     }
@@ -213,7 +272,29 @@ impl ActivityEntry {
             ActivityKind::Unblocked => format!("unblocked this task — {detail}"),
             ActivityKind::Deleted => "deleted this task".to_string(),
             ActivityKind::Commented => "commented".to_string(),
-            ActivityKind::Other(_) => detail.to_string(),
+            ActivityKind::FileAdded => format!("added {detail}"),
+            ActivityKind::FileRemoved => format!("removed {detail}"),
+            // Account and admin kinds never appear in a task's strip — they
+            // ride the workspace feed, which words its own lines — but the
+            // match still has to say something if one ever reaches it.
+            ActivityKind::WorkspaceClaimed
+            | ActivityKind::Invited
+            | ActivityKind::LinkResent
+            | ActivityKind::Joined
+            | ActivityKind::SignedIn
+            | ActivityKind::SignedOut
+            | ActivityKind::SignInFailed
+            | ActivityKind::PasswordChanged
+            | ActivityKind::RoleChanged
+            | ActivityKind::ProfileSaved
+            | ActivityKind::SenderSaved
+            | ActivityKind::LimitsSaved
+            | ActivityKind::TestMailSent
+            | ActivityKind::RuleCreated
+            | ActivityKind::RuleEdited
+            | ActivityKind::RuleToggled
+            | ActivityKind::RuleDeleted
+            | ActivityKind::Other(_) => detail.to_string(),
         }
     }
 

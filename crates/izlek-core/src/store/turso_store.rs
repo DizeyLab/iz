@@ -71,6 +71,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (17, include_str!("../../migrations/0017_ui_preference.sql")),
     (18, include_str!("../../migrations/0018_photo_in_the_user.sql")),
+    (19, include_str!("../../migrations/0019_events_without_a_task.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -2237,6 +2238,26 @@ impl Store for TursoStore {
         Ok(id)
     }
 
+    async fn record_event(
+        &self,
+        actor_id: Option<&str>,
+        kind: &ActivityKind,
+        detail: &str,
+        at: OffsetDateTime,
+    ) -> Result<String> {
+        let conn = self.conn.lock().await;
+        let id = Ulid::new().to_string();
+        conn
+            .execute(
+                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                params![id.clone(), actor_id, kind.as_str(), detail, stamp(at)?],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(id)
+    }
+
     // -- mail rules --------------------------------------------------------
 
     async fn create_mail_rule(
@@ -2736,7 +2757,7 @@ impl Store for TursoStore {
             .query(
                 "SELECT a.task_id, t.title, u.display_name, a.kind, a.detail, a.created_at \
                  FROM activity a \
-                 JOIN task t ON t.id = a.task_id \
+                 LEFT JOIN task t ON t.id = a.task_id \
                  LEFT JOIN user u ON u.id = a.actor_id \
                  ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?1",
                 params![i64::from(limit)],
@@ -2746,8 +2767,8 @@ impl Store for TursoStore {
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(ActivityLine {
-                task_id: text(&row, 0)?,
-                title: text(&row, 1)?,
+                task_id: opt_text(&row, 0)?,
+                title: opt_text(&row, 1)?,
                 actor_name: opt_text(&row, 2)?,
                 kind: ActivityKind::parse(&text(&row, 3)?),
                 detail: text(&row, 4)?,

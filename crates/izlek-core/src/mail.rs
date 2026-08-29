@@ -671,11 +671,31 @@ impl Engine {
                 ActivityKind::Unlinked => format!("{} unlinked {}.", actor, activity.detail),
                 ActivityKind::Deleted => format!("{} deleted it.", actor),
                 // Never a wired trigger — `activity_kind_for` never maps to
-                // these — but `compose` still has to say something if one
+                // these — and account/admin kinds have no task to be mailed
+                // about — but `compose` still has to say something if one
                 // ever reaches it.
                 ActivityKind::Described
                 | ActivityKind::Moved
                 | ActivityKind::Unblocked
+                | ActivityKind::WorkspaceClaimed
+                | ActivityKind::Invited
+                | ActivityKind::LinkResent
+                | ActivityKind::Joined
+                | ActivityKind::SignedIn
+                | ActivityKind::SignedOut
+                | ActivityKind::SignInFailed
+                | ActivityKind::PasswordChanged
+                | ActivityKind::RoleChanged
+                | ActivityKind::ProfileSaved
+                | ActivityKind::SenderSaved
+                | ActivityKind::LimitsSaved
+                | ActivityKind::TestMailSent
+                | ActivityKind::RuleCreated
+                | ActivityKind::RuleEdited
+                | ActivityKind::RuleToggled
+                | ActivityKind::RuleDeleted
+                | ActivityKind::FileAdded
+                | ActivityKind::FileRemoved
                 | ActivityKind::Other(_) => format!("{} touched it.", actor),
             },
         };
