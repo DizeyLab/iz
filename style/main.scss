@@ -2061,8 +2061,9 @@ img.avatar {
 
 .activity-line {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 10px;
+  gap: 6px 10px;
   font-size: 12px;
   color: var(--muted);
 }
@@ -2074,7 +2075,10 @@ img.avatar {
   color: var(--muted-soft);
 }
 
-.activity-who { color: var(--ink); }
+.activity-who {
+  flex: none;
+  color: var(--ink);
+}
 
 // -- footer -----------------------------------------------------------------
 

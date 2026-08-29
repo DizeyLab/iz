@@ -82,6 +82,34 @@ pub struct DetailSnapshot {
     pub may_delete: bool,
     pub allowed_file_types: Vec<String>,
     pub attachment_limit_mb: u64,
+    pub notifications: Vec<NotificationLine>,
+    pub may_administer: bool,
+}
+
+/// One send's fate, joined to the sends of its decision's event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendLine {
+    pub recipient: String,
+    pub state: String,
+    /// The chip's tone — see `logs.rs`'s `QueueLine::state_kind`.
+    pub state_kind: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub sent_at: Option<String>,
+}
+
+/// One decision the task's rules made about one event, with what happened to
+/// any mail it owed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationLine {
+    /// What caused it — "moved to Done" — absent when the event is gone.
+    pub happened: Option<String>,
+    pub at: String,
+    /// Shown only to an admin.
+    pub rule_name: Option<String>,
+    pub outcome: String,
+    pub outcome_kind: String,
+    pub sends: Vec<SendLine>,
 }
 
 /// Which way round a dependency runs, as it travels in a form.
@@ -269,6 +297,70 @@ async fn load_snapshot(
     }
 
     let may_write = user.role.can_write_tasks();
+    let may_administer = user.role.can_administer();
+    let lang = Lang::from_code(&user.language);
+    let zone = parse_zone(&user.timezone);
+
+    let decisions = store.decisions_for_task(&detail.id, 10).await?;
+    let sends = store.sends_for_task(&detail.id, 50).await?;
+    let mut columns_cache: std::collections::HashMap<String, Vec<izlek_core::board::Column>> =
+        std::collections::HashMap::new();
+    let mut notifications = Vec::with_capacity(decisions.len());
+    for decision in decisions {
+        let rule = store.mail_rule(&decision.rule_id).await?;
+        let rule_name = may_administer.then(|| {
+            rule.as_ref()
+                .map(|rule| rule.subject.clone())
+                .unwrap_or_else(|| t(lang, Key::RuleGone).to_string())
+        });
+        let outcome_detail = crate::logs::decision_detail(
+            &store,
+            &mut columns_cache,
+            rule.as_ref().map(|rule| rule.board_id.as_str()),
+            decision.outcome,
+            &decision.detail,
+            lang,
+        )
+        .await?;
+        let happened = crate::logs::event_happened(&store, &decision.event_id, lang).await?;
+        let matching: Vec<SendLine> = sends
+            .iter()
+            .filter(|s| s.event_id.as_deref() == Some(decision.event_id.as_str()))
+            .map(|send| {
+                use izlek_core::store::SendState;
+                let (state, state_kind) = match send.state {
+                    SendState::Pending => (t(lang, Key::QueueStatePending), "pending"),
+                    SendState::Failed if send.attempts == 0 => {
+                        (t(lang, Key::QueueStateHeld), "held")
+                    }
+                    SendState::Failed => (t(lang, Key::QueueStateFailed), "failed"),
+                    SendState::Sent => (t(lang, Key::QueueStateSent), "sent"),
+                    SendState::Abandoned => (t(lang, Key::QueueStateAbandoned), "abandoned"),
+                };
+                SendLine {
+                    recipient: send.recipient.clone(),
+                    state: state.to_string(),
+                    state_kind: state_kind.to_string(),
+                    attempts: send.attempts,
+                    last_error: send.last_error.clone(),
+                    sent_at: send.sent_at.map(|at| moment_label_in(at, zone)),
+                }
+            })
+            .collect();
+        let outcome = crate::logs::outcome_word(decision.outcome, lang).to_string();
+        notifications.push(NotificationLine {
+            happened,
+            at: moment_label_in(decision.at, zone),
+            rule_name,
+            outcome: if outcome_detail.is_empty() {
+                outcome
+            } else {
+                format!("{outcome} · {outcome_detail}")
+            },
+            outcome_kind: decision.outcome.as_str().to_string(),
+            sends: matching,
+        });
+    }
 
     const MB: u64 = 1024 * 1024;
     let workspace = store.workspace().await?;
@@ -288,6 +380,8 @@ async fn load_snapshot(
         may_delete: may_write,
         allowed_file_types,
         attachment_limit_mb,
+        notifications,
+        may_administer,
         me: Me::from(&user),
         today: OffsetDateTime::now_utc().date(),
         zone: parse_zone(&user.timezone),
@@ -1268,6 +1362,8 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
         may_delete,
         allowed_file_types,
         attachment_limit_mb: _,
+        notifications,
+        may_administer: _,
     } = snapshot;
     let lang = Lang::from_code(&me.language);
 
@@ -1443,6 +1539,49 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool) -> Result 
                                     <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "Izlek".to_string()))</strong>
                                     <span class="activity-what">(entry.sentence())</span>
                                 </div>
+                            }
+                        </div>
+                    </section>
+
+                    <section class="detail-block">
+                        <span class="detail-label">(t(lang, Key::Notifications))</span>
+                        <div class="activity-list">
+                            for line in &notifications {
+                                <div class="activity-line">
+                                    <span class="activity-stamp">(line.at.clone())</span>
+                                    if let Some(rule_name) = &line.rule_name {
+                                        <strong class="activity-who">(rule_name.clone())</strong>
+                                    }
+                                    <span class="activity-what">
+                                        (line.happened.clone().unwrap_or_else(|| t(lang, Key::TaskGoneLabel).to_string()))
+                                        // The outcome word only speaks when no mail was owed: once a
+                                        // send exists its own state is the truth, and printing both
+                                        // reads as a contradiction ("queued" beside a mail long sent).
+                                        if line.sends.is_empty() {
+                                            " — "
+                                            <span class=(format!("rule-term rule-term-{}", line.outcome_kind))>(line.outcome.clone())</span>
+                                        }
+                                    </span>
+                                    if !line.sends.is_empty() {
+                                        <span class="activity-what">
+                                            for send in &line.sends {
+                                                <span class="rule-term">(send.recipient.clone())</span>
+                                                <span class=(format!("rule-term rule-term-{}", send.state_kind))>
+                                                    (if send.state_kind == "failed" || send.state_kind == "abandoned" {
+                                                        send.last_error.clone().unwrap_or_else(|| send.state.clone())
+                                                    } else if send.state_kind == "sent" {
+                                                        format!("{} {}", send.state, send.sent_at.clone().unwrap_or_default())
+                                                    } else {
+                                                        send.state.clone()
+                                                    })
+                                                </span>
+                                            }
+                                        </span>
+                                    }
+                                </div>
+                            }
+                            if notifications.is_empty() {
+                                <p class="rules-quiet">(t(lang, Key::NothingYet))</p>
                             }
                         </div>
                     </section>

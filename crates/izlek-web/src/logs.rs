@@ -14,8 +14,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use topcoat::Result;
 use topcoat::context::Cx;
-use topcoat::router::content::Json;
-use topcoat::router::{page, route};
+use topcoat::router::content::{Form, Json};
+use topcoat::router::request::headers;
+use topcoat::router::{HeaderName, StatusCode, header, page, route};
 use topcoat::view::view;
 
 use crate::detail::{Me, datepicker_grid};
@@ -26,6 +27,7 @@ use crate::settings::{decode_q, encode_q};
 /// One send still owed or refused, as the queue panel reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct QueueLine {
+    id: String,
     recipient: String,
     subject: String,
     /// The localized word shown to the admin.
@@ -124,7 +126,7 @@ const ACTIVITY_KINDS: &[&str] = &[
 
 /// The word the decisions panel prints for an outcome. Terse: the panel is
 /// read, not explained.
-fn outcome_word(outcome: izlek_core::store::MailOutcome, lang: Lang) -> &'static str {
+pub(crate) fn outcome_word(outcome: izlek_core::store::MailOutcome, lang: Lang) -> &'static str {
     use izlek_core::store::MailOutcome;
     match outcome {
         MailOutcome::Owed => t(lang, Key::OutcomeQueued),
@@ -182,7 +184,7 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang
 /// What an event did, in the decisions panel's own words — "moved to
 /// Review" — or nothing when the event or its destination column is gone:
 /// the panel names what it can still read, never a guess.
-async fn event_happened(
+pub(crate) async fn event_happened(
     store: &std::sync::Arc<dyn izlek_core::store::Store>,
     event_id: &str,
     lang: Lang,
@@ -217,7 +219,7 @@ async fn event_happened(
 /// one fetch per board no matter how many decisions share it. A detail that
 /// is empty or does not parse as a known token — including every row a
 /// version before this scheme wrote — is shown exactly as stored.
-async fn decision_detail(
+pub(crate) async fn decision_detail(
     store: &std::sync::Arc<dyn izlek_core::store::Store>,
     columns_cache: &mut std::collections::HashMap<String, Vec<izlek_core::board::Column>>,
     board_id: Option<&str>,
@@ -536,6 +538,7 @@ async fn snapshot(
             SendState::Abandoned => (t(lang, Key::QueueStateAbandoned), "abandoned"),
         };
         queue.push(QueueLine {
+            id: send.id,
             recipient: send.recipient,
             subject,
             state: state.to_string(),
@@ -717,6 +720,48 @@ async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, 
         .await?
         .map(|(snapshot, _links)| snapshot),
     ))
+}
+
+/// The page a retry form was posted from, or the queue tab when there is no
+/// `Referer` to read.
+fn back_to(cx: &Cx) -> String {
+    headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("/logs?section=queue")
+        .to_string()
+}
+
+/// A 303 to [`back_to`], carrying `refusal` as the body for
+/// `crate::server::carry_refusal_on_redirect` to read and copy onto the query.
+type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
+
+fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
+    Ok((
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, back_to(cx))],
+        Json(refusal),
+    ))
+}
+
+#[derive(Deserialize)]
+struct RetrySendForm {
+    send_id: String,
+}
+
+/// Puts a failed or abandoned send back in play, admin only. No trail event:
+/// no `ActivityKind` fits a retry, so none is written rather than one being
+/// invented.
+#[route(POST "/api/retry_send")]
+async fn retry_send(cx: &Cx, Form(input): Form<RetrySendForm>) -> Redirect {
+    if let Err(refusal) = require_admin(cx).await {
+        return redirect(cx, Some(refusal));
+    }
+    let store = accounts(cx).store().clone();
+    let _ = store
+        .requeue_send(&input.send_id, OffsetDateTime::now_utc())
+        .await;
+    redirect(cx, None)
 }
 
 fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
@@ -907,6 +952,12 @@ async fn logs_screen(
                                         <span>(crate::i18n::attempt_label(lang, line.attempts))</span>
                                     </div>
                                     <span class="rule-stamp">(next_attempt)</span>
+                                    if line.state_kind == "failed" || line.state_kind == "abandoned" {
+                                        <form method="post" action="/api/retry_send">
+                                            <input type="hidden" name="send_id" value=(line.id.clone())>
+                                            <button class="quiet" type="submit">(t(lang, Key::Retry))</button>
+                                        </form>
+                                    }
                                 </div>
                             }
                             if queue_empty {

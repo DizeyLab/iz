@@ -983,6 +983,15 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Every send a rule has made, newest first, for the admin's trail.
     async fn sends_for_rule(&self, rule_id: &str, limit: u32) -> Result<Vec<MailSend>>;
 
+    /// Every send this task's events have caused, newest first, for the task
+    /// detail's notifications block.
+    async fn sends_for_task(&self, task_id: &str, limit: u32) -> Result<Vec<MailSend>>;
+
+    /// Puts a failed or abandoned send back in play: pending, due at `at`.
+    /// `attempts` is left alone — this is a new try, not a rewrite of the
+    /// ones already spent. A send that already went out is untouched.
+    async fn requeue_send(&self, send_id: &str, at: OffsetDateTime) -> Result<()>;
+
     // -- mail decisions and observability -----------------------------------
 
     /// Records what a rule decided about one event and task. Idempotent: a
@@ -1001,6 +1010,10 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// The most recent decisions across every rule, newest first.
     async fn recent_mail_decisions(&self, limit: u32, page: FeedPage) -> Result<Vec<MailDecision>>;
+
+    /// Every decision written about one task, newest first, for its
+    /// notifications block.
+    async fn decisions_for_task(&self, task_id: &str, limit: u32) -> Result<Vec<MailDecision>>;
 
     /// When each rule last decided anything, for the "last checked" line.
     async fn mail_rule_last_decision(&self) -> Result<Vec<(String, OffsetDateTime)>>;

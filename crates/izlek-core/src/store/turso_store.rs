@@ -2694,6 +2694,36 @@ impl Store for TursoStore {
         Ok(out)
     }
 
+    async fn sends_for_task(&self, task_id: &str, limit: u32) -> Result<Vec<MailSend>> {
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT {SEND_COLUMNS} FROM mail_send WHERE task_id = ?1 \
+             ORDER BY claimed_at DESC, rowid DESC LIMIT ?2"
+        );
+        let mut rows = conn
+            .query(&sql, params![task_id, i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(send_from(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn requeue_send(&self, send_id: &str, at: OffsetDateTime) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn
+            .execute(
+                "UPDATE mail_send SET state = 'pending', next_attempt_at = ?1 \
+                 WHERE id = ?2 AND state IN ('failed', 'abandoned')",
+                params![stamp(at)?, send_id],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
+    }
+
     // -- mail decisions and observability -----------------------------------
 
     async fn record_mail_decision(
@@ -2763,6 +2793,23 @@ impl Store for TursoStore {
         }
         if reverse {
             out.reverse();
+        }
+        Ok(out)
+    }
+
+    async fn decisions_for_task(&self, task_id: &str, limit: u32) -> Result<Vec<MailDecision>> {
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT {DECISION_COLUMNS} FROM mail_decision WHERE task_id = ?1 \
+             ORDER BY created_at DESC, id DESC LIMIT ?2"
+        );
+        let mut rows = conn
+            .query(&sql, params![task_id, i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(decision_from(&row)?);
         }
         Ok(out)
     }

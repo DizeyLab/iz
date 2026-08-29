@@ -5098,3 +5098,91 @@ async fn a_created_activity_does_not_fire_a_status_rule() {
     assert!(!row.detail.is_empty(), "the reason is not left blank");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn decisions_and_sends_for_task_read_only_that_tasks_own_rows() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let other_task = add_task(store, &workspace, "Backlog", "Something else", None, &admin).await;
+    let rule = a_rule(store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let other_transition =
+        moved_to(store, &workspace, &other_task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+
+    store
+        .record_mail_decision(&rule.id, &transition.id, &task, MailOutcome::Owed, "", now)
+        .await
+        .unwrap();
+    store
+        .record_mail_decision(
+            &rule.id,
+            &other_transition.id,
+            &other_task,
+            MailOutcome::Owed,
+            "",
+            now,
+        )
+        .await
+        .unwrap();
+    let send = store
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .claim_send(&rule.id, &other_transition.id, &other_task, "emre@izlek.sh", now)
+        .await
+        .unwrap();
+
+    let decisions = store.decisions_for_task(&task, 10).await.unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].task_id, task);
+
+    let sends = store.sends_for_task(&task, 10).await.unwrap();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].id, send.id);
+    assert_eq!(sends[0].task_id.as_deref(), Some(task.as_str()));
+}
+
+#[tokio::test]
+async fn requeuing_a_send_puts_it_back_in_play_but_leaves_a_sent_one_alone() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let rule = a_rule(store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let now = OffsetDateTime::now_utc();
+
+    let failed = store
+        .claim_send(&rule.id, &transition.id, &task, "failed@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .record_send_refused(&failed.id, "timeout", None, now)
+        .await
+        .unwrap();
+
+    let sent = store
+        .claim_send(&rule.id, &transition.id, &task, "sent@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    store.record_send_accepted(&sent.id, now).await.unwrap();
+
+    store.requeue_send(&failed.id, now).await.unwrap();
+    store.requeue_send(&sent.id, now).await.unwrap();
+
+    let sends = store.sends_for_task(&task, 10).await.unwrap();
+    let reread_failed = sends.iter().find(|s| s.id == failed.id).unwrap();
+    assert_eq!(reread_failed.state, SendState::Pending);
+    assert!(reread_failed.next_attempt_at.is_some_and(|at| at <= now));
+
+    let reread_sent = sends.iter().find(|s| s.id == sent.id).unwrap();
+    assert_eq!(reread_sent.state, SendState::Sent, "a sent send is untouched");
+
+    let owed = store.sends_owed(now, 10).await.unwrap();
+    assert!(owed.iter().any(|s| s.id == failed.id), "the requeued send is now due");
+}

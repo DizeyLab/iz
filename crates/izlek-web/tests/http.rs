@@ -24,7 +24,8 @@ use std::sync::Arc;
 use http::{HeaderValue, Request, StatusCode, header};
 use izlek_core::Role;
 use izlek_core::accounts::Accounts;
-use izlek_core::store::{SendKind, Store, TursoStore};
+use izlek_core::board::Moved;
+use izlek_core::store::{Audience, MailOutcome, SendKind, SendState, Store, Trigger, TursoStore};
 use izlek_web::server::{Mail, SESSION_COOKIE};
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
@@ -5209,4 +5210,185 @@ async fn an_invite_refusal_lands_on_the_members_section() {
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("field-error"), "{html}");
     assert!(html.contains("emre@izlek.sh"), "{html}");
+}
+
+/// Seeds one decision and one accepted send directly on the store — the
+/// engine's own timing is not what these notification tests are about — and
+/// hands back the task and the send's id.
+async fn a_task_with_a_notification(app: &App, admin_cookie: &str, subject: &str) -> (String, String) {
+    let columns = columns_of(app).await;
+    let task = a_task(app, admin_cookie, &columns[0], "Ship it").await;
+    let admin_id = person_id(app, admin_cookie, &task, "Ada Lovelace").await;
+    let workspace_id = app.workspace_id().await;
+    let board = app.store.board(&workspace_id).await.unwrap().unwrap();
+    let rule = app
+        .store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(columns[1].clone()),
+            subject,
+            Audience::Assignees,
+            time::OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+    let transition = match app
+        .store
+        .move_task(
+            &task,
+            &columns[0],
+            &columns[1],
+            &admin_id,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap()
+    {
+        Moved::Recorded(transition) => transition,
+        other => panic!("the move did not happen: {other:?}"),
+    };
+    let now = time::OffsetDateTime::now_utc();
+    app.store
+        .record_mail_decision(&rule.id, &transition.id, &task, MailOutcome::Owed, "", now)
+        .await
+        .unwrap();
+    let send = app
+        .store
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .await
+        .unwrap()
+        .unwrap();
+    app.store.record_send_accepted(&send.id, now).await.unwrap();
+    (task, send.id)
+}
+
+/// A task's detail page shows its notifications: the recipient and a state
+/// chip for a send its rules made, to anyone who can read the task — but the
+/// rule's own name only to an admin.
+#[tokio::test]
+async fn a_tasks_notifications_show_the_recipient_and_the_rule_name_is_admin_only() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let (task, _send_id) =
+        a_task_with_a_notification(&app, &admin_cookie, "Wraps up the sprint").await;
+
+    let member_page = app.get(&format!("/?task={task}"), Some(&member)).await;
+    let member_html = String::from_utf8_lossy(&member_page.bytes);
+    assert!(member_html.contains("ada@izlek.sh"), "{member_html}");
+    assert!(
+        member_html.contains("rule-term-sent"),
+        "no state chip on the member's page: {member_html}"
+    );
+    assert!(
+        !member_html.contains("Wraps up the sprint"),
+        "a member was shown the rule's name: {member_html}"
+    );
+
+    let admin_page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let admin_html = String::from_utf8_lossy(&admin_page.bytes);
+    assert!(admin_html.contains("ada@izlek.sh"), "{admin_html}");
+    assert!(admin_html.contains("Wraps up the sprint"), "{admin_html}");
+}
+
+/// A task with no mail at all renders the same quiet empty line the other
+/// blocks use, under the notifications heading.
+#[tokio::test]
+async fn a_task_with_no_mail_shows_the_quiet_notifications_line() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Nobody mails me").await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("NOTIFICATIONS"), "{html}");
+    assert!(html.contains("Nothing yet."), "{html}");
+}
+
+/// An admin's retry puts a failed send back in play — pending, due right
+/// away — and the queue tab picks it back up.
+#[tokio::test]
+async fn an_admin_retries_a_failed_send_and_it_rejoins_the_queue() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let (task, send_id) =
+        a_task_with_a_notification(&app, &admin_cookie, "Never got there").await;
+    let now = time::OffsetDateTime::now_utc();
+    app.store
+        .record_send_refused(&send_id, "timeout", Some(now), now)
+        .await
+        .unwrap();
+
+    let answer = app
+        .post("/api/retry_send", Some(&admin_cookie), &[("send_id", &send_id)])
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let sends = app.store.sends_for_task(&task, 10).await.unwrap();
+    let reread = sends.iter().find(|s| s.id == send_id).unwrap();
+    assert_eq!(reread.state, SendState::Pending);
+    assert!(
+        reread
+            .next_attempt_at
+            .is_some_and(|at| at <= time::OffsetDateTime::now_utc()),
+        "the retry is not due right away: {reread:?}"
+    );
+
+    let logs = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    assert!(
+        logs.body.contains("\"recipient\":\"ada@izlek.sh\""),
+        "the retried send did not rejoin the queue: {}",
+        logs.body
+    );
+}
+
+/// A member cannot retry a send, and the pages a member can reach never draw
+/// a Retry button in the first place.
+#[tokio::test]
+async fn a_member_may_not_retry_a_send() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let (task, send_id) =
+        a_task_with_a_notification(&app, &admin_cookie, "Member cannot touch this").await;
+    let now = time::OffsetDateTime::now_utc();
+    app.store
+        .record_send_refused(&send_id, "timeout", Some(now), now)
+        .await
+        .unwrap();
+
+    let answer = app
+        .post("/api/retry_send", Some(&member), &[("send_id", &send_id)])
+        .await;
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+
+    let sends = app.store.sends_for_task(&task, 10).await.unwrap();
+    let reread = sends.iter().find(|s| s.id == send_id).unwrap();
+    assert_eq!(reread.state, SendState::Failed, "the refused retry moved it anyway");
+
+    let member_page = app.get(&format!("/?task={task}"), Some(&member)).await;
+    let member_html = String::from_utf8_lossy(&member_page.bytes);
+    assert!(!member_html.contains("Retry"), "{member_html}");
+}
+
+/// Retrying a send that already went out changes nothing, and does not 500.
+#[tokio::test]
+async fn retrying_an_already_sent_send_changes_nothing() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let (task, send_id) =
+        a_task_with_a_notification(&app, &admin_cookie, "Already on its way").await;
+
+    let answer = app
+        .post("/api/retry_send", Some(&admin_cookie), &[("send_id", &send_id)])
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert_eq!(answer.body, "null", "{}", answer.body);
+
+    let sends = app.store.sends_for_task(&task, 10).await.unwrap();
+    let reread = sends.iter().find(|s| s.id == send_id).unwrap();
+    assert_eq!(reread.state, SendState::Sent, "a sent send was touched by a retry");
 }
