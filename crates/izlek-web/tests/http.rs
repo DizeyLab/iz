@@ -456,7 +456,7 @@ async fn admin(app: &App) -> String {
 /// invitee's address does. It rides the invite mail this function digs out of
 /// the outbox instead: the newest pending invite queued for that address.
 async fn queued_join_token(app: &App, email: &str) -> String {
-    let sends = app.store.mail_queue(10).await.unwrap();
+    let sends = app.store.mail_queue(10, 0).await.unwrap();
     let body = sends
         .into_iter()
         .rev()
@@ -582,7 +582,7 @@ async fn adding_a_member_mails_them_the_link() {
     assert!(answer.body.contains("nour@izlek.sh"), "{}", answer.body);
     assert!(!answer.body.contains("/join/"), "{}", answer.body);
 
-    let sends = app.store.mail_queue(10).await.unwrap();
+    let sends = app.store.mail_queue(10, 0).await.unwrap();
     let invites: Vec<_> = sends
         .iter()
         .filter(|send| {
@@ -644,7 +644,7 @@ async fn a_resend_queues_another_mail() {
             })
             .count()
     };
-    let before = count(&app.store.mail_queue(10).await.unwrap());
+    let before = count(&app.store.mail_queue(10, 0).await.unwrap());
     assert_eq!(before, 1);
 
     // `resend_link` has no hydrated action to answer with a value here: the
@@ -660,7 +660,7 @@ async fn a_resend_queues_another_mail() {
     let location = resent.location.expect("resend did not redirect");
     assert!(location.contains("mailed=sena%40izlek.sh"), "{location}");
 
-    let after = count(&app.store.mail_queue(10).await.unwrap());
+    let after = count(&app.store.mail_queue(10, 0).await.unwrap());
     assert_eq!(after, 2);
 }
 
@@ -4129,7 +4129,7 @@ async fn until_rule_send_to(
     for _ in 0..500 {
         let matching: Vec<_> = app
             .store
-            .mail_queue(50)
+            .mail_queue(50, 0)
             .await
             .unwrap()
             .into_iter()
@@ -4187,14 +4187,14 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
     let send = until_rule_send_to(&app, &rule, "ada@izlek.sh", 0).await;
     assert_eq!(send.recipient, "ada@izlek.sh");
     assert!(
-        app.store.mail_queue(50).await.unwrap().iter().all(|send| {
+        app.store.mail_queue(50, 0).await.unwrap().iter().all(|send| {
             !(send.kind == SendKind::Rule
                 && send.rule_id.as_deref() == Some(rule.as_str())
                 && send.recipient == "deniz@izlek.sh")
         }),
         "the commenter was mailed instead of the creator"
     );
-    let decisions = app.store.recent_mail_decisions(50).await.unwrap();
+    let decisions = app.store.recent_mail_decisions(50, 0).await.unwrap();
     assert!(
         decisions.iter().any(|decision| decision.rule_id == rule
             && matches!(decision.outcome, izlek_core::store::MailOutcome::Owed)),
@@ -4263,7 +4263,7 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
     // addresses the assignee — the admin — not the member who renamed it.
     let already = app
         .store
-        .mail_queue(50)
+        .mail_queue(50, 0)
         .await
         .unwrap()
         .iter()
@@ -4284,7 +4284,7 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
 
     until_rule_send_to(&app, &rule, "ada@izlek.sh", already).await;
     assert!(
-        app.store.mail_queue(50).await.unwrap().iter().all(|send| {
+        app.store.mail_queue(50, 0).await.unwrap().iter().all(|send| {
             !(send.kind == SendKind::Rule
                 && send.rule_id.as_deref() == Some(rule.as_str())
                 && send.recipient == "deniz@izlek.sh")
@@ -4621,6 +4621,64 @@ async fn account_events_ride_the_activity_feed() {
     assert!(body.contains("claimed the workspace"), "{body}");
     assert!(body.contains("\"sentence\":\"joined\""), "{body}");
     assert!(body.contains("Ship it"), "{body}");
+}
+
+/// The activity panel truncates at 50 rows; a page past that shows the
+/// remainder with a Newer link back, and a member GET still finds the door
+/// shut.
+#[tokio::test]
+async fn the_logs_page_pages_past_the_truncation() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..60 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let first = app.get("/logs?section=activity", Some(&admin_cookie)).await;
+    let first_html = String::from_utf8_lossy(&first.bytes);
+    assert!(first_html.contains("row 59"), "{first_html}");
+    assert!(!first_html.contains("row 9<"), "{first_html}");
+    assert!(
+        first_html.contains("href=\"/logs?section=activity&amp;page=1\""),
+        "no Older link: {first_html}"
+    );
+    assert!(
+        !first_html.contains("href=\"/logs?section=activity&amp;page=0\""),
+        "a Newer link on page 0: {first_html}"
+    );
+
+    let second = app
+        .get("/logs?section=activity&page=1", Some(&admin_cookie))
+        .await;
+    let second_html = String::from_utf8_lossy(&second.bytes);
+    assert!(second_html.contains("row 9<"), "{second_html}");
+    assert!(
+        second_html.contains("href=\"/logs?section=activity&amp;page=0\""),
+        "no Newer link: {second_html}"
+    );
+
+    let refused = app.get("/logs", Some(&member)).await;
+    let refused_html = String::from_utf8_lossy(&refused.bytes);
+    assert!(refused_html.contains("Not permitted."), "{refused_html}");
+
+    // An absurd page number saturates instead of overflowing the offset.
+    let absurd = app
+        .get("/logs?section=activity&page=4294967295", Some(&admin_cookie))
+        .await;
+    assert_eq!(absurd.status, 200);
+    let absurd_html = String::from_utf8_lossy(&absurd.bytes);
+    assert!(!absurd_html.contains("row 59"), "{absurd_html}");
 }
 
 /// A photo needs a session: signed out gets the same 404 an unknown id

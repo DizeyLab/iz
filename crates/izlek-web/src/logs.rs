@@ -259,10 +259,26 @@ async fn decision_detail(
     Ok(detail.to_string())
 }
 
+/// Query width for one section's list: the extra row beyond `LIMIT` only
+/// signals that an older page exists — it is trimmed before rendering.
+fn page_window(active: Section, target: Section, page: u32) -> (u32, u32) {
+    if active == target {
+        (LIMIT + 1, page.saturating_mul(LIMIT))
+    } else {
+        (LIMIT, 0)
+    }
+}
+
 /// The queue, the decisions, and the activity, admin only. Shared by the
 /// `/logs` page and the `/api/current_logs` route so both answer the same
-/// read the same way.
-async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>> {
+/// read the same way. `active`/`page` widen only the section being paged;
+/// the JSON caller always passes page 0, matching the old unpaged read.
+/// Returns whether the active section's list had more rows past this page.
+async fn snapshot(
+    cx: &Cx,
+    active: Section,
+    page: u32,
+) -> Result<std::result::Result<(LogsSnapshot, bool), Refusal>> {
     use izlek_core::store::SendState;
 
     let user = match require_admin(cx).await {
@@ -273,7 +289,14 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
     let zone = izlek_core::detail::parse_zone(&user.timezone);
     let store = accounts(cx).store().clone();
 
-    let sends = store.mail_queue(LIMIT).await?;
+    let mut has_more = false;
+
+    let (queue_limit, queue_offset) = page_window(active, Section::Queue, page);
+    let mut sends = store.mail_queue(queue_limit, queue_offset).await?;
+    if active == Section::Queue && sends.len() as u32 > LIMIT {
+        has_more = true;
+        sends.truncate(LIMIT as usize);
+    }
     let mut queue = Vec::with_capacity(sends.len());
     for send in sends {
         let subject = match &send.subject {
@@ -309,7 +332,14 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         });
     }
 
-    let raw_decisions = store.recent_mail_decisions(LIMIT).await?;
+    let (decisions_limit, decisions_offset) = page_window(active, Section::Decisions, page);
+    let mut raw_decisions = store
+        .recent_mail_decisions(decisions_limit, decisions_offset)
+        .await?;
+    if active == Section::Decisions && raw_decisions.len() as u32 > LIMIT {
+        has_more = true;
+        raw_decisions.truncate(LIMIT as usize);
+    }
     let mut decisions: Vec<DecisionGroup> = Vec::new();
     let mut columns_cache: std::collections::HashMap<String, Vec<izlek_core::board::Column>> =
         std::collections::HashMap::new();
@@ -356,9 +386,13 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         });
     }
 
-    let activity = store
-        .recent_activity(LIMIT)
-        .await?
+    let (activity_limit, activity_offset) = page_window(active, Section::Activity, page);
+    let mut raw_activity = store.recent_activity(activity_limit, activity_offset).await?;
+    if active == Section::Activity && raw_activity.len() as u32 > LIMIT {
+        has_more = true;
+        raw_activity.truncate(LIMIT as usize);
+    }
+    let activity = raw_activity
         .into_iter()
         .map(|line| ActivityRow {
             at: izlek_core::detail::moment_label_in(line.at, zone),
@@ -370,18 +404,26 @@ async fn snapshot(cx: &Cx) -> Result<std::result::Result<LogsSnapshot, Refusal>>
         })
         .collect();
 
-    Ok(Ok(LogsSnapshot {
-        me: Me::from(&user),
-        queue,
-        decisions,
-        activity,
-    }))
+    Ok(Ok((
+        LogsSnapshot {
+            me: Me::from(&user),
+            queue,
+            decisions,
+            activity,
+        },
+        has_more,
+    )))
 }
 
-/// The same read the page renders, as JSON — polled by `tests/http.rs`.
+/// The same read the page renders, as JSON — polled by `tests/http.rs`. Page
+/// 0 throughout, matching the read before pagination existed.
 #[route(POST "/api/current_logs")]
 async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, Refusal>>> {
-    Ok(Json(snapshot(cx).await?))
+    Ok(Json(
+        snapshot(cx, Section::Activity, 0)
+            .await?
+            .map(|(snapshot, _has_more)| snapshot),
+    ))
 }
 
 fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
@@ -421,8 +463,11 @@ async fn logs_page(cx: &Cx) -> Result {
         Some("decisions") => Section::Decisions,
         _ => Section::Activity,
     };
-    match snapshot(cx).await {
-        Ok(Ok(snapshot)) => logs_screen(cx, snapshot, section).await,
+    let page: u32 = query_value(query, "page")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(0);
+    match snapshot(cx, section, page).await {
+        Ok(Ok((snapshot, has_more))) => logs_screen(cx, snapshot, section, page, has_more).await,
         // No `Me` here to read a language off of when the refusal itself is
         // "no session" — English, same as the other admin pages' own gate.
         Ok(Err(refusal)) => view! {
@@ -441,7 +486,22 @@ async fn logs_page(cx: &Cx) -> Result {
     }
 }
 
-async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section) -> Result {
+/// The section name each rail link and page nav carries in the query.
+fn section_slug(section: Section) -> &'static str {
+    match section {
+        Section::Queue => "queue",
+        Section::Decisions => "decisions",
+        Section::Activity => "activity",
+    }
+}
+
+async fn logs_screen(
+    cx: &Cx,
+    snapshot: LogsSnapshot,
+    section: Section,
+    page: u32,
+    has_more: bool,
+) -> Result {
     let lang = Lang::from_code(&snapshot.me.language);
     let me = snapshot.me;
     let queue = snapshot.queue;
@@ -450,6 +510,9 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section) -> Resul
     let queue_empty = queue.is_empty();
     let decisions_empty = decisions.is_empty();
     let activity_empty = activity.is_empty();
+    let slug = section_slug(section);
+    let newer_href = format!("/logs?section={}&page={}", slug, page.saturating_sub(1));
+    let older_href = format!("/logs?section={}&page={}", slug, page.saturating_add(1));
 
     view! {
         cx =>
@@ -506,6 +569,20 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section) -> Resul
                             }
                         </div>
                     </div>
+                    if page > 0 || has_more {
+                    <div class="panel-foot panel-foot-split">
+                        <div class="foot-side">
+                            if page > 0 {
+                                <a class="quiet" href=(newer_href.clone())>(t(lang, Key::Newer))</a>
+                            }
+                        </div>
+                        <div class="foot-side">
+                            if has_more {
+                                <a class="quiet" href=(older_href.clone())>(t(lang, Key::Older))</a>
+                            }
+                        </div>
+                    </div>
+                    }
                 </section>
                 }
 
@@ -543,6 +620,20 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section) -> Resul
                             }
                         </div>
                     </div>
+                    if page > 0 || has_more {
+                    <div class="panel-foot panel-foot-split">
+                        <div class="foot-side">
+                            if page > 0 {
+                                <a class="quiet" href=(newer_href.clone())>(t(lang, Key::Newer))</a>
+                            }
+                        </div>
+                        <div class="foot-side">
+                            if has_more {
+                                <a class="quiet" href=(older_href.clone())>(t(lang, Key::Older))</a>
+                            }
+                        </div>
+                    </div>
+                    }
                 </section>
                 }
 
@@ -571,6 +662,20 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section) -> Resul
                             }
                         </div>
                     </div>
+                    if page > 0 || has_more {
+                    <div class="panel-foot panel-foot-split">
+                        <div class="foot-side">
+                            if page > 0 {
+                                <a class="quiet" href=(newer_href.clone())>(t(lang, Key::Newer))</a>
+                            }
+                        </div>
+                        <div class="foot-side">
+                            if has_more {
+                                <a class="quiet" href=(older_href.clone())>(t(lang, Key::Older))</a>
+                            }
+                        </div>
+                    </div>
+                    }
                 </section>
                 }
             </main>

@@ -2685,14 +2685,14 @@ impl Store for TursoStore {
         Ok(())
     }
 
-    async fn recent_mail_decisions(&self, limit: u32) -> Result<Vec<MailDecision>> {
+    async fn recent_mail_decisions(&self, limit: u32, offset: u32) -> Result<Vec<MailDecision>> {
         let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {DECISION_COLUMNS} FROM mail_decision \
-             ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+             ORDER BY created_at DESC, rowid DESC LIMIT ?1 OFFSET ?2"
         );
         let mut rows = conn
-            .query(&sql, params![i64::from(limit)])
+            .query(&sql, params![i64::from(limit), i64::from(offset)])
             .await
             .map_err(backend)?;
         let mut out = Vec::new();
@@ -2718,14 +2718,14 @@ impl Store for TursoStore {
         Ok(out)
     }
 
-    async fn mail_queue(&self, limit: u32) -> Result<Vec<MailSend>> {
+    async fn mail_queue(&self, limit: u32, offset: u32) -> Result<Vec<MailSend>> {
         let conn = self.conn.lock().await;
         let sql = format!(
             "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
-             ORDER BY next_attempt_at LIMIT ?1"
+             ORDER BY next_attempt_at LIMIT ?1 OFFSET ?2"
         );
         let mut rows = conn
-            .query(&sql, params![i64::from(limit)])
+            .query(&sql, params![i64::from(limit), i64::from(offset)])
             .await
             .map_err(backend)?;
         let mut out = Vec::new();
@@ -2751,7 +2751,7 @@ impl Store for TursoStore {
         Ok(out)
     }
 
-    async fn recent_activity(&self, limit: u32) -> Result<Vec<ActivityLine>> {
+    async fn recent_activity(&self, limit: u32, offset: u32) -> Result<Vec<ActivityLine>> {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
@@ -2759,8 +2759,8 @@ impl Store for TursoStore {
                  FROM activity a \
                  LEFT JOIN task t ON t.id = a.task_id \
                  LEFT JOIN user u ON u.id = a.actor_id \
-                 ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?1",
-                params![i64::from(limit)],
+                 ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?1 OFFSET ?2",
+                params![i64::from(limit), i64::from(offset)],
             )
             .await
             .map_err(backend)?;
