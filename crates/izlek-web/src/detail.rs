@@ -1527,6 +1527,28 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             </div>
                         </div>
                         (refused(cx, "move_card", lang).await?)
+
+                        <section class="detail-block">
+                            <div class="detail-block-head">
+                                <span class="detail-label">(t(lang, Key::Dependencies))</span>
+                                <div class="spacer"></div>
+                                if may_write {
+                                    (link_picker(cx, &detail.id, &linkable, lang).await?)
+                                }
+                            </div>
+                            if has_deps {
+                                <div class="dep-list">
+                                    for edge in &detail.blocked_by {
+                                        (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?)
+                                    }
+                                    for edge in &detail.blocks {
+                                        (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
+                                    }
+                                </div>
+                            } else {
+                                <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
+                            }
+                        </section>
                     }
                 </div>
 
@@ -1534,27 +1556,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 <div class="detail-body">
                     if tab == Tab::Task {
 
-                    <section class="detail-block">
-                        <div class="detail-block-head">
-                            <span class="detail-label">(t(lang, Key::Dependencies))</span>
-                            <div class="spacer"></div>
-                            if may_write {
-                                (link_picker(cx, &detail.id, &linkable, lang).await?)
-                            }
-                        </div>
-                        if has_deps {
-                            <div class="dep-list">
-                                for edge in &detail.blocked_by {
-                                    (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?)
-                                }
-                                for edge in &detail.blocks {
-                                    (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
-                                }
-                            </div>
-                        } else {
-                            <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
-                        }
-                    </section>
 
                     <section class="detail-block">
                         <span class="detail-label">(t(lang, Key::Description))</span>

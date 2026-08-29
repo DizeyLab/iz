@@ -1092,6 +1092,21 @@ img.avatar {
   flex: none;
 }
 
+// Dependencies ride in the mast, and a task can be blocked by any number of
+// others — so the list keeps three whole rows' worth of room and pans inside itself,
+// silently, rather than pushing the task's own text off the screen.
+.detail-mast .dep-list {
+  max-height: 160px;
+  overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+}
+
+.detail-mast .detail-block {
+  margin-top: 14px;
+}
+
 .detail-body {
   flex: 1;
   min-height: 0;
