@@ -2732,14 +2732,15 @@ async fn saving_a_task_records_only_what_changed() {
     assert_eq!(detail.title, "second title");
     assert_eq!(detail.description, "some prose");
     assert_eq!(detail.deadline_input(), "2026-09-12");
+    // Newest first, as everywhere else: the deadline was the last thing set.
     let kinds: Vec<&ActivityKind> = detail.activity.iter().map(|e| &e.kind).collect();
     assert_eq!(
         kinds,
         [
-            &ActivityKind::Created,
-            &ActivityKind::Retitled,
+            &ActivityKind::DeadlineSet,
             &ActivityKind::Described,
-            &ActivityKind::DeadlineSet
+            &ActivityKind::Retitled,
+            &ActivityKind::Created
         ]
     );
 }
@@ -5248,4 +5249,31 @@ async fn the_engine_delivers_a_notice_that_owes_no_rule() {
         .unwrap();
     assert!(owed.is_empty(), "a delivered notice is no longer owed: {owed:?}");
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// A task's own history reads newest first, the same way every other feed in
+/// the app does — the oldest line is the last one, not the first.
+#[tokio::test]
+async fn a_tasks_activity_reads_newest_first() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "order me", None, &admin).await;
+
+    for word in ["one", "two", "three"] {
+        store
+            .add_comment(&task, &admin, word, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+    }
+
+    let activity = store.activity_for_task(&task).await.unwrap();
+    let stamps: Vec<_> = activity.iter().map(|line| line.at).collect();
+    assert!(
+        stamps.windows(2).all(|pair| pair[0] >= pair[1]),
+        "not newest first: {stamps:?}"
+    );
+    // Creation is the oldest thing that ever happens to a task, so it is last
+    // now; a comment — the most recent act here — leads.
+    assert_eq!(activity.first().map(|line| line.kind.clone()), Some(ActivityKind::Commented), "{activity:?}");
+    assert_eq!(activity.last().map(|line| line.kind.clone()), Some(ActivityKind::Created), "{activity:?}");
 }

@@ -3341,7 +3341,7 @@ impl DetailReads for TursoStore {
                 "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
                  (u.photo IS NOT NULL) \
                  FROM activity a LEFT JOIN user u ON u.id = a.actor_id \
-                 WHERE a.task_id = ?1 ORDER BY a.created_at, a.rowid",
+                 WHERE a.task_id = ?1 ORDER BY a.created_at DESC, a.rowid DESC",
                 params![task_id],
             )
             .await
