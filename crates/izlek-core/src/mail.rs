@@ -696,6 +696,7 @@ impl Engine {
                 | ActivityKind::RuleDeleted
                 | ActivityKind::FileAdded
                 | ActivityKind::FileRemoved
+                | ActivityKind::MessageSent
                 | ActivityKind::Other(_) => format!("{} touched it.", actor),
             },
         };

@@ -236,14 +236,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 19);
+    assert_eq!(first.schema_version().await.unwrap(), 20);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 19);
+    assert_eq!(second.schema_version().await.unwrap(), 20);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -260,7 +260,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
         a_pre_0013_store_with_a_rule_send_and_decision().await;
 
     let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 19);
+    assert_eq!(store.schema_version().await.unwrap(), 20);
     assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
 
     let rules = store.mail_rules(&board).await.unwrap();
@@ -5185,4 +5185,33 @@ async fn requeuing_a_send_puts_it_back_in_play_but_leaves_a_sent_one_alone() {
 
     let owed = store.sends_owed(now, 10).await.unwrap();
     assert!(owed.iter().any(|s| s.id == failed.id), "the requeued send is now due");
+}
+
+#[tokio::test]
+async fn a_queued_notice_is_pending_and_due_and_on_the_queue() {
+    let scratch = Scratch::open().await;
+    let now = OffsetDateTime::now_utc();
+    let queued = scratch
+        .store
+        .queue_notice("grace@izlek.sh", "Heads up", "Body text", now)
+        .await
+        .unwrap();
+    assert_eq!(queued.kind, SendKind::Notice);
+    assert_eq!(queued.state, SendState::Pending);
+    assert_eq!(queued.recipient, "grace@izlek.sh");
+    assert_eq!(queued.subject.as_deref(), Some("Heads up"));
+    assert_eq!(queued.body.as_deref(), Some("Body text"));
+
+    let owed = scratch.store.sends_owed(now, 10).await.unwrap();
+    assert!(owed.iter().any(|s| s.id == queued.id), "not due: {owed:?}");
+
+    let mail_queue = scratch
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    assert!(
+        mail_queue.iter().any(|s| s.id == queued.id),
+        "not in mail_queue: {mail_queue:?}"
+    );
 }

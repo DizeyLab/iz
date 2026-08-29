@@ -5392,3 +5392,175 @@ async fn retrying_an_already_sent_send_changes_nothing() {
     let reread = sends.iter().find(|s| s.id == send_id).unwrap();
     assert_eq!(reread.state, SendState::Sent, "a sent send was touched by a retry");
 }
+
+// ---------------------------------------------------------------------------
+// Send message
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_admin_sends_a_message_to_one_member() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _ = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let mert_id = app.store.user_by_email(&app.workspace_id().await, "emre@izlek.sh").await.unwrap().unwrap().id;
+
+    let answer = app
+        .post(
+            "/api/send_message",
+            Some(&admin_cookie),
+            &[("to", &mert_id), ("subject", "Heads up"), ("body", "Standup moved to 10.")],
+        )
+        .await;
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("saved=send_message"),
+        "{:?}",
+        answer.location
+    );
+
+    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let notices: Vec<_> = sends.iter().filter(|send| send.kind == SendKind::Notice).collect();
+    assert_eq!(notices.len(), 1, "{sends:?}");
+    let notice = notices[0];
+    assert_eq!(notice.recipient, "emre@izlek.sh");
+    assert_eq!(notice.subject.as_deref(), Some("Heads up"));
+    assert_eq!(notice.body.as_deref(), Some("Standup moved to 10."));
+
+    let queue = app.get("/logs?section=queue", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&queue.bytes);
+    assert!(html.contains("Heads up"), "{html}");
+}
+
+#[tokio::test]
+async fn an_admin_sends_a_message_to_everyone_and_not_to_themself() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _ = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let _ = invited(&app, &admin_cookie, "quiet@izlek.sh", "Quiet", Role::Viewer).await;
+
+    let answer = app
+        .post(
+            "/api/send_message",
+            Some(&admin_cookie),
+            &[("to", "everyone"), ("subject", "All hands"), ("body", "Board meeting Friday.")],
+        )
+        .await;
+    assert!(
+        answer.location.as_deref().unwrap_or_default().contains("saved=send_message"),
+        "{:?}",
+        answer.location
+    );
+
+    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let notices: Vec<_> = sends.iter().filter(|send| send.kind == SendKind::Notice).collect();
+    assert_eq!(notices.len(), 2, "{sends:?}");
+    assert!(notices.iter().all(|send| send.recipient != "ada@izlek.sh"), "{sends:?}");
+}
+
+#[tokio::test]
+async fn a_blank_subject_or_body_refuses_and_queues_nothing() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _ = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/send_message",
+            Some(&admin_cookie),
+            &[("to", "everyone"), ("subject", "   "), ("body", "Something")],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=empty-subject&on=send_message"),
+        "{:?}",
+        answer.location
+    );
+
+    let answer = app
+        .post(
+            "/api/send_message",
+            Some(&admin_cookie),
+            &[("to", "everyone"), ("subject", "Subject"), ("body", "  ")],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=empty-body&on=send_message"),
+        "{:?}",
+        answer.location
+    );
+
+    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+
+    let location = answer.location.expect("no redirect");
+    let page = app.get(&location, Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("field-error"), "{html}");
+}
+
+#[tokio::test]
+async fn a_member_may_not_send_a_message_and_never_sees_the_panel() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/send_message",
+            Some(&member),
+            &[("to", "everyone"), ("subject", "Sneaky"), ("body", "Should not send")],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=send_message"),
+        "{:?}",
+        answer.location
+    );
+
+    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+
+    let page = app.get("/settings", Some(&member)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(!html.contains("section=message"), "{html}");
+    assert!(!html.contains("id=\"message\""), "{html}");
+}
+
+#[tokio::test]
+async fn an_unknown_recipient_refuses_and_never_broadcasts() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _ = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/send_message",
+            Some(&admin_cookie),
+            &[("to", "not-a-real-id"), ("subject", "Subject"), ("body", "Body")],
+        )
+        .await;
+    assert_ne!(answer.status, StatusCode::INTERNAL_SERVER_ERROR, "{}", answer.body);
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=no-such-member&on=send_message"),
+        "{:?}",
+        answer.location
+    );
+
+    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+}

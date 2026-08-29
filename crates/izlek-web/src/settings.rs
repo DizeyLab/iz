@@ -190,6 +190,7 @@ fn section_of_call(call: &str) -> &'static str {
         "save_sender" | "send_test_mail" => "outgoing",
         "save_limits" => "limits",
         "invite_member" | "set_role" | "resend_link" => "members",
+        "send_message" => "message",
         _ => "profile",
     }
 }
@@ -724,6 +725,57 @@ async fn set_role(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SendMessageForm {
+    to: String,
+    subject: String,
+    body: String,
+}
+
+#[route(POST "/api/send_message")]
+async fn send_message(
+    cx: &Cx,
+    Form(input): Form<SendMessageForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    let admin = match require_admin(cx).await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(saved_or_refused("send_message", Some(refusal))),
+    };
+    let subject = input.subject.trim();
+    if subject.is_empty() {
+        return Ok(saved_or_refused("send_message", Some(Refusal::EmptySubject)));
+    }
+    let body = input.body.trim();
+    if body.is_empty() {
+        return Ok(saved_or_refused("send_message", Some(Refusal::EmptyBody)));
+    }
+    let store = accounts(cx).store().clone();
+    let members = store.users(&admin.workspace_id).await?;
+    let recipients: Vec<String> = if input.to == "everyone" {
+        members
+            .into_iter()
+            .filter(|member| member.id != admin.id)
+            .map(|member| member.email)
+            .collect()
+    } else {
+        match members.into_iter().find(|member| member.id == input.to) {
+            Some(member) => vec![member.email],
+            None => return Ok(saved_or_refused("send_message", Some(Refusal::NoSuchMember))),
+        }
+    };
+    let now = time::OffsetDateTime::now_utc();
+    for recipient in &recipients {
+        if let Err(problem) = store.queue_notice(recipient, subject, body, now).await {
+            eprintln!("store error: {problem}");
+            return Ok(saved_or_refused("send_message", Some(Refusal::Unavailable)));
+        }
+    }
+    let _ = store
+        .record_event(Some(&admin.id), &ActivityKind::MessageSent, subject, now)
+        .await;
+    Ok(saved_or_refused("send_message", None))
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -896,6 +948,7 @@ enum Section {
     Outgoing,
     Limits,
     Members,
+    Message,
 }
 
 /// The class a rail link wears: `active` on the section it points to when
@@ -931,6 +984,7 @@ async fn settings_page(cx: &Cx) -> Result {
         Some("outgoing") if administers => Section::Outgoing,
         Some("limits") if administers => Section::Limits,
         Some("members") if administers => Section::Members,
+        Some("message") if administers => Section::Message,
         _ => Section::Profile,
     };
 
@@ -964,6 +1018,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let (role_refusal, _) = call_state(query, "set_role");
     let member_refusal = resend_refusal.or(invite_refusal).or(role_refusal);
     let (password_refusal, _) = call_state(query, "change_password");
+    let (message_refusal, message_saved) = call_state(query, "send_message");
     let mailed = query_value(query, "mailed").map(decode_q);
 
     view! {
@@ -985,6 +1040,7 @@ async fn settings_page(cx: &Cx) -> Result {
                     <a class=(rail_class(section, Section::Outgoing)) href="/settings?section=outgoing">(t(lang, Key::OutgoingMail))</a>
                     <a class=(rail_class(section, Section::Limits)) href="/settings?section=limits">(t(lang, Key::WorkspaceLimits))</a>
                     <a class=(rail_class(section, Section::Members)) href="/settings?section=members">(t(lang, Key::Members))</a>
+                    <a class=(rail_class(section, Section::Message)) href="/settings?section=message">(t(lang, Key::Message))</a>
                 }
             </nav>
             <main class="settings-stage">
@@ -1257,7 +1313,7 @@ async fn settings_page(cx: &Cx) -> Result {
                     </section>
                 }
 
-                if section == Section::Members && let Some(members) = members {
+                if section == Section::Members && let Some(members) = &members {
                     <section class="panel" id="members">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::Members))</h2>
@@ -1358,6 +1414,43 @@ async fn settings_page(cx: &Cx) -> Result {
                                 <p class="field-note">(crate::i18n::mailed_to_label(lang, address))</p>
                             }
                         </div>
+                    </section>
+                }
+
+                if section == Section::Message && let Some(members) = &members {
+                    <section class="panel" id="message">
+                        <div class="panel-head">
+                            <h2 class="panel-title">(t(lang, Key::Message))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
+                        </div>
+                        <form method="post" action="/api/send_message" class="panel-body">
+                            <label class="field">
+                                <span class="field-label">(t(lang, Key::Recipient))</span>
+                                <select class="field-input" name="to" data-search="">
+                                    <option value="everyone">(t(lang, Key::Everyone))</option>
+                                    for member in members {
+                                        <option value=(member.id.clone())>(member.display_name.clone())</option>
+                                    }
+                                </select>
+                            </label>
+                            <label class="field">
+                                <span class="field-label">(t(lang, Key::Subject))</span>
+                                <input class="field-input" type="text" name="subject" maxlength="200">
+                            </label>
+                            <label class="field">
+                                <span class="field-label">(t(lang, Key::Body))</span>
+                                <textarea class="detail-textarea" name="body" rows="6"></textarea>
+                            </label>
+                            <div class="panel-foot">
+                                if let Some(refusal) = &message_refusal {
+                                    <span class="field-error">(refusal.message_in(lang))</span>
+                                }
+                                if message_saved {
+                                    <span class="field-note">(t(lang, Key::Saved))</span>
+                                }
+                                <button class="primary" type="submit">(t(lang, Key::Send))</button>
+                            </div>
+                        </form>
                     </section>
                 }
             </main>

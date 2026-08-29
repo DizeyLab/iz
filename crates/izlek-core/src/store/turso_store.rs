@@ -72,6 +72,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (17, include_str!("../../migrations/0017_ui_preference.sql")),
     (18, include_str!("../../migrations/0018_photo_in_the_user.sql")),
     (19, include_str!("../../migrations/0019_events_without_a_task.sql")),
+    (
+        20,
+        include_str!("../../migrations/0020_a_notice_owes_no_rule_either.sql"),
+    ),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -2569,6 +2573,33 @@ impl Store for TursoStore {
                  (id, recipient, state, attempts, claimed_at, next_attempt_at, kind, subject, \
                   body) \
                  VALUES (?1, ?2, 'pending', 0, ?3, ?3, 'invite', ?4, ?5)",
+                params![id.clone(), recipient, stamp(at)?, subject, body],
+            )
+            .await
+            .map_err(backend)?;
+        let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
+        match self.one_row(&sql, params![id]).await? {
+            Some(row) => send_from(&row),
+            None => Err(StoreError::NotFound),
+        }
+    }
+
+    async fn queue_notice(
+        &self,
+        recipient: &str,
+        subject: &str,
+        body: &str,
+        at: OffsetDateTime,
+    ) -> Result<MailSend> {
+        let id = Ulid::new().to_string();
+        self.conn
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO mail_send \
+                 (id, recipient, state, attempts, claimed_at, next_attempt_at, kind, subject, \
+                  body) \
+                 VALUES (?1, ?2, 'pending', 0, ?3, ?3, 'notice', ?4, ?5)",
                 params![id.clone(), recipient, stamp(at)?, subject, body],
             )
             .await

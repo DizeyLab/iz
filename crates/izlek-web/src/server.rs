@@ -351,6 +351,8 @@ pub enum Refusal {
     NotAnImage,
     /// A rule with no subject line: the mail it sends would arrive blank.
     EmptySubject,
+    /// A message with no body: there is nothing for the recipient to read.
+    EmptyBody,
     /// The date field did not hold a date.
     BadDeadline,
     /// The link asked for would put a task behind itself.
@@ -361,6 +363,8 @@ pub enum Refusal {
     /// No such task — or none this account may see. Deliberately one answer for
     /// both.
     NotFound,
+    /// A recipient id that names nobody in this workspace.
+    NoSuchMember,
     Unavailable,
 }
 
@@ -401,10 +405,12 @@ impl Refusal {
             }
             Refusal::NotAnImage => "That is not an image.".to_string(),
             Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
+            Refusal::EmptyBody => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
             Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
             Refusal::NotFound => "No such task.".to_string(),
+            Refusal::NoSuchMember => "No such member.".to_string(),
             Refusal::Unavailable => "Something went wrong.".to_string(),
         }
     }
@@ -433,6 +439,7 @@ impl Refusal {
             Refusal::Cycle => "Bu bağlantı görevi kendi arkasına koyar.".to_string(),
             Refusal::MovedAlready => "Bu kartı başka biri zaten taşıdı.".to_string(),
             Refusal::NotFound => "Böyle bir görev yok.".to_string(),
+            Refusal::NoSuchMember => "Böyle bir üye yok.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
             Refusal::BadLimit => {
                 "Limit en az 1 MB, dosya başına en çok 500 MB, fotoğraf başına en çok 20 MB olabilir."
@@ -452,6 +459,7 @@ impl Refusal {
             // language off of, so it falls back to English like the rest.
             Refusal::BadSender(_) => self.message(),
             Refusal::EmptySubject => "Kurala bir konu ver.".to_string(),
+            Refusal::EmptyBody => "Önce bir şey yaz.".to_string(),
             Refusal::Rejected => "Bu işe yaramadı.".to_string(),
             Refusal::RateLimited => {
                 "Çok fazla deneme — birkaç dakika bekleyip tekrar dene.".to_string()
@@ -500,10 +508,12 @@ impl Refusal {
             "file-type" => Refusal::FileTypeNotAllowed,
             "not-an-image" => Refusal::NotAnImage,
             "empty-subject" => Refusal::EmptySubject,
+            "empty-body" => Refusal::EmptyBody,
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
             "moved-already" => Refusal::MovedAlready,
             "not-found" => Refusal::NotFound,
+            "no-such-member" => Refusal::NoSuchMember,
             "unavailable" => Refusal::Unavailable,
             _ => return None,
         })
@@ -551,10 +561,12 @@ impl Refusal {
             Refusal::FileTypeNotAllowed => "file-type",
             Refusal::NotAnImage => "not-an-image",
             Refusal::EmptySubject => "empty-subject",
+            Refusal::EmptyBody => "empty-body",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
             Refusal::MovedAlready => "moved-already",
             Refusal::NotFound => "not-found",
+            Refusal::NoSuchMember => "no-such-member",
             Refusal::Unavailable => "unavailable",
         }
     }
@@ -831,6 +843,7 @@ mod refusal_message_tests {
             Refusal::Cycle,
             Refusal::MovedAlready,
             Refusal::NotFound,
+            Refusal::NoSuchMember,
             Refusal::Unavailable,
         ];
         for refusal in all {

@@ -158,6 +158,8 @@ pub enum ActivityKind {
     RuleDeleted,
     FileAdded,
     FileRemoved,
+    /// An admin's own mail to one or more members, outside any rule.
+    MessageSent,
     /// A kind written by a newer version than the one reading it. The stored
     /// detail is shown as-is rather than dropping the row.
     Other(String),
@@ -186,6 +188,7 @@ impl ActivityKind {
             ActivityKind::RuleDeleted => "rule_deleted",
             ActivityKind::FileAdded => "file_added",
             ActivityKind::FileRemoved => "file_removed",
+            ActivityKind::MessageSent => "message_sent",
             ActivityKind::Created => "created",
             ActivityKind::Retitled => "retitled",
             ActivityKind::Described => "described",
@@ -236,6 +239,7 @@ impl ActivityKind {
             "rule_deleted" => ActivityKind::RuleDeleted,
             "file_added" => ActivityKind::FileAdded,
             "file_removed" => ActivityKind::FileRemoved,
+            "message_sent" => ActivityKind::MessageSent,
             other => ActivityKind::Other(other.to_string()),
         }
     }
@@ -294,6 +298,7 @@ impl ActivityEntry {
             | ActivityKind::RuleEdited
             | ActivityKind::RuleToggled
             | ActivityKind::RuleDeleted
+            | ActivityKind::MessageSent
             | ActivityKind::Other(_) => detail.to_string(),
         }
     }

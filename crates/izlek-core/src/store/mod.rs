@@ -303,6 +303,9 @@ pub enum SendState {
 pub enum SendKind {
     Rule,
     Invite,
+    /// An admin's own mail to one or more members — no rule, no event, no
+    /// task, same as an invite.
+    Notice,
 }
 
 impl SendKind {
@@ -310,6 +313,7 @@ impl SendKind {
         match self {
             SendKind::Rule => "rule",
             SendKind::Invite => "invite",
+            SendKind::Notice => "notice",
         }
     }
 
@@ -317,6 +321,7 @@ impl SendKind {
         match raw {
             "rule" => Some(SendKind::Rule),
             "invite" => Some(SendKind::Invite),
+            "notice" => Some(SendKind::Notice),
             _ => None,
         }
     }
@@ -942,6 +947,16 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Holds an invite mail: pending, no rule, no event, no task.
     async fn queue_invite(
+        &self,
+        recipient: &str,
+        subject: &str,
+        body: &str,
+        at: OffsetDateTime,
+    ) -> Result<MailSend>;
+
+    /// Holds an admin's mail to one member: pending, no rule, no event, no
+    /// task, same shape as [`Store::queue_invite`].
+    async fn queue_notice(
         &self,
         recipient: &str,
         subject: &str,
