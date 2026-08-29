@@ -166,6 +166,8 @@ pub enum Key {
     SigningInAsLabel,
     NewPasswordLabel,
     SetPasswordAndSignIn,
+    CurrentPasswordLabel,
+    ChangePassword,
 
     // rules.rs
     MailRules,
@@ -562,6 +564,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (NewPasswordLabel, Tr) => "YENİ PAROLA",
         (SetPasswordAndSignIn, En) => "Set password and sign in",
         (SetPasswordAndSignIn, Tr) => "Parolayı ayarla ve giriş yap",
+        (CurrentPasswordLabel, En) => "CURRENT PASSWORD",
+        (CurrentPasswordLabel, Tr) => "MEVCUT PAROLA",
+        (ChangePassword, En) => "Change password",
+        (ChangePassword, Tr) => "Parolayı değiştir",
         (AdminMadeYouAnAccount, En) => "An admin made you an account.",
         (AdminMadeYouAnAccount, Tr) => "Bir yönetici sana hesap oluşturdu.",
 

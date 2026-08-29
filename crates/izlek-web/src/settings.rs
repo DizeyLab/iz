@@ -182,23 +182,39 @@ fn redirect_to(query: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
     (StatusCode::SEE_OTHER, headers, Vec::new())
 }
 
+/// Which rail section a call's redirect lands back on, so the reload shows
+/// the panel the form it answers actually lives in.
+fn section_of_call(call: &str) -> &'static str {
+    match call {
+        "save_sender" | "send_test_mail" => "outgoing",
+        "save_limits" => "limits",
+        "invite_member" | "set_role" | "resend_link" => "members",
+        _ => "profile",
+    }
+}
+
 /// Where a save lands: back on Settings, with the refusal (if any) on the
 /// query the same way `files.rs`'s upload carries one, or `saved=<call>`
-/// when there was nothing to refuse.
+/// when there was nothing to refuse — either way, on the rail section that
+/// call belongs to.
 pub(crate) fn saved_or_refused(
     call: &str,
     refusal: Option<Refusal>,
 ) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let section = section_of_call(call);
     match refusal {
         // `BadSender`'s code collapses six different complaints into one
         // generic "bad-sender"; the sentence save time actually wrote rides
         // along as `why` so the redirect does not have to guess it back.
         Some(Refusal::BadSender(problem)) => redirect_to(&format!(
-            "refusal=bad-sender&on={call}&why={}",
+            "refusal=bad-sender&on={call}&why={}&section={section}",
             qsencode(&problem)
         )),
-        Some(refusal) => redirect_to(&format!("refusal={}&on={call}", refusal.code())),
-        None => redirect_to(&format!("saved={call}")),
+        Some(refusal) => redirect_to(&format!(
+            "refusal={}&on={call}&section={section}",
+            refusal.code()
+        )),
+        None => redirect_to(&format!("saved={call}&section={section}")),
     }
 }
 
@@ -803,6 +819,27 @@ fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
     })
 }
 
+/// Which rail section the page renders. Only one is drawn at a time; an
+/// admin-only value asked for by anyone else falls back to `Profile`, same as
+/// a section name it does not recognize at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Profile,
+    Outgoing,
+    Limits,
+    Members,
+}
+
+/// The class a rail link wears: `active` on the section it points to when
+/// that is the one showing, plain otherwise.
+fn rail_class(current: Section, target: Section) -> &'static str {
+    if current == target {
+        "settings-section-link active"
+    } else {
+        "settings-section-link"
+    }
+}
+
 /// The settings screen.
 #[page("/settings")]
 #[allow(unused_variables)]
@@ -822,6 +859,12 @@ async fn settings_page(cx: &Cx) -> Result {
     let lang = Lang::from_code(&user.language);
     let administers = user.role.can_administer();
     let query = topcoat::router::request::uri(cx).query().unwrap_or("");
+    let section = match query_value(query, "section") {
+        Some("outgoing") if administers => Section::Outgoing,
+        Some("limits") if administers => Section::Limits,
+        Some("members") if administers => Section::Members,
+        _ => Section::Profile,
+    };
 
     let zone = izlek_core::detail::parse_zone(&user.timezone);
     let sender = if administers {
@@ -852,6 +895,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let (invite_refusal, _) = call_state(query, "invite_member");
     let (role_refusal, _) = call_state(query, "set_role");
     let member_refusal = resend_refusal.or(invite_refusal).or(role_refusal);
+    let (password_refusal, _) = call_state(query, "change_password");
     let mailed = query_value(query, "mailed").map(decode_q);
 
     view! {
@@ -867,20 +911,16 @@ async fn settings_page(cx: &Cx) -> Result {
         </header>
 
         <div class="settings-shell">
+            <nav class="settings-sections">
+                <a class=(rail_class(section, Section::Profile)) href="/settings?section=profile">(t(lang, Key::YourProfile))</a>
+                if administers {
+                    <a class=(rail_class(section, Section::Outgoing)) href="/settings?section=outgoing">(t(lang, Key::OutgoingMail))</a>
+                    <a class=(rail_class(section, Section::Limits)) href="/settings?section=limits">(t(lang, Key::WorkspaceLimits))</a>
+                    <a class=(rail_class(section, Section::Members)) href="/settings?section=members">(t(lang, Key::Members))</a>
+                }
+            </nav>
             <main class="settings-stage">
-                <div class="settings-head">
-                    <h1 class="settings-title">(t(lang, Key::NavSettings))</h1>
-                    <span class="chip chip-role">(user.role.as_str().to_string())</span>
-                </div>
-                <nav class="settings-sections">
-                    <a class="settings-section-link" href="#profile">(t(lang, Key::YourProfile))</a>
-                    if administers {
-                        <a class="settings-section-link" href="#outgoing">(t(lang, Key::OutgoingMail))</a>
-                        <a class="settings-section-link" href="#limits">(t(lang, Key::WorkspaceLimits))</a>
-                        <a class="settings-section-link" href="#members">(t(lang, Key::Members))</a>
-                    }
-                </nav>
-
+                if section == Section::Profile {
                 <section class="panel" id="profile">
                     <div class="panel-head">
                         <h2 class="panel-title">(t(lang, Key::YourProfile))</h2>
@@ -967,7 +1007,30 @@ async fn settings_page(cx: &Cx) -> Result {
                     }
                 </section>
 
-                if let Some(sender) = &sender {
+                <section class="panel" id="password">
+                    <div class="panel-head">
+                        <h2 class="panel-title">(t(lang, Key::ChangePassword))</h2>
+                    </div>
+                    <form method="post" action="/api/change_password" class="panel-body">
+                        <label class="field">
+                            <span class="field-label">(t(lang, Key::CurrentPasswordLabel))</span>
+                            <input class="field-input" type="password" name="current" autocomplete="current-password" required="">
+                        </label>
+                        <label class="field">
+                            <span class="field-label">(t(lang, Key::NewPasswordLabel))</span>
+                            <input class="field-input" type="password" name="new" autocomplete="new-password" required="">
+                        </label>
+                        <div class="panel-foot">
+                            if let Some(refusal) = &password_refusal {
+                                <span class="field-error">(refusal.message_in(lang))</span>
+                            }
+                            <button class="primary" type="submit">(t(lang, Key::ChangePassword))</button>
+                        </div>
+                    </form>
+                </section>
+                }
+
+                if section == Section::Outgoing && let Some(sender) = &sender {
                     let connected = sender.is_connected();
                     let password_set = sender.password_set;
                     <section class="panel" id="outgoing">
@@ -1074,7 +1137,7 @@ async fn settings_page(cx: &Cx) -> Result {
                     </section>
                 }
 
-                if let Some((attachment_limit_mb, photo_limit_mb)) = limits {
+                if section == Section::Limits && let Some((attachment_limit_mb, photo_limit_mb)) = limits {
                     <section class="panel" id="limits">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::WorkspaceLimits))</h2>
@@ -1130,7 +1193,7 @@ async fn settings_page(cx: &Cx) -> Result {
                     </section>
                 }
 
-                if let Some(members) = members {
+                if section == Section::Members && let Some(members) = members {
                     <section class="panel" id="members">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::Members))</h2>

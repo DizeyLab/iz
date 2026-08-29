@@ -420,3 +420,13 @@
 [data-ui="ledger"] .comment-composer {
   padding: 20px 0 0;
 }
+
+// Settings rail: a narrower column, mono/uppercase stays, the active section
+// marked with an ink rule rather than a fill.
+[data-ui="ledger"] .settings-sections {
+  width: 170px;
+}
+
+[data-ui="ledger"] .settings-section-link.active {
+  border-bottom: 2px solid var(--ink);
+}

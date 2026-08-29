@@ -2460,7 +2460,9 @@ async fn an_admin_sees_the_sender_and_never_a_password() {
     let admin_cookie = admin(&app).await;
     assert!(sender_saved(&app, &admin_cookie).await);
 
-    let page = app.get("/settings", Some(&admin_cookie)).await;
+    let page = app
+        .get("/settings?section=outgoing", Some(&admin_cookie))
+        .await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("smtp.fastmail.com"), "{html}");
@@ -2504,7 +2506,7 @@ async fn an_admin_sees_who_has_a_password_and_never_a_hash() {
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
 
-    let page = app.get("/settings", Some(&admin_cookie)).await;
+    let page = app.get("/settings?section=members", Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("mert@izlek.sh"), "{html}");
     assert!(
@@ -3901,7 +3903,7 @@ async fn an_unlisted_language_is_refused() {
         .await;
     assert_eq!(
         saved.location.as_deref(),
-        Some("/settings?refusal=bad-language&on=save_profile")
+        Some("/settings?refusal=bad-language&on=save_profile&section=profile")
     );
 }
 
@@ -4041,14 +4043,76 @@ async fn the_topbar_nav_marks_the_active_page() {
         }
     }
 
-    // The settings section list keeps the panels' admin gating: a member
-    // sees only the Profile anchor.
+    // The settings rail keeps the panels' admin gating: a member sees only
+    // the Profile link, and an admin-only section in the query still renders
+    // Profile rather than the panel it asked for.
     let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
     let page = app.get("/settings", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(r##"href="#profile""##), "{html}");
-    assert!(!html.contains("href=\"#limits\""), "{html}");
-    assert!(!html.contains("href=\"#members\""), "{html}");
+    assert!(html.contains(r#"href="/settings?section=profile""#), "{html}");
+    assert!(!html.contains("href=\"/settings?section=limits\""), "{html}");
+    assert!(!html.contains("href=\"/settings?section=members\""), "{html}");
+    assert!(html.contains(r#"id="profile""#), "{html}");
+    assert!(!html.contains(r#"id="limits""#), "{html}");
+
+    let page = app
+        .get("/settings?section=limits", Some(&member))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"id="profile""#), "{html}");
+    assert!(!html.contains(r#"id="limits""#), "{html}");
+}
+
+/// A wrong current password lands back on the rail section it was posted
+/// from with a refusal; a right one changes nothing about the query but the
+/// refusal — `carry_refusal_on_redirect` never writes a `saved=` for a call
+/// nobody asked to see a note about.
+#[tokio::test]
+async fn a_password_change_carries_its_own_refusal_and_never_a_saved_note() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let wrong = app
+        .post_without_script(
+            "/api/change_password",
+            Some(&admin_cookie),
+            "http://izlek.test/settings?section=profile",
+            &[
+                ("current", "not the password"),
+                ("new", "a whole new passphrase"),
+            ],
+        )
+        .await;
+    assert!(
+        wrong.location.as_deref().is_some_and(|location| {
+            location.contains("refusal=")
+                && location.contains("on=change_password")
+                && location.contains("section=profile")
+        }),
+        "{:?}",
+        wrong.location
+    );
+
+    let right = app
+        .post_without_script(
+            "/api/change_password",
+            Some(&admin_cookie),
+            "http://izlek.test/settings?section=profile",
+            &[
+                ("current", "correct horse battery staple"),
+                ("new", "a whole new passphrase"),
+            ],
+        )
+        .await;
+    assert_eq!(right.status, StatusCode::SEE_OTHER);
+    assert!(
+        right
+            .location
+            .as_deref()
+            .is_some_and(|location| !location.contains("saved=")),
+        "{:?}",
+        right.location
+    );
 }
 
 /// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`
@@ -4351,7 +4415,7 @@ async fn a_profile_photo_round_trips_back_as_the_same_bytes() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some("/settings?saved=profile_photo")
+        Some("/settings?saved=profile_photo&section=profile")
     );
 
     let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
@@ -4379,7 +4443,7 @@ async fn text_uploaded_as_a_photo_is_refused_and_stores_nothing() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some("/settings?refusal=not-an-image&on=profile_photo")
+        Some("/settings?refusal=not-an-image&on=profile_photo&section=profile")
     );
 
     let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
@@ -4439,7 +4503,7 @@ async fn a_photo_over_the_workspace_limit_is_refused_and_stores_nothing() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some("/settings?refusal=file-too-big&on=profile_photo")
+        Some("/settings?refusal=file-too-big&on=profile_photo&section=profile")
     );
 
     let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
@@ -4465,7 +4529,7 @@ async fn a_photo_is_visible_to_other_workspace_members() {
         .await;
     assert_eq!(
         answer.location.as_deref(),
-        Some("/settings?saved=profile_photo")
+        Some("/settings?saved=profile_photo&section=profile")
     );
 
     let photo = app.get(&format!("/photo/{admin_id}"), Some(&member)).await;
@@ -4493,7 +4557,7 @@ async fn an_unknown_photo_id_is_not_found_and_the_photo_revalidates_by_etag() {
         .await;
     assert_eq!(
         answer.location.as_deref(),
-        Some("/settings?saved=profile_photo")
+        Some("/settings?saved=profile_photo&section=profile")
     );
 
     let stranger = app.get("/photo/does-not-exist", Some(&admin)).await;

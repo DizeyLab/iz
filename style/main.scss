@@ -338,6 +338,16 @@ body:has(.board-stage) {
   > .board-stage { flex: 1; min-height: 0; }
 }
 
+body:has(.settings-shell) {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  > * { flex: none; }
+  > .settings-shell { flex: 1; min-height: 0; }
+}
+
 a {
   color: var(--accent);
   transition: color var(--dur-fast) var(--ease);
@@ -2138,18 +2148,19 @@ img.avatar {
 
 .settings-shell {
   display: flex;
-  flex-direction: column;
-  min-height: calc(100vh - var(--topbar-height));
 }
 
 .settings-stage {
-  flex-grow: 1;
+  flex: 1;
   min-width: 0;
   padding: 24px 32px 40px;
   display: flex;
   flex-direction: column;
   gap: 20px;
-  max-width: 900px;
+  max-width: 860px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
 }
 
 .settings-head {
@@ -2160,12 +2171,18 @@ img.avatar {
 }
 
 .settings-sections {
+  flex: none;
+  width: 200px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 0;
+  border-right: 1px solid var(--border);
 }
 
 .settings-section-link {
+  display: block;
+  padding: 8px 16px;
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
@@ -2620,12 +2637,6 @@ input[type="radio"] {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-// The logs pages reuse the rules list but bound its height.
-.rule-list-scroll {
-  max-height: 360px;
-  overflow-y: auto;
 }
 
 .rule-row {

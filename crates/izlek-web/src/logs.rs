@@ -422,7 +422,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                         <h2 class="panel-title">(t(lang, Key::MailQueue))</h2>
                     </div>
                     <div class="panel-body">
-                        <div class="rule-list rule-list-scroll">
+                        <div class="rule-list">
                             for line in queue {
                                 let is_failed_or_held = line.state_kind == "failed" || line.state_kind == "held";
                                 let state_note = if is_failed_or_held {
@@ -454,7 +454,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                         <h2 class="panel-title">(t(lang, Key::MailDecisions))</h2>
                     </div>
                     <div class="panel-body">
-                        <div class="rule-list rule-list-scroll">
+                        <div class="rule-list">
                             for group in decisions {
                                 let header = match group.happened {
                                     Some(happened) => format!("{} · {}", group.task, happened),
@@ -489,7 +489,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                         <h2 class="panel-title">(t(lang, Key::Activity))</h2>
                     </div>
                     <div class="panel-body">
-                        <div class="rule-list rule-list-scroll">
+                        <div class="rule-list">
                             for line in activity {
                                 <div class="rule-row">
                                     <div class="rule-sentence">

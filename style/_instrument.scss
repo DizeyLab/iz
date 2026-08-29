@@ -158,6 +158,21 @@
   // ruled columns and the square avatars above. Token values — control
   // heights, radii, shadows — already carry the rest.)
 
+  // --- Instrument skin: settings rail -----------------------------------------
+
+  .settings-sections { width: 200px; }
+
+  .settings-section-link {
+    font-size: 13px;
+    letter-spacing: normal;
+    text-transform: none;
+
+    &.active {
+      background: var(--row-hover);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+  }
+
 }
 
 // -- task detail: 560px side panel over the board ----------------------------
