@@ -269,10 +269,10 @@
 [data-ui="ledger"] .modal-scrim:has(> .modal-task) {
   background: var(--bg);
   justify-content: center;
-  // No bottom padding: the sticky foot below carries the page's trailing
-  // margin in its own padding, so it can sit flush on the pan surface's edge
-  // instead of floating with text showing beneath it.
-  padding: 36px 40px 0;
+  // Neither top nor bottom padding: the sticky masthead and foot carry the
+  // page's margins in their own padding, so both sit flush on the pan
+  // surface's edges instead of floating with text showing past them.
+  padding: 0 40px;
 }
 
 [data-ui="ledger"] .modal-task {
@@ -304,6 +304,16 @@
 [data-ui="ledger"] .detail-tabs {
   padding: 0;
   margin-top: 14px;
+}
+
+// The masthead holds at the top of the paper: the task names itself however
+// far down the comments you are.
+[data-ui="ledger"] .detail-mast {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 36px 0 6px;
+  background: var(--bg);
 }
 
 [data-ui="ledger"] .modal-task .detail-esc,

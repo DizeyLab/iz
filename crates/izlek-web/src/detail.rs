@@ -1438,50 +1438,55 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
         cx =>
         <div class="modal-scrim">
             <div class="modal modal-task" tabindex="-1">
-                <header class="detail-head">
-                    <div class="detail-headline">
-                        <span class="detail-key">(detail.task_key.clone())</span>
-                        (title_control(cx, &detail, may_write, lang).await?)
-                    </div>
-                    <span class="detail-state">
-                        if may_write {
-                            <form class="status-form" method="post" action="/api/move_card">
-                                <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
-                                <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
-                                <select class="status-select" name="to_column_id" data-autosubmit="">
-                                    for column in &detail.columns {
-                                        <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
-                                    }
-                                </select>
-                                (glyph::chevron(cx).await?)
-                            </form>
-                        } else {
-                            <span class="field-box">
-                                <span class="status-dot"></span>
-                                <span class="field-text">(detail.column.name.clone())</span>
-                            </span>
-                        }
-                    </span>
-                    <div class="spacer"></div>
-                    <span class="detail-esc">(t(lang, Key::Esc))</span>
-                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
-                    <a class="quiet detail-board" href="/">(format!("<- {}", t(lang, Key::NavBoard)))</a>
-                </header>
+                // Key, title, state and the tabs ride together as one masthead:
+                // pinned, so the task still names itself at the 200th comment.
+                <div class="detail-mast">
+                    <header class="detail-head">
+                        <div class="detail-headline">
+                            <span class="detail-key">(detail.task_key.clone())</span>
+                            (title_control(cx, &detail, may_write, lang).await?)
+                        </div>
+                        <span class="detail-state">
+                            if may_write {
+                                <form class="status-form" method="post" action="/api/move_card">
+                                    <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                    <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
+                                    <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
+                                    <select class="status-select" name="to_column_id" data-autosubmit="">
+                                        for column in &detail.columns {
+                                            <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
+                                        }
+                                    </select>
+                                    (glyph::chevron(cx).await?)
+                                </form>
+                            } else {
+                                <span class="field-box">
+                                    <span class="status-dot"></span>
+                                    <span class="field-text">(detail.column.name.clone())</span>
+                                </span>
+                            }
+                        </span>
+                        <div class="spacer"></div>
+                        <span class="detail-esc">(t(lang, Key::Esc))</span>
+                        <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
+                        <a class="quiet detail-board" href="/">(format!("<- {}", t(lang, Key::NavBoard)))</a>
+                    </header>
 
-                <nav class="detail-tabs">
-                    <a class=(tab_class(tab, Tab::Task)) href=(format!("/?task={}&tab={}", detail.id, Tab::Task.slug()))>(t(lang, Key::TabTask))</a>
-                    <a class=(tab_class(tab, Tab::Files)) href=(format!("/?task={}&tab={}", detail.id, Tab::Files.slug()))>
-                        (t(lang, Key::Files))
-                        if !detail.files.is_empty() { <span class="detail-tab-count">(detail.files.len())</span> }
-                    </a>
-                    <a class=(tab_class(tab, Tab::Comments)) href=(format!("/?task={}&tab={}", detail.id, Tab::Comments.slug()))>
-                        (t(lang, Key::Comments))
-                        if !detail.comments.is_empty() { <span class="detail-tab-count">(detail.comments.len())</span> }
-                    </a>
-                    <a class=(tab_class(tab, Tab::Activity)) href=(format!("/?task={}&tab={}", detail.id, Tab::Activity.slug()))>(t(lang, Key::Activity))</a>
-                    <a class=(tab_class(tab, Tab::Mail)) href=(format!("/?task={}&tab={}", detail.id, Tab::Mail.slug()))>(t(lang, Key::TabMail))</a>
-                </nav>
+                    <nav class="detail-tabs">
+                        <a class=(tab_class(tab, Tab::Task)) href=(format!("/?task={}&tab={}", detail.id, Tab::Task.slug()))>(t(lang, Key::TabTask))</a>
+                        <a class=(tab_class(tab, Tab::Files)) href=(format!("/?task={}&tab={}", detail.id, Tab::Files.slug()))>
+                            (t(lang, Key::Files))
+                            if !detail.files.is_empty() { <span class="detail-tab-count">(detail.files.len())</span> }
+                        </a>
+                        <a class=(tab_class(tab, Tab::Comments)) href=(format!("/?task={}&tab={}", detail.id, Tab::Comments.slug()))>
+                            (t(lang, Key::Comments))
+                            if !detail.comments.is_empty() { <span class="detail-tab-count">(detail.comments.len())</span> }
+                        </a>
+                        <a class=(tab_class(tab, Tab::Activity)) href=(format!("/?task={}&tab={}", detail.id, Tab::Activity.slug()))>(t(lang, Key::Activity))</a>
+                        <a class=(tab_class(tab, Tab::Mail)) href=(format!("/?task={}&tab={}", detail.id, Tab::Mail.slug()))>(t(lang, Key::TabMail))</a>
+                    </nav>
+                </div>
+
 
                 <div class="detail-body">
                     if tab == Tab::Task {
