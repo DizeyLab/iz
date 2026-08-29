@@ -68,6 +68,15 @@ pub enum Moved {
     /// longer the column it is in. Nothing was written and the caller should
     /// re-read the board rather than overwrite a decision it never saw.
     Stale,
+    /// The card was headed for a done column with subtasks still open. A
+    /// parent finished while its parts are not is a lie the board would then
+    /// go on telling, so nothing was written.
+    ///
+    /// There is no override: a subtask nobody will do is deleted or promoted
+    /// out of its parent, both of which are single writes that already exist.
+    /// A "finish anyway" button would make this rule advisory, which is worse
+    /// than not having it.
+    Held,
 }
 
 /// Whoever a card can point at. The address is not here: a board card never

@@ -1347,6 +1347,89 @@ async fn a_successful_move_never_redirects_off_site() {
 }
 
 #[tokio::test]
+async fn a_card_with_open_subtasks_is_refused_the_done_column() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+    let child = a_task(&app, &admin, &columns[0], "Write the CSV writer").await;
+    app.store.set_parent(&child, Some(&parent)).await.unwrap();
+
+    // The last column is the done one; both the board drag and the detail
+    // page's status control post here.
+    let done = columns.last().unwrap();
+    let held = app
+        .post(
+            "/api/move_card",
+            Some(&admin),
+            &[
+                ("task_id", &parent),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", done),
+            ],
+        )
+        .await;
+    assert!(
+        held.location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=subtasks-open&on=move_card"),
+        "{:?}",
+        held.location
+    );
+
+    // The card did not move, so the board still shows it where it was.
+    let workspace_id = app.workspace_id().await;
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let held_card = board
+        .columns
+        .iter()
+        .flat_map(|c| &c.cards)
+        .find(|card| card.id == parent)
+        .expect("the parent left the board");
+    assert_eq!(held_card.column_id, columns[0]);
+    assert!(!held_card.is_done());
+
+    // Finishing the subtask is what lets it through.
+    let finished = app
+        .post(
+            "/api/move_card",
+            Some(&admin),
+            &[
+                ("task_id", &child),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", done),
+            ],
+        )
+        .await;
+    assert_eq!(finished.body, "");
+    let through = app
+        .post(
+            "/api/move_card",
+            Some(&admin),
+            &[
+                ("task_id", &parent),
+                ("from_column_id", &columns[0]),
+                ("to_column_id", done),
+            ],
+        )
+        .await;
+    assert_eq!(through.body, "");
+    assert!(
+        !through
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        through.location
+    );
+}
+
+#[tokio::test]
 async fn a_drop_decided_against_a_stale_board_is_refused() {
     let app = App::open().await;
     let admin = admin(&app).await;

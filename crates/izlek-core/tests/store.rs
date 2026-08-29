@@ -267,6 +267,143 @@ async fn parenting_a_task_that_is_not_there_is_not_found() {
     ));
 }
 
+/// A parent in Backlog with one subtask, also in Backlog. Returns both ids.
+async fn a_parent_and_one_subtask(
+    store: &TursoStore,
+    workspace: &str,
+    admin: &str,
+) -> (String, String) {
+    let parent = add_task(store, workspace, "Backlog", "Ship the exporter", None, admin).await;
+    let board = store.board(workspace).await.unwrap().unwrap();
+    let column_id = column_named(store, workspace, "Backlog").await;
+    let child = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            parent_id: Some(&parent),
+            title: "Write the CSV writer",
+            description: "",
+            deadline: None,
+            created_by: admin,
+        })
+        .await
+        .unwrap()
+        .row
+        .id;
+    (parent, child)
+}
+
+#[tokio::test]
+async fn a_parent_does_not_finish_before_its_subtasks_do() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    let backlog = column_named(&scratch.store, &workspace, "Backlog").await;
+    let done = column_named(&scratch.store, &workspace, "Done").await;
+    let held = scratch
+        .store
+        .move_task(&parent, &backlog, &done, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert!(matches!(held, Moved::Held));
+
+    // Nothing was written: not the column, not a crossing for a rule to read.
+    let detail = load_detail(&scratch.store, &workspace, &parent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.column.id, backlog);
+    assert!(detail.done_at.is_none());
+    assert!(
+        !detail
+            .activity
+            .iter()
+            .any(|entry| matches!(entry.kind, izlek_core::detail::ActivityKind::Moved)),
+        "a held move leaves no trail"
+    );
+
+    // The subtask finishing is what lets the parent through.
+    moved_to(&scratch.store, &workspace, &child, "Backlog", "Done", &admin).await;
+    let recorded = scratch
+        .store
+        .move_task(&parent, &backlog, &done, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert!(matches!(recorded, Moved::Recorded(_)));
+    assert!(
+        load_detail(&scratch.store, &workspace, &parent)
+            .await
+            .unwrap()
+            .unwrap()
+            .done_at
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn an_open_subtask_only_holds_the_done_column() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, _child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    // Every other column is a column like any other.
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &parent,
+        "Backlog",
+        "In Progress",
+        &admin,
+    )
+    .await;
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &parent,
+        "In Progress",
+        "Review",
+        &admin,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_subtask_finishes_on_its_own_account() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (_parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    // The rule is about a parent's parts, not about being somebody's part.
+    moved_to(&scratch.store, &workspace, &child, "Backlog", "Done", &admin).await;
+}
+
+#[tokio::test]
+async fn a_deleted_subtask_stops_holding_its_parent() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    // The escape hatch is not an override button: a subtask nobody will do is
+    // deleted, or promoted out of its parent.
+    scratch
+        .store
+        .delete_task(&child, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    moved_to(&scratch.store, &workspace, &parent, "Backlog", "Done", &admin).await;
+}
+
+#[tokio::test]
+async fn a_promoted_subtask_stops_holding_its_parent() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
+
+    scratch.store.set_parent(&child, None).await.unwrap();
+    moved_to(&scratch.store, &workspace, &parent, "Backlog", "Done", &admin).await;
+}
+
 #[tokio::test]
 async fn the_first_account_owns_the_workspace() {
     let scratch = Scratch::open().await;

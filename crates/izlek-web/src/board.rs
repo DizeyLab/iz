@@ -65,6 +65,7 @@ async fn move_card_shared(
         }
         Ok(Moved::Unchanged) => Ok(None),
         Ok(Moved::Stale) => Ok(Some(Refusal::MovedAlready)),
+        Ok(Moved::Held) => Ok(Some(Refusal::SubtasksOpen)),
         Err(izlek_core::store::StoreError::NotFound) => Ok(Some(Refusal::NotFound)),
         Err(error) => {
             eprintln!("store error: {error}");

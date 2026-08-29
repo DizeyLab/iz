@@ -360,6 +360,11 @@ pub enum Refusal {
     /// The card was already moved out of the column this request thought it
     /// was in, by somebody else, while this person was deciding.
     MovedAlready,
+    /// A task headed for a done column while its subtasks are not done. The
+    /// count is deliberately not in the sentence: the parent's card already
+    /// carries it, and a number cannot survive the round trip through the
+    /// address bar that a browser without script makes.
+    SubtasksOpen,
     /// No such task — or none this account may see. Deliberately one answer for
     /// both.
     NotFound,
@@ -409,6 +414,7 @@ impl Refusal {
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
             Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
+            Refusal::SubtasksOpen => "Subtasks are still open.".to_string(),
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::NoSuchMember => "No such member.".to_string(),
             Refusal::Unavailable => "Something went wrong.".to_string(),
@@ -438,6 +444,7 @@ impl Refusal {
             Refusal::BadDeadline => "Bu bir tarih değil.".to_string(),
             Refusal::Cycle => "Bu bağlantı görevi kendi arkasına koyar.".to_string(),
             Refusal::MovedAlready => "Bu kartı başka biri zaten taşıdı.".to_string(),
+            Refusal::SubtasksOpen => "Alt görevler hâlâ açık.".to_string(),
             Refusal::NotFound => "Böyle bir görev yok.".to_string(),
             Refusal::NoSuchMember => "Böyle bir üye yok.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
@@ -512,6 +519,7 @@ impl Refusal {
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
             "moved-already" => Refusal::MovedAlready,
+            "subtasks-open" => Refusal::SubtasksOpen,
             "not-found" => Refusal::NotFound,
             "no-such-member" => Refusal::NoSuchMember,
             "unavailable" => Refusal::Unavailable,
@@ -565,6 +573,7 @@ impl Refusal {
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
             Refusal::MovedAlready => "moved-already",
+            Refusal::SubtasksOpen => "subtasks-open",
             Refusal::NotFound => "not-found",
             Refusal::NoSuchMember => "no-such-member",
             Refusal::Unavailable => "unavailable",
@@ -842,6 +851,7 @@ mod refusal_message_tests {
             Refusal::BadEmail,
             Refusal::Cycle,
             Refusal::MovedAlready,
+            Refusal::SubtasksOpen,
             Refusal::NotFound,
             Refusal::NoSuchMember,
             Refusal::Unavailable,

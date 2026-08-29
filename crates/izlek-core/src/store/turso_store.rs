@@ -428,6 +428,7 @@ enum Outcome {
     Wrote,
     Stale,
     Missing,
+    Held,
 }
 
 fn stamp(at: OffsetDateTime) -> Result<String> {
@@ -2015,6 +2016,25 @@ impl Store for TursoStore {
             };
             drop(rows);
 
+            // A parent does not finish before its parts do. Read inside the
+            // same transaction as the move: outside it, a subtask created
+            // while the drag was in the air would slip under the check.
+            if to_is_done {
+                let mut rows = tx
+                    .query(
+                        "SELECT 1 FROM task \
+                         WHERE parent_id = ?1 AND deleted_at IS NULL AND done_at IS NULL \
+                         LIMIT 1",
+                        params![task_id],
+                    )
+                    .await?;
+                let open_child = rows.next().await?.is_some();
+                drop(rows);
+                if open_child {
+                    return Ok(Outcome::Held);
+                }
+            }
+
             // The card lands at the end of its new column. Where inside a
             // column a card sits is the board's sort control's business, not
             // the drop's.
@@ -2103,6 +2123,10 @@ impl Store for TursoStore {
             Ok(Outcome::Stale) => {
                 let _ = tx.rollback().await;
                 Ok(Moved::Stale)
+            }
+            Ok(Outcome::Held) => {
+                let _ = tx.rollback().await;
+                Ok(Moved::Held)
             }
             Ok(Outcome::Missing) => {
                 let _ = tx.rollback().await;
