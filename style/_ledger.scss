@@ -269,7 +269,10 @@
 [data-ui="ledger"] .modal-scrim:has(> .modal-task) {
   background: var(--bg);
   justify-content: center;
-  padding: 36px 40px;
+  // No bottom padding: the sticky foot below carries the page's trailing
+  // margin in its own padding, so it can sit flush on the pan surface's edge
+  // instead of floating with text showing beneath it.
+  padding: 36px 40px 0;
 }
 
 [data-ui="ledger"] .modal-task {
@@ -438,8 +441,17 @@
 
 // Composer sits in the flow at the end of the page — the body above is
 // static, so it simply follows the sections.
+// The page pans, but the way out must not pan with it. The foot and the
+// composer hold at the bottom of the paper with the ground under them, so a
+// description or a comment run of any length still ends within reach.
+[data-ui="ledger"] .detail-foot,
 [data-ui="ledger"] .comment-composer {
-  padding: 20px 0 0;
+  position: sticky;
+  bottom: 0;
+  margin-top: 24px;
+  padding: 16px 0 36px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
 }
 
 // Settings rail: a narrower column, mono/uppercase stays, the active section
