@@ -119,7 +119,7 @@ async fn claim_workspace(cx: &Cx, Form(input): Form<ClaimWorkspaceForm>) -> Redi
                     WORKSPACE_NAME,
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             redirect(cx, None)
         }
         Err(error) => redirect(cx, Some(error.into())),
@@ -150,19 +150,21 @@ async fn sign_in(cx: &Cx, Form(input): Form<SignInForm>) -> Redirect {
                     &input.email,
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             redirect(cx, None)
         }
         Err(error) => {
-            let _ = accounts(cx)
-                .store()
-                .record_event(
-                    None,
-                    &ActivityKind::SignInFailed,
-                    &input.email,
-                    time::OffsetDateTime::now_utc(),
-                )
-                .await?;
+            if !matches!(error, izlek_core::accounts::AccountError::RateLimited) {
+                let _ = accounts(cx)
+                    .store()
+                    .record_event(
+                        None,
+                        &ActivityKind::SignInFailed,
+                        &input.email,
+                        time::OffsetDateTime::now_utc(),
+                    )
+                    .await;
+            }
             redirect(cx, Some(error.into()))
         }
     }
@@ -215,7 +217,7 @@ async fn redeem_link(cx: &Cx, Form(input): Form<RedeemLinkForm>) -> Redirect {
                     &signed_in.user.email,
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             // Redeemed; the referring `/join/{token}` now names a spent
             // link, which would show "no longer works" to someone who just
             // signed in, so land on the board itself instead.
@@ -257,7 +259,7 @@ async fn change_password(cx: &Cx, Form(input): Form<ChangePasswordForm>) -> Redi
                     "",
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             redirect(cx, None)
         }
         Err(error) => redirect(cx, Some(error.into())),
@@ -300,7 +302,7 @@ async fn invite_member(cx: &Cx, Form(input): Form<InviteMemberForm>) -> Result<R
                     &input.email,
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             invite_answer(cx, has_referer, Ok(made.user.email))
         }
         Err(error) => invite_answer(cx, has_referer, Err(error.into())),
@@ -318,8 +320,11 @@ fn invite_answer(
         return Json(outcome).into_response(cx);
     }
     let location = match outcome {
-        Ok(address) => format!("/settings?mailed={}", encode_q(&address)),
-        Err(refusal) => format!("/settings?refusal={}&on=invite_member", refusal.code()),
+        Ok(address) => format!("/settings?mailed={}&section=members", encode_q(&address)),
+        Err(refusal) => format!(
+            "/settings?refusal={}&on=invite_member&section=members",
+            refusal.code()
+        ),
     };
     (StatusCode::SEE_OTHER, [(header::LOCATION, location)], ()).into_response(cx)
 }

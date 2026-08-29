@@ -4647,3 +4647,35 @@ async fn a_photo_hides_from_the_signed_out_and_the_foreign() {
     let signed_out = app.get(&format!("/photo/{admin_id}"), None).await;
     assert_eq!(signed_out.status, StatusCode::NOT_FOUND);
 }
+
+/// An invite refusal reopens the Members section, where the message shows;
+/// so does the mailed note on success.
+#[tokio::test]
+async fn an_invite_refusal_lands_on_the_members_section() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let dup = app
+        .post_without_script(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            "http://localhost/settings?section=members",
+            &[
+                ("email", "emre@izlek.sh"),
+                ("display_name", "Emre"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    let location = dup.location.expect("no redirect");
+    assert!(
+        location.contains("on=invite_member") && location.contains("section=members"),
+        "{location}"
+    );
+
+    let page = app.get(&location, Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("field-error"), "{html}");
+    assert!(html.contains("emre@izlek.sh"), "{html}");
+}

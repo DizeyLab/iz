@@ -381,7 +381,7 @@ async fn upload(
                 &label,
                 OffsetDateTime::now_utc(),
             )
-            .await?;
+            .await;
     }
 
     Ok(match added {

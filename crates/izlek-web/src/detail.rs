@@ -599,7 +599,7 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
             &attachment.file_name,
             time::OffsetDateTime::now_utc(),
         )
-        .await?;
+        .await;
     redirect(cx, None)
 }
 

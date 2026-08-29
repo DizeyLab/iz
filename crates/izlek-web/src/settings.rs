@@ -321,7 +321,7 @@ async fn save_limits(
                     "",
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             None
         }
         Err(problem) => {
@@ -424,7 +424,7 @@ async fn save_sender(
                     "",
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             None
         }
         Err(problem) => {
@@ -503,7 +503,7 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
                 "",
                 time::OffsetDateTime::now_utc(),
             )
-            .await?;
+            .await;
     }
     Ok(saved_or_refused("send_test_mail", None))
 }
@@ -629,7 +629,7 @@ async fn save_profile(
                     "",
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             None
         }
         Err(izlek_core::store::StoreError::Conflict("account")) => Some(Refusal::AddressTaken),
@@ -672,7 +672,7 @@ async fn resend_link(
                     &invitation.user.email,
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             Ok(redirect_to(&format!(
                 "mailed={}",
                 encode_q(&invitation.user.email)
@@ -717,7 +717,7 @@ async fn set_role(
                     &format!("{name} -> {}", input.role.as_str()),
                     time::OffsetDateTime::now_utc(),
                 )
-                .await?;
+                .await;
             Ok(saved_or_refused("set_role", None))
         }
         Err(error) => Ok(saved_or_refused("set_role", Some(error.into()))),

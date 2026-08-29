@@ -470,7 +470,7 @@ async fn create_rule(cx: &Cx, Form(input): Form<CreateRuleForm>) -> Redirect {
             &subject,
             time::OffsetDateTime::now_utc(),
         )
-        .await?;
+        .await;
     redirect(cx, None)
 }
 
@@ -556,7 +556,7 @@ async fn update_rule(cx: &Cx, Form(input): Form<UpdateRuleForm>) -> Redirect {
             &subject,
             time::OffsetDateTime::now_utc(),
         )
-        .await?;
+        .await;
     redirect(cx, None)
 }
 
@@ -588,7 +588,7 @@ async fn set_rule_enabled(cx: &Cx, Form(input): Form<SetRuleEnabledForm>) -> Red
             &rule.subject,
             time::OffsetDateTime::now_utc(),
         )
-        .await?;
+        .await;
     redirect(cx, None)
 }
 
@@ -615,7 +615,7 @@ async fn delete_rule(cx: &Cx, Form(input): Form<DeleteRuleForm>) -> Redirect {
             &rule.subject,
             time::OffsetDateTime::now_utc(),
         )
-        .await?;
+        .await;
     redirect(cx, None)
 }
 
