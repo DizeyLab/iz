@@ -1511,7 +1511,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             <span class="detail-label">(t(lang, Key::Deadline))</span>
                             (deadline_control(cx, &detail, today, may_write, lang).await?)
                         </div>
-                        <div class="detail-field">
+                        <div class="detail-field detail-field-people">
                             <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
                             <div class="detail-assignees">
                                 for person in &detail.assignees {

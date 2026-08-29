@@ -1488,12 +1488,18 @@ img.avatar {
 
 // -- the field row ----------------------------------------------------------
 
+// Status and a date are short and sit side by side; the people carry names,
+// which no third of a panel holds, so they take a row of their own.
 .detail-fields {
   display: grid;
-  grid-template-columns: 1fr 1.5fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
   padding: 18px 24px 0;
   margin-top: 2px;
+}
+
+.detail-field-people {
+  grid-column: 1 / -1;
 }
 
 .detail-field {
@@ -1725,7 +1731,6 @@ img.avatar {
 .assignee-name {
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1735,15 +1740,10 @@ img.avatar {
 
 // Two people share one cell, so each name gives up half its room before the
 // policy below drops names altogether.
-.detail-assignees:has(.assignee-chip:nth-child(2)) .assignee-name { max-width: 76px; }
-
-// Three people is the whole company here, and three first names fit. Past that
-// the labels go, in order, and the chips read as avatars — legible where a
-// clipped name is not. The round "+" keeps its size either way.
-.detail-assignees:has(.assignee-chip:nth-child(4)) {
-  .assignee-chip:nth-child(-n + 2) .assignee-name { display: none; }
-}
-
+// Four names fit the full-width row, sharing the slack evenly. Past that the
+// labels go together — never half of them, which reads as a rendering fault —
+// and the chips stand as avatars, legible where a clipped name is not. The
+// round "+" keeps its size either way.
 .detail-assignees:has(.assignee-chip:nth-child(5)) {
   .assignee-name { display: none; }
 }
