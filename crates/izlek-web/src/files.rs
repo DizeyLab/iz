@@ -47,8 +47,10 @@ fn redirect_to(location: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
 /// alike — the task detail modal it was posted from, reopened.
 fn back_to(task_id: &str, refusal: Option<Refusal>) -> (StatusCode, HeaderMap, Vec<u8>) {
     let location = match refusal {
-        Some(refusal) => format!("/?task={task_id}&refusal={}&on=upload_file", refusal.code()),
-        None => format!("/?task={task_id}"),
+        Some(refusal) => {
+            format!("/?task={task_id}&tab=files&refusal={}&on=upload_file", refusal.code())
+        }
+        None => format!("/?task={task_id}&tab=files"),
     };
     redirect_to(&location)
 }

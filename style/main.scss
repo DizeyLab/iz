@@ -1698,6 +1698,7 @@ img.avatar {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   height: 36px;
   padding: 0 6px;
   background: var(--field-bg);
@@ -1705,12 +1706,13 @@ img.avatar {
   border-radius: var(--radius);
 }
 
-// Chips never shrink: the row gives up labels instead, and what is left is a
-// whole name or an avatar on its own. A name too long for the row ellipsizes
-// rather than losing whole words.
+// A chip shrinks before it overflows: the field box is one cell of a three
+// column grid, so a long name has to fold into an ellipsis rather than push
+// its own remove cross — and the round "+" — out past the box edge.
 .assignee-chip {
   display: inline-flex;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   align-items: center;
   gap: 4px;
   white-space: nowrap;
@@ -1721,12 +1723,19 @@ img.avatar {
 }
 
 .assignee-name {
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--ink);
 }
+
+// Two people share one cell, so each name gives up half its room before the
+// policy below drops names altogether.
+.detail-assignees:has(.assignee-chip:nth-child(2)) .assignee-name { max-width: 76px; }
 
 // Three people is the whole company here, and three first names fit. Past that
 // the labels go, in order, and the chips read as avatars — legible where a
@@ -1743,6 +1752,7 @@ img.avatar {
 
 .assignee-remove {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: 14px;
@@ -1761,6 +1771,7 @@ img.avatar {
 // survive `ActionForm`, so each row carries its own hidden field instead.
 .assignee-add {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: var(--control-h);

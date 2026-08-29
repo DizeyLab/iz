@@ -2985,7 +2985,7 @@ async fn a_member_uploads_a_file_and_the_chip_comes_back() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some(format!("/?task={task}").as_str())
+        Some(format!("/?task={task}&tab=files").as_str())
     );
 
     let snapshot = app
@@ -2997,7 +2997,7 @@ async fn a_member_uploads_a_file_and_the_chip_comes_back() {
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(&format!("task={task}&amp;file={file_id}")),
+        html.contains(&format!("task={task}&amp;tab=files&amp;file={file_id}")),
         "no viewer href for the new file: {html}"
     );
     assert!(html.contains("spec.png"));
@@ -3249,6 +3249,51 @@ async fn the_viewer_renders_in_page_for_a_renderable_file_and_ignores_a_foreign_
     assert!(!String::from_utf8_lossy(&missing_page.bytes).contains("viewer-body"));
 }
 
+/// A file is opened from a section, so closing it lands back on that section:
+/// the close links carry the tab the viewer was opened over, not the panel's
+/// default.
+#[tokio::test]
+async fn closing_a_file_returns_to_the_tab_it_was_opened_from() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Open it in place").await;
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &png)),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let file_id = attachment_id_named(&snapshot.body, "spec.png");
+
+    let page = app
+        .get(
+            &format!("/?task={task}&tab=files&file={file_id}"),
+            Some(&admin_cookie),
+        )
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("viewer-body"), "no viewer overlay: {html}");
+    // The tab strip behind the overlay carries the same href, so the check
+    // names the close control itself.
+    assert!(
+        html.contains(&format!(
+            "class=\"viewer-close\" href=\"/?task={task}&amp;tab=files\""
+        )),
+        "viewer closes to the bare task, losing the section: {html}"
+    );
+}
+
 #[tokio::test]
 async fn a_file_past_the_workspace_limit_is_refused_before_it_is_kept() {
     let app = App::open().await;
@@ -3289,7 +3334,7 @@ async fn a_file_past_the_workspace_limit_is_refused_before_it_is_kept() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some(format!("/?task={task}&refusal=file-too-big&on=upload_file").as_str())
+        Some(format!("/?task={task}&tab=files&refusal=file-too-big&on=upload_file").as_str())
     );
 
     let snapshot = app
@@ -3341,7 +3386,7 @@ async fn a_file_type_off_the_list_is_refused() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some(format!("/?task={task}&refusal=file-type&on=upload_file").as_str())
+        Some(format!("/?task={task}&tab=files&refusal=file-type&on=upload_file").as_str())
     );
 }
 
@@ -3367,7 +3412,7 @@ async fn an_empty_allowed_list_lets_anything_through() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some(format!("/?task={task}").as_str())
+        Some(format!("/?task={task}&tab=files").as_str())
     );
 }
 
@@ -3501,7 +3546,7 @@ async fn an_upload_without_a_file_is_refused() {
     assert_eq!(answer.status, StatusCode::SEE_OTHER);
     assert_eq!(
         answer.location.as_deref(),
-        Some(format!("/?task={task}&refusal=no-file&on=upload_file").as_str())
+        Some(format!("/?task={task}&tab=files&refusal=no-file&on=upload_file").as_str())
     );
 }
 

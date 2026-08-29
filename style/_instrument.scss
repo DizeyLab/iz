@@ -245,8 +245,10 @@
   font-size: 20px;
 }
 
+// Status and a date are short; the people carry names, so the third column
+// takes the slack rather than ellipsising them to a single letter.
 [data-ui="instrument"] .detail-fields {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 0.85fr) minmax(0, 1.3fr);
   gap: 10px;
   padding: 0;
   margin-top: 18px;

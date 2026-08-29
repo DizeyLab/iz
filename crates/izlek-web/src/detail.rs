@@ -1288,7 +1288,7 @@ async fn file_chip(
     let on_comment = file.comment_id.is_some();
     let remove_title = t(lang, Key::RemoveThisFile);
     let href = if crate::files::viewer_kind(&file.mime_type).is_some() {
-        format!("/?task={task_id}&file={}", file.id)
+        format!("/?task={task_id}&tab={}&file={}", Tab::Files.slug(), file.id)
     } else {
         format!("/files/{}", file.id)
     };
@@ -1527,11 +1527,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     (refused(cx, "move_card", lang).await?)
 
                     <section class="detail-block">
-                        <span class="detail-label">(t(lang, Key::Description))</span>
-                        (description_control(cx, &detail, may_write, lang).await?)
-                    </section>
-
-                    <section class="detail-block">
                         <div class="detail-block-head">
                             <span class="detail-label">(t(lang, Key::Dependencies))</span>
                             <div class="spacer"></div>
@@ -1552,6 +1547,11 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             <p class="detail-prose detail-prose-empty">(t(lang, Key::NoDependencies))</p>
                         }
                     </section>
+
+                    <section class="detail-block">
+                        <span class="detail-label">(t(lang, Key::Description))</span>
+                        (description_control(cx, &detail, may_write, lang).await?)
+                    </section>
                     }
 
                     if tab == Tab::Files {
@@ -1560,14 +1560,6 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             <span class="detail-label">(t(lang, Key::Files))</span>
                             <span class="detail-count">(detail.files.len())</span>
                         </div>
-                        if !detail.files.is_empty() {
-                            <div class="file-list">
-                                for file in &detail.files {
-                                    (file_chip(cx, &detail.id, file, &me, may_write, lang).await?)
-                                }
-                            </div>
-                        }
-                        (refused(cx, "delete_file", lang).await?)
                         if may_comment {
                             <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
@@ -1578,6 +1570,14 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                 </label>
                             </form>
                             (refused(cx, "upload_file", lang).await?)
+                        }
+                        (refused(cx, "delete_file", lang).await?)
+                        if !detail.files.is_empty() {
+                            <div class="file-list">
+                                for file in &detail.files {
+                                    (file_chip(cx, &detail.id, file, &me, may_write, lang).await?)
+                                }
+                            </div>
                         }
                     </section>
                     }
@@ -1774,7 +1774,7 @@ async fn audio_player_script(cx: &Cx) -> Result {
 /// mime type with no viewer element: a filename's own link only ever points
 /// here when [`crate::files::viewer_kind`] already said yes, but a hand-edited
 /// query string gets the same silent no as a stale or foreign id.
-pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result {
+pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str, tab: Tab) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(_) => return view! { cx => },
@@ -1793,7 +1793,9 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str) -> Result 
         return view! { cx => };
     };
     let lang = Lang::from_code(&user.language);
-    let close_href = format!("/?task={task_id}");
+    // Closing a file returns to the panel exactly as it stood, tab and all:
+    // a viewer is opened from a section, not from the task at large.
+    let close_href = format!("/?task={task_id}&tab={}", tab.slug());
     let src = format!("/files/{file_id}");
     let download_href = format!("/files/{file_id}?dl=1");
     let name = attachment.file_name.clone();

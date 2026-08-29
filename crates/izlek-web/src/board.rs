@@ -534,6 +534,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         .collect();
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
+    let open_tab = crate::detail::Tab::from_query(query.tab.as_deref());
     // `?task=X&new=1` together would render both modals at once — two
     // document-level datepicker listeners double-stepping the month nav — so
     // an open task wins and `new` is ignored.
@@ -586,9 +587,9 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             </div>
         </main>
         if let Some(task_id) = &open_task {
-            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), crate::detail::Tab::from_query(query.tab.as_deref())).await?)
+            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?)
             if let Some(file_id) = &query.file {
-                (crate::detail::file_viewer_modal(cx, task_id, file_id).await?)
+                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab).await?)
             }
         }
         if open_new {
