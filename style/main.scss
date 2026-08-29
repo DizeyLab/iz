@@ -946,16 +946,27 @@ img.avatar {
   display: block;
 }
 
+// The block is a sibling of the profile form (a form cannot nest the photo
+// forms), so it carries the `.panel-body` inset itself to line up with the
+// fields above.
 .photo-block {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 0 18px 18px;
 }
 
 .photo-row {
   display: flex;
   align-items: center;
   gap: 12px;
+
+  // Sized to the field boxes beside it, not the board's 28px overlap size.
+  .avatar {
+    width: 40px;
+    height: 40px;
+    font-size: 13px;
+  }
 }
 
 // A form here is just a wrapper for the box/button it holds — it must not

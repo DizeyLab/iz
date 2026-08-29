@@ -444,8 +444,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (YourProfile, En) => "Your profile",
         (YourProfile, Tr) => "Profilin",
-        (Picture, En) => "Picture",
-        (Picture, Tr) => "Resim",
+        (Picture, En) => "PICTURE",
+        (Picture, Tr) => "RESİM",
         (Remove, En) => "Remove",
         (Remove, Tr) => "Kaldır",
         (DisplayNameLabel, En) => "DISPLAY NAME",
