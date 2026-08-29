@@ -490,6 +490,7 @@ async fn card_menu_script(cx: &Cx) -> Result {
 #[query_params(error = redirect("/"))]
 struct BoardQuery {
     task: Option<String>,
+    tab: Option<String>,
     file: Option<String>,
     refusal: Option<String>,
     on: Option<String>,
@@ -585,7 +586,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             </div>
         </main>
         if let Some(task_id) = &open_task {
-            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete")).await?)
+            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), crate::detail::Tab::from_query(query.tab.as_deref())).await?)
             if let Some(file_id) = &query.file {
                 (crate::detail::file_viewer_modal(cx, task_id, file_id).await?)
             }

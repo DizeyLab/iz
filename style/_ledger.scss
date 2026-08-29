@@ -130,6 +130,11 @@
     box-shadow: none;
   }
 
+  .detail-tab-on {
+    border-bottom: 2px solid var(--ink);
+    box-shadow: none;
+  }
+
   // --- Ledger skin: chips as inked text ----------------------------------------
 
   .chip {
@@ -293,6 +298,11 @@
   padding: 0;
 }
 
+[data-ui="ledger"] .detail-tabs {
+  padding: 0;
+  margin-top: 14px;
+}
+
 [data-ui="ledger"] .modal-task .detail-esc,
 [data-ui="ledger"] .modal-task .detail-close,
 [data-ui="ledger"] .detail-body .detail-field-status {
@@ -356,8 +366,9 @@
 }
 
 // Serif title over a heavy rule; the edit form gets the same rule so the
-// title area holds still while editing.
-[data-ui="ledger"] .detail-body .detail-title,
+// title area holds still while editing. The title now lives in the header,
+// stacked under the key, ahead of the tab strip.
+[data-ui="ledger"] .detail-head .detail-title,
 [data-ui="ledger"] .title-form {
   padding-bottom: 10px;
   border-bottom: 2px solid var(--ink);
