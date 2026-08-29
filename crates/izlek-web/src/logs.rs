@@ -69,6 +69,7 @@ struct ActivityRow {
     actor: String,
     sentence: String,
     title: Option<String>,
+    task_key: Option<String>,
 }
 
 /// The screen in one answer.
@@ -604,6 +605,7 @@ async fn snapshot(
                 .unwrap_or_else(|| t(lang, Key::TheSystem).to_string()),
             sentence: activity_sentence(&line.kind, &line.detail, lang),
             title: line.title,
+            task_key: line.task_key,
         })
         .collect();
 
@@ -795,6 +797,11 @@ async fn logs_screen(
     } else {
         Vec::new()
     };
+    let tasks: Vec<(String, String)> = if section == Section::Activity {
+        accounts(cx).store().clone().task_directory().await?
+    } else {
+        Vec::new()
+    };
 
     view! {
         cx =>
@@ -946,7 +953,12 @@ async fn logs_screen(
                                     <option value=(kind) selected=(filter_kind == *kind)>(crate::i18n::activity_kind_word(lang, kind))</option>
                                 }
                             </select>
-                            <input class="field-input" type="text" name="task" value=(filter_task.clone()) placeholder=(t(lang, Key::Task))>
+                            <select class="field-input" name="task" data-autosubmit="">
+                                <option value="" selected=(filter_task.is_empty())>(t(lang, Key::All))</option>
+                                for task in &tasks {
+                                    <option value=(task.0.clone()) selected=(filter_task == task.0)>(format!("{} {}", task.0, task.1))</option>
+                                }
+                            </select>
                             <div class="edit edit-pop datepick-pop">
                                 <input class="edit-toggle" type="checkbox" id="log-on-toggle" aria-label=(t(lang, Key::All))>
                                 <label class="field-box edit-view edit-hit" for="log-on-toggle">
@@ -964,10 +976,14 @@ async fn logs_screen(
                         <div class="log-list" data-rows=(limit) data-section="activity">
                             for line in activity {
                                 let title = line.title;
+                                let task_key = line.task_key;
                                 <div class="log-row">
                                     <span class="log-stamp">(line.at)</span>
                                     <span class="log-actor">(line.actor)</span>
                                     <span class="log-line">(line.sentence)</span>
+                                    if let Some(key) = task_key {
+                                        <span class="log-key">(format!("({key})"))</span>
+                                    }
                                     if let Some(title) = title {
                                         <span class="log-title">(title)</span>
                                     }

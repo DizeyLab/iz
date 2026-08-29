@@ -2901,7 +2901,7 @@ impl Store for TursoStore {
         filter: &ActivityFilter,
     ) -> Result<Vec<ActivityLine>> {
         const SELECT: &str = "SELECT a.id, a.task_id, t.title, u.display_name, a.kind, a.detail, \
-             a.created_at FROM activity a \
+             a.created_at, t.task_key FROM activity a \
              LEFT JOIN task t ON t.id = a.task_id \
              LEFT JOIN user u ON u.id = a.actor_id";
         let conn = self.conn.lock().await;
@@ -2973,6 +2973,7 @@ impl Store for TursoStore {
                 kind: ActivityKind::parse(&text(&row, 4)?),
                 detail: text(&row, 5)?,
                 at: parse_stamp(&text(&row, 6)?)?,
+                task_key: opt_text(&row, 7)?,
             });
         }
         if reverse {
@@ -3018,6 +3019,22 @@ impl Store for TursoStore {
         );
         let row = self.one_row(&sql, vals).await?;
         row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
+    async fn task_directory(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT task_key, title FROM task WHERE deleted_at IS NULL ORDER BY task_key",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push((text(&row, 0)?, text(&row, 1)?));
+        }
+        Ok(out)
     }
 
     // -- who gets mailed ---------------------------------------------------

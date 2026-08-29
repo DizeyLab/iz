@@ -415,6 +415,8 @@ pub struct ActivityLine {
     /// Absent when the line is an account or admin event, which has no task.
     pub task_id: Option<String>,
     pub title: Option<String>,
+    /// The task's own key (e.g. `PROJ-12`), absent alongside `task_id`.
+    pub task_key: Option<String>,
     /// Absent when the system did it rather than a person.
     pub actor_name: Option<String>,
     pub kind: ActivityKind,
@@ -1037,6 +1039,10 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// How many activity rows match `filter`, unpaged.
     async fn count_activity(&self, filter: &ActivityFilter) -> Result<u64>;
+
+    /// Every live task's key and title, key-ordered — the activity feed's
+    /// task filter.
+    async fn task_directory(&self) -> Result<Vec<(String, String)>>;
 
     /// How many rows matching `filter` sit strictly ahead of `cursor` in
     /// `dir`'s reading order; `None` (the newest/oldest page) is `0`.

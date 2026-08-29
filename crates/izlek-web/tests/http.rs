@@ -4839,8 +4839,58 @@ async fn the_task_filter_shows_only_that_tasks_rows() {
         .get(&format!("/logs?section=activity&task={alpha_key}"), Some(&admin_cookie))
         .await;
     let html = String::from_utf8_lossy(&narrowed.bytes).into_owned();
-    assert!(html.contains("Task Alpha"), "{html}");
-    assert!(!html.contains("Task Beta"), "{html}");
+    assert!(html.contains("log-title\">Task Alpha<"), "{html}");
+    assert!(!html.contains("log-title\">Task Beta<"), "{html}");
+}
+
+/// The task filter is a select listing the workspace's tasks, keyed by
+/// task_key — not a bare text input.
+#[tokio::test]
+async fn the_task_filter_lists_the_workspaces_tasks() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let alpha = a_task(&app, &admin_cookie, &column, "Task Alpha").await;
+    let alpha_key = app
+        .store
+        .task(&alpha)
+        .await
+        .unwrap()
+        .expect("alpha task gone")
+        .row
+        .task_key;
+
+    let page = app.get("/logs?section=activity", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes).into_owned();
+    assert!(
+        html.contains(&format!("<option value=\"{alpha_key}\"")),
+        "{html}"
+    );
+}
+
+/// A row for a task-attached event carries the task's key alongside its
+/// title.
+#[tokio::test]
+async fn the_activity_row_shows_the_task_key() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let alpha = a_task(&app, &admin_cookie, &column, "Task Alpha").await;
+    let alpha_key = app
+        .store
+        .task(&alpha)
+        .await
+        .unwrap()
+        .expect("alpha task gone")
+        .row
+        .task_key;
+
+    let page = app.get("/logs?section=activity", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes).into_owned();
+    assert!(
+        html.contains(&format!("log-key\">({alpha_key})<")),
+        "{html}"
+    );
 }
 
 /// `on=YYYY-MM-DD` keeps only the rows recorded that day, in the admin's own
