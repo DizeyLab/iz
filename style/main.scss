@@ -2203,6 +2203,11 @@ img.avatar {
   &::-webkit-scrollbar { display: none; }
 
   &.stage-wide { max-width: 1200px; }
+
+  // A panel's own `overflow: hidden` (the corner clip) zeroes its flex
+  // min-height, so the column would compress it to the viewport and clip the
+  // rows invisibly. Panels keep natural height; the stage is what pans.
+  > * { flex: none; }
 }
 
 .settings-head {
