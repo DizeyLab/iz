@@ -1048,7 +1048,7 @@ async fn settings_page(cx: &Cx) -> Result {
                             <button class="primary" type="submit">(t(lang, Key::Save))</button>
                         </div>
                     </form>
-                    <form class="panel-body photo-form" method="post" action="/api/profile_photo" enctype="multipart/form-data">
+                    <div class="photo-block">
                         <span class="field-label">(t(lang, Key::Picture))</span>
                         <div class="photo-row">
                             (crate::layout::avatar(cx, &izlek_core::board::Person {
@@ -1056,23 +1056,25 @@ async fn settings_page(cx: &Cx) -> Result {
                                 display_name: user.display_name.clone(),
                                 has_photo: user.has_photo,
                             }, "avatar-lg").await?)
-                            <label class="field-box file-upload-box">
-                                <span class="field-text file-upload-name">(t(lang, Key::Picture))</span>
-                                <input class="file-upload-input" type="file" name="file" accept="image/*" data-autosubmit="">
-                            </label>
+                            <form class="photo-form" method="post" action="/api/profile_photo" enctype="multipart/form-data">
+                                <label class="field-box file-upload-box">
+                                    <span class="field-text file-upload-name">(t(lang, Key::File))</span>
+                                    <input class="file-upload-input" type="file" name="file" accept="image/*" data-autosubmit="">
+                                </label>
+                            </form>
+                            if user.has_photo {
+                                <form class="photo-form" method="post" action="/api/delete_profile_photo">
+                                    <button class="quiet" type="submit">(t(lang, Key::Remove))</button>
+                                </form>
+                            }
+                            if let Some(refusal) = &photo_refusal {
+                                <span class="field-error">(refusal.message_in(lang))</span>
+                            }
+                            if photo_saved {
+                                <span class="field-note">(t(lang, Key::Saved))</span>
+                            }
                         </div>
-                        if let Some(refusal) = &photo_refusal {
-                            <span class="field-error">(refusal.message_in(lang))</span>
-                        }
-                        if photo_saved {
-                            <span class="field-note">(t(lang, Key::Saved))</span>
-                        }
-                    </form>
-                    if user.has_photo {
-                        <form class="panel-body photo-form" method="post" action="/api/delete_profile_photo">
-                            <button class="quiet" type="submit">(t(lang, Key::Remove))</button>
-                        </form>
-                    }
+                    </div>
                 </section>
 
                 <section class="panel" id="password">

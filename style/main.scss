@@ -946,11 +946,21 @@ img.avatar {
   display: block;
 }
 
+.photo-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .photo-row {
   display: flex;
   align-items: center;
   gap: 12px;
 }
+
+// A form here is just a wrapper for the box/button it holds — it must not
+// stretch full-width like `.panel-body`'s other flex children do.
+.photo-form { display: contents; }
 
 // -- the card context menu ---------------------------------------------------
 //

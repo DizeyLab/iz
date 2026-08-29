@@ -384,11 +384,45 @@ async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, 
     Ok(Json(snapshot(cx).await?))
 }
 
+fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
+    query.split('&').find_map(|pair| {
+        pair.split_once('=')
+            .filter(|(k, _)| *k == key)
+            .map(|(_, v)| v)
+    })
+}
+
+/// Which rail section the page renders. Only one is drawn at a time; a
+/// section name it does not recognize falls back to `Activity`, the page's
+/// namesake feed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Queue,
+    Decisions,
+    Activity,
+}
+
+/// The class a rail link wears: `active` on the section it points to when
+/// that is the one showing, plain otherwise.
+fn rail_class(current: Section, target: Section) -> &'static str {
+    if current == target {
+        "settings-section-link active"
+    } else {
+        "settings-section-link"
+    }
+}
+
 #[page("/logs")]
 async fn logs_page(cx: &Cx) -> Result {
     let lang = Lang::En;
+    let query = topcoat::router::request::uri(cx).query().unwrap_or("");
+    let section = match query_value(query, "section") {
+        Some("queue") => Section::Queue,
+        Some("decisions") => Section::Decisions,
+        _ => Section::Activity,
+    };
     match snapshot(cx).await {
-        Ok(Ok(snapshot)) => logs_screen(cx, snapshot).await,
+        Ok(Ok(snapshot)) => logs_screen(cx, snapshot, section).await,
         // No `Me` here to read a language off of when the refusal itself is
         // "no session" — English, same as the other admin pages' own gate.
         Ok(Err(refusal)) => view! {
@@ -407,7 +441,7 @@ async fn logs_page(cx: &Cx) -> Result {
     }
 }
 
-async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
+async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section) -> Result {
     let lang = Lang::from_code(&snapshot.me.language);
     let me = snapshot.me;
     let queue = snapshot.queue;
@@ -430,12 +464,18 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
         </header>
 
         <div class="settings-shell">
+            <nav class="settings-sections">
+                <a class=(rail_class(section, Section::Queue)) href="/logs?section=queue">(t(lang, Key::MailQueue))</a>
+                <a class=(rail_class(section, Section::Decisions)) href="/logs?section=decisions">(t(lang, Key::MailDecisions))</a>
+                <a class=(rail_class(section, Section::Activity)) href="/logs?section=activity">(t(lang, Key::Activity))</a>
+            </nav>
             <main class="settings-stage">
                 <div class="settings-head">
                     <h1 class="settings-title">(t(lang, Key::Logs))</h1>
                     <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                 </div>
 
+                if section == Section::Queue {
                 <section class="panel">
                     <div class="panel-head">
                         <h2 class="panel-title">(t(lang, Key::MailQueue))</h2>
@@ -467,7 +507,9 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                         </div>
                     </div>
                 </section>
+                }
 
+                if section == Section::Decisions {
                 <section class="panel">
                     <div class="panel-head">
                         <h2 class="panel-title">(t(lang, Key::MailDecisions))</h2>
@@ -502,7 +544,9 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                         </div>
                     </div>
                 </section>
+                }
 
+                if section == Section::Activity {
                 <section class="panel">
                     <div class="panel-head">
                         <h2 class="panel-title">(t(lang, Key::Activity))</h2>
@@ -528,6 +572,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                         </div>
                     </div>
                 </section>
+                }
             </main>
         </div>
         (crate::layout::escape_script(cx).await?)
