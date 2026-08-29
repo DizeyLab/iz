@@ -64,9 +64,12 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 search.dispatchEvent(new Event('input', { bubbles: true }));\
             }\
             function filterRows(panel, query) {\
-                var q = query.toLowerCase();\
+                var qTr = query.toLocaleLowerCase('tr');\
+                var qEn = query.toLowerCase();\
                 panel.querySelectorAll('.dd-option').forEach(function (r) {\
-                    r.classList.toggle('dd-option-hidden', q !== '' && r.textContent.toLowerCase().indexOf(q) === -1);\
+                    var t = r.textContent;\
+                    var miss = t.toLocaleLowerCase('tr').indexOf(qTr) === -1 && t.toLowerCase().indexOf(qEn) === -1;\
+                    r.classList.toggle('dd-option-hidden', qEn !== '' && miss);\
                 });\
                 var vis = visibleRows(panel);\
                 activate(panel, panel.querySelector('.dd-option-selected:not(.dd-option-hidden)') || vis[0]);\
