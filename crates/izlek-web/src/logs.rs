@@ -64,7 +64,7 @@ struct ActivityRow {
     at: String,
     actor: String,
     sentence: String,
-    title: String,
+    title: Option<String>,
 }
 
 /// The screen in one answer.
@@ -114,6 +114,25 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang
         ActivityKind::Unblocked => crate::i18n::unblocked_label(lang, detail),
         ActivityKind::Deleted => t(lang, Key::ActDeleted).to_string(),
         ActivityKind::Commented => t(lang, Key::ActCommented).to_string(),
+        ActivityKind::FileAdded => crate::i18n::file_added_label(lang, detail),
+        ActivityKind::FileRemoved => crate::i18n::file_removed_label(lang, detail),
+        ActivityKind::WorkspaceClaimed => t(lang, Key::ActWorkspaceClaimed).to_string(),
+        ActivityKind::Invited => crate::i18n::invited_label(lang, detail),
+        ActivityKind::LinkResent => crate::i18n::link_resent_label(lang, detail),
+        ActivityKind::Joined => t(lang, Key::ActJoined).to_string(),
+        ActivityKind::SignedIn => t(lang, Key::ActSignedIn).to_string(),
+        ActivityKind::SignInFailed => crate::i18n::sign_in_failed_label(lang, detail),
+        ActivityKind::SignedOut => t(lang, Key::ActSignedOut).to_string(),
+        ActivityKind::PasswordChanged => t(lang, Key::ActPasswordChanged).to_string(),
+        ActivityKind::ProfileSaved => t(lang, Key::ActProfileSaved).to_string(),
+        ActivityKind::SenderSaved => t(lang, Key::ActSenderSaved).to_string(),
+        ActivityKind::LimitsSaved => t(lang, Key::ActLimitsSaved).to_string(),
+        ActivityKind::TestMailSent => t(lang, Key::ActTestMailSent).to_string(),
+        ActivityKind::RoleChanged => crate::i18n::role_changed_label(lang, detail),
+        ActivityKind::RuleCreated => crate::i18n::rule_created_label(lang, detail),
+        ActivityKind::RuleEdited => crate::i18n::rule_edited_label(lang, detail),
+        ActivityKind::RuleToggled => crate::i18n::rule_toggled_label(lang, detail),
+        ActivityKind::RuleDeleted => crate::i18n::rule_deleted_label(lang, detail),
         ActivityKind::Other(_) => detail.to_string(),
     }
 }
@@ -491,11 +510,14 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot) -> Result {
                     <div class="panel-body">
                         <div class="rule-list rule-list-scroll">
                             for line in activity {
+                                let title = line.title;
                                 <div class="rule-row">
                                     <div class="rule-sentence">
                                         <span class="rule-term">(line.actor)</span>
                                         <span>(line.sentence)</span>
-                                        <span>(line.title)</span>
+                                        if let Some(title) = title {
+                                            <span>(title)</span>
+                                        }
                                     </div>
                                     <span class="rule-stamp">(line.at)</span>
                                 </div>

@@ -407,12 +407,13 @@ pub struct MailDecision {
     pub at: OffsetDateTime,
 }
 
-/// One line of the workspace-wide activity feed: what happened, on which task,
-/// and who did it.
+/// One line of the workspace-wide activity feed: what happened, on which
+/// task when there was one, and who did it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityLine {
-    pub task_id: String,
-    pub title: String,
+    /// Absent when the line is an account or admin event, which has no task.
+    pub task_id: Option<String>,
+    pub title: Option<String>,
     /// Absent when the system did it rather than a person.
     pub actor_name: Option<String>,
     pub kind: ActivityKind,
@@ -806,6 +807,16 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn record_activity(
         &self,
         task_id: &str,
+        actor_id: Option<&str>,
+        kind: &ActivityKind,
+        detail: &str,
+        at: OffsetDateTime,
+    ) -> Result<String>;
+
+    /// Appends one line to the workspace-wide event trail — an account or
+    /// admin moment with no task to live under — and returns its row id.
+    async fn record_event(
+        &self,
         actor_id: Option<&str>,
         kind: &ActivityKind,
         detail: &str,

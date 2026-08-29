@@ -248,6 +248,15 @@ pub enum Key {
     ActDeadlineCleared,
     ActDeleted,
     ActCommented,
+    ActWorkspaceClaimed,
+    ActJoined,
+    ActSignedIn,
+    ActSignedOut,
+    ActPasswordChanged,
+    ActProfileSaved,
+    ActSenderSaved,
+    ActLimitsSaved,
+    ActTestMailSent,
     UnblockedWord,
     AColumn,
     AudienceEmpty,
@@ -722,6 +731,24 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActDeleted, Tr) => "bu görevi sildi",
         (ActCommented, En) => "commented",
         (ActCommented, Tr) => "yorum yaptı",
+        (ActWorkspaceClaimed, En) => "claimed the workspace",
+        (ActWorkspaceClaimed, Tr) => "çalışma alanını kurdu",
+        (ActJoined, En) => "joined",
+        (ActJoined, Tr) => "katıldı",
+        (ActSignedIn, En) => "signed in",
+        (ActSignedIn, Tr) => "oturum açtı",
+        (ActSignedOut, En) => "signed out",
+        (ActSignedOut, Tr) => "oturumu kapattı",
+        (ActPasswordChanged, En) => "changed the password",
+        (ActPasswordChanged, Tr) => "parolasını değiştirdi",
+        (ActProfileSaved, En) => "saved the profile",
+        (ActProfileSaved, Tr) => "profilini kaydetti",
+        (ActSenderSaved, En) => "saved the sender settings",
+        (ActSenderSaved, Tr) => "gönderen ayarlarını kaydetti",
+        (ActLimitsSaved, En) => "saved the limits",
+        (ActLimitsSaved, Tr) => "sınırları kaydetti",
+        (ActTestMailSent, En) => "sent a test mail",
+        (ActTestMailSent, Tr) => "test postası gönderdi",
         (UnblockedWord, En) => "unblocked",
         (UnblockedWord, Tr) => "engeli kaldırıldı",
         (AColumn, En) => "a column",
@@ -924,6 +951,76 @@ pub fn unblocked_label(lang: Lang, detail: &str) -> String {
     match lang {
         Lang::En => format!("unblocked this task — {detail}"),
         Lang::Tr => format!("bu görevin engelini kaldırdı — {detail}"),
+    }
+}
+
+pub fn invited_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("invited {detail}"),
+        Lang::Tr => format!("{detail} kişisine davet gönderdi"),
+    }
+}
+
+pub fn link_resent_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("resent the link to {detail}"),
+        Lang::Tr => format!("{detail} adresine bağlantıyı yeniden gönderdi"),
+    }
+}
+
+pub fn sign_in_failed_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("failed to sign in as {detail}"),
+        Lang::Tr => format!("{detail} olarak oturum açılamadı"),
+    }
+}
+
+pub fn role_changed_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("made {detail}"),
+        Lang::Tr => format!("{detail} yaptı"),
+    }
+}
+
+pub fn rule_created_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("created rule {detail}"),
+        Lang::Tr => format!("{detail} kuralını oluşturdu"),
+    }
+}
+
+pub fn rule_edited_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("edited rule {detail}"),
+        Lang::Tr => format!("{detail} kuralını düzenledi"),
+    }
+}
+
+pub fn rule_toggled_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("toggled rule {detail}"),
+        Lang::Tr => format!("{detail} kuralını açıp kapattı"),
+    }
+}
+
+pub fn rule_deleted_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("deleted rule {detail}"),
+        Lang::Tr => format!("{detail} kuralını sildi"),
+    }
+}
+
+pub fn file_added_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("added {detail}"),
+        Lang::Tr => format!("{detail} ekledi"),
+    }
+}
+
+pub fn file_removed_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("removed {detail}"),
+        Lang::Tr => format!("{detail} kaldırdı"),
     }
 }
 

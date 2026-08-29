@@ -236,14 +236,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 18);
+    assert_eq!(first.schema_version().await.unwrap(), 19);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 18);
+    assert_eq!(second.schema_version().await.unwrap(), 19);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -260,7 +260,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
         a_pre_0013_store_with_a_rule_send_and_decision().await;
 
     let store = TursoStore::open(path.to_str().unwrap()).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 18);
+    assert_eq!(store.schema_version().await.unwrap(), 19);
     assert_eq!(store.board(&workspace).await.unwrap().unwrap().id, board);
 
     let rules = store.mail_rules(&board).await.unwrap();
@@ -4692,12 +4692,48 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
     // Two "created" lines came free with the two tasks; the two just recorded
     // sit newest first, ahead of both of those.
     assert_eq!(feed.len(), 4);
-    assert_eq!(feed[0].task_id, task_b);
-    assert_eq!(feed[0].title, "second task");
+    assert_eq!(feed[0].task_id.as_deref(), Some(task_b.as_str()));
+    assert_eq!(feed[0].title.as_deref(), Some("second task"));
     assert_eq!(feed[0].actor_name.as_deref(), Some("Sam"));
     assert_eq!(feed[0].kind, ActivityKind::Retitled);
-    assert_eq!(feed[1].task_id, task_a);
+    assert_eq!(feed[1].task_id.as_deref(), Some(task_a.as_str()));
     assert_eq!(feed[1].actor_name.as_deref(), Some("Ada"));
+}
+
+#[tokio::test]
+async fn an_account_event_rides_the_feed_without_a_task() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
+    let t0 = OffsetDateTime::now_utc();
+
+    store
+        .record_activity(&task, Some(&admin), &ActivityKind::Created, "", t0)
+        .await
+        .unwrap();
+    store
+        .record_event(
+            Some(&admin),
+            &ActivityKind::SignedIn,
+            "from 198.51.100.7",
+            t0 + Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+
+    let feed = store.recent_activity(10).await.unwrap();
+    // The sign-in sits newest with no task on it; the task's own lines below
+    // still name theirs.
+    assert_eq!(feed[0].kind, ActivityKind::SignedIn);
+    assert_eq!(feed[0].task_id, None);
+    assert_eq!(feed[0].title, None);
+    assert_eq!(feed[0].actor_name.as_deref(), Some("Ada"));
+    assert_eq!(feed[0].detail, "from 198.51.100.7");
+    assert!(
+        feed.iter()
+            .any(|line| line.task_id.as_deref() == Some(task.as_str())),
+        "the task's own lines kept their task"
+    );
 }
 
 #[tokio::test]
