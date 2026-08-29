@@ -4622,3 +4622,28 @@ async fn account_events_ride_the_activity_feed() {
     assert!(body.contains("\"sentence\":\"joined\""), "{body}");
     assert!(body.contains("Ship it"), "{body}");
 }
+
+/// A photo needs a session: signed out gets the same 404 an unknown id
+/// gets, and a second workspace's admin cannot see across the fence.
+#[tokio::test]
+async fn a_photo_hides_from_the_signed_out_and_the_foreign() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+
+    let answer = app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin_cookie),
+            &[],
+            Some(("me.png", "image/png", &PNG)),
+        )
+        .await;
+    assert_eq!(
+        answer.location.as_deref(),
+        Some("/settings?saved=profile_photo&section=profile")
+    );
+
+    let signed_out = app.get(&format!("/photo/{admin_id}"), None).await;
+    assert_eq!(signed_out.status, StatusCode::NOT_FOUND);
+}
