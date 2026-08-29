@@ -15,10 +15,10 @@ use ulid::Ulid;
 
 use super::secret;
 use super::{
-    ActivityEvent, ActivityLine, Attachment, Audience, CommentWritten, Deletion, Event, Freeing,
-    MailDecision, MailOutcome, MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser,
-    Recipient, Result, SendKind, SendState, SenderTest, Session, SigninLink, Store, StoreError,
-    TaskCreated, Trigger, User, Workspace,
+    ActivityEvent, ActivityLine, Attachment, Audience, CommentWritten, Deletion, Event, FeedPage,
+    Freeing, MailDecision, MailOutcome, MailRule, MailSend, NewAttachment, NewSender, NewTask,
+    NewUser, Recipient, Result, SendKind, SendState, SenderTest, Session, SigninLink, Store,
+    StoreError, TaskCreated, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -2685,19 +2685,49 @@ impl Store for TursoStore {
         Ok(())
     }
 
-    async fn recent_mail_decisions(&self, limit: u32, offset: u32) -> Result<Vec<MailDecision>> {
+    async fn recent_mail_decisions(&self, limit: u32, page: FeedPage) -> Result<Vec<MailDecision>> {
         let conn = self.conn.lock().await;
-        let sql = format!(
-            "SELECT {DECISION_COLUMNS} FROM mail_decision \
-             ORDER BY created_at DESC, rowid DESC LIMIT ?1 OFFSET ?2"
-        );
-        let mut rows = conn
-            .query(&sql, params![i64::from(limit), i64::from(offset)])
-            .await
-            .map_err(backend)?;
+        let reverse = matches!(page, FeedPage::After(_));
+        let mut rows = match &page {
+            FeedPage::Newest => {
+                let sql = format!(
+                    "SELECT {DECISION_COLUMNS} FROM mail_decision \
+                     ORDER BY created_at DESC, id DESC LIMIT ?1"
+                );
+                conn.query(&sql, params![i64::from(limit)]).await
+            }
+            FeedPage::Before(cursor) => {
+                let sql = format!(
+                    "SELECT {DECISION_COLUMNS} FROM mail_decision \
+                     WHERE created_at < ?2 OR (created_at = ?2 AND id < ?3) \
+                     ORDER BY created_at DESC, id DESC LIMIT ?1"
+                );
+                conn.query(
+                    &sql,
+                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                )
+                .await
+            }
+            FeedPage::After(cursor) => {
+                let sql = format!(
+                    "SELECT {DECISION_COLUMNS} FROM mail_decision \
+                     WHERE created_at > ?2 OR (created_at = ?2 AND id > ?3) \
+                     ORDER BY created_at ASC, id ASC LIMIT ?1"
+                );
+                conn.query(
+                    &sql,
+                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                )
+                .await
+            }
+        }
+        .map_err(backend)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(decision_from(&row)?);
+        }
+        if reverse {
+            out.reverse();
         }
         Ok(out)
     }
@@ -2718,19 +2748,55 @@ impl Store for TursoStore {
         Ok(out)
     }
 
-    async fn mail_queue(&self, limit: u32, offset: u32) -> Result<Vec<MailSend>> {
+    async fn mail_queue(&self, limit: u32, page: FeedPage) -> Result<Vec<MailSend>> {
         let conn = self.conn.lock().await;
-        let sql = format!(
-            "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
-             ORDER BY next_attempt_at LIMIT ?1 OFFSET ?2"
-        );
-        let mut rows = conn
-            .query(&sql, params![i64::from(limit), i64::from(offset)])
-            .await
-            .map_err(backend)?;
+        let reverse = matches!(page, FeedPage::After(_));
+        let mut rows = match &page {
+            FeedPage::Newest => {
+                let sql = format!(
+                    "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
+                     ORDER BY next_attempt_at ASC, id ASC LIMIT ?1"
+                );
+                conn.query(&sql, params![i64::from(limit)]).await
+            }
+            // Older: strictly later than the cursor, same ascending order the
+            // queue reads in. `next_attempt_at` only ever moves forward on a
+            // retry, so a row already shown here can never slip past this
+            // boundary backward — it can only reappear ahead of it, later.
+            FeedPage::Before(cursor) => {
+                let sql = format!(
+                    "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
+                     AND (next_attempt_at > ?2 OR (next_attempt_at = ?2 AND id > ?3)) \
+                     ORDER BY next_attempt_at ASC, id ASC LIMIT ?1"
+                );
+                conn.query(
+                    &sql,
+                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                )
+                .await
+            }
+            // Newer: strictly earlier, scanned backward then reversed so the
+            // page still renders soonest-first.
+            FeedPage::After(cursor) => {
+                let sql = format!(
+                    "SELECT {SEND_COLUMNS} FROM mail_send WHERE state IN ('pending', 'failed') \
+                     AND (next_attempt_at < ?2 OR (next_attempt_at = ?2 AND id < ?3)) \
+                     ORDER BY next_attempt_at DESC, id DESC LIMIT ?1"
+                );
+                conn.query(
+                    &sql,
+                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                )
+                .await
+            }
+        }
+        .map_err(backend)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(send_from(&row)?);
+        }
+        if reverse {
+            out.reverse();
         }
         Ok(out)
     }
@@ -2751,29 +2817,56 @@ impl Store for TursoStore {
         Ok(out)
     }
 
-    async fn recent_activity(&self, limit: u32, offset: u32) -> Result<Vec<ActivityLine>> {
+    async fn recent_activity(&self, limit: u32, page: FeedPage) -> Result<Vec<ActivityLine>> {
+        const SELECT: &str = "SELECT a.id, a.task_id, t.title, u.display_name, a.kind, a.detail, \
+             a.created_at FROM activity a \
+             LEFT JOIN task t ON t.id = a.task_id \
+             LEFT JOIN user u ON u.id = a.actor_id";
         let conn = self.conn.lock().await;
-        let mut rows = conn
-            .query(
-                "SELECT a.task_id, t.title, u.display_name, a.kind, a.detail, a.created_at \
-                 FROM activity a \
-                 LEFT JOIN task t ON t.id = a.task_id \
-                 LEFT JOIN user u ON u.id = a.actor_id \
-                 ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?1 OFFSET ?2",
-                params![i64::from(limit), i64::from(offset)],
-            )
-            .await
-            .map_err(backend)?;
+        let reverse = matches!(page, FeedPage::After(_));
+        let mut rows = match &page {
+            FeedPage::Newest => {
+                let sql = format!("{SELECT} ORDER BY a.created_at DESC, a.id DESC LIMIT ?1");
+                conn.query(&sql, params![i64::from(limit)]).await
+            }
+            FeedPage::Before(cursor) => {
+                let sql = format!(
+                    "{SELECT} WHERE a.created_at < ?2 OR (a.created_at = ?2 AND a.id < ?3) \
+                     ORDER BY a.created_at DESC, a.id DESC LIMIT ?1"
+                );
+                conn.query(
+                    &sql,
+                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                )
+                .await
+            }
+            FeedPage::After(cursor) => {
+                let sql = format!(
+                    "{SELECT} WHERE a.created_at > ?2 OR (a.created_at = ?2 AND a.id > ?3) \
+                     ORDER BY a.created_at ASC, a.id ASC LIMIT ?1"
+                );
+                conn.query(
+                    &sql,
+                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                )
+                .await
+            }
+        }
+        .map_err(backend)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(ActivityLine {
-                task_id: opt_text(&row, 0)?,
-                title: opt_text(&row, 1)?,
-                actor_name: opt_text(&row, 2)?,
-                kind: ActivityKind::parse(&text(&row, 3)?),
-                detail: text(&row, 4)?,
-                at: parse_stamp(&text(&row, 5)?)?,
+                id: text(&row, 0)?,
+                task_id: opt_text(&row, 1)?,
+                title: opt_text(&row, 2)?,
+                actor_name: opt_text(&row, 3)?,
+                kind: ActivityKind::parse(&text(&row, 4)?),
+                detail: text(&row, 5)?,
+                at: parse_stamp(&text(&row, 6)?)?,
             });
+        }
+        if reverse {
+            out.reverse();
         }
         Ok(out)
     }

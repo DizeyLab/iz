@@ -110,7 +110,7 @@ pub(crate) fn encode_q(raw: &str) -> String {
     out
 }
 
-fn decode_q(raw: &str) -> String {
+pub(crate) fn decode_q(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

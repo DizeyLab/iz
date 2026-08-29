@@ -8,7 +8,10 @@
 //! every request, so `snapshot` — the shared read — backs both the page and
 //! the JSON route `tests/http.rs` polls.
 
+use izlek_core::store::{FeedCursor, FeedPage};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::Json;
@@ -18,6 +21,7 @@ use topcoat::view::view;
 use crate::detail::Me;
 use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, require_admin};
+use crate::settings::{decode_q, encode_q};
 
 /// One send still owed or refused, as the queue panel reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,26 +263,64 @@ async fn decision_detail(
     Ok(detail.to_string())
 }
 
-/// Query width for one section's list: the extra row beyond `LIMIT` only
-/// signals that an older page exists — it is trimmed before rendering.
-fn page_window(active: Section, target: Section, page: u32) -> (u32, u32) {
+/// Query width and cursor for one section's list: the extra row beyond
+/// `LIMIT` only signals that an older page exists — it is trimmed before
+/// rendering. Only the section actually showing is paged; the rest always
+/// read the newest `LIMIT`.
+fn feed_window(active: Section, target: Section, page: &FeedPage) -> (u32, FeedPage) {
     if active == target {
-        (LIMIT + 1, page.saturating_mul(LIMIT))
+        (LIMIT + 1, page.clone())
     } else {
-        (LIMIT, 0)
+        (LIMIT, FeedPage::Newest)
+    }
+}
+
+/// Where the reader can turn from the active section's current page: the
+/// query fragment (`before=…`/`after=…`, already encoded) for each
+/// direction the rail may still show a link for.
+struct PageLinks {
+    show_newer: bool,
+    show_older: bool,
+    newer_q: Option<String>,
+    older_q: Option<String>,
+}
+
+fn cursor_q(param: &str, cursor: &FeedCursor) -> String {
+    let raw = format!(
+        "{}~{}",
+        cursor.at.format(&Rfc3339).unwrap_or_default(),
+        cursor.id
+    );
+    format!("{param}={}", encode_q(&raw))
+}
+
+fn parse_cursor(raw: &str) -> Option<FeedCursor> {
+    let decoded = decode_q(raw);
+    let (at, id) = decoded.rsplit_once('~')?;
+    let at = OffsetDateTime::parse(at, &Rfc3339).ok()?;
+    Some(FeedCursor { at, id: id.to_string() })
+}
+
+/// `before=`/`after=` from the query: mutually exclusive, and either one
+/// absent or unparsable falls back to the newest page.
+fn parse_page(query: &str) -> FeedPage {
+    match (query_value(query, "before"), query_value(query, "after")) {
+        (Some(raw), None) => parse_cursor(raw).map(FeedPage::Before).unwrap_or(FeedPage::Newest),
+        (None, Some(raw)) => parse_cursor(raw).map(FeedPage::After).unwrap_or(FeedPage::Newest),
+        _ => FeedPage::Newest,
     }
 }
 
 /// The queue, the decisions, and the activity, admin only. Shared by the
 /// `/logs` page and the `/api/current_logs` route so both answer the same
-/// read the same way. `active`/`page` widen only the section being paged;
-/// the JSON caller always passes page 0, matching the old unpaged read.
-/// Returns whether the active section's list had more rows past this page.
+/// read the same way. `active`/`page` widen and cursor only the section
+/// being paged; the JSON caller always passes `FeedPage::Newest`, matching
+/// the old unpaged read.
 async fn snapshot(
     cx: &Cx,
     active: Section,
-    page: u32,
-) -> Result<std::result::Result<(LogsSnapshot, bool), Refusal>> {
+    page: FeedPage,
+) -> Result<std::result::Result<(LogsSnapshot, PageLinks), Refusal>> {
     use izlek_core::store::SendState;
 
     let user = match require_admin(cx).await {
@@ -290,12 +332,30 @@ async fn snapshot(
     let store = accounts(cx).store().clone();
 
     let mut has_more = false;
+    // Only the active section can move off `Newest`; a cursor that ran off
+    // the top on a retried fetch below updates this so the links reflect
+    // where the page actually landed rather than where it was asked to go.
+    let mut effective_page = page.clone();
+    let mut newer_cursor: Option<FeedCursor> = None;
+    let mut older_cursor: Option<FeedCursor> = None;
 
-    let (queue_limit, queue_offset) = page_window(active, Section::Queue, page);
-    let mut sends = store.mail_queue(queue_limit, queue_offset).await?;
+    let (queue_limit, queue_page) = feed_window(active, Section::Queue, &page);
+    let mut sends = store.mail_queue(queue_limit, queue_page).await?;
+    if active == Section::Queue && matches!(page, FeedPage::After(_)) && sends.is_empty() {
+        effective_page = FeedPage::Newest;
+        sends = store.mail_queue(LIMIT + 1, FeedPage::Newest).await?;
+    }
     if active == Section::Queue && sends.len() as u32 > LIMIT {
         has_more = true;
         sends.truncate(LIMIT as usize);
+    }
+    if active == Section::Queue {
+        newer_cursor = sends
+            .first()
+            .and_then(|s| s.next_attempt_at.map(|at| FeedCursor { at, id: s.id.clone() }));
+        older_cursor = sends
+            .last()
+            .and_then(|s| s.next_attempt_at.map(|at| FeedCursor { at, id: s.id.clone() }));
     }
     let mut queue = Vec::with_capacity(sends.len());
     for send in sends {
@@ -332,13 +392,27 @@ async fn snapshot(
         });
     }
 
-    let (decisions_limit, decisions_offset) = page_window(active, Section::Decisions, page);
-    let mut raw_decisions = store
-        .recent_mail_decisions(decisions_limit, decisions_offset)
-        .await?;
+    let (decisions_limit, decisions_page) = feed_window(active, Section::Decisions, &page);
+    let mut raw_decisions = store.recent_mail_decisions(decisions_limit, decisions_page).await?;
+    if active == Section::Decisions && matches!(page, FeedPage::After(_)) && raw_decisions.is_empty()
+    {
+        effective_page = FeedPage::Newest;
+        raw_decisions = store.recent_mail_decisions(LIMIT + 1, FeedPage::Newest).await?;
+    }
     if active == Section::Decisions && raw_decisions.len() as u32 > LIMIT {
         has_more = true;
         raw_decisions.truncate(LIMIT as usize);
+    }
+    // Cursors come from the raw rows, before grouping by event — a group
+    // split across a page boundary is accepted, unchanged from the offset
+    // scheme this replaces.
+    if active == Section::Decisions {
+        newer_cursor = raw_decisions
+            .first()
+            .map(|d| FeedCursor { at: d.at, id: d.id.clone() });
+        older_cursor = raw_decisions
+            .last()
+            .map(|d| FeedCursor { at: d.at, id: d.id.clone() });
     }
     let mut decisions: Vec<DecisionGroup> = Vec::new();
     let mut columns_cache: std::collections::HashMap<String, Vec<izlek_core::board::Column>> =
@@ -386,11 +460,24 @@ async fn snapshot(
         });
     }
 
-    let (activity_limit, activity_offset) = page_window(active, Section::Activity, page);
-    let mut raw_activity = store.recent_activity(activity_limit, activity_offset).await?;
+    let (activity_limit, activity_page) = feed_window(active, Section::Activity, &page);
+    let mut raw_activity = store.recent_activity(activity_limit, activity_page).await?;
+    if active == Section::Activity && matches!(page, FeedPage::After(_)) && raw_activity.is_empty()
+    {
+        effective_page = FeedPage::Newest;
+        raw_activity = store.recent_activity(LIMIT + 1, FeedPage::Newest).await?;
+    }
     if active == Section::Activity && raw_activity.len() as u32 > LIMIT {
         has_more = true;
         raw_activity.truncate(LIMIT as usize);
+    }
+    if active == Section::Activity {
+        newer_cursor = raw_activity
+            .first()
+            .map(|line| FeedCursor { at: line.at, id: line.id.clone() });
+        older_cursor = raw_activity
+            .last()
+            .map(|line| FeedCursor { at: line.at, id: line.id.clone() });
     }
     let activity = raw_activity
         .into_iter()
@@ -404,6 +491,16 @@ async fn snapshot(
         })
         .collect();
 
+    let show_older = matches!(effective_page, FeedPage::After(_)) || has_more;
+    let show_newer = matches!(effective_page, FeedPage::Before(_))
+        || (matches!(effective_page, FeedPage::After(_)) && has_more);
+    let links = PageLinks {
+        show_newer,
+        show_older,
+        newer_q: newer_cursor.as_ref().map(|c| cursor_q("after", c)),
+        older_q: older_cursor.as_ref().map(|c| cursor_q("before", c)),
+    };
+
     Ok(Ok((
         LogsSnapshot {
             me: Me::from(&user),
@@ -411,18 +508,18 @@ async fn snapshot(
             decisions,
             activity,
         },
-        has_more,
+        links,
     )))
 }
 
-/// The same read the page renders, as JSON — polled by `tests/http.rs`. Page
-/// 0 throughout, matching the read before pagination existed.
+/// The same read the page renders, as JSON — polled by `tests/http.rs`. The
+/// newest page throughout, matching the read before pagination existed.
 #[route(POST "/api/current_logs")]
 async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, Refusal>>> {
     Ok(Json(
-        snapshot(cx, Section::Activity, 0)
+        snapshot(cx, Section::Activity, FeedPage::Newest)
             .await?
-            .map(|(snapshot, _has_more)| snapshot),
+            .map(|(snapshot, _links)| snapshot),
     ))
 }
 
@@ -463,11 +560,9 @@ async fn logs_page(cx: &Cx) -> Result {
         Some("decisions") => Section::Decisions,
         _ => Section::Activity,
     };
-    let page: u32 = query_value(query, "page")
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(0);
+    let page = parse_page(query);
     match snapshot(cx, section, page).await {
-        Ok(Ok((snapshot, has_more))) => logs_screen(cx, snapshot, section, page, has_more).await,
+        Ok(Ok((snapshot, links))) => logs_screen(cx, snapshot, section, links).await,
         // No `Me` here to read a language off of when the refusal itself is
         // "no session" — English, same as the other admin pages' own gate.
         Ok(Err(refusal)) => view! {
@@ -495,13 +590,7 @@ fn section_slug(section: Section) -> &'static str {
     }
 }
 
-async fn logs_screen(
-    cx: &Cx,
-    snapshot: LogsSnapshot,
-    section: Section,
-    page: u32,
-    has_more: bool,
-) -> Result {
+async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section, links: PageLinks) -> Result {
     let lang = Lang::from_code(&snapshot.me.language);
     let me = snapshot.me;
     let queue = snapshot.queue;
@@ -511,8 +600,14 @@ async fn logs_screen(
     let decisions_empty = decisions.is_empty();
     let activity_empty = activity.is_empty();
     let slug = section_slug(section);
-    let newer_href = format!("/logs?section={}&page={}", slug, page.saturating_sub(1));
-    let older_href = format!("/logs?section={}&page={}", slug, page.saturating_add(1));
+    let newer_href = links
+        .newer_q
+        .filter(|_| links.show_newer)
+        .map(|q| format!("/logs?section={slug}&{q}"));
+    let older_href = links
+        .older_q
+        .filter(|_| links.show_older)
+        .map(|q| format!("/logs?section={slug}&{q}"));
 
     view! {
         cx =>
@@ -569,16 +664,16 @@ async fn logs_screen(
                             }
                         </div>
                     </div>
-                    if page > 0 || has_more {
+                    if newer_href.is_some() || older_href.is_some() {
                     <div class="panel-foot panel-foot-split">
                         <div class="foot-side">
-                            if page > 0 {
-                                <a class="quiet" href=(newer_href.clone())>(t(lang, Key::Newer))</a>
+                            if let Some(newer_href) = newer_href.clone() {
+                                <a class="quiet" href=(newer_href)>(t(lang, Key::Newer))</a>
                             }
                         </div>
                         <div class="foot-side">
-                            if has_more {
-                                <a class="quiet" href=(older_href.clone())>(t(lang, Key::Older))</a>
+                            if let Some(older_href) = older_href.clone() {
+                                <a class="quiet" href=(older_href)>(t(lang, Key::Older))</a>
                             }
                         </div>
                     </div>
@@ -620,16 +715,16 @@ async fn logs_screen(
                             }
                         </div>
                     </div>
-                    if page > 0 || has_more {
+                    if newer_href.is_some() || older_href.is_some() {
                     <div class="panel-foot panel-foot-split">
                         <div class="foot-side">
-                            if page > 0 {
-                                <a class="quiet" href=(newer_href.clone())>(t(lang, Key::Newer))</a>
+                            if let Some(newer_href) = newer_href.clone() {
+                                <a class="quiet" href=(newer_href)>(t(lang, Key::Newer))</a>
                             }
                         </div>
                         <div class="foot-side">
-                            if has_more {
-                                <a class="quiet" href=(older_href.clone())>(t(lang, Key::Older))</a>
+                            if let Some(older_href) = older_href.clone() {
+                                <a class="quiet" href=(older_href)>(t(lang, Key::Older))</a>
                             }
                         </div>
                     </div>
@@ -662,16 +757,16 @@ async fn logs_screen(
                             }
                         </div>
                     </div>
-                    if page > 0 || has_more {
+                    if newer_href.is_some() || older_href.is_some() {
                     <div class="panel-foot panel-foot-split">
                         <div class="foot-side">
-                            if page > 0 {
-                                <a class="quiet" href=(newer_href.clone())>(t(lang, Key::Newer))</a>
+                            if let Some(newer_href) = newer_href.clone() {
+                                <a class="quiet" href=(newer_href)>(t(lang, Key::Newer))</a>
                             }
                         </div>
                         <div class="foot-side">
-                            if has_more {
-                                <a class="quiet" href=(older_href.clone())>(t(lang, Key::Older))</a>
+                            if let Some(older_href) = older_href.clone() {
+                                <a class="quiet" href=(older_href)>(t(lang, Key::Older))</a>
                             }
                         </div>
                     </div>

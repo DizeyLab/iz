@@ -411,6 +411,7 @@ pub struct MailDecision {
 /// task when there was one, and who did it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityLine {
+    pub id: String,
     /// Absent when the line is an account or admin event, which has no task.
     pub task_id: Option<String>,
     pub title: Option<String>,
@@ -419,6 +420,26 @@ pub struct ActivityLine {
     pub kind: ActivityKind,
     pub detail: String,
     pub at: OffsetDateTime,
+}
+
+/// A keyset position in one of the logs feeds: the moment and the row's own
+/// id, the same pair the feed orders by, so paging never relies on a row
+/// count that can shift under a writer between page turns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedCursor {
+    pub at: OffsetDateTime,
+    pub id: String,
+}
+
+/// Which slice of a feed to read: the newest rows, strictly older than a
+/// cursor (an "Older" turn), or strictly newer (a "Newer" turn back toward
+/// the top). `Before`/`After` name the cursor's position relative to the
+/// page returned, not the feed's own sort direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeedPage {
+    Newest,
+    Before(FeedCursor),
+    After(FeedCursor),
 }
 
 /// A deletion that freed something, kept so a mail owed because of it can be
@@ -952,20 +973,20 @@ pub trait Store: BoardReads + DetailReads + 'static {
     ) -> Result<()>;
 
     /// The most recent decisions across every rule, newest first.
-    async fn recent_mail_decisions(&self, limit: u32, offset: u32) -> Result<Vec<MailDecision>>;
+    async fn recent_mail_decisions(&self, limit: u32, page: FeedPage) -> Result<Vec<MailDecision>>;
 
     /// When each rule last decided anything, for the "last checked" line.
     async fn mail_rule_last_decision(&self) -> Result<Vec<(String, OffsetDateTime)>>;
 
     /// What is still owed: claimed but not yet accepted, and anything that
     /// failed and may be tried again.
-    async fn mail_queue(&self, limit: u32, offset: u32) -> Result<Vec<MailSend>>;
+    async fn mail_queue(&self, limit: u32, page: FeedPage) -> Result<Vec<MailSend>>;
 
     /// Every send, whatever its state, newest first.
     async fn recent_sends(&self, limit: u32) -> Result<Vec<MailSend>>;
 
     /// The workspace's activity feed across every task, newest first.
-    async fn recent_activity(&self, limit: u32, offset: u32) -> Result<Vec<ActivityLine>>;
+    async fn recent_activity(&self, limit: u32, page: FeedPage) -> Result<Vec<ActivityLine>>;
 
     // -- who gets mailed ---------------------------------------------------
 

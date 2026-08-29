@@ -272,7 +272,7 @@ async fn migration_0013_rebuilds_mail_rule_without_losing_its_ledger() {
     assert_eq!(sends.len(), 1, "the send survived, joined to its rule");
     assert_eq!(sends[0].task_id, Some(task.clone()));
 
-    let decisions = store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     assert_eq!(
         decisions.len(),
         1,
@@ -1362,7 +1362,7 @@ async fn adding_a_member_queues_the_mail_that_carries_the_link() {
         .await
         .unwrap();
 
-    let queue = accounts.store().mail_queue(10, 0).await.unwrap();
+    let queue = accounts.store().mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let queued = queue
         .iter()
         .find(|s| s.recipient == "grace@izlek.sh")
@@ -4167,7 +4167,7 @@ async fn a_rule_that_owed_nobody_still_says_so() {
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
     engine.on_transition(&transition).await.unwrap();
 
-    let decisions = store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -4189,7 +4189,7 @@ async fn a_rule_that_did_not_match_leaves_a_reason() {
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Review", &admin).await;
     engine.on_transition(&transition).await.unwrap();
 
-    let decisions = store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -4219,7 +4219,7 @@ async fn a_deleted_task_still_leaves_a_task_gone_row() {
     assert_eq!(report, Default::default());
     assert!(mailer.sent().is_empty());
 
-    let decisions = store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -4344,7 +4344,7 @@ async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
     assert_eq!(updated.enabled, rule.enabled);
     assert_eq!(updated.created_at, rule.created_at);
 
-    let decisions = scratch.store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = scratch.store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     assert!(
         decisions.iter().any(|d| d.rule_id == rule.id),
         "the pre-existing decision no longer joins to the rule"
@@ -4568,6 +4568,50 @@ async fn a_file_can_be_taken_away_and_saying_so_twice_is_answered_honestly() {
     assert!(store.attachments(&task).await.unwrap().is_empty());
 }
 
+/// The queue reads soonest-first, ascending; a keyset walk in that same
+/// direction covers every owed send exactly once, whatever order the pages
+/// come back in.
+#[tokio::test]
+async fn keyset_paging_covers_the_queue_ascending() {
+    use izlek_core::store::{FeedCursor, FeedPage};
+
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let t0 = OffsetDateTime::now_utc();
+    for i in 0..11 {
+        store
+            .queue_invite(
+                &format!("row{i}@izlek.sh"),
+                "Join",
+                "Come aboard.",
+                t0 + Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let whole = store.mail_queue(100, FeedPage::Newest).await.unwrap();
+    assert_eq!(whole.len(), 11);
+
+    let mut walked = Vec::new();
+    let mut page = FeedPage::Newest;
+    loop {
+        let rows = store.mail_queue(4, page).await.unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        let last = rows.last().unwrap();
+        page = FeedPage::Before(FeedCursor {
+            at: last.next_attempt_at.unwrap(),
+            id: last.id.clone(),
+        });
+        walked.extend(rows);
+    }
+    let walked_ids: Vec<&str> = walked.iter().map(|r| r.id.as_str()).collect();
+    let whole_ids: Vec<&str> = whole.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(walked_ids, whole_ids);
+}
+
 #[tokio::test]
 async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
@@ -4610,7 +4654,7 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
         .await
         .unwrap();
 
-    let queue = store.mail_queue(10, 0).await.unwrap();
+    let queue = store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let ids: Vec<&str> = queue.iter().map(|s| s.id.as_str()).collect();
     assert!(ids.contains(&pending.id.as_str()));
     assert!(ids.contains(&failed.id.as_str()));
@@ -4635,7 +4679,7 @@ async fn an_invite_mail_is_owed_without_a_rule() {
     let found = owed.iter().find(|s| s.id == invite.id).unwrap();
     assert_eq!(found.rule_id, None);
 
-    let queue = store.mail_queue(10, 0).await.unwrap();
+    let queue = store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let found = queue.iter().find(|s| s.id == invite.id).unwrap();
     assert_eq!(found.rule_id, None);
 }
@@ -4655,7 +4699,7 @@ async fn an_invite_mail_with_no_sender_is_held_not_failed() {
     assert_eq!(report.held, 1);
     assert_eq!(report.sent, 0);
 
-    let queue = store.mail_queue(10, 0).await.unwrap();
+    let queue = store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let held = queue
         .iter()
         .find(|s| s.recipient == "newcomer@izlek.sh")
@@ -4688,7 +4732,7 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
         .await
         .unwrap();
 
-    let feed = store.recent_activity(10, 0).await.unwrap();
+    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     // Two "created" lines came free with the two tasks; the two just recorded
     // sit newest first, ahead of both of those.
     assert_eq!(feed.len(), 4);
@@ -4698,6 +4742,52 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
     assert_eq!(feed[0].kind, ActivityKind::Retitled);
     assert_eq!(feed[1].task_id.as_deref(), Some(task_a.as_str()));
     assert_eq!(feed[1].actor_name.as_deref(), Some("Ada"));
+}
+
+/// A keyset page never skips or repeats a row even though the underlying
+/// rows never move: walking `Before` from the top to the bottom, one page at
+/// a time, visits every row exactly once, in the same order the unpaged
+/// feed reads.
+#[tokio::test]
+async fn keyset_paging_covers_every_activity_row_once() {
+    use izlek_core::store::{FeedCursor, FeedPage};
+
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let t0 = OffsetDateTime::now_utc();
+    for i in 0..23 {
+        store
+            .record_event(
+                Some(&admin),
+                &ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+    let _ = workspace;
+
+    let whole = store.recent_activity(100, FeedPage::Newest).await.unwrap();
+    assert_eq!(whole.len(), 23);
+
+    let mut walked = Vec::new();
+    let mut page = FeedPage::Newest;
+    loop {
+        let rows = store.recent_activity(7, page).await.unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        let last = rows.last().unwrap();
+        page = FeedPage::Before(FeedCursor {
+            at: last.at,
+            id: last.id.clone(),
+        });
+        walked.extend(rows);
+    }
+    let walked_ids: Vec<&str> = walked.iter().map(|r| r.id.as_str()).collect();
+    let whole_ids: Vec<&str> = whole.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(walked_ids, whole_ids);
 }
 
 #[tokio::test]
@@ -4721,7 +4811,7 @@ async fn an_account_event_rides_the_feed_without_a_task() {
         .await
         .unwrap();
 
-    let feed = store.recent_activity(10, 0).await.unwrap();
+    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     // The sign-in sits newest with no task on it; the task's own lines below
     // still name theirs.
     assert_eq!(feed[0].kind, ActivityKind::SignedIn);
@@ -4910,7 +5000,7 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
     assert_eq!(report, Default::default());
     assert_eq!(mailer.sent().len(), 1, "no second mail went out");
 
-    let decisions = store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let row = decisions
         .iter()
         .find(|d| d.event_id == commented_by_creator)
@@ -4944,7 +5034,7 @@ async fn a_created_activity_does_not_fire_a_status_rule() {
     assert_eq!(report, Default::default());
     assert!(mailer.sent().is_empty());
 
-    let decisions = store.recent_mail_decisions(10, 0).await.unwrap();
+    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
