@@ -174,6 +174,13 @@ pub fn presented_session(cx: &Cx) -> Option<String> {
         .map(|c| c.value().to_string())
 }
 
+/// Any other cookie the request presented, by name — the client-set,
+/// non-`HttpOnly` ones (e.g. `izlek_rows_<section>`) that JS reads and
+/// writes on its own.
+pub fn presented_cookie(cx: &Cx, name: &str) -> Option<String> {
+    cookies(cx).get(name).map(|c| c.value().to_string())
+}
+
 /// A stable-enough label for the client, for rate limiting. A proxy header is
 /// only trusted because Izlek is meant to sit behind one; the address bucket is
 /// the limit that actually protects the Argon2 work either way.

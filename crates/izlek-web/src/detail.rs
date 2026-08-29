@@ -899,7 +899,7 @@ async fn deadline_control(
             <div class="edit-form pop-panel datepick-panel">
                 <form class="pop-form" method="post" action="/api/save_task">
                     <input type="hidden" name="task_id" value=(task.id.clone())>
-                    (datepicker_grid(cx, "deadline", &input_value, lang).await?)
+                    (datepicker_grid(cx, "deadline", &input_value, false, lang).await?)
                     <div class="edit-row">
                         <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
                         <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
@@ -916,10 +916,16 @@ async fn deadline_control(
 /// grid — the grid cells and month title are blank until `datepicker_script`
 /// fills them in on open (see that function's doc comment for why the fill
 /// happens in JS rather than here).
-async fn datepicker_grid(cx: &Cx, name: &str, value: &str, lang: Lang) -> Result {
+pub(crate) async fn datepicker_grid(
+    cx: &Cx,
+    name: &str,
+    value: &str,
+    autosubmit: bool,
+    lang: Lang,
+) -> Result {
     view! {
         cx =>
-        <input class="datepick-input" type="hidden" name=(name.to_string()) value=(value.to_string())>
+        <input class="datepick-input" type="hidden" name=(name.to_string()) value=(value.to_string()) data-autosubmit=(autosubmit)>
         <div class="datepick-head">
             <button class="datepick-nav datepick-prev" type="button" aria-label=(t(lang, Key::PreviousMonth))>(glyph::chevron(cx).await?)</button>
             <span class="datepick-title"></span>
@@ -945,7 +951,7 @@ async fn datepicker_grid(cx: &Cx, name: &str, value: &str, lang: Lang) -> Result
 /// `Escape` closes the panel through the datepick resolver `board.rs`'s
 /// `card_menu_script` registers (priority 100 — see the table on
 /// `layout.rs`'s `escape_manager_script`).
-async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
+pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
     use crate::i18n::datepicker_js_literals;
     use topcoat::view::Unescaped;
     let (months, weekdays) = datepicker_js_literals(lang);
@@ -986,6 +992,7 @@ async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 if (label) {{ label.textContent = ymd ? (MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d)) : label.dataset.empty; }}\
                 var toggle = pop.querySelector('.edit-toggle');\
                 if (toggle) {{ toggle.checked = false; }}\
+                if (input.hasAttribute('data-autosubmit') && input.form) {{ input.form.requestSubmit(); }}\
             }}\
             document.addEventListener('change', function(e) {{\
                 var toggle = e.target.closest('.datepick-pop > .edit-toggle');\
@@ -1653,7 +1660,7 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                                     <span class="field-text datepick-label" data-empty=(t(lang, Key::NoDeadline))>(t(lang, Key::NoDeadline))</span>
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
-                                    (datepicker_grid(cx, "deadline", "", lang).await?)
+                                    (datepicker_grid(cx, "deadline", "", false, lang).await?)
                                 </div>
                             </div>
                         </div>

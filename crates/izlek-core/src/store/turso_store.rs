@@ -10,15 +10,15 @@ use rand::Rng;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use turso::transaction::TransactionBehavior;
-use turso::{Builder, Connection, Row, params};
+use turso::{Builder, Connection, Row, Value, params};
 use ulid::Ulid;
 
 use super::secret;
 use super::{
-    ActivityEvent, ActivityLine, Attachment, Audience, CommentWritten, Deletion, Event, FeedPage,
-    Freeing, MailDecision, MailOutcome, MailRule, MailSend, NewAttachment, NewSender, NewTask,
-    NewUser, Recipient, Result, SendKind, SendState, SenderTest, Session, SigninLink, Store,
-    StoreError, TaskCreated, Trigger, User, Workspace,
+    ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, CommentWritten, Deletion,
+    Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule, MailSend,
+    NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
+    SenderTest, Session, SigninLink, Store, StoreError, TaskCreated, Trigger, User, Workspace,
 };
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
@@ -528,6 +528,41 @@ fn opt_text(row: &Row, idx: usize) -> Result<Option<String>> {
 
 fn count_of(row: &Row) -> Result<u64> {
     row.get::<i64>(0).map_err(backend).map(|n| n.max(0) as u64)
+}
+
+/// The activity filter's AND clauses, as SQL text (leading `AND `, empty
+/// when the filter matches everything) and the values it binds, in the order
+/// the placeholders appear.
+fn activity_filter_sql(filter: &ActivityFilter) -> Result<(String, Vec<Value>)> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut vals: Vec<Value> = Vec::new();
+    match filter.actor.as_deref() {
+        Some("system") => clauses.push("a.actor_id IS NULL".to_string()),
+        Some(actor) => {
+            clauses.push("a.actor_id = ?".to_string());
+            vals.push(actor.to_string().into());
+        }
+        None => {}
+    }
+    if let Some(kind) = &filter.kind {
+        clauses.push("a.kind = ?".to_string());
+        vals.push(kind.clone().into());
+    }
+    if let Some(task_key) = &filter.task_key {
+        clauses.push("t.task_key = ?".to_string());
+        vals.push(task_key.clone().into());
+    }
+    if let Some((start, end)) = &filter.day {
+        clauses.push("(a.created_at >= ? AND a.created_at < ?)".to_string());
+        vals.push(stamp(*start)?.into());
+        vals.push(stamp(*end)?.into());
+    }
+    let sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", clauses.join(" AND "))
+    };
+    Ok((sql, vals))
 }
 
 fn workspace_from(row: &Row) -> Result<Workspace> {
@@ -2732,6 +2767,25 @@ impl Store for TursoStore {
         Ok(out)
     }
 
+    async fn count_mail_decisions(&self) -> Result<u64> {
+        let row = self
+            .one_row("SELECT COUNT(*) FROM mail_decision", ())
+            .await?;
+        row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
+    async fn count_mail_decisions_preceding(&self, cursor: Option<&FeedCursor>) -> Result<u64> {
+        let Some(cursor) = cursor else { return Ok(0) };
+        let row = self
+            .one_row(
+                "SELECT COUNT(*) FROM mail_decision \
+                 WHERE created_at > ?1 OR (created_at = ?1 AND id > ?2)",
+                params![stamp(cursor.at)?, cursor.id.clone()],
+            )
+            .await?;
+        row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
     async fn mail_rule_last_decision(&self) -> Result<Vec<(String, OffsetDateTime)>> {
         let conn = self.conn.lock().await;
         let mut rows = conn
@@ -2801,6 +2855,28 @@ impl Store for TursoStore {
         Ok(out)
     }
 
+    async fn count_mail_queue(&self) -> Result<u64> {
+        let row = self
+            .one_row(
+                "SELECT COUNT(*) FROM mail_send WHERE state IN ('pending', 'failed')",
+                (),
+            )
+            .await?;
+        row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
+    async fn count_mail_queue_preceding(&self, cursor: Option<&FeedCursor>) -> Result<u64> {
+        let Some(cursor) = cursor else { return Ok(0) };
+        let row = self
+            .one_row(
+                "SELECT COUNT(*) FROM mail_send WHERE state IN ('pending', 'failed') \
+                 AND (next_attempt_at < ?1 OR (next_attempt_at = ?1 AND id < ?2))",
+                params![stamp(cursor.at)?, cursor.id.clone()],
+            )
+            .await?;
+        row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
     async fn recent_sends(&self, limit: u32) -> Result<Vec<MailSend>> {
         let conn = self.conn.lock().await;
         let sql = format!(
@@ -2817,42 +2893,76 @@ impl Store for TursoStore {
         Ok(out)
     }
 
-    async fn recent_activity(&self, limit: u32, page: FeedPage) -> Result<Vec<ActivityLine>> {
+    async fn recent_activity(
+        &self,
+        limit: u32,
+        page: FeedPage,
+        dir: Dir,
+        filter: &ActivityFilter,
+    ) -> Result<Vec<ActivityLine>> {
         const SELECT: &str = "SELECT a.id, a.task_id, t.title, u.display_name, a.kind, a.detail, \
              a.created_at FROM activity a \
              LEFT JOIN task t ON t.id = a.task_id \
              LEFT JOIN user u ON u.id = a.actor_id";
         let conn = self.conn.lock().await;
+        let (filter_sql, filter_vals) = activity_filter_sql(filter)?;
+        // The base order is the feed's own reading direction; `After` scans
+        // the opposite way (back toward the start) and the caller reverses
+        // the page below to restore it.
+        let base = match dir {
+            Dir::Newest => "DESC",
+            Dir::Oldest => "ASC",
+        };
+        let opp = match dir {
+            Dir::Newest => "ASC",
+            Dir::Oldest => "DESC",
+        };
         let reverse = matches!(page, FeedPage::After(_));
-        let mut rows = match &page {
+        let mut vals: Vec<Value> = Vec::new();
+        let sql = match &page {
             FeedPage::Newest => {
-                let sql = format!("{SELECT} ORDER BY a.created_at DESC, a.id DESC LIMIT ?1");
-                conn.query(&sql, params![i64::from(limit)]).await
+                vals.extend(filter_vals);
+                vals.push(i64::from(limit).into());
+                format!("{SELECT} WHERE 1=1{filter_sql} ORDER BY a.created_at {base}, a.id {base} LIMIT ?")
             }
             FeedPage::Before(cursor) => {
-                let sql = format!(
-                    "{SELECT} WHERE a.created_at < ?2 OR (a.created_at = ?2 AND a.id < ?3) \
-                     ORDER BY a.created_at DESC, a.id DESC LIMIT ?1"
-                );
-                conn.query(
-                    &sql,
-                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                // Further along in `dir`'s reading order: older when
+                // Newest, newer when Oldest.
+                let cmp = match dir {
+                    Dir::Newest => "<",
+                    Dir::Oldest => ">",
+                };
+                let at = stamp(cursor.at)?;
+                vals.push(at.clone().into());
+                vals.push(at.into());
+                vals.push(cursor.id.clone().into());
+                vals.extend(filter_vals);
+                vals.push(i64::from(limit).into());
+                format!(
+                    "{SELECT} WHERE (a.created_at {cmp} ? OR (a.created_at = ? AND a.id {cmp} ?)){filter_sql} \
+                     ORDER BY a.created_at {base}, a.id {base} LIMIT ?"
                 )
-                .await
             }
             FeedPage::After(cursor) => {
-                let sql = format!(
-                    "{SELECT} WHERE a.created_at > ?2 OR (a.created_at = ?2 AND a.id > ?3) \
-                     ORDER BY a.created_at ASC, a.id ASC LIMIT ?1"
-                );
-                conn.query(
-                    &sql,
-                    params![i64::from(limit), stamp(cursor.at)?, cursor.id.clone()],
+                // Back toward the start: newer when Newest, older when
+                // Oldest — scanned in the opposite order, then reversed.
+                let cmp = match dir {
+                    Dir::Newest => ">",
+                    Dir::Oldest => "<",
+                };
+                let at = stamp(cursor.at)?;
+                vals.push(at.clone().into());
+                vals.push(at.into());
+                vals.push(cursor.id.clone().into());
+                vals.extend(filter_vals);
+                vals.push(i64::from(limit).into());
+                format!(
+                    "{SELECT} WHERE (a.created_at {cmp} ? OR (a.created_at = ? AND a.id {cmp} ?)){filter_sql} \
+                     ORDER BY a.created_at {opp}, a.id {opp} LIMIT ?"
                 )
-                .await
             }
-        }
-        .map_err(backend)?;
+        };
+        let mut rows = conn.query(&sql, vals).await.map_err(backend)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(ActivityLine {
@@ -2869,6 +2979,45 @@ impl Store for TursoStore {
             out.reverse();
         }
         Ok(out)
+    }
+
+    async fn count_activity(&self, filter: &ActivityFilter) -> Result<u64> {
+        let (filter_sql, filter_vals) = activity_filter_sql(filter)?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM activity a \
+             LEFT JOIN task t ON t.id = a.task_id \
+             LEFT JOIN user u ON u.id = a.actor_id WHERE 1=1{filter_sql}"
+        );
+        let row = self.one_row(&sql, filter_vals).await?;
+        row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
+    async fn count_activity_preceding(
+        &self,
+        filter: &ActivityFilter,
+        dir: Dir,
+        cursor: Option<&FeedCursor>,
+    ) -> Result<u64> {
+        let Some(cursor) = cursor else { return Ok(0) };
+        let (filter_sql, filter_vals) = activity_filter_sql(filter)?;
+        // Preceding = already shown on an earlier page: back toward the
+        // start of `dir`'s reading order, the same side `FeedPage::After`
+        // reads from.
+        let cmp = match dir {
+            Dir::Newest => ">",
+            Dir::Oldest => "<",
+        };
+        let at = stamp(cursor.at)?;
+        let mut vals: Vec<Value> = vec![at.clone().into(), at.into(), cursor.id.clone().into()];
+        vals.extend(filter_vals);
+        let sql = format!(
+            "SELECT COUNT(*) FROM activity a \
+             LEFT JOIN task t ON t.id = a.task_id \
+             LEFT JOIN user u ON u.id = a.actor_id \
+             WHERE (a.created_at {cmp} ? OR (a.created_at = ? AND a.id {cmp} ?)){filter_sql}"
+        );
+        let row = self.one_row(&sql, vals).await?;
+        row.as_ref().map(count_of).unwrap_or(Ok(0))
     }
 
     // -- who gets mailed ---------------------------------------------------

@@ -289,6 +289,11 @@ pub enum Key {
     MonthOctober,
     MonthNovember,
     MonthDecember,
+    All,
+    Task,
+    LogSystem,
+    Newest,
+    Oldest,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -816,6 +821,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (MonthNovember, Tr) => "Kasım",
         (MonthDecember, En) => "December",
         (MonthDecember, Tr) => "Aralık",
+        (All, En) => "All",
+        (All, Tr) => "Tümü",
+        (Task, En) => "Task",
+        (Task, Tr) => "Görev",
+        (LogSystem, En) => "System",
+        (LogSystem, Tr) => "Sistem",
+        (Newest, En) => "Newest",
+        (Newest, Tr) => "En yeni",
+        (Oldest, En) => "Oldest",
+        (Oldest, Tr) => "En eski",
     }
 }
 

@@ -132,6 +132,19 @@ impl App {
     /// regardless — [`Router::handle`] never follows a redirect, so the answer
     /// is read straight off this response, same as `oneshot` did before.
     async fn post(&self, path: &str, cookie: Option<&str>, form: &[(&str, &str)]) -> Answer {
+        self.post_with_extra_cookie(path, cookie, form, None).await
+    }
+
+    /// Like `post`, but with a second `Cookie` header of the caller's own
+    /// naming — for the `izlek_rows_<section>` page-size cookie, which lives
+    /// beside the session cookie rather than replacing it.
+    async fn post_with_extra_cookie(
+        &self,
+        path: &str,
+        cookie: Option<&str>,
+        form: &[(&str, &str)],
+        extra_cookie: Option<&str>,
+    ) -> Answer {
         let body = form
             .iter()
             .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
@@ -147,6 +160,9 @@ impl App {
                 header::COOKIE,
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
+        }
+        if let Some(extra) = extra_cookie {
+            request = request.header(header::COOKIE, HeaderValue::from_str(extra).unwrap());
         }
         let response = self
             .router
@@ -251,16 +267,23 @@ impl App {
         self.get_with_range(path, cookie, None).await
     }
 
+    /// Like `get`, but with a second `Cookie` header of the caller's own
+    /// naming — for the `izlek_rows_<section>` page-size cookie, which
+    /// lives beside the session cookie rather than replacing it.
+    async fn get_with_extra_cookie(&self, path: &str, cookie: Option<&str>, extra: &str) -> Raw {
+        self.get_with(path, cookie, None, None, Some(extra)).await
+    }
+
     /// Like `get`, but with a `Range` header, for exercising the
     /// `/files/{id}` partial-content path.
     async fn get_with_range(&self, path: &str, cookie: Option<&str>, range: Option<&str>) -> Raw {
-        self.get_with(path, cookie, range, None).await
+        self.get_with(path, cookie, range, None, None).await
     }
 
     /// Like `get`, but with `If-None-Match`, for the `/photo/{user_id}`
     /// revalidate path.
     async fn get_with_if_none_match(&self, path: &str, cookie: Option<&str>, etag: &str) -> Raw {
-        self.get_with(path, cookie, None, Some(etag)).await
+        self.get_with(path, cookie, None, Some(etag), None).await
     }
 
     async fn get_with(
@@ -269,6 +292,7 @@ impl App {
         cookie: Option<&str>,
         range: Option<&str>,
         if_none_match: Option<&str>,
+        extra_cookie: Option<&str>,
     ) -> Raw {
         let mut request = Request::builder().method("GET").uri(path);
         if let Some(cookie) = cookie {
@@ -276,6 +300,9 @@ impl App {
                 header::COOKIE,
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
+        }
+        if let Some(extra) = extra_cookie {
+            request = request.header(header::COOKIE, HeaderValue::from_str(extra).unwrap());
         }
         if let Some(range) = range {
             request = request.header(header::RANGE, range);
@@ -4703,6 +4730,271 @@ async fn the_logs_page_pages_past_the_truncation() {
     assert_eq!(garbage.status, 200);
     let garbage_html = String::from_utf8_lossy(&garbage.bytes);
     assert!(garbage_html.contains("row 59"), "{garbage_html}");
+}
+
+/// The activity filter row narrows the feed by actor, kind, task and day,
+/// and the pager foot's position note counts against the filtered total —
+/// not the whole feed.
+#[tokio::test]
+async fn the_activity_filter_narrows_and_the_position_note_counts_the_match() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let member_id = user_id(&app, "deniz@izlek.sh").await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..60 {
+        let actor = if i % 2 == 0 { Some(admin_id.as_str()) } else { Some(member_id.as_str()) };
+        app.store
+            .record_event(
+                actor,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let all = app.get("/logs?section=activity&kind=row", Some(&admin_cookie)).await;
+    let all_html = String::from_utf8_lossy(&all.bytes).into_owned();
+    assert!(all_html.contains("1\u{2013}"), "{all_html}");
+    assert!(all_html.contains("/ 60</span>"), "{all_html}");
+
+    let by_actor = app
+        .get(&format!("/logs?section=activity&kind=row&actor={member_id}"), Some(&admin_cookie))
+        .await;
+    let by_actor_html = String::from_utf8_lossy(&by_actor.bytes).into_owned();
+    assert!(by_actor_html.contains("/ 30</span>"), "{by_actor_html}");
+
+    let oldest = app.get("/logs?section=activity&kind=row&dir=oldest", Some(&admin_cookie)).await;
+    let oldest_html = String::from_utf8_lossy(&oldest.bytes).into_owned();
+    assert!(oldest_html.contains("row 0<"), "{oldest_html}");
+
+    let garbage = app
+        .get("/logs?section=activity&actor=zz&kind=zz&on=zz", Some(&admin_cookie))
+        .await;
+    assert_eq!(garbage.status, 200);
+
+    let refused = app.get("/logs?section=activity&actor=x", Some(&member)).await;
+    let refused_html = String::from_utf8_lossy(&refused.bytes);
+    assert!(refused_html.contains("Not permitted."), "{refused_html}");
+}
+
+/// `kind=` alone narrows the feed to one activity kind, leaving the other
+/// kind's rows out of the body entirely.
+#[tokio::test]
+async fn the_kind_filter_shows_only_that_kinds_rows() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..5 {
+        app.store
+            .record_event(None, &izlek_core::detail::ActivityKind::Created, "", t0 + time::Duration::seconds(i))
+            .await
+            .unwrap();
+    }
+    for i in 0..3 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Commented,
+                "",
+                t0 + time::Duration::seconds(100 + i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let narrowed = app
+        .get("/logs?section=activity&kind=created", Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&narrowed.bytes).into_owned();
+    assert!(html.contains("created this task"), "{html}");
+    assert!(!html.contains("log-line\">commented<"), "{html}");
+    assert!(html.contains("/ 5</span>"), "{html}");
+}
+
+/// `task=` narrows the feed to one task's rows, by its key — not any other
+/// task's, even one created in the same run.
+#[tokio::test]
+async fn the_task_filter_shows_only_that_tasks_rows() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let alpha = a_task(&app, &admin_cookie, &column, "Task Alpha").await;
+    let _beta = a_task(&app, &admin_cookie, &column, "Task Beta").await;
+    let alpha_key = app
+        .store
+        .task(&alpha)
+        .await
+        .unwrap()
+        .expect("alpha task gone")
+        .row
+        .task_key;
+
+    let narrowed = app
+        .get(&format!("/logs?section=activity&task={alpha_key}"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&narrowed.bytes).into_owned();
+    assert!(html.contains("Task Alpha"), "{html}");
+    assert!(!html.contains("Task Beta"), "{html}");
+}
+
+/// `on=YYYY-MM-DD` keeps only the rows recorded that day, in the admin's own
+/// timezone (UTC by default in this fixture).
+#[tokio::test]
+async fn the_day_filter_keeps_only_that_days_rows() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let today = time::OffsetDateTime::now_utc();
+    let two_days_ago = today - time::Duration::days(2);
+    for i in 0..5 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("today-row {i}"),
+                today + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+    for i in 0..5 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("old-row {i}"),
+                two_days_ago + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+    let on = format!("{:04}-{:02}-{:02}", today.year(), today.month() as u8, today.day());
+
+    let narrowed = app
+        .get(&format!("/logs?section=activity&on={on}"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&narrowed.bytes).into_owned();
+    assert!(html.contains("today-row"), "{html}");
+    assert!(!html.contains("old-row"), "{html}");
+}
+
+/// The `izlek_rows_activity` cookie the page's own fit script sets caps the
+/// page at that many rows, no more.
+#[tokio::test]
+async fn the_rows_cookie_caps_the_page_size() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..60 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let capped = app
+        .get_with_extra_cookie(
+            "/logs?section=activity",
+            Some(&admin_cookie),
+            "izlek_rows_activity=15",
+        )
+        .await;
+    let html = String::from_utf8_lossy(&capped.bytes).into_owned();
+    assert_eq!(html.matches("class=\"log-row\"").count(), 15, "{html}");
+    assert!(html.contains("\">Older</a>"), "{html}");
+}
+
+/// The Older href carries an active `kind=`/`dir=oldest` filter along with
+/// its own cursor, and following it never turns up the other kind's rows.
+#[tokio::test]
+async fn the_older_href_round_trips_the_active_filter() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..60 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("target".to_string()),
+                &format!("target {i}"),
+                t0 + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+    for i in 0..5 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("foreign".to_string()),
+                &format!("foreign {i}"),
+                t0 + time::Duration::seconds(1000 + i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let first = app
+        .get("/logs?section=activity&kind=target&dir=oldest", Some(&admin_cookie))
+        .await;
+    let first_html = String::from_utf8_lossy(&first.bytes).into_owned();
+    assert!(!first_html.contains("foreign"), "{first_html}");
+    let older_href = extract_href(&first_html, "/logs?section=activity&amp;before=").replace("&amp;", "&");
+    assert!(older_href.contains("kind=target"), "{older_href}");
+    assert!(older_href.contains("dir=oldest"), "{older_href}");
+
+    let second = app.get(&older_href, Some(&admin_cookie)).await;
+    let second_html = String::from_utf8_lossy(&second.bytes).into_owned();
+    assert!(!second_html.contains("foreign"), "{second_html}");
+}
+
+/// `/api/current_logs` keeps reading the unpaged newest page regardless of a
+/// small `izlek_rows_activity` cookie — the JSON route never widened by the
+/// page's own fit cookie.
+#[tokio::test]
+async fn current_logs_json_ignores_the_rows_cookie() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..60 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let answer = app
+        .post_with_extra_cookie(
+            "/api/current_logs",
+            Some(&admin_cookie),
+            &[],
+            Some("izlek_rows_activity=5"),
+        )
+        .await;
+    assert!(answer.body.contains("\"queue\""), "{}", answer.body);
+    assert!(answer.body.contains("\"decisions\""), "{}", answer.body);
+    assert!(answer.body.contains("\"activity\""), "{}", answer.body);
+    let activity_rows = answer.body.matches("\"sentence\":").count();
+    assert!(activity_rows <= 50, "{} rows: {}", activity_rows, answer.body);
 }
 
 /// A photo needs a session: signed out gets the same 404 an unknown id

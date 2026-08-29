@@ -2044,6 +2044,61 @@ async fn add_task(
         .id
 }
 
+/// The counting fns agree with a full read, and a filtered keyset walk
+/// covers exactly the filtered set — no row skipped or repeated.
+#[tokio::test]
+async fn count_and_filtered_keyset_walk_cover_exactly_the_filtered_set() {
+    use izlek_core::store::{ActivityFilter, Dir, FeedCursor, FeedPage};
+
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let other = member(store, &workspace, "sam@izlek.sh", "Sam").await;
+    let t0 = OffsetDateTime::now_utc();
+    for i in 0..20 {
+        let actor = if i % 2 == 0 { &admin } else { &other };
+        store
+            .record_event(
+                Some(actor),
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+
+    let filter = ActivityFilter { actor: Some(admin.clone()), ..Default::default() };
+    let total = store.count_activity(&filter).await.unwrap();
+    assert_eq!(total, 10);
+
+    let mut walked = Vec::new();
+    let mut page = FeedPage::Newest;
+    loop {
+        let rows = store
+            .recent_activity(3, page, Dir::Newest, &filter)
+            .await
+            .unwrap();
+        if rows.is_empty() {
+            break;
+        }
+        let last = rows.last().unwrap();
+        page = FeedPage::Before(FeedCursor { at: last.at, id: last.id.clone() });
+        walked.extend(rows);
+    }
+    assert_eq!(walked.len(), 10);
+    assert!(walked.iter().all(|r| r.actor_name.as_deref() == Some("Ada")));
+
+    let preceding = store
+        .count_activity_preceding(
+            &filter,
+            Dir::Newest,
+            Some(&FeedCursor { at: walked[3].at, id: walked[3].id.clone() }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preceding, 3);
+}
+
 #[tokio::test]
 async fn a_claimed_workspace_starts_with_four_named_columns() {
     let (scratch, workspace, _admin) = workspace_with_admin().await;
@@ -4732,7 +4787,7 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
         .await
         .unwrap();
 
-    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
     // Two "created" lines came free with the two tasks; the two just recorded
     // sit newest first, ahead of both of those.
     assert_eq!(feed.len(), 4);
@@ -4768,13 +4823,13 @@ async fn keyset_paging_covers_every_activity_row_once() {
     }
     let _ = workspace;
 
-    let whole = store.recent_activity(100, FeedPage::Newest).await.unwrap();
+    let whole = store.recent_activity(100, FeedPage::Newest, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
     assert_eq!(whole.len(), 23);
 
     let mut walked = Vec::new();
     let mut page = FeedPage::Newest;
     loop {
-        let rows = store.recent_activity(7, page).await.unwrap();
+        let rows = store.recent_activity(7, page, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
         if rows.is_empty() {
             break;
         }
@@ -4811,7 +4866,7 @@ async fn an_account_event_rides_the_feed_without_a_task() {
         .await
         .unwrap();
 
-    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
     // The sign-in sits newest with no task on it; the task's own lines below
     // still name theirs.
     assert_eq!(feed[0].kind, ActivityKind::SignedIn);

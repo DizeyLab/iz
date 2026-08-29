@@ -2893,6 +2893,25 @@ input[type="radio"] {
   min-width: 0;
   font-size: 13px;
   color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// The filter row above `.log-list`: house field boxes, wrapping rather than
+// squeezing when the rail narrows the stage.
+.log-filterbar {
+  height: auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px;
+}
+
+// The pager foot's read of where the rendered rows sit in the whole feed.
+.log-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
 }
 
 .log-title {

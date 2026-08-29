@@ -442,6 +442,31 @@ pub enum FeedPage {
     After(FeedCursor),
 }
 
+/// Which end of the activity feed reading order starts at. `Before` always
+/// means further along in this order (an "Older" turn from `Newest`, a
+/// "toward the end" turn from `Oldest`); `After` always means back toward
+/// the start — the two feel symmetric to the reader regardless of which
+/// direction is currently in play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Dir {
+    Newest,
+    Oldest,
+}
+
+/// The activity tab's narrowing: every field is an AND'd equality (or a
+/// half-open range for `day`), and an absent field matches everything.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityFilter {
+    /// A user id, or the literal `"system"` for a row with no actor.
+    pub actor: Option<String>,
+    /// An `ActivityKind::as_str()` value.
+    pub kind: Option<String>,
+    pub task_key: Option<String>,
+    /// Half-open `[start, end)` in UTC, already resolved from the admin's
+    /// timezone.
+    pub day: Option<(OffsetDateTime, OffsetDateTime)>,
+}
+
 /// A deletion that freed something, kept so a mail owed because of it can be
 /// rebuilt later. The task it names is gone by the time anyone reads this, so
 /// its key and title are copied rather than looked up.
@@ -982,11 +1007,45 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// failed and may be tried again.
     async fn mail_queue(&self, limit: u32, page: FeedPage) -> Result<Vec<MailSend>>;
 
+    /// How many rows `mail_queue` draws from, unpaged — for the tab's
+    /// position note.
+    async fn count_mail_queue(&self) -> Result<u64>;
+
+    /// How many queue rows sit strictly ahead of `cursor` in the queue's own
+    /// order (soonest first); `None` (the newest page) is `0`.
+    async fn count_mail_queue_preceding(&self, cursor: Option<&FeedCursor>) -> Result<u64>;
+
     /// Every send, whatever its state, newest first.
     async fn recent_sends(&self, limit: u32) -> Result<Vec<MailSend>>;
 
-    /// The workspace's activity feed across every task, newest first.
-    async fn recent_activity(&self, limit: u32, page: FeedPage) -> Result<Vec<ActivityLine>>;
+    /// How many decisions there are in all, unpaged.
+    async fn count_mail_decisions(&self) -> Result<u64>;
+
+    /// How many decision rows sit strictly ahead of `cursor` in the
+    /// decisions' own order (newest first); `None` is `0`.
+    async fn count_mail_decisions_preceding(&self, cursor: Option<&FeedCursor>) -> Result<u64>;
+
+    /// The workspace's activity feed across every task, matching `filter`,
+    /// ordered per `dir`.
+    async fn recent_activity(
+        &self,
+        limit: u32,
+        page: FeedPage,
+        dir: Dir,
+        filter: &ActivityFilter,
+    ) -> Result<Vec<ActivityLine>>;
+
+    /// How many activity rows match `filter`, unpaged.
+    async fn count_activity(&self, filter: &ActivityFilter) -> Result<u64>;
+
+    /// How many rows matching `filter` sit strictly ahead of `cursor` in
+    /// `dir`'s reading order; `None` (the newest/oldest page) is `0`.
+    async fn count_activity_preceding(
+        &self,
+        filter: &ActivityFilter,
+        dir: Dir,
+        cursor: Option<&FeedCursor>,
+    ) -> Result<u64>;
 
     // -- who gets mailed ---------------------------------------------------
 
