@@ -117,7 +117,7 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 panel.__ddTrigger = trigger;\
                 var allOpts = opts(select);\
                 var search = null;\
-                if (allOpts.length > 7) {\
+                if (allOpts.length > 7 || select.hasAttribute('data-search')) {\
                     search = document.createElement('input');\
                     search.type = 'text';\
                     search.className = 'dd-search';\

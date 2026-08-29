@@ -2933,6 +2933,12 @@ input[type="radio"] {
   padding: 14px 18px;
 }
 
+.log-range-dash {
+  align-self: center;
+  margin: 0 2px;
+  color: var(--muted);
+}
+
 // The pager foot's read of where the rendered rows sit in the whole feed.
 .log-count {
   font-family: var(--font-mono);

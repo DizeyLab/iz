@@ -293,6 +293,8 @@ pub enum Key {
     LogSystem,
     Newest,
     Oldest,
+    From,
+    To,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -828,6 +830,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Newest, Tr) => "En yeni",
         (Oldest, En) => "Oldest",
         (Oldest, Tr) => "En eski",
+        (From, En) => "From",
+        (From, Tr) => "Başlangıç",
+        (To, En) => "To",
+        (To, Tr) => "Bitiş",
     }
 }
 

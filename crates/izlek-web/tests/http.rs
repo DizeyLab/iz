@@ -4934,6 +4934,113 @@ async fn the_day_filter_keeps_only_that_days_rows() {
     assert!(!html.contains("old-row"), "{html}");
 }
 
+/// `from=`/`to=` narrows the feed to an inclusive span of days, in the
+/// admin's own timezone (UTC by default in this fixture): a row on the `to`
+/// day itself is kept, not just the days strictly between.
+#[tokio::test]
+async fn the_range_filter_keeps_the_inclusive_span() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let base = time::OffsetDateTime::now_utc()
+        .replace_time(time::Time::from_hms(12, 0, 0).unwrap());
+    for i in 0..5i64 {
+        let day = base + time::Duration::days(i);
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("day{i}-row"),
+                day,
+            )
+            .await
+            .unwrap();
+    }
+    let ymd = |dt: time::OffsetDateTime| format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day());
+    let from = ymd(base + time::Duration::days(1));
+    let to = ymd(base + time::Duration::days(3));
+
+    let ranged = app
+        .get(&format!("/logs?section=activity&from={from}&to={to}"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&ranged.bytes).into_owned();
+    assert!(!html.contains("day0-row"), "{html}");
+    assert!(html.contains("day1-row"), "{html}");
+    assert!(html.contains("day2-row"), "{html}");
+    // The `to` day itself is included — the off-by-one that matters.
+    assert!(html.contains("day3-row"), "{html}");
+    assert!(!html.contains("day4-row"), "{html}");
+
+    let from_only = app
+        .get(&format!("/logs?section=activity&from={from}"), Some(&admin_cookie))
+        .await;
+    let from_only_html = String::from_utf8_lossy(&from_only.bytes).into_owned();
+    assert!(!from_only_html.contains("day0-row"), "{from_only_html}");
+    assert!(from_only_html.contains("day1-row"), "{from_only_html}");
+    assert!(from_only_html.contains("day4-row"), "{from_only_html}");
+
+    let to_only = app
+        .get(&format!("/logs?section=activity&to={to}"), Some(&admin_cookie))
+        .await;
+    let to_only_html = String::from_utf8_lossy(&to_only.bytes).into_owned();
+    assert!(to_only_html.contains("day0-row"), "{to_only_html}");
+    assert!(to_only_html.contains("day3-row"), "{to_only_html}");
+    assert!(!to_only_html.contains("day4-row"), "{to_only_html}");
+
+    // A reversed range (from later than to) is swapped, not empty: same rows
+    // as the correctly-ordered range, though the form itself keeps echoing
+    // the raw (reversed) query values so it does not overrule what the user
+    // typed.
+    let reversed = app
+        .get(&format!("/logs?section=activity&from={to}&to={from}"), Some(&admin_cookie))
+        .await;
+    let reversed_html = String::from_utf8_lossy(&reversed.bytes).into_owned();
+    for i in 1..=3 {
+        assert!(reversed_html.contains(&format!("day{i}-row")), "{reversed_html}");
+    }
+    assert!(!reversed_html.contains("day0-row"), "{reversed_html}");
+    assert!(!reversed_html.contains("day4-row"), "{reversed_html}");
+
+    // Garbage bounds narrow nothing rather than 500ing.
+    let garbage = app.get("/logs?section=activity&from=zz&to=zz", Some(&admin_cookie)).await;
+    assert_eq!(garbage.status, StatusCode::OK);
+    let garbage_html = String::from_utf8_lossy(&garbage.bytes).into_owned();
+    for i in 0..5 {
+        assert!(garbage_html.contains(&format!("day{i}-row")), "{garbage_html}");
+    }
+}
+
+/// An Older href on a range-filtered page keeps carrying `from=`/`to=` so
+/// paging never drops the range.
+#[tokio::test]
+async fn the_older_href_round_trips_the_range_filter() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let t0 = time::OffsetDateTime::now_utc();
+    for i in 0..60 {
+        app.store
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Other("row".to_string()),
+                &format!("row {i}"),
+                t0 + time::Duration::seconds(i),
+            )
+            .await
+            .unwrap();
+    }
+    let from = format!("{:04}-{:02}-{:02}", t0.year(), t0.month() as u8, t0.day());
+    let to = from.clone();
+
+    let first = app
+        .get(&format!("/logs?section=activity&from={from}&to={to}"), Some(&admin_cookie))
+        .await;
+    let first_html = String::from_utf8_lossy(&first.bytes).into_owned();
+    let older_href = extract_href(&first_html, "/logs?section=activity&amp;before=").replace("&amp;", "&");
+    assert!(older_href.contains(&format!("from={from}")), "{older_href}");
+    assert!(older_href.contains(&format!("to={to}")), "{older_href}");
+}
+
 /// The `izlek_rows_activity` cookie the page's own fit script sets caps the
 /// page at that many rows, no more.
 #[tokio::test]

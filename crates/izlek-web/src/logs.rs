@@ -373,17 +373,65 @@ fn parse_dir(query: &str) -> Dir {
     }
 }
 
-/// `on=YYYY-MM-DD`, resolved to a half-open UTC range in the admin's own
-/// timezone. Unparsable or absent is no filter, never a 500.
-fn parse_day(raw: &str, zone: time::UtcOffset) -> Option<(OffsetDateTime, OffsetDateTime)> {
+/// `YYYY-MM-DD`, resolved to that day's midnight in the admin's own
+/// timezone then converted to UTC. Unparsable is no bound, never a 500.
+fn parse_day_start(raw: &str, zone: time::UtcOffset) -> Option<OffsetDateTime> {
     use time::macros::format_description;
     let day = time::Date::parse(raw, format_description!("[year]-[month]-[day]")).ok()?;
-    let start = day
-        .with_hms(0, 0, 0)
-        .ok()?
-        .assume_offset(zone)
-        .to_offset(time::UtcOffset::UTC);
-    Some((start, start + time::Duration::hours(24)))
+    Some(day.with_hms(0, 0, 0).ok()?.assume_offset(zone).to_offset(time::UtcOffset::UTC))
+}
+
+/// A bound that can never exclude a real row, for the open side of a
+/// one-sided range. `Date::MIN`'s negative year does not round-trip through
+/// the store's Rfc3339 timestamp encoding (no sign, 4 digits only), so the
+/// far ends stay inside that format's representable range instead.
+fn far_past() -> OffsetDateTime {
+    time::PrimitiveDateTime::new(
+        time::Date::from_calendar_date(1, time::Month::January, 1).expect("valid"),
+        time::Time::MIDNIGHT,
+    )
+    .assume_utc()
+}
+
+fn far_future() -> OffsetDateTime {
+    time::PrimitiveDateTime::new(time::Date::MAX, time::Time::MIDNIGHT).assume_utc()
+}
+
+/// `from=`/`to=YYYY-MM-DD` (or the `on=` shorthand for a single day),
+/// resolved to a half-open UTC range in the admin's own timezone. `to` is
+/// inclusive of its whole day. A backwards range is swapped rather than
+/// read as empty. Unparsable or absent bounds fall back to the open ends,
+/// so garbage input narrows nothing rather than 500ing.
+fn parse_day_range(
+    query: &str,
+    zone: time::UtcOffset,
+) -> Option<(OffsetDateTime, OffsetDateTime)> {
+    let (from_raw, to_raw) = match (query_value(query, "from"), query_value(query, "to")) {
+        (None, None) => match query_value(query, "on").filter(|v| !v.is_empty()) {
+            Some(on) => (Some(on), Some(on)),
+            None => return None,
+        },
+        (from, to) => (from.filter(|v| !v.is_empty()), to.filter(|v| !v.is_empty())),
+    };
+    if from_raw.is_none() && to_raw.is_none() {
+        return None;
+    }
+    // Compare the raw day starts — not `to`'s already-widened end-of-day —
+    // so a backwards pick swaps the two *days*, not a day boundary against
+    // one shifted 24h later.
+    let mut from_start = from_raw.and_then(|raw| parse_day_start(raw, zone));
+    let mut to_start = to_raw.and_then(|raw| parse_day_start(raw, zone));
+    if let (Some(f), Some(t)) = (from_start, to_start) {
+        if f > t {
+            std::mem::swap(&mut from_start, &mut to_start);
+        }
+    }
+    let start = from_start.unwrap_or_else(far_past);
+    let end = match to_start {
+        Some(to_start) => to_start + time::Duration::hours(24),
+        None => far_future(),
+    };
+    Some((start, end))
 }
 
 /// The activity tab's filter, straight off the query: an absent or empty
@@ -395,7 +443,7 @@ fn parse_activity_filter(query: &str, zone: time::UtcOffset) -> ActivityFilter {
         task_key: query_value(query, "task")
             .filter(|v| !v.is_empty())
             .map(|v| v.to_uppercase()),
-        day: query_value(query, "on").and_then(|raw| parse_day(raw, zone)),
+        day: parse_day_range(query, zone),
     }
 }
 
@@ -404,7 +452,7 @@ fn parse_activity_filter(query: &str, zone: time::UtcOffset) -> ActivityFilter {
 /// filter form's own action so a page turn never drops a filter.
 fn activity_query_suffix(query: &str) -> String {
     let mut out = String::new();
-    for key in ["actor", "kind", "task", "on", "dir"] {
+    for key in ["actor", "kind", "task", "from", "to", "on", "dir"] {
         if let Some(value) = query_value(query, key).filter(|v| !v.is_empty()) {
             out.push('&');
             out.push_str(key);
@@ -776,13 +824,21 @@ async fn logs_screen(
         .map(|q| format!("/logs?section={slug}&{q}{extra}"));
     let position_note = links.position.map(|(x, y, n)| format!("{x}\u{2013}{y} / {n}"));
 
-    let (filter_actor, filter_kind, filter_task, filter_on, filter_dir) = (
+    let (filter_actor, filter_kind, filter_task, filter_dir) = (
         query_value(query, "actor").unwrap_or("").to_string(),
         query_value(query, "kind").unwrap_or("").to_string(),
         query_value(query, "task").unwrap_or("").to_string(),
-        query_value(query, "on").unwrap_or("").to_string(),
         query_value(query, "dir").unwrap_or("").to_string(),
     );
+    // `on=` is a shorthand for `from=to=on`; the boxes themselves only ever
+    // read/write `from`/`to`, so a link that arrived with only `on=` shows
+    // it in both.
+    let (filter_from, filter_to) = {
+        let on = query_value(query, "on").unwrap_or("");
+        let from = query_value(query, "from").unwrap_or(on).to_string();
+        let to = query_value(query, "to").unwrap_or(on).to_string();
+        (from, to)
+    };
     let members: Vec<(String, String)> = if section == Section::Activity {
         let store = accounts(cx).store().clone();
         match store.user(&me.id).await? {
@@ -940,32 +996,42 @@ async fn logs_screen(
                     <div class="panel-body">
                         <form class="filterbar log-filterbar" method="get" action="/logs">
                             <input type="hidden" name="section" value="activity">
-                            <select class="field-input" name="actor" data-autosubmit="">
+                            <select class="field-input" name="actor" data-autosubmit="" data-search="">
                                 <option value="" selected=(filter_actor.is_empty())>(t(lang, Key::All))</option>
                                 <option value="system" selected=(filter_actor == "system")>(t(lang, Key::LogSystem))</option>
                                 for member in &members {
                                     <option value=(member.0.clone()) selected=(filter_actor == member.0)>(member.1.clone())</option>
                                 }
                             </select>
-                            <select class="field-input" name="kind" data-autosubmit="">
+                            <select class="field-input" name="kind" data-autosubmit="" data-search="">
                                 <option value="" selected=(filter_kind.is_empty())>(t(lang, Key::All))</option>
                                 for kind in ACTIVITY_KINDS {
                                     <option value=(kind) selected=(filter_kind == *kind)>(crate::i18n::activity_kind_word(lang, kind))</option>
                                 }
                             </select>
-                            <select class="field-input" name="task" data-autosubmit="">
+                            <select class="field-input" name="task" data-autosubmit="" data-search="">
                                 <option value="" selected=(filter_task.is_empty())>(t(lang, Key::All))</option>
                                 for task in &tasks {
                                     <option value=(task.0.clone()) selected=(filter_task == task.0)>(format!("{} {}", task.0, task.1))</option>
                                 }
                             </select>
                             <div class="edit edit-pop datepick-pop">
-                                <input class="edit-toggle" type="checkbox" id="log-on-toggle" aria-label=(t(lang, Key::All))>
-                                <label class="field-box edit-view edit-hit" for="log-on-toggle">
-                                    <span class="field-text datepick-label" data-empty=(t(lang, Key::All))>(if filter_on.is_empty() { t(lang, Key::All).to_string() } else { filter_on.clone() })</span>
+                                <input class="edit-toggle" type="checkbox" id="log-from-toggle" aria-label=(t(lang, Key::From))>
+                                <label class="field-box edit-view edit-hit" for="log-from-toggle">
+                                    <span class="field-text datepick-label" data-empty=(t(lang, Key::From))>(if filter_from.is_empty() { t(lang, Key::From).to_string() } else { filter_from.clone() })</span>
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
-                                    (datepicker_grid(cx, "on", &filter_on, true, lang).await?)
+                                    (datepicker_grid(cx, "from", &filter_from, true, lang).await?)
+                                </div>
+                            </div>
+                            <span class="log-range-dash">("\u{2013}")</span>
+                            <div class="edit edit-pop datepick-pop">
+                                <input class="edit-toggle" type="checkbox" id="log-to-toggle" aria-label=(t(lang, Key::To))>
+                                <label class="field-box edit-view edit-hit" for="log-to-toggle">
+                                    <span class="field-text datepick-label" data-empty=(t(lang, Key::To))>(if filter_to.is_empty() { t(lang, Key::To).to_string() } else { filter_to.clone() })</span>
+                                </label>
+                                <div class="edit-form pop-panel datepick-panel">
+                                    (datepicker_grid(cx, "to", &filter_to, true, lang).await?)
                                 </div>
                             </div>
                             <select class="field-input" name="dir" data-autosubmit="">
