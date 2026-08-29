@@ -2201,6 +2201,8 @@ img.avatar {
   overflow-y: auto;
   scrollbar-width: none;
   &::-webkit-scrollbar { display: none; }
+
+  &.stage-wide { max-width: 1200px; }
 }
 
 .settings-head {
@@ -2846,6 +2848,55 @@ input[type="radio"] {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted-soft);
+}
+
+// Activity log: a columnar register, not a card list — one line per event,
+// time-first, ruled by hairlines instead of boxed rows.
+.log-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.log-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-stamp {
+  flex-shrink: 0;
+  min-width: 110px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.log-actor {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.log-line {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.log-title {
+  flex-shrink: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 

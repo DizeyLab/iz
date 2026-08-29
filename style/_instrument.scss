@@ -163,6 +163,12 @@
   // ruled columns and the square avatars above. Token values — control
   // heights, radii, shadows — already carry the rest.)
 
+  // --- Instrument skin: activity log -----------------------------------------
+
+  .log-row {
+    padding: 6px 2px;
+  }
+
   // --- Instrument skin: settings rail -----------------------------------------
 
   .settings-sections { width: 200px; }

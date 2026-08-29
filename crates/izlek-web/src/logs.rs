@@ -627,7 +627,7 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section, links: P
                 <a class=(rail_class(section, Section::Decisions)) href="/logs?section=decisions">(t(lang, Key::MailDecisions))</a>
                 <a class=(rail_class(section, Section::Activity)) href="/logs?section=activity">(t(lang, Key::Activity))</a>
             </nav>
-            <main class="settings-stage">
+            <main class="settings-stage stage-wide">
                 <div class="settings-head">
                     <h1 class="settings-title">(t(lang, Key::Logs))</h1>
                     <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
@@ -738,18 +738,16 @@ async fn logs_screen(cx: &Cx, snapshot: LogsSnapshot, section: Section, links: P
                         <h2 class="panel-title">(t(lang, Key::Activity))</h2>
                     </div>
                     <div class="panel-body">
-                        <div class="rule-list">
+                        <div class="log-list">
                             for line in activity {
                                 let title = line.title;
-                                <div class="rule-row">
-                                    <div class="rule-sentence">
-                                        <span class="rule-term">(line.actor)</span>
-                                        <span>(line.sentence)</span>
-                                        if let Some(title) = title {
-                                            <span>(title)</span>
-                                        }
-                                    </div>
-                                    <span class="rule-stamp">(line.at)</span>
+                                <div class="log-row">
+                                    <span class="log-stamp">(line.at)</span>
+                                    <span class="log-actor">(line.actor)</span>
+                                    <span class="log-line">(line.sentence)</span>
+                                    if let Some(title) = title {
+                                        <span class="log-title">(title)</span>
+                                    }
                                 </div>
                             }
                             if activity_empty {

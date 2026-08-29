@@ -108,6 +108,16 @@
     &-off { background: transparent; }
   }
 
+  // Activity log reads as a ruled ledger column too: no boxes, the actor
+  // named in the display face like .member-name.
+  .log-row {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .log-actor {
+    font-family: var(--font-display);
+  }
+
   // --- Ledger skin: baseline header --------------------------------------------
 
   .topbar {
