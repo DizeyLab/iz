@@ -14,7 +14,7 @@ use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
-use topcoat::view::view;
+use topcoat::view::{class, view};
 
 use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, mail, require_user, require_writer};
@@ -361,7 +361,7 @@ async fn render_card(
         .collect();
     view! {
         cx =>
-        <a class="card" class:card-done=(done_column) href=(href.clone())
+        <a class=(class!("card", "card-done" if done_column)) href=(href.clone())
             draggable=(if may_write { "true" } else { "false" })
             data-task-id=(task_id.clone())
             data-from-column=(from_column.clone())
@@ -376,11 +376,11 @@ async fn render_card(
             </div>
             <div class="card-title">(card.title.clone())</div>
             <div class="card-foot">
-                <span class="card-deadline" class:card-deadline-overdue=(overdue) class:card-deadline-none=(!dated)>
+                <span class=(class!("card-deadline", "card-deadline-overdue" if overdue, "card-deadline-none" if !dated))>
                     (deadline)
                 </span>
                 if let Some(parts) = subtasks.clone() {
-                    <span class="card-subtasks" class:card-subtasks-open=(subtasks_open)>(format!("{parts} \u{2630}"))</span>
+                    <span class=(class!("card-subtasks", "card-subtasks-open" if subtasks_open))>(format!("{parts} \u{2630}"))</span>
                 }
                 if comments > 0 { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
                 <div class="spacer"></div>

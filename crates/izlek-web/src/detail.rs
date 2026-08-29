@@ -321,8 +321,21 @@ async fn load_snapshot(
                 });
             }
         }
+        // A task's own family is not offered: a parent and its part are
+        // already related, the store refuses the edge, and a picker that
+        // offers what will always be refused is a worse control than one that
+        // does not offer it.
+        let family: Vec<&str> = detail
+            .subtasks
+            .iter()
+            .map(|part| part.id.as_str())
+            .chain(detail.parent.iter().map(|whole| whole.id.as_str()))
+            .collect();
         for task in tasks {
-            if task.id == detail.id || taken.contains(&task.id.as_str()) {
+            if task.id == detail.id
+                || taken.contains(&task.id.as_str())
+                || family.contains(&task.id.as_str())
+            {
                 continue;
             }
             linkable.push(LinkTarget {
@@ -1802,11 +1815,8 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             if may_write {
                                 <form class="subtask-new" method="post" action="/api/create_subtask">
                                     <input type="hidden" name="parent_id" value=(detail.id.clone())>
-                                    <label class="field-box subtask-new-box">
-                                        (glyph::plus(cx).await?)
-                                        <input class="field-input" type="text" name="title"
-                                            placeholder=(t(lang, Key::NewSubtask)) required="" maxlength="200">
-                                    </label>
+                                    <input class="field-input subtask-new-input" type="text" name="title"
+                                        placeholder=(t(lang, Key::NewSubtask)) required="" maxlength="200">
                                     <button class="edit-save" type="submit">(t(lang, Key::AddSubtask))</button>
                                 </form>
                             }

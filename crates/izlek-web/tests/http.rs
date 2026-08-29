@@ -1633,6 +1633,74 @@ async fn a_viewer_may_not_open_or_move_a_subtask() {
 }
 
 #[tokio::test]
+async fn a_card_wears_its_conditional_classes() {
+    // `class:foo=(cond)` renders as a literal attribute in this view macro
+    // rather than merging into `class`, so every state that used it — a done
+    // card, an overdue chip, a dateless chip, an open-parts chip — was
+    // invisible. They are built with `class!` now; this holds that.
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let task = a_task(&app, &admin, &columns[0], "Undated").await;
+
+    let page = app.get("/", Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        !page.contains("class:"),
+        "a conditional class rendered as a literal attribute"
+    );
+    assert!(
+        page.contains("card-deadline card-deadline-none"),
+        "the dateless chip lost its class"
+    );
+
+    // A card in a done column carries card-done, which is what greys it.
+    let done = columns.last().unwrap();
+    app.post(
+        "/api/move_card",
+        Some(&admin),
+        &[
+            ("task_id", &task),
+            ("from_column_id", &columns[0]),
+            ("to_column_id", done),
+        ],
+    )
+    .await;
+    let page = app.get("/", Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    assert!(page.contains("card card-done"), "a finished card is not marked");
+}
+
+#[tokio::test]
+async fn a_parents_own_part_is_not_offered_as_a_blocker() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+    let child = a_task(&app, &admin, &columns[0], "Write the CSV writer").await;
+    let stranger = a_task(&app, &admin, &columns[0], "Unrelated work").await;
+    app.store.set_parent(&child, Some(&parent)).await.unwrap();
+
+    // The store refuses a parent-to-part edge, so the picker must not offer
+    // one: an option that is always refused is a worse control than no option.
+    let page = app.get(&format!("/?task={parent}"), Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    let picker = page
+        .split_once("link-pop")
+        .map(|(_, rest)| rest.split_once("</div>").map(|(p, _)| p).unwrap_or(rest))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !picker.contains(&child),
+        "the picker offered the task's own part"
+    );
+    assert!(
+        page.contains(&stranger),
+        "an unrelated task vanished from the page"
+    );
+}
+
+#[tokio::test]
 async fn a_drop_decided_against_a_stale_board_is_refused() {
     let app = App::open().await;
     let admin = admin(&app).await;
