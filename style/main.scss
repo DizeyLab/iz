@@ -946,32 +946,51 @@ img.avatar {
   display: block;
 }
 
-// The block is a sibling of the profile form (a form cannot nest the photo
-// forms), so it carries the `.panel-body` inset itself to line up with the
-// fields above.
-.photo-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 0 18px 18px;
-}
-
-.photo-row {
+// The avatar leads the profile panel and is itself the upload control: the
+// file input rides its `form` attribute to a hidden sibling form, so nothing
+// nests inside the profile form.
+.identity-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-
-  // Sized to the field boxes beside it, not the board's 28px overlap size.
-  .avatar {
-    width: 40px;
-    height: 40px;
-    font-size: 13px;
-  }
+  gap: 14px;
 }
 
-// A form here is just a wrapper for the box/button it holds — it must not
-// stretch full-width like `.panel-body`'s other flex children do.
-.photo-form { display: contents; }
+.avatar-upload {
+  position: relative;
+  flex: none;
+  cursor: pointer;
+
+  .avatar {
+    width: 64px;
+    height: 64px;
+    font-size: 20px;
+  }
+
+  // The upload affordance: a veil and a plus over the picture, on hover or
+  // keyboard focus only.
+  &::after {
+    content: "+";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgb(0 0 0 / 0.4);
+    border-radius: 50%;
+    color: #fff;
+    font-size: 24px;
+    font-weight: 300;
+    opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease);
+    pointer-events: none;
+  }
+
+  &:hover::after,
+  &:has(.file-upload-input:focus-visible)::after { opacity: 1; }
+
+  // The name tooltip has no job on your own picture.
+  .avatar[data-name]:hover::after { content: none; }
+}
 
 // -- the card context menu ---------------------------------------------------
 //

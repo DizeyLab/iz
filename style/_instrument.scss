@@ -92,6 +92,11 @@
     margin-left: -4px;
   }
 
+  // The upload veil squares off with the avatar under it.
+  .avatar-upload::after {
+    border-radius: 2px;
+  }
+
   // Keep the empty-assignee slot's dashed outline, which the border: none
   // above would otherwise silence.
   .avatar-none {

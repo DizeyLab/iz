@@ -994,6 +994,25 @@ async fn settings_page(cx: &Cx) -> Result {
                         <h2 class="panel-title">(t(lang, Key::YourProfile))</h2>
                     </div>
                     <form method="post" action="/api/save_profile" class="panel-body">
+                        <div class="identity-row">
+                            <label class="avatar-upload">
+                                (crate::layout::avatar(cx, &izlek_core::board::Person {
+                                    id: user.id.clone(),
+                                    display_name: user.display_name.clone(),
+                                    has_photo: user.has_photo,
+                                }, "avatar-lg").await?)
+                                <input class="file-upload-input" type="file" name="file" accept="image/*" data-autosubmit="" form="photo-form">
+                            </label>
+                            if user.has_photo {
+                                <button class="quiet" type="submit" form="photo-remove-form">(t(lang, Key::Remove))</button>
+                            }
+                            if let Some(refusal) = &photo_refusal {
+                                <span class="field-error">(refusal.message_in(lang))</span>
+                            }
+                            if photo_saved {
+                                <span class="field-note">(t(lang, Key::Saved))</span>
+                            }
+                        </div>
                         <label class="field">
                             <span class="field-label">(t(lang, Key::DisplayNameLabel))</span>
                             <input
@@ -1048,33 +1067,8 @@ async fn settings_page(cx: &Cx) -> Result {
                             <button class="primary" type="submit">(t(lang, Key::Save))</button>
                         </div>
                     </form>
-                    <div class="photo-block">
-                        <span class="field-label">(t(lang, Key::Picture))</span>
-                        <div class="photo-row">
-                            (crate::layout::avatar(cx, &izlek_core::board::Person {
-                                id: user.id.clone(),
-                                display_name: user.display_name.clone(),
-                                has_photo: user.has_photo,
-                            }, "avatar-lg").await?)
-                            <form class="photo-form" method="post" action="/api/profile_photo" enctype="multipart/form-data">
-                                <label class="field-box file-upload-box">
-                                    <span class="field-text file-upload-name">(t(lang, Key::File))</span>
-                                    <input class="file-upload-input" type="file" name="file" accept="image/*" data-autosubmit="">
-                                </label>
-                            </form>
-                            if user.has_photo {
-                                <form class="photo-form" method="post" action="/api/delete_profile_photo">
-                                    <button class="quiet" type="submit">(t(lang, Key::Remove))</button>
-                                </form>
-                            }
-                            if let Some(refusal) = &photo_refusal {
-                                <span class="field-error">(refusal.message_in(lang))</span>
-                            }
-                            if photo_saved {
-                                <span class="field-note">(t(lang, Key::Saved))</span>
-                            }
-                        </div>
-                    </div>
+                    <form id="photo-form" method="post" action="/api/profile_photo" enctype="multipart/form-data"></form>
+                    <form id="photo-remove-form" method="post" action="/api/delete_profile_photo"></form>
                 </section>
 
                 <section class="panel" id="password">
