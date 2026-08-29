@@ -5215,3 +5215,37 @@ async fn a_queued_notice_is_pending_and_due_and_on_the_queue() {
         "not in mail_queue: {mail_queue:?}"
     );
 }
+
+/// An admin's notice carries its own subject and body and owes no rule, the
+/// same as an invite — the engine has to deliver it rather than skip past it
+/// looking for a rule that was never there.
+#[tokio::test]
+async fn the_engine_delivers_a_notice_that_owes_no_rule() {
+    let (dir, store, _workspace, _admin) = shared().await;
+    let now = OffsetDateTime::now_utc();
+    store
+        .queue_notice("grace@izlek.sh", "Heads up", "Body text", now)
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let report = engine
+        .deliver_owed(now + Duration::minutes(1), 10)
+        .await
+        .unwrap();
+
+    assert_eq!(report.sent, 1, "{report:?}");
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].to, "grace@izlek.sh");
+    assert_eq!(sent[0].subject, "Heads up");
+    assert_eq!(sent[0].body, "Body text");
+
+    let owed = store
+        .sends_owed(now + Duration::hours(2), 10)
+        .await
+        .unwrap();
+    assert!(owed.is_empty(), "a delivered notice is no longer owed: {owed:?}");
+    std::fs::remove_dir_all(dir).ok();
+}

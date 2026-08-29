@@ -1583,7 +1583,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     }
 
                     if tab == Tab::Comments {
-                    <section class="detail-block">
+                    <section class="detail-block detail-block-fill">
                         <div class="detail-block-head">
                             <span class="detail-label">(t(lang, Key::Comments))</span>
                             <span class="detail-count">(detail.comments.len())</span>
@@ -1597,7 +1597,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     }
 
                     if tab == Tab::Activity {
-                    <section class="detail-block">
+                    <section class="detail-block detail-block-fill">
                         <span class="detail-label">(t(lang, Key::Activity))</span>
                         <div class="activity-list">
                             for entry in &detail.activity {
@@ -1612,7 +1612,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     }
 
                     if tab == Tab::Mail {
-                    <section class="detail-block">
+                    <section class="detail-block detail-block-fill">
                         <span class="detail-label">(t(lang, Key::Notifications))</span>
                         <div class="activity-list">
                             for line in &notifications {
@@ -1656,6 +1656,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     </section>
                     }
 
+                    if tab == Tab::Task {
                     (refused(cx, "delete_task", lang).await?)
 
                     <footer class="detail-foot">
@@ -1691,6 +1692,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                         <div class="spacer"></div>
                         <a class="quiet" href="/">(t(lang, Key::Close))</a>
                     </footer>
+                    }
                 </div>
 
                 if tab == Tab::Comments && may_comment {

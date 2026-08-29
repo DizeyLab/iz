@@ -922,7 +922,7 @@ async fn logs_screen(
             <nav class="settings-sections">
                 <a class=(rail_class(section, Section::Queue)) href="/logs?section=queue">(t(lang, Key::MailQueue))</a>
                 <a class=(rail_class(section, Section::Decisions)) href="/logs?section=decisions">(t(lang, Key::MailDecisions))</a>
-                <a class=(rail_class(section, Section::Activity)) href="/logs?section=activity">(t(lang, Key::Activity))</a>
+                <a class=(rail_class(section, Section::Activity)) href="/logs?section=activity">(t(lang, Key::WorkspaceActivity))</a>
             </nav>
             <main class="settings-stage stage-wide">
                 <div class="settings-head">
@@ -1044,7 +1044,7 @@ async fn logs_screen(
                 if section == Section::Activity {
                 <section class="panel">
                     <div class="panel-head">
-                        <h2 class="panel-title">(t(lang, Key::Activity))</h2>
+                        <h2 class="panel-title">(t(lang, Key::WorkspaceActivity))</h2>
                     </div>
                     <div class="panel-body">
                         <form class="filterbar log-filterbar" method="get" action="/logs">

@@ -1799,13 +1799,37 @@ img.avatar {
 .detail-prose {
   display: block;
   margin: 0;
+  min-width: 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--ink-soft);
   white-space: pre-wrap;
+  // A pasted URL or an unbroken run of characters has no space to wrap at;
+  // without this it runs off the panel instead of folding.
+  overflow-wrap: anywhere;
 }
 
 .detail-prose-empty { color: var(--muted-soft); }
+
+// One tab's region owns the whole body: the block stretches, and the list
+// inside it pans rather than stopping short and leaving the panel empty
+// below (the old 320px cap made sense only when every region shared one
+// scrolling column).
+.detail-body { display: flex; flex-direction: column; }
+
+.detail-block-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+
+  > .comment-list,
+  > .activity-list {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+  }
+}
 
 .detail-quiet {
   margin: 0;
@@ -2018,6 +2042,9 @@ img.avatar {
   gap: 14px;
   max-height: 320px;
   overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
 }
 
 .comment {
@@ -2080,6 +2107,9 @@ img.avatar {
   gap: 10px;
   max-height: 320px;
   overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
 }
 
 .activity-line {

@@ -533,9 +533,11 @@ impl Engine {
     ) -> crate::store::Result<Report> {
         let mut report = Report::default();
         for send in self.store.sends_owed(now, limit).await? {
-            // An invite owes no rule and no event: it carries its own subject
-            // and body, composed once at mint time.
-            if send.kind == SendKind::Invite {
+            // An invite and an admin's notice both owe no rule and no event:
+            // each carries its own subject and body, composed once at mint
+            // time. Without this arm a notice falls through to the rule path,
+            // finds no rule_id, and is skipped every run — queued forever.
+            if matches!(send.kind, SendKind::Invite | SendKind::Notice) {
                 let mail = Outgoing {
                     to: send.recipient.clone(),
                     subject: send.subject.clone().unwrap_or_default(),
