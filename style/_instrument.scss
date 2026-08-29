@@ -245,10 +245,11 @@
   font-size: 20px;
 }
 
+// The fields ride in the masthead, so they carry its inset themselves.
 [data-ui="instrument"] .detail-fields {
   gap: 10px;
-  padding: 0;
-  margin-top: 18px;
+  padding: 0 16px 14px;
+  margin-top: 14px;
 }
 
 // Blocks run down the panel body below the title; only the composer pins.

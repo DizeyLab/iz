@@ -1485,51 +1485,54 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                         <a class=(tab_class(tab, Tab::Activity)) href=(format!("/?task={}&tab={}", detail.id, Tab::Activity.slug()))>(t(lang, Key::Activity))</a>
                         <a class=(tab_class(tab, Tab::Mail)) href=(format!("/?task={}&tab={}", detail.id, Tab::Mail.slug()))>(t(lang, Key::TabMail))</a>
                     </nav>
+
+                    if tab == Tab::Task {
+                        <div class="detail-fields">
+                            <div class="detail-field detail-field-status">
+                                <span class="detail-label">(t(lang, Key::Status))</span>
+                                if may_write {
+                                    <form class="status-form" method="post" action="/api/move_card">
+                                        <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                        <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
+                                        <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
+                                        <select class="status-select" name="to_column_id" data-autosubmit="">
+                                            for column in &detail.columns {
+                                                <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
+                                            }
+                                        </select>
+                                        (glyph::chevron(cx).await?)
+                                    </form>
+                                } else {
+                                    <span class="field-box">
+                                        <span class="status-dot"></span>
+                                        <span class="field-text">(detail.column.name.clone())</span>
+                                    </span>
+                                }
+                            </div>
+                            <div class="detail-field">
+                                <span class="detail-label">(t(lang, Key::Deadline))</span>
+                                (deadline_control(cx, &detail, today, may_write, lang).await?)
+                            </div>
+                            <div class="detail-field detail-field-people">
+                                <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
+                                <div class="detail-assignees">
+                                    for person in &detail.assignees {
+                                        (assignee_chip(cx, &detail.id, person, may_write, lang).await?)
+                                    }
+                                    <div class="spacer"></div>
+                                    if may_write {
+                                        (assignee_picker(cx, &detail.id, &unassigned, lang).await?)
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                        (refused(cx, "move_card", lang).await?)
+                    }
                 </div>
 
 
                 <div class="detail-body">
                     if tab == Tab::Task {
-                    <div class="detail-fields">
-                        <div class="detail-field detail-field-status">
-                            <span class="detail-label">(t(lang, Key::Status))</span>
-                            if may_write {
-                                <form class="status-form" method="post" action="/api/move_card">
-                                    <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                    <input type="hidden" name="from_column_id" value=(detail.column.id.clone())>
-                                    <span class=(class!("status-dot", "status-dot-done" if detail.column.is_done))></span>
-                                    <select class="status-select" name="to_column_id" data-autosubmit="">
-                                        for column in &detail.columns {
-                                            <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
-                                        }
-                                    </select>
-                                    (glyph::chevron(cx).await?)
-                                </form>
-                            } else {
-                                <span class="field-box">
-                                    <span class="status-dot"></span>
-                                    <span class="field-text">(detail.column.name.clone())</span>
-                                </span>
-                            }
-                        </div>
-                        <div class="detail-field">
-                            <span class="detail-label">(t(lang, Key::Deadline))</span>
-                            (deadline_control(cx, &detail, today, may_write, lang).await?)
-                        </div>
-                        <div class="detail-field detail-field-people">
-                            <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
-                            <div class="detail-assignees">
-                                for person in &detail.assignees {
-                                    (assignee_chip(cx, &detail.id, person, may_write, lang).await?)
-                                }
-                                <div class="spacer"></div>
-                                if may_write {
-                                    (assignee_picker(cx, &detail.id, &unassigned, lang).await?)
-                                }
-                            </div>
-                        </div>
-                    </div>
-                    (refused(cx, "move_card", lang).await?)
 
                     <section class="detail-block">
                         <div class="detail-block-head">
