@@ -50,9 +50,26 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 panel.style.top = top + 'px';\
                 panel.style.minWidth = r.width + 'px';\
             }\
+            function visibleRows(panel) { return Array.prototype.slice.call(panel.querySelectorAll('.dd-option:not(.dd-option-hidden)')); }\
             function activate(panel, row) {\
                 panel.querySelectorAll('.dd-option-active').forEach(function (r) { r.classList.remove('dd-option-active'); });\
-                if (row) { row.classList.add('dd-option-active'); row.focus(); }\
+                if (!row) { return; }\
+                row.classList.add('dd-option-active');\
+                if (panel.__ddSearch) { row.scrollIntoView({ block: 'nearest' }); } else { row.focus(); }\
+            }\
+            function isTypeKey(e) { return e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey; }\
+            function typeIntoSearch(search, e) {\
+                search.focus();\
+                search.value += e.key;\
+                search.dispatchEvent(new Event('input', { bubbles: true }));\
+            }\
+            function filterRows(panel, query) {\
+                var q = query.toLowerCase();\
+                panel.querySelectorAll('.dd-option').forEach(function (r) {\
+                    r.classList.toggle('dd-option-hidden', q !== '' && r.textContent.toLowerCase().indexOf(q) === -1);\
+                });\
+                var vis = visibleRows(panel);\
+                activate(panel, panel.querySelector('.dd-option-selected:not(.dd-option-hidden)') || vis[0]);\
             }\
             function pick(select, trigger, panel, row) {\
                 select.value = row.dataset.value;\
@@ -68,10 +85,16 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
             }\
             function openPanel(select, trigger, panel) {\
                 closeAll();\
+                var search = panel.__ddSearch;\
+                if (search) {\
+                    search.value = '';\
+                    panel.querySelectorAll('.dd-option').forEach(function (r) { r.classList.remove('dd-option-hidden'); });\
+                }\
                 panel.classList.add('dd-open');\
                 place(panel, trigger);\
                 trigger.setAttribute('aria-expanded', 'true');\
                 activate(panel, panel.querySelector('.dd-option-selected') || panel.querySelector('.dd-option'));\
+                if (search) { search.focus(); }\
             }\
             function enhance(select) {\
                 if (select.dataset.ddDone) { return; }\
@@ -89,7 +112,16 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 panel.className = 'dd-panel';\
                 panel.setAttribute('role', 'listbox');\
                 panel.__ddTrigger = trigger;\
-                opts(select).forEach(function (opt) {\
+                var allOpts = opts(select);\
+                var search = null;\
+                if (allOpts.length > 7) {\
+                    search = document.createElement('input');\
+                    search.type = 'text';\
+                    search.className = 'dd-search';\
+                    panel.appendChild(search);\
+                    panel.__ddSearch = search;\
+                }\
+                allOpts.forEach(function (opt) {\
                     var row = document.createElement('button');\
                     row.type = 'button';\
                     row.className = 'dd-option' + (opt.selected ? ' dd-option-selected' : '');\
@@ -108,16 +140,40 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {\
                         e.preventDefault();\
                         if (!panel.classList.contains('dd-open')) { openPanel(select, trigger, panel); return; }\
-                        var rows = Array.prototype.slice.call(panel.querySelectorAll('.dd-option'));\
-                        var idx = rows.indexOf(panel.querySelector('.dd-option-active')) + (e.key === 'ArrowDown' ? 1 : -1);\
-                        if (idx >= 0 && idx < rows.length) { activate(panel, rows[idx]); }\
+                        var vis = visibleRows(panel);\
+                        var idx = vis.indexOf(panel.querySelector('.dd-option-active')) + (e.key === 'ArrowDown' ? 1 : -1);\
+                        if (idx >= 0 && idx < vis.length) { activate(panel, vis[idx]); }\
                     } else if (e.key === 'Enter' && panel.classList.contains('dd-open')) {\
                         e.preventDefault();\
                         var active = panel.querySelector('.dd-option-active');\
                         if (active) { pick(select, trigger, panel, active); }\
+                    } else if (search && isTypeKey(e)) {\
+                        e.preventDefault();\
+                        if (!panel.classList.contains('dd-open')) { openPanel(select, trigger, panel); }\
+                        typeIntoSearch(search, e);\
+                    }\
+                });\
+                if (search) {\
+                    search.addEventListener('input', function () { filterRows(panel, search.value); });\
+                }\
+                panel.addEventListener('keydown', function (e) {\
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {\
+                        e.preventDefault();\
+                        var vis = visibleRows(panel);\
+                        var idx = vis.indexOf(panel.querySelector('.dd-option-active')) + (e.key === 'ArrowDown' ? 1 : -1);\
+                        if (idx >= 0 && idx < vis.length) { activate(panel, vis[idx]); }\
+                    } else if (e.key === 'Enter') {\
+                        e.preventDefault();\
+                        var vis = visibleRows(panel);\
+                        var active = panel.querySelector('.dd-option-active') || (vis.length === 1 ? vis[0] : null);\
+                        if (active) { pick(select, trigger, panel, active); }\
+                    } else if (search && e.target !== search && isTypeKey(e)) {\
+                        e.preventDefault();\
+                        typeIntoSearch(search, e);\
                     }\
                 });\
                 panel.addEventListener('click', function (e) {\
+                    e.stopPropagation();\
                     var row = e.target.closest('.dd-option');\
                     if (row) { pick(select, trigger, panel, row); }\
                 });\
@@ -131,7 +187,11 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 return true;\
             });\
             document.addEventListener('click', closeAll);\
-            window.addEventListener('scroll', closeAll, true);\
+            window.addEventListener('scroll', function (e) {\
+                var t = e.target;\
+                if (t && t.nodeType === 1 && t.classList.contains('dd-panel')) { return; }\
+                closeAll();\
+            }, true);\
             function enhanceAll() { document.querySelectorAll('select.status-select, select.field-input').forEach(enhance); }\
             enhanceAll();\
             document.addEventListener('izlek:wire', enhanceAll);\

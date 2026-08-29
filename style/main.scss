@@ -2463,6 +2463,25 @@ input[type="radio"] {
 
 .dd-option-selected { background: var(--accent-tint); color: var(--accent-ink); }
 
+.dd-option-hidden { display: none; }
+
+// Type-to-filter, injected as the panel's first child on any select with
+// more than 7 options (dropdown.rs `enhance`) — small selects (Newest/
+// Oldest, yes/no) stay clean. Its own focus-visible override sits after
+// the shared ring rule below (same (0,2,0) trick as `.modal:focus-visible`).
+.dd-search {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+}
+
 // A row that states a fact instead of pretending to be an editable field. An
 // empty box that silently does nothing is worse than a sentence.
 .field-stated {
@@ -2523,6 +2542,13 @@ input[type="radio"] {
 // controls — no ring. Re-stated here because a plain `.modal` rule loses
 // the specificity tie against the shared rule above.
 .modal:focus-visible { outline: none; }
+
+// A boxed outline inside a panel that's already bordered reads as a double
+// frame; the hairline brightening to the accent color is enough.
+.dd-search:focus-visible {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
 
 // -- the member list --------------------------------------------------------
 
