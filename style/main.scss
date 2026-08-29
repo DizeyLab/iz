@@ -2146,10 +2146,13 @@ img.avatar {
 
 // -- footer -----------------------------------------------------------------
 
+// The foot sits outside `.detail-body`, so a description that runs on
+// forever scrolls under it rather than pushing Close off the panel.
 .detail-foot {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: none;
   padding: 22px 24px 24px;
   margin-top: 4px;
 }

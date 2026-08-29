@@ -1656,44 +1656,45 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     </section>
                     }
 
-                    if tab == Tab::Task {
-                    (refused(cx, "delete_task", lang).await?)
-
-                    <footer class="detail-foot">
-                        if may_delete {
-                            match cost {
-                                Some(cost) => {
-                                    let freed = cost.frees.join(", ");
-                                    <details class="confirm-details" open=(confirm_delete)>
-                                        <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
-                                        <div class="confirm">
-                                            <div class="confirm-title">(format!("{} — {}?", cost.task_key, cost.title))</div>
-                                            <ul class="confirm-list">
-                                                if cost.comment_count > 0 {
-                                                    <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
-                                                }
-                                                if cost.link_count > 0 {
-                                                    <li>(if cost.link_count == 1 { t(lang, Key::DependencyStopsApplying).to_string() } else { format!("{} {}", cost.link_count, t(lang, Key::DependenciesStopApplying)) })</li>
-                                                }
-                                                if !freed.is_empty() {
-                                                    <li>(format!("{freed} {}", t(lang, Key::StopsBeingBlocked)))</li>
-                                                }
-                                            </ul>
-                                            <form class="detail-delete-form" method="post" action="/api/delete_task">
-                                                <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                                <button class="detail-delete detail-delete-sure" type="submit">(t(lang, Key::DeleteTask))</button>
-                                            </form>
-                                        </div>
-                                    </details>
-                                },
-                                None => <p class="detail-quiet">(t(lang, Key::ThisTaskCannotBeDeleted))</p>,
-                            }
-                        }
-                        <div class="spacer"></div>
-                        <a class="quiet" href="/">(t(lang, Key::Close))</a>
-                    </footer>
-                    }
                 </div>
+
+                if tab == Tab::Task {
+                (refused(cx, "delete_task", lang).await?)
+
+                <footer class="detail-foot">
+                    if may_delete {
+                        match cost {
+                            Some(cost) => {
+                                let freed = cost.frees.join(", ");
+                                <details class="confirm-details" open=(confirm_delete)>
+                                    <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
+                                    <div class="confirm">
+                                        <div class="confirm-title">(format!("{} — {}?", cost.task_key, cost.title))</div>
+                                        <ul class="confirm-list">
+                                            if cost.comment_count > 0 {
+                                                <li>(if cost.comment_count == 1 { t(lang, Key::CommentGoesWithIt).to_string() } else { format!("{} {}", cost.comment_count, t(lang, Key::CommentsGoWithIt)) })</li>
+                                            }
+                                            if cost.link_count > 0 {
+                                                <li>(if cost.link_count == 1 { t(lang, Key::DependencyStopsApplying).to_string() } else { format!("{} {}", cost.link_count, t(lang, Key::DependenciesStopApplying)) })</li>
+                                            }
+                                            if !freed.is_empty() {
+                                                <li>(format!("{freed} {}", t(lang, Key::StopsBeingBlocked)))</li>
+                                            }
+                                        </ul>
+                                        <form class="detail-delete-form" method="post" action="/api/delete_task">
+                                            <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                            <button class="detail-delete detail-delete-sure" type="submit">(t(lang, Key::DeleteTask))</button>
+                                        </form>
+                                    </div>
+                                </details>
+                            },
+                            None => <p class="detail-quiet">(t(lang, Key::ThisTaskCannotBeDeleted))</p>,
+                        }
+                    }
+                    <div class="spacer"></div>
+                    <a class="quiet" href="/">(t(lang, Key::Close))</a>
+                </footer>
+                }
 
                 if tab == Tab::Comments && may_comment {
                     <form class="comment-composer" method="post" action="/api/post_comment">

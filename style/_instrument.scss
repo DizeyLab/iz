@@ -259,9 +259,12 @@
   margin-top: 18px;
 }
 
+// Pinned at the panel's foot, wearing the composer's rule and padding: the
+// two are the same kind of thing, a bar the body scrolls beneath.
 [data-ui="instrument"] .detail-foot {
-  padding: 0;
-  margin-top: 20px;
+  padding: 14px 20px;
+  margin-top: 0;
+  border-top: 1px solid var(--border);
 }
 
 // Composer is the last child of `.modal-task` (outside `.detail-body`), so on
