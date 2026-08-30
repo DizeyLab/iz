@@ -500,6 +500,8 @@ struct BoardQuery {
     tab: Option<String>,
     file: Option<String>,
     sheet: Option<String>,
+    rows: Option<String>,
+    cols: Option<String>,
     refusal: Option<String>,
     on: Option<String>,
     sort: Option<String>,
@@ -550,6 +552,14 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         .as_deref()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
+    // Which window of it is drawn, in pages of rows and pages of columns.
+    let page_of = |value: Option<&str>| {
+        value
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    let open_rows = page_of(query.rows.as_deref());
+    let open_cols = page_of(query.cols.as_deref());
     // `?task=X&new=1` together would render both modals at once — two
     // document-level datepicker listeners double-stepping the month nav — so
     // an open task wins and `new` is ignored.
@@ -604,7 +614,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         if let Some(task_id) = &open_task {
             (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?)
             if let Some(file_id) = &query.file {
-                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab, open_sheet).await?)
+                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab, open_sheet, open_rows, open_cols).await?)
             }
         }
         if open_new {

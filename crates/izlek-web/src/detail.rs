@@ -2119,6 +2119,8 @@ pub async fn file_viewer_modal(
     file_id: &str,
     tab: Tab,
     sheet_index: usize,
+    row_page: usize,
+    column_page: usize,
 ) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
@@ -2153,7 +2155,9 @@ pub async fn file_viewer_modal(
     let sheet = if kind == crate::files::ViewerKind::Sheet {
         match store.attachment_bytes(file_id).await {
             Ok(Some(bytes)) => {
-                tokio::task::spawn_blocking(move || crate::sheet::read(bytes, sheet_index))
+                tokio::task::spawn_blocking(move || {
+                    crate::sheet::read(bytes, sheet_index, row_page, column_page)
+                })
                     .await
                     .ok()
                     .flatten()
@@ -2199,11 +2203,10 @@ pub async fn file_viewer_modal(
     }
 }
 
-/// One sheet of a workbook as a table: the tab strip when the book has more
+/// One window of one sheet as a table: the tab strip when the book has more
 /// than one sheet, the grid with its column letters and row numbers, and the
-/// clipped line when the sheet ran past what [`crate::sheet`] draws. A
-/// workbook no reader here understands says so in one line — the header's
-/// download link is still the whole file.
+/// two pagers that move the window. A workbook no reader here understands
+/// says so in one line — the header's download link is still the whole file.
 async fn sheet_view(
     cx: &Cx,
     sheet: Option<crate::sheet::Sheet>,
@@ -2212,13 +2215,28 @@ async fn sheet_view(
     tab: Tab,
     lang: Lang,
 ) -> Result {
+    use crate::sheet::{COLUMNS_PER_PAGE, ROWS_PER_PAGE, column_name};
+
     let Some(sheet) = sheet else {
         return view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> };
     };
     let width = sheet.rows.iter().map(Vec::len).max().unwrap_or(0);
-    let columns: Vec<String> = (0..width).map(crate::sheet::column_name).collect();
+    let columns: Vec<String> = (0..width)
+        .map(|column| column_name(sheet.first_column + column))
+        .collect();
+    let row_page = sheet.first_row / ROWS_PER_PAGE;
+    let column_page = sheet.first_column / COLUMNS_PER_PAGE;
+    // Every link out of here is the same page with one number moved, so the
+    // window a link lands on is the window its own numbers name.
+    let at = |sheet_index: usize, rows: usize, columns: usize| {
+        format!(
+            "/?task={task_id}&tab={}&file={file_id}&sheet={sheet_index}&rows={rows}&cols={columns}",
+            tab.slug()
+        )
+    };
     // The tab strip is a row of links, not a control: switching sheets is a
-    // navigation like every other overlay state on this page.
+    // navigation like every other overlay state on this page, and it starts
+    // that sheet at its own first window.
     let tabs: Vec<(String, String, &'static str)> = sheet
         .names
         .iter()
@@ -2226,10 +2244,7 @@ async fn sheet_view(
         .map(|(index, name)| {
             (
                 name.clone(),
-                format!(
-                    "/?task={task_id}&tab={}&file={file_id}&sheet={index}",
-                    tab.slug()
-                ),
+                at(index, 0, 0),
                 if index == sheet.index {
                     "sheet-tab sheet-tab-on"
                 } else {
@@ -2238,6 +2253,28 @@ async fn sheet_view(
             )
         })
         .collect();
+    let rows_back = (row_page > 0).then(|| at(sheet.index, row_page - 1, column_page));
+    let rows_on = sheet
+        .more_rows
+        .then(|| at(sheet.index, row_page + 1, column_page));
+    let columns_back = (column_page > 0).then(|| at(sheet.index, row_page, column_page - 1));
+    let columns_on = sheet
+        .more_columns
+        .then(|| at(sheet.index, row_page, column_page + 1));
+    // "51–100 / 5000" down the rows, "M–X / 40" across the columns: the
+    // window's own edges in the same vocabulary the grid labels its gutters
+    // with, counted against the whole sheet where the file's own size can be
+    // trusted and left uncounted where it cannot.
+    let row_range = match sheet.total_rows {
+        Some(total) => format!("{}–{} / {total}", sheet.first_row + 1, sheet.last_row()),
+        None => format!("{}–{}", sheet.first_row + 1, sheet.last_row()),
+    };
+    let first_letter = column_name(sheet.first_column);
+    let last_letter = column_name(sheet.last_column().saturating_sub(1));
+    let column_range = match sheet.total_columns {
+        Some(total) => format!("{first_letter}–{last_letter} / {total}"),
+        None => format!("{first_letter}–{last_letter}"),
+    };
     view! {
         cx =>
         <div class="viewer-sheet">
@@ -2261,7 +2298,7 @@ async fn sheet_view(
                     <tbody>
                         for (index, row) in sheet.rows.iter().enumerate() {
                             <tr>
-                                <th class="sheet-gutter">(format!("{}", index + 1))</th>
+                                <th class="sheet-gutter">(format!("{}", sheet.first_row + index + 1))</th>
                                 for column in 0..width {
                                     <td>(row.get(column).cloned().unwrap_or_default())</td>
                                 }
@@ -2270,9 +2307,34 @@ async fn sheet_view(
                     </tbody>
                 </table>
             </div>
-            if sheet.clipped {
-                <p class="sheet-note">(t(lang, Key::SheetClipped))</p>
-            }
+            <div class="sheet-foot">
+                <div class="sheet-pager">
+                    <span class="sheet-range">(row_range)</span>
+                    if let Some(href) = rows_back {
+                        <a class="sheet-step sheet-step-up" href=(href) aria-label=(t(lang, Key::Previous))>(glyph::chevron(cx).await?)</a>
+                    } else {
+                        <span class="sheet-step sheet-step-up sheet-step-off">(glyph::chevron(cx).await?)</span>
+                    }
+                    if let Some(href) = rows_on {
+                        <a class="sheet-step" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
+                    } else {
+                        <span class="sheet-step sheet-step-off">(glyph::chevron(cx).await?)</span>
+                    }
+                </div>
+                <div class="sheet-pager">
+                    <span class="sheet-range">(column_range)</span>
+                    if let Some(href) = columns_back {
+                        <a class="sheet-step sheet-step-left" href=(href) aria-label=(t(lang, Key::Previous))>(glyph::chevron(cx).await?)</a>
+                    } else {
+                        <span class="sheet-step sheet-step-left sheet-step-off">(glyph::chevron(cx).await?)</span>
+                    }
+                    if let Some(href) = columns_on {
+                        <a class="sheet-step sheet-step-right" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
+                    } else {
+                        <span class="sheet-step sheet-step-right sheet-step-off">(glyph::chevron(cx).await?)</span>
+                    }
+                </div>
+            </div>
         </div>
     }
 }

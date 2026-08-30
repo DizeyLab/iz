@@ -6494,3 +6494,80 @@ async fn an_admin_sets_the_address_mail_links_point_at() {
         "an empty field did not clear the stored address"
     );
 }
+
+/// A sheet is read one window at a time and the pagers move it: down the rows
+/// and across the columns, each a link like every other overlay state. The
+/// window's own numbers and letters label the grid, so a page says where it
+/// sits without being told.
+#[tokio::test]
+async fn a_big_sheet_pages_down_its_rows_and_across_its_columns() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Read the big book").await;
+
+    let book = include_bytes!("fixtures/wide.xlsx");
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some((
+            "wide.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            book,
+        )),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let file_id = attachment_id_named(&snapshot.body, "wide.xlsx");
+
+    let first = app
+        .get(
+            &format!("/?task={task}&file={file_id}"),
+            Some(&admin_cookie),
+        )
+        .await;
+    let html = String::from_utf8_lossy(&first.bytes);
+    assert!(html.contains("Col A"), "the first column is missing: {html}");
+    assert!(!html.contains("Col M"), "the window is not 12 wide: {html}");
+    assert!(html.contains("A–L / 40"), "no column count: {html}");
+    assert!(html.contains("1–8 / 8"), "no row count: {html}");
+    assert!(
+        html.contains(&format!("file={file_id}&amp;sheet=0&amp;rows=0&amp;cols=1")),
+        "no step to the next columns: {html}"
+    );
+
+    // Stepping across lands on the next twelve columns, and the grid labels
+    // them from where the window sits rather than from A.
+    let across = app
+        .get(
+            &format!("/?task={task}&file={file_id}&sheet=0&rows=0&cols=1"),
+            Some(&admin_cookie),
+        )
+        .await;
+    let html = String::from_utf8_lossy(&across.bytes);
+    assert!(html.contains("Col M"), "the second window is wrong: {html}");
+    assert!(html.contains("M–X / 40"), "the count did not move: {html}");
+    assert!(
+        html.contains(&format!("file={file_id}&amp;sheet=0&amp;rows=0&amp;cols=0")),
+        "no step back to the first columns: {html}"
+    );
+
+    // A window nobody links to is the empty one it names, not a redirect and
+    // not the first page wearing another page's numbers.
+    let nowhere = app
+        .get(
+            &format!("/?task={task}&file={file_id}&sheet=0&rows=99&cols=0"),
+            Some(&admin_cookie),
+        )
+        .await;
+    let html = String::from_utf8_lossy(&nowhere.bytes);
+    assert!(html.contains("sheet-table"), "the grid is gone: {html}");
+    assert!(!html.contains("Col A"), "row 4951 is not row 1: {html}");
+}

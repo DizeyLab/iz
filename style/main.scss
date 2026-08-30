@@ -1237,7 +1237,7 @@ img.avatar {
 // further, and the grid takes whatever is left under the tab strip and pans
 // inside that — the panel itself never leaves the screen.
 .viewer:has(.viewer-sheet) {
-  width: min(96vw, 1400px);
+  width: auto;
   max-width: min(96vw, 1400px);
   display: flex;
   flex-direction: column;
@@ -1287,8 +1287,11 @@ img.avatar {
   border-color: var(--accent);
 }
 
+// A window is sized to land on a screen, so the grid takes only the room its
+// own rows need — the pagers below it stay in view rather than being pushed
+// off by a table that always claims the whole panel.
 .sheet-grid {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -1343,6 +1346,54 @@ img.avatar {
   margin: 0;
   color: var(--text-dim);
   font-size: 12px;
+}
+
+// A sheet is read one window at a time, and these move it: the rows down the
+// left, the columns across the right, each counted against the whole sheet.
+// A step with nowhere to go stays in place, dimmed, so the pair never moves
+// under the pointer.
+.sheet-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sheet-pager {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sheet-range {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+
+.sheet-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+
+  &:hover { color: var(--text); border-color: var(--accent); }
+}
+
+// One chevron points down; the other three are that chevron turned.
+.sheet-step-up .glyph { transform: rotate(180deg); }
+.sheet-step-left .glyph { transform: rotate(90deg); }
+.sheet-step-right .glyph { transform: rotate(-90deg); }
+
+.sheet-step-off {
+  opacity: 0.3;
+
+  &:hover { color: var(--text-dim); border-color: var(--border); }
 }
 
 .new-task-form {
