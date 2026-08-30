@@ -5735,7 +5735,7 @@ async fn a_task_with_a_notification(app: &App, admin_cookie: &str, subject: &str
         .store
         .create_mail_rule(
             &board.id,
-            &Trigger::StatusBecomes(columns[1].clone()),
+            &Trigger::StatusBecomes(Some(columns[1].clone())),
             subject,
             Audience::Assignees,
             time::OffsetDateTime::now_utc(),
@@ -6342,4 +6342,48 @@ async fn a_workbook_opens_as_a_table_and_its_other_sheet_is_one_link_away() {
         )
         .await;
     assert!(String::from_utf8_lossy(&past_the_end.bytes).contains("Cable"));
+}
+
+/// A status rule can watch the whole board: the column select's first option
+/// sends no column, and the rule reads back as a sentence about status
+/// changing rather than becoming one named column.
+#[tokio::test]
+async fn a_status_rule_may_watch_every_column() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/create_rule",
+            Some(&admin_cookie),
+            &[
+                ("trigger", "status"),
+                ("column_id", ""),
+                ("subject", "It moved"),
+                ("audience", "assignees"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(answer.body, "null", "the rule was refused: {}", answer.body);
+
+    let seen = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
+    assert!(
+        seen.body.contains("\"when\":\"When status changes\""),
+        "{}",
+        seen.body
+    );
+    assert!(
+        seen.body.contains("\"column_id\":null"),
+        "the every-column rule names no column: {}",
+        seen.body
+    );
+
+    // The composer offers it: the column select carries the any option, and
+    // it is the one selected while the rule names no column.
+    let page = app.get("/rules", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("Any column"), "no any-column option: {html}");
 }

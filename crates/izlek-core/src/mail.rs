@@ -214,7 +214,11 @@ impl Engine {
                 continue;
             }
             match &rule.trigger {
-                Trigger::StatusBecomes(column) if *column == transition.to_column => {
+                Trigger::StatusBecomes(column)
+                    if column
+                        .as_deref()
+                        .is_none_or(|watched| watched == transition.to_column) =>
+                {
                     self.owe(rule, &event, &transition.task_id, &mut report)
                         .await?;
                 }
@@ -224,7 +228,11 @@ impl Engine {
                     }
                 }
                 Trigger::StatusBecomes(watched) => {
-                    let detail = format!("moved:{}:{}", transition.to_column, watched);
+                    let detail = format!(
+                        "moved:{}:{}",
+                        transition.to_column,
+                        watched.as_deref().unwrap_or("any")
+                    );
                     self.store
                         .record_mail_decision(
                             &rule.id,
@@ -295,7 +303,8 @@ impl Engine {
                         self.owe(rule, &event, task_id, &mut report).await?;
                     }
                     Trigger::StatusBecomes(watched) => {
-                        let detail = format!("unblocked:{}", watched);
+                        let detail =
+                            format!("unblocked:{}", watched.as_deref().unwrap_or("any"));
                         self.store
                             .record_mail_decision(
                                 &rule.id,
@@ -423,7 +432,9 @@ impl Engine {
                 continue;
             }
             let watches = match &rule.trigger {
-                Trigger::StatusBecomes(column) => format!("status:{}", column),
+                Trigger::StatusBecomes(column) => {
+                    format!("status:{}", column.as_deref().unwrap_or("any"))
+                }
                 Trigger::Unblocked => "unblocked".to_string(),
                 other => activity_kind_for(other)
                     .map(|kind| format!("kind:{}", kind.as_str()))

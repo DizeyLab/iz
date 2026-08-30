@@ -101,16 +101,16 @@ fn audience_kind(audience: Audience) -> &'static str {
 }
 
 /// Parses a trigger from the words a form sends: the trigger's own kind, and
-/// a column id only a status trigger carries. Every other trigger must arrive
-/// with no column — a column id on, say, "created" is a form gone wrong, not
-/// something to guess past.
+/// a column id only a status trigger carries. A status trigger with no column
+/// is the every-column rule. Every other trigger must arrive with no column —
+/// a column id on, say, "created" is a form gone wrong, not something to
+/// guess past.
 ///
 /// Shared by `create_rule` and `update_rule` so the vocabulary is matched
 /// once.
 fn trigger_of(kind: &str, column_id: Option<String>) -> Option<Trigger> {
     match (kind, column_id) {
-        ("status", Some(column_id)) => Some(Trigger::StatusBecomes(column_id)),
-        ("status", None) => None,
+        ("status", column_id) => Some(Trigger::StatusBecomes(column_id)),
         ("unblocked", None) => Some(Trigger::Unblocked),
         ("created", None) => Some(Trigger::Created),
         ("assigned", None) => Some(Trigger::Assigned),
@@ -170,7 +170,16 @@ fn sentence_of(
     lang: Lang,
 ) -> (String, String, String, Option<String>) {
     match trigger {
-        Trigger::StatusBecomes(column_id) => (
+        // No column is every column, and "becomes <a column>" has nothing to
+        // name then — the sentence changes shape rather than printing a word
+        // for "any".
+        Trigger::StatusBecomes(None) => (
+            t(lang, Key::WhenStatusChanges).to_string(),
+            String::new(),
+            "status".to_string(),
+            None,
+        ),
+        Trigger::StatusBecomes(Some(column_id)) => (
             t(lang, Key::WhenStatusBecomes).to_string(),
             columns
                 .iter()
@@ -433,10 +442,11 @@ async fn create_rule(cx: &Cx, Form(input): Form<CreateRuleForm>) -> Redirect {
     } else {
         Some(input.column_id)
     };
-    if input.trigger == "status" {
-        let Some(column_id) = &column_id else {
-            return redirect(cx, Some(Refusal::Forbidden));
-        };
+    // A status rule may name no column at all — that one watches every
+    // column. A named one still has to be this board's own.
+    if input.trigger == "status"
+        && let Some(column_id) = &column_id
+    {
         let columns = match store.columns(&board.id).await {
             Ok(columns) => columns,
             Err(_) => return redirect(cx, Some(Refusal::Unavailable)),
@@ -520,10 +530,11 @@ async fn update_rule(cx: &Cx, Form(input): Form<UpdateRuleForm>) -> Redirect {
     } else {
         Some(input.column_id)
     };
-    if input.trigger == "status" {
-        let Some(column_id) = &column_id else {
-            return redirect(cx, Some(Refusal::Forbidden));
-        };
+    // A status rule may name no column at all — that one watches every
+    // column. A named one still has to be this board's own.
+    if input.trigger == "status"
+        && let Some(column_id) = &column_id
+    {
         let columns = match store.columns(&board.id).await {
             Ok(columns) => columns,
             Err(_) => return redirect(cx, Some(Refusal::Unavailable)),
@@ -690,6 +701,7 @@ async fn rule_form(
                 <label class="rule-field">
                     <span class="field-label">(t(lang, Key::ColumnLabel))</span>
                     <select class="field-input" name="column_id">
+                        <option value="" selected=(column_id.is_empty())>(t(lang, Key::AnyColumn))</option>
                         for column in columns {
                             <option value=(column.id.clone()) selected=(column.id == column_id)>(column.name.clone())</option>
                         }

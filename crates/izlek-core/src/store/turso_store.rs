@@ -249,7 +249,12 @@ const SEND_COLUMNS: &str = "id, rule_id, event_id, task_id, recipient, state, at
 
 fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
     match trigger {
-        Trigger::StatusBecomes(column) => ("status", Some(column.clone())),
+        // The every-column rule is its own stored kind rather than a status
+        // row with no column: the schema's check ties `status` to a column
+        // it names, and a kind of its own keeps that check honest without
+        // rebuilding the table under a live ledger.
+        Trigger::StatusBecomes(Some(column)) => ("status", Some(column.clone())),
+        Trigger::StatusBecomes(None) => ("status_any", None),
         Trigger::Unblocked => ("unblocked", None),
         Trigger::Created => ("created", None),
         Trigger::Assigned => ("assigned", None),
@@ -279,7 +284,8 @@ fn rule_from(row: &Row) -> Result<MailRule> {
     let kind = text(row, 2)?;
     let column = opt_text(row, 3)?;
     let trigger = match (kind.as_str(), column) {
-        ("status", Some(column)) => Trigger::StatusBecomes(column),
+        ("status", Some(column)) => Trigger::StatusBecomes(Some(column)),
+        ("status_any", None) => Trigger::StatusBecomes(None),
         ("unblocked", None) => Trigger::Unblocked,
         ("created", None) => Trigger::Created,
         ("assigned", None) => Trigger::Assigned,

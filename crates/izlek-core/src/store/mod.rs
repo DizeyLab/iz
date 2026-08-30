@@ -250,8 +250,9 @@ pub struct CommentWritten {
 pub enum Trigger {
     /// A card crossed into this column. The crossing is the fact, not the
     /// card's current column: a card that goes Review -> Done -> Review has
-    /// crossed into Done once.
-    StatusBecomes(String),
+    /// crossed into Done once. `None` watches every column — any crossing at
+    /// all fires it, which is how one rule covers a whole board.
+    StatusBecomes(Option<String>),
     /// A task whose last blocker just finished, so the people on it can start.
     Unblocked,
     Created,

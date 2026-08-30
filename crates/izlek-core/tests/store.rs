@@ -3470,7 +3470,7 @@ async fn a_rule(store: &TursoStore, workspace: &str, column: &str, subject: &str
     store
         .create_mail_rule(
             &board.id,
-            &Trigger::StatusBecomes(column_id),
+            &Trigger::StatusBecomes(Some(column_id)),
             subject,
             Audience::Assignees,
             OffsetDateTime::now_utc(),
@@ -4105,7 +4105,7 @@ async fn a_rule_can_opt_the_task_key_into_its_own_mail() {
     let opted_in = store
         .create_mail_rule(
             &board.id,
-            &Trigger::StatusBecomes(column_named(&store, &workspace, "Done").await),
+            &Trigger::StatusBecomes(Some(column_named(&store, &workspace, "Done").await)),
             "Task completed, with details",
             Audience::Assignees,
             OffsetDateTime::now_utc(),
@@ -4604,7 +4604,7 @@ async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() 
     store
         .create_mail_rule(
             &board.id,
-            &Trigger::StatusBecomes(column_id),
+            &Trigger::StatusBecomes(Some(column_id)),
             "Task completed",
             Audience::Board,
             OffsetDateTime::now_utc(),
@@ -5585,4 +5585,72 @@ async fn a_tasks_activity_reads_newest_first() {
     // now; a comment — the most recent act here — leads.
     assert_eq!(activity.first().map(|line| line.kind.clone()), Some(ActivityKind::Commented), "{activity:?}");
     assert_eq!(activity.last().map(|line| line.kind.clone()), Some(ActivityKind::Created), "{activity:?}");
+}
+
+/// A status rule with no column watches the whole board: every crossing fires
+/// it, not just the one into a named column.
+#[tokio::test]
+async fn a_status_rule_with_no_column_fires_on_every_crossing() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(None),
+            "It moved",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+
+    let first = moved_to(&store, &workspace, &task, "Backlog", "In Progress", &admin).await;
+    engine.on_transition(&first).await.unwrap();
+    let second = moved_to(&store, &workspace, &task, "In Progress", "Done", &admin).await;
+    engine.on_transition(&second).await.unwrap();
+
+    let sent = mailer.sent();
+    assert_eq!(
+        sent.iter().filter(|mail| mail.subject == "It moved").count(),
+        2,
+        "both crossings fired the every-column rule: {sent:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The every-column rule round-trips through the store: it is written with no
+/// column and read back as one, not as a rule pointing at a column named "".
+#[tokio::test]
+async fn an_every_column_rule_survives_the_round_trip() {
+    let (dir, store, workspace, admin) = shared().await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let rule = store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(None),
+            "It moved",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+    let read = store
+        .mail_rules(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|stored| stored.id == rule.id)
+        .expect("the rule is on the board");
+    assert_eq!(read.trigger, Trigger::StatusBecomes(None));
+    let _ = admin;
+    let _ = std::fs::remove_dir_all(&dir);
 }
