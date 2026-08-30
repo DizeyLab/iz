@@ -3272,6 +3272,60 @@ async fn a_rule_with_no_subject_is_refused_and_says_why() {
 }
 
 #[tokio::test]
+async fn a_trigger_with_nothing_to_name_prints_no_term_box() {
+    // "When someone is assigned" names no column, and the sentence used to
+    // print the term box anyway, with nothing in it — an empty rounded box
+    // sitting between the words. The absence was carried as an empty string,
+    // so the renderer could not tell "no term" from "a term that is blank".
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+
+    // One rule that has a term, and one that has none.
+    app.post(
+        "/api/create_rule",
+        Some(&admin_cookie),
+        &[
+            ("trigger", "status"),
+            ("column_id", &column),
+            ("subject", "A card reached the column."),
+            ("audience", "assignees"),
+        ],
+    )
+    .await;
+    app.post(
+        "/api/create_rule",
+        Some(&admin_cookie),
+        &[
+            ("trigger", "assigned"),
+            ("column_id", ""),
+            ("subject", "You have been assigned a task."),
+            ("audience", "assignees"),
+        ],
+    )
+    .await;
+
+    let page = app.get("/rules", Some(&admin_cookie)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    // The rule with no column is on the page at all — without this the
+    // assertion below passes by having nothing to assert on.
+    assert!(
+        page.contains("When someone is assigned"),
+        "the triggerless rule was never created, so this test proves nothing"
+    );
+    assert!(
+        !page.contains(r#"<span class="rule-term"></span>"#),
+        "a trigger with no second half still prints an empty term box"
+    );
+    // The rule that does name a column still shows it, so this did not fix
+    // the box by removing it.
+    assert!(
+        page.contains(r#"<span class="rule-term">"#),
+        "the term box is gone from the rule that has a term"
+    );
+}
+
+#[tokio::test]
 async fn a_rule_may_not_be_hung_off_a_column_that_is_not_on_this_board() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;

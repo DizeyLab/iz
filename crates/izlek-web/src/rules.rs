@@ -40,8 +40,11 @@ struct RuleLine {
     id: String,
     /// "When status becomes", or "When a task stops being".
     when: String,
-    /// "Done", or "blocked", or empty when the trigger has no second half.
-    what: String,
+    /// "Done", or "blocked". `None` when the trigger has no second half —
+    /// which is not the same as an empty one: the sentence prints this in a
+    /// term box, and a box with nothing in it is what "When someone is
+    /// assigned □ send" was.
+    what: Option<String>,
     subject: String,
     /// "assignees", "everyone on board", or "its creator".
     audience: String,
@@ -168,92 +171,94 @@ fn sentence_of(
     trigger: &Trigger,
     columns: &[Column],
     lang: Lang,
-) -> (String, String, String, Option<String>) {
+) -> (String, Option<String>, String, Option<String>) {
     match trigger {
         // No column is every column, and "becomes <a column>" has nothing to
         // name then — the sentence changes shape rather than printing a word
         // for "any".
         Trigger::StatusBecomes(None) => (
             t(lang, Key::WhenStatusChanges).to_string(),
-            String::new(),
+            None,
             "status".to_string(),
             None,
         ),
         Trigger::StatusBecomes(Some(column_id)) => (
             t(lang, Key::WhenStatusBecomes).to_string(),
-            columns
-                .iter()
-                .find(|column| &column.id == column_id)
-                // A rule can outlive the column it names. Saying so is
-                // better than printing an id nobody can read.
-                .map(|column| column.name.clone())
-                .unwrap_or_else(|| t(lang, Key::ColumnGone).to_string()),
+            Some(
+                columns
+                    .iter()
+                    .find(|column| &column.id == column_id)
+                    // A rule can outlive the column it names. Saying so is
+                    // better than printing an id nobody can read.
+                    .map(|column| column.name.clone())
+                    .unwrap_or_else(|| t(lang, Key::ColumnGone).to_string()),
+            ),
             "status".to_string(),
             Some(column_id.clone()),
         ),
         Trigger::Unblocked => (
             t(lang, Key::WhenTaskStopsBeingBlocked).to_string(),
-            t(lang, Key::BlockedWord).to_string(),
+            Some(t(lang, Key::BlockedWord).to_string()),
             "unblocked".to_string(),
             None,
         ),
         Trigger::Created => (
             t(lang, Key::WhenTaskCreated).to_string(),
-            String::new(),
+            None,
             "created".to_string(),
             None,
         ),
         Trigger::Assigned => (
             t(lang, Key::WhenSomeoneAssigned).to_string(),
-            String::new(),
+            None,
             "assigned".to_string(),
             None,
         ),
         Trigger::Unassigned => (
             t(lang, Key::WhenSomeoneUnassigned).to_string(),
-            String::new(),
+            None,
             "unassigned".to_string(),
             None,
         ),
         Trigger::Commented => (
             t(lang, Key::WhenCommentWritten).to_string(),
-            String::new(),
+            None,
             "commented".to_string(),
             None,
         ),
         Trigger::DeadlineSet => (
             t(lang, Key::WhenDeadlineSet).to_string(),
-            String::new(),
+            None,
             "deadline_set".to_string(),
             None,
         ),
         Trigger::DeadlineCleared => (
             t(lang, Key::WhenDeadlineRemoved).to_string(),
-            String::new(),
+            None,
             "deadline_cleared".to_string(),
             None,
         ),
         Trigger::Retitled => (
             t(lang, Key::WhenTaskRenamed).to_string(),
-            String::new(),
+            None,
             "retitled".to_string(),
             None,
         ),
         Trigger::Linked => (
             t(lang, Key::WhenTaskLinked).to_string(),
-            String::new(),
+            None,
             "linked".to_string(),
             None,
         ),
         Trigger::Unlinked => (
             t(lang, Key::WhenTaskUnlinked).to_string(),
-            String::new(),
+            None,
             "unlinked".to_string(),
             None,
         ),
         Trigger::Deleted => (
             t(lang, Key::WhenTaskDeleted).to_string(),
-            String::new(),
+            None,
             "deleted".to_string(),
             None,
         ),
@@ -827,7 +832,11 @@ async fn rule_row(
 
             <div class="rule-sentence">
                 <span>(rule.when.clone())</span>
-                <span class="rule-term">(rule.what.clone())</span>
+                // A trigger with no second half prints no term box. The box
+                // only exists to hold a word.
+                if let Some(what) = &rule.what {
+                    <span class="rule-term">(what.clone())</span>
+                }
                 <span>(t(lang, Key::SendConnector))</span>
                 <span class="rule-term">(rule.subject.clone())</span>
                 <span>(t(lang, Key::ToConnector))</span>
