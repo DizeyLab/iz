@@ -28,3 +28,13 @@ toml = "1"
 [profile.release]
 codegen-units = 1
 lto = true
+
+# What the deploy builds. Fat LTO and one codegen unit buy the last few
+# percent by optimizing the whole program in a single non-parallel pass —
+# worth it for something CPU-bound, not for a server whose time goes to
+# SQLite, TLS and the network. Thin LTO still optimizes across crates, in
+# parallel, so `release` stays available for when the trade is worth making.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
