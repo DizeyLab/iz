@@ -1964,6 +1964,61 @@ async fn the_rules_and_logs_pages_get_the_shared_escape_script() {
     );
 }
 
+/// The soft swap settles the address bar before it runs the swapped-in
+/// page's scripts, never after. `logs.rs`'s fit script reloads through
+/// `location.replace(location.href)`; while the link handler pushed the
+/// new URL only after `swap()` had re-executed scripts, that read the
+/// page the browser had just left, so clicking Logs painted the page and
+/// hard-navigated back to the board a few hundred milliseconds later.
+/// Ordering inside `swap` is the whole fix, so ordering is what is
+/// asserted, together with the hazard that makes it matter.
+#[tokio::test]
+async fn the_soft_swap_rewrites_the_url_before_the_new_pages_scripts_run() {
+    let app = App::open().await;
+    let cookie = admin(&app).await;
+
+    let page = app.get("/", Some(&cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    let (_, after) = html
+        .split_once("function swap(html, url, fresh, push)")
+        .unwrap_or_else(|| panic!("no soft-nav swap on the board page: {html}"));
+    let body = after
+        .split_once("window.__izlekGo")
+        .unwrap_or_else(|| panic!("swap runs past the end of the script: {after}"))
+        .0;
+    let rewrite = body
+        .find("history[")
+        .unwrap_or_else(|| panic!("swap no longer rewrites history: {body}"));
+    let run = body
+        .find("document.body.replaceChildren()")
+        .unwrap_or_else(|| panic!("swap no longer replaces the body: {body}"));
+    assert!(
+        rewrite < run,
+        "swap runs the new page's scripts before the URL is settled: {body}"
+    );
+
+    // Every caller hands `swap` the response URL. A `null` here is the
+    // old shape: the address bar lagged the body by one navigation.
+    assert!(
+        html.contains("swap(t, r.url, true, true)"),
+        "the link handler no longer pushes through swap: {html}"
+    );
+    assert!(
+        !html.contains("swap(t, null"),
+        "a swap still runs the new page's scripts under the old URL: {html}"
+    );
+
+    // The hazard itself: a swapped-in script that reads `location.href`
+    // on load. Were this to go, the ordering above would still be right
+    // but would guard nothing.
+    let logs = app.get("/logs", Some(&cookie)).await;
+    let logs_html = String::from_utf8_lossy(&logs.bytes);
+    assert!(
+        logs_html.contains("location.replace(location.href)"),
+        "the log-fit reload is gone: {logs_html}"
+    );
+}
+
 #[tokio::test]
 async fn signing_out_stops_the_session_being_worth_anything() {
     let app = App::open().await;

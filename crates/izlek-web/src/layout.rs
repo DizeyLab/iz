@@ -142,6 +142,11 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
 /// arrive with the swap because the redirect URL's query params rendered
 /// them server-side; `history.replaceState` keeps the address bar honest.
 ///
+/// The address bar and the `<html>` attributes are rewritten *before* the
+/// new body's scripts run, never after: a swapped-in script that reads
+/// `location.href` (the log-fit reload in `logs.rs`) would otherwise read
+/// the page it just replaced and hard-navigate back to it.
+///
 /// Swapped-in `<script>` nodes are inert (parser-inserted only), so
 /// `swap()` re-creates each one as a fresh element, which runs it; every
 /// emitted script carries a one-shot `window.__izlek*` guard, so that
@@ -163,8 +168,8 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
 ///
 /// Ordinary same-origin links get the same treatment: a delegated capture
 /// click listener — registered after the close/scrim one, and skipped when
-/// that one already `preventDefault`ed — fetches the href and swaps it in,
-/// then `history.pushState`s, so board cards and file chips no longer
+/// that one already `preventDefault`ed — fetches the href and swaps it in
+/// under a `history.pushState`, so board cards and file chips no longer
 /// reload the page. Raw `/files/` byte routes, `download`/`target`/
 /// `data-hard` links and modified clicks (ctrl/meta/shift/alt, non-left
 /// button) stay browser-native. `popstate` replays the same fetch without
@@ -181,9 +186,16 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 document.querySelectorAll('.comment-list').forEach(function (list) { list.scrollTop = list.scrollHeight; }); \
                 document.dispatchEvent(new Event('izlek:wire')); \
             } \
-            function swap(html, url, fresh) { \
+            function swap(html, url, fresh, push) { \
                 var doc = new DOMParser().parseFromString(html, 'text/html'); \
                 var x = window.scrollX, y = window.scrollY; \
+                var root = doc.documentElement; \
+                if (root.getAttribute('lang')) { document.documentElement.setAttribute('lang', root.getAttribute('lang')); } \
+                if (root.hasAttribute('data-theme')) { document.documentElement.setAttribute('data-theme', root.getAttribute('data-theme')); } \
+                else { document.documentElement.removeAttribute('data-theme'); } \
+                if (root.hasAttribute('data-ui')) { document.documentElement.setAttribute('data-ui', root.getAttribute('data-ui')); } \
+                else { document.documentElement.removeAttribute('data-ui'); } \
+                if (url) { history[push ? 'pushState' : 'replaceState'](null, '', url); } \
                 document.body.replaceChildren(); \
                 while (doc.body.firstChild) { document.body.appendChild(doc.body.firstChild); } \
                 document.body.querySelectorAll('script').forEach(function (old) { \
@@ -192,13 +204,6 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                     live.textContent = old.textContent; \
                     old.replaceWith(live); \
                 }); \
-                var root = doc.documentElement; \
-                if (root.getAttribute('lang')) { document.documentElement.setAttribute('lang', root.getAttribute('lang')); } \
-                if (root.hasAttribute('data-theme')) { document.documentElement.setAttribute('data-theme', root.getAttribute('data-theme')); } \
-                else { document.documentElement.removeAttribute('data-theme'); } \
-                if (root.hasAttribute('data-ui')) { document.documentElement.setAttribute('data-ui', root.getAttribute('data-ui')); } \
-                else { document.documentElement.removeAttribute('data-ui'); } \
-                if (url) { history.replaceState(null, '', url); } \
                 window.scrollTo(fresh ? 0 : x, fresh ? 0 : y); \
                 wire(); \
             } \
@@ -298,7 +303,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 if (!href || href.charAt(0) !== '/' || href.indexOf('/files/') === 0) { return; } \
                 e.preventDefault(); \
                 fetch(href).then( \
-                    function (r) { return r.text().then(function (t) { swap(t, null, true); history.pushState(null, '', r.url); }); }, \
+                    function (r) { return r.text().then(function (t) { swap(t, r.url, true, true); }); }, \
                     function () { window.location.href = href; } \
                 ); \
             }, true); \
