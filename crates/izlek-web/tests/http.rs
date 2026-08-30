@@ -6076,6 +6076,53 @@ async fn a_tasks_notifications_show_the_recipient_and_the_rule_name_is_admin_onl
     assert!(admin_html.contains("Wraps up the sprint"), "{admin_html}");
 }
 
+/// Who a task mailed and whether it arrived belongs to everyone who can read
+/// the task. Why the mail server refused belongs to the people who can do
+/// something about it.
+#[tokio::test]
+async fn the_mail_servers_own_words_are_admin_only() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+    let (task, send_id) = a_task_with_a_notification(&app, &admin_cookie, "Sprint wrap").await;
+
+    // The send failed, and the server said something about the account it
+    // failed to authenticate.
+    let now = time::OffsetDateTime::now_utc();
+    app.store
+        .record_send_refused(
+            &send_id,
+            "535 5.7.8 Username and Password not accepted for postmaster@dizey.sh",
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+
+    let member_page = app
+        .get(&format!("/?task={task}&tab=mail"), Some(&member))
+        .await;
+    let member_html = String::from_utf8_lossy(&member_page.bytes);
+    // The fact of the failure is theirs to see.
+    assert!(
+        member_html.contains("ada@izlek.sh"),
+        "the member lost the recipient too: {member_html}"
+    );
+    assert!(
+        !member_html.contains("postmaster@dizey.sh") && !member_html.contains("535"),
+        "a member was shown what the mail server said: {member_html}"
+    );
+
+    let admin_page = app
+        .get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie))
+        .await;
+    let admin_html = String::from_utf8_lossy(&admin_page.bytes);
+    assert!(
+        admin_html.contains("postmaster@dizey.sh"),
+        "the admin cannot see why it failed either: {admin_html}"
+    );
+}
+
 /// A task with no mail at all renders the same quiet empty line the other
 /// blocks use, under the notifications heading.
 #[tokio::test]

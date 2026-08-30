@@ -98,6 +98,15 @@ pub struct SendLine {
     /// The chip's tone — see `logs.rs`'s `QueueLine::state_kind`.
     pub state_kind: String,
     pub attempts: u32,
+    /// What the mail server said when it refused, and `None` for anyone who
+    /// may not administer — the same gate `rule_name` gets, for the same
+    /// reason. Which people a task mailed, and whether it arrived, is a fact
+    /// about the task and belongs to everyone who can read it. *Why the mail
+    /// server refused* is a fact about the workspace's sender — a host, an
+    /// account, a rejected credential — and this app keeps that admin-only
+    /// everywhere else (`/api/current_logs` is admin-gated; the live channel
+    /// will not even name `Topic::Queue` to a member). Gated here, where the
+    /// line is built, so no view can print what it was never given.
     pub last_error: Option<String>,
     pub sent_at: Option<String>,
 }
@@ -397,7 +406,7 @@ async fn load_snapshot(
                     state: state.to_string(),
                     state_kind: state_kind.to_string(),
                     attempts: send.attempts,
-                    last_error: send.last_error.clone(),
+                    last_error: may_administer.then(|| send.last_error.clone()).flatten(),
                     sent_at: send.sent_at.map(|at| moment_label_in(at, zone)),
                 }
             })

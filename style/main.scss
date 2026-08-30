@@ -2982,10 +2982,21 @@ input[type="radio"] {
 
 // -- the member list --------------------------------------------------------
 
+// The columns are named, not counted, and only one of them is elastic.
+//
+// This was `table-layout: fixed` with a single hardcoded `width: 30%` on the
+// last column, which made the other three exactly a third of the rest each —
+// a geometry decided without reference to anything that would be in it. A
+// mono-spaced address longer than a third of the table simply ran out from
+// under its own cell and printed across the role select next to it. Auto
+// layout asks the content instead: every column takes the width it needs,
+// and the address — the one column whose length is somebody else's decision
+// — absorbs what is left and ends in an ellipsis rather than in the
+// neighbouring column.
 .member-table {
   width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
   font-size: 13px;
 
   th {
@@ -2999,12 +3010,31 @@ input[type="radio"] {
     border-bottom: 1px solid var(--border);
   }
 
-  th:last-child, td:last-child { width: 30%; }
-
+  // Row height comes from the tallest thing in the row. A fixed 48px was a
+  // guess that held until a cell had two things in it, and then the second
+  // one hung out over the row's own border.
   td {
-    height: 48px;
-    padding: 0 12px 0 0;
+    padding: 10px 12px 10px 0;
     vertical-align: middle;
+  }
+
+  // Everything but the address is as wide as its content and no wider:
+  // `width: 1%` is how a table cell asks for its intrinsic width.
+  .member-col-name,
+  .member-col-role,
+  .member-col-account {
+    width: 1%;
+    white-space: nowrap;
+  }
+
+  // The elastic one. `max-width: 0` with `width: 100%` is what lets a table
+  // cell be told "take the slack, and clip rather than overflow".
+  .member-col-address {
+    width: 100%;
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .member-row {
@@ -3043,7 +3073,7 @@ input[type="radio"] {
 }
 
 .member-account { color: var(--muted); }
-.member-account-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+.member-account-row { gap: 10px; }
 .member-status { flex: none; white-space: nowrap; }
 
 .member-resend { display: inline-flex; flex: none; }

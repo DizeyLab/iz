@@ -1532,10 +1532,10 @@ async fn settings_page(cx: &Cx) -> Result {
                             <table class="member-table">
                                 <thead>
                                     <tr>
-                                        <th>(t(lang, Key::NameCol))</th>
-                                        <th>(t(lang, Key::AddressCol))</th>
-                                        <th>(t(lang, Key::RoleCol))</th>
-                                        <th>(t(lang, Key::AccountCol))</th>
+                                        <th class="member-col-name">(t(lang, Key::NameCol))</th>
+                                        <th class="member-col-address">(t(lang, Key::AddressCol))</th>
+                                        <th class="member-col-role">(t(lang, Key::RoleCol))</th>
+                                        <th class="member-col-account">(t(lang, Key::AccountCol))</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1555,7 +1555,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                             has_photo: member.has_photo,
                                         };
                                         <tr class="member-row">
-                                            <td class="member-name">
+                                            <td class="member-col-name member-name">
                                                 <span class="member-name-row">
                                                     (crate::layout::avatar(cx, &member_person, "avatar-sm").await?)
                                                     (member.display_name.clone())
@@ -1564,8 +1564,8 @@ async fn settings_page(cx: &Cx) -> Result {
                                                     }
                                                 </span>
                                             </td>
-                                            <td class="member-address">(member.email.clone())</td>
-                                            <td>
+                                            <td class="member-col-address member-address">(member.email.clone())</td>
+                                            <td class="member-col-role">
                                                 if member.is_owner || member.is_you {
                                                     <span class="chip chip-role">(member.role.as_str().to_string())</span>
                                                 } else {
@@ -1580,7 +1580,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                                     </form>
                                                 }
                                             </td>
-                                            <td class="member-account">
+                                            <td class="member-col-account member-account">
                                                 <span class="member-account-row">
                                                     <span class="member-status">(account)</span>
                                                     if !member.has_password {
