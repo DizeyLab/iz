@@ -6387,3 +6387,39 @@ async fn a_status_rule_may_watch_every_column() {
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("Any column"), "no any-column option: {html}");
 }
+
+/// The queue says when a retry fires, not just a bare moment: a stamp in the
+/// future is labelled as the next try, and one already past says the send is
+/// due rather than naming a time that has been and gone.
+#[tokio::test]
+async fn the_queue_says_when_the_next_try_fires() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let (_task, send_id) =
+        a_task_with_a_notification(&app, &admin_cookie, "Never got there").await;
+    let now = time::OffsetDateTime::now_utc();
+
+    let later = now + time::Duration::hours(2);
+    app.store
+        .record_send_refused(&send_id, "timeout", Some(later), now)
+        .await
+        .unwrap();
+    let logs = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    assert!(
+        logs.body.contains("next try"),
+        "the queue does not say when the retry fires: {}",
+        logs.body
+    );
+
+    // Once the moment has passed the row is waiting on the next sweep.
+    app.store
+        .record_send_refused(&send_id, "timeout", Some(now - time::Duration::hours(1)), now)
+        .await
+        .unwrap();
+    let logs = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    assert!(
+        logs.body.contains("\"next_attempt\":\"due\""),
+        "a retry already owed does not say so: {}",
+        logs.body
+    );
+}

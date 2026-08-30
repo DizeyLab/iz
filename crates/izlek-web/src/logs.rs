@@ -490,6 +490,7 @@ async fn snapshot(
     };
     let lang = Lang::from_code(&user.language);
     let zone = izlek_core::detail::parse_zone(&user.timezone);
+    let now = OffsetDateTime::now_utc();
     let store = accounts(cx).store().clone();
 
     let mut has_more = false;
@@ -549,9 +550,21 @@ async fn snapshot(
             state_kind: state_kind.to_string(),
             attempts: send.attempts,
             last_error: send.last_error,
-            next_attempt: send
-                .next_attempt_at
-                .map(|at| izlek_core::detail::moment_label_in(at, zone)),
+            // When the retry fires, not just a bare moment: a stamp on its
+            // own read as the moment the row was made. A stamp already past
+            // is waiting on the next sweep, so it says the sweep is owed
+            // rather than naming a time that has been and gone.
+            next_attempt: send.next_attempt_at.map(|at| {
+                if at <= now {
+                    t(lang, Key::DueNow).to_string()
+                } else {
+                    format!(
+                        "{} {}",
+                        t(lang, Key::NextTry),
+                        izlek_core::detail::moment_label_in(at, zone)
+                    )
+                }
+            }),
         });
     }
 
