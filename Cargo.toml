@@ -25,14 +25,6 @@ chacha20poly1305 = "0.10.1"
 base64 = "0.22.1"
 toml = "1"
 
-# A dev build runs the same spreadsheet reader a release build does, and an
-# unoptimised quick-xml walks a wide sheet about twenty times slower — a page
-# of a 1,200-column book took two seconds to open on `cargo run`. Dependencies
-# are compiled optimised even in dev; the workspace's own crates stay
-# unoptimised, so an edit still rebuilds in a second.
-[profile.dev.package."*"]
-opt-level = 3
-
 [profile.release]
 codegen-units = 1
 lto = true
