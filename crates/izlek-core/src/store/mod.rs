@@ -367,6 +367,39 @@ impl SendKind {
     }
 }
 
+/// A send this delivery pass holds, and the only thing the engine will mail.
+///
+/// The duplicate-invite bug was not that somebody forgot to claim a row. It
+/// was that the delivery path *could* read a row and mail it without claiming
+/// it — two passes did, and an invited member got two identical mails. A
+/// comment saying "claim first" is a fix that lasts until the next person
+/// writes the next delivery loop.
+///
+/// So the reading and the claiming are one operation
+/// ([`claim_sends_owed`](Store::claim_sends_owed)), and what it hands back is
+/// this rather than a bare [`MailSend`]. Only the store builds one, and
+/// `Engine::attempt` accepts nothing else, so a row that was merely *read* —
+/// by [`sends_owed`](Store::sends_owed), by a queue screen, by a test — will
+/// not compile into a mail. The rule is carried by the type instead of by
+/// whoever remembers it.
+#[derive(Debug, Clone)]
+pub struct ClaimedSend(MailSend);
+
+impl ClaimedSend {
+    /// Built only where a row was actually taken: the store's claim.
+    pub(crate) fn taken(send: MailSend) -> Self {
+        Self(send)
+    }
+}
+
+impl std::ops::Deref for ClaimedSend {
+    type Target = MailSend;
+
+    fn deref(&self) -> &MailSend {
+        &self.0
+    }
+}
+
 /// One mail a rule owes one person, or an invite that owes nobody, and what
 /// happened to it. `rule_id`/`event_id`/`task_id` are `None` on an invite
 /// send; `subject`/`body` are `None` on a rule send, which composes its own
@@ -1010,6 +1043,12 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Nothing is handed to the mail server before this row exists, so a
     /// crash mid-send leaves a row that says pending rather than a mail
     /// nobody can account for.
+    ///
+    /// The row is born held until `until`, because writing it announces the
+    /// queue and the sweep wakes on that announcement — a row inserted due
+    /// now is a row the sweep can be mailing while the pass that created it
+    /// is also mailing it. The index stops the crossing being owed twice; the
+    /// lease stops the one row being sent twice.
     async fn claim_send(
         &self,
         rule_id: &str,
@@ -1017,7 +1056,8 @@ pub trait Store: BoardReads + DetailReads + 'static {
         task_id: &str,
         recipient: &str,
         at: OffsetDateTime,
-    ) -> Result<Option<MailSend>>;
+        until: OffsetDateTime,
+    ) -> Result<Option<ClaimedSend>>;
 
     /// Holds an invite mail: pending, no rule, no event, no task.
     async fn queue_invite(
@@ -1067,7 +1107,36 @@ pub trait Store: BoardReads + DetailReads + 'static {
     ) -> Result<()>;
 
     /// Sends owed right now: claimed but never accepted, and due.
+    ///
+    /// This is a read, for looking: what it returns is a [`MailSend`], which
+    /// the engine cannot mail. Delivery goes through
+    /// [`claim_sends_owed`](Store::claim_sends_owed).
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>>;
+
+    /// Takes the sends owed right now for this pass, and hands back only the
+    /// ones it actually got.
+    ///
+    /// Two things deliver: the pass spawned off the request that queued the
+    /// mail, and the sweep, which the same queue write wakes. Both used to
+    /// read the ledger and then go to the mail server, and a row does not stop
+    /// looking owed until the send comes back — so both saw the same row as
+    /// owed and an invited member was mailed twice.
+    ///
+    /// Reading and claiming are therefore one operation. Every row returned
+    /// has already been moved out of the due window, in the same call, before
+    /// anyone can spend a network round-trip on it; a pass arriving second
+    /// gets a shorter list, not a duplicate.
+    ///
+    /// `until` is a lease rather than a removal, because a process that dies
+    /// between claiming and recording must not take the mail with it. The row
+    /// falls due again then, and is sent late rather than never — which is the
+    /// right way round for a mail nobody has received.
+    async fn claim_sends_owed(
+        &self,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+        limit: u32,
+    ) -> Result<Vec<ClaimedSend>>;
 
     /// When the next mail falls due, whether or not that is yet.
     ///

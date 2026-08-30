@@ -31,7 +31,8 @@ use time::{Duration, OffsetDateTime};
 use crate::board::Transition;
 use crate::detail::ActivityKind;
 use crate::store::{
-    ActivityEvent, Audience, Event, Freeing, MailOutcome, MailRule, MailSend, SendKind, Store,
+    ActivityEvent, Audience, ClaimedSend, Event, Freeing, MailOutcome, MailRule, MailSend, SendKind,
+    Store,
     Trigger,
 };
 
@@ -112,6 +113,15 @@ pub const MAX_ATTEMPTS: u32 = 5;
 /// because the thing it waits on is an admin finishing a form and then watching
 /// to see whether mail starts moving.
 pub const HOLD: Duration = Duration::minutes(1);
+
+/// How long a delivery pass holds a row it is about to send, so a second pass
+/// running at the same moment leaves it alone.
+///
+/// It is a lease and not a removal: if this process dies between taking the
+/// row and writing down what happened, the row falls due again after this and
+/// the mail goes late instead of never. Long enough to cover a mail server
+/// that is thinking about it, short enough that a crash is not a lost day.
+pub const LEASE: Duration = Duration::minutes(5);
 
 /// The wait before the next attempt, doubling and capped: five minutes, ten,
 /// twenty, forty, an hour.
@@ -524,7 +534,14 @@ impl Engine {
         for recipient in audience {
             let claimed = self
                 .store
-                .claim_send(&rule.id, event.id(), task_id, &recipient.email, now)
+                .claim_send(
+                    &rule.id,
+                    event.id(),
+                    task_id,
+                    &recipient.email,
+                    now,
+                    now + LEASE,
+                )
                 .await?;
             match claimed {
                 Some(send) => {
@@ -567,7 +584,11 @@ impl Engine {
         limit: u32,
     ) -> crate::store::Result<Report> {
         let mut report = Report::default();
-        for send in self.store.sends_owed(now, limit).await? {
+        // Claimed, not merely owed: the request that queued a mail spawns a
+        // pass and the same write wakes the sweep, so two passes reach the
+        // same row together. Each is handed only what it took, and only a
+        // `ClaimedSend` can be mailed. See `Store::claim_sends_owed`.
+        for send in self.store.claim_sends_owed(now, now + LEASE, limit).await? {
             // An invite and an admin's notice both owe no rule and no event:
             // each carries its own subject and body, composed once at mint
             // time. Without this arm a notice falls through to the rule path,
@@ -602,7 +623,7 @@ impl Engine {
     /// One attempt, and the ledger line it leaves behind.
     async fn attempt(
         &self,
-        send: &MailSend,
+        send: &ClaimedSend,
         mail: Option<Outgoing>,
         report: &mut Report,
     ) -> crate::store::Result<()> {

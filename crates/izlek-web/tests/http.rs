@@ -5985,12 +5985,12 @@ async fn a_task_with_a_notification(app: &App, admin_cookie: &str, subject: &str
         .unwrap();
     let send = app
         .store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
     app.store.record_send_accepted(&send.id, now).await.unwrap();
-    (task, send.id)
+    (task, send.id.clone())
 }
 
 /// A task's detail page shows its notifications: the recipient and a state

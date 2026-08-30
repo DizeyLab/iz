@@ -16,7 +16,8 @@ use ulid::Ulid;
 use super::secret;
 use super::{
     ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, CommentWritten, Deletion,
-    Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule, MailSend,
+    ClaimedSend, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
+    MailSend,
     NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
     SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, TaskCreated, Trigger, User,
     Workspace,
@@ -2880,7 +2881,8 @@ impl Store for TursoStore {
         task_id: &str,
         recipient: &str,
         at: OffsetDateTime,
-    ) -> Result<Option<MailSend>> {
+        until: OffsetDateTime,
+    ) -> Result<Option<ClaimedSend>> {
         let id = Ulid::new().to_string();
         // The index is the decision. `DO NOTHING` turns the second engine run
         // into zero rows affected rather than an error to interpret, and the
@@ -2893,7 +2895,7 @@ impl Store for TursoStore {
                 "INSERT INTO mail_send \
                  (id, rule_id, event_id, task_id, recipient, state, attempts, claimed_at, \
                   next_attempt_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, ?6) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, ?7) \
                  ON CONFLICT (rule_id, event_id, task_id, recipient) DO NOTHING",
                 params![
                     id.clone(),
@@ -2901,7 +2903,8 @@ impl Store for TursoStore {
                     event_id,
                     task_id,
                     recipient,
-                    stamp(at)?
+                    stamp(at)?,
+                    stamp(until)?
                 ],
             )
             .await
@@ -2913,7 +2916,7 @@ impl Store for TursoStore {
         self.announce([Topic::Queue]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
-            Some(row) => send_from(&row).map(Some),
+            Some(row) => send_from(&row).map(ClaimedSend::taken).map(Some),
             None => Err(StoreError::NotFound),
         }
     }
@@ -3083,6 +3086,51 @@ impl Store for TursoStore {
             Value::Text(at) => parse_stamp(&at).map(Some),
             _ => Ok(None),
         }
+    }
+
+    async fn claim_sends_owed(
+        &self,
+        now: OffsetDateTime,
+        until: OffsetDateTime,
+        limit: u32,
+    ) -> Result<Vec<ClaimedSend>> {
+        // One lock across the read and every claim: no second pass is inside
+        // this while it runs, and every path into this store goes through the
+        // same connection.
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT {SEND_COLUMNS} FROM mail_send \
+             WHERE next_attempt_at IS NOT NULL AND next_attempt_at <= ?1 \
+             ORDER BY next_attempt_at LIMIT ?2"
+        );
+        let mut rows = conn
+            .query(&sql, params![stamp(now)?, i64::from(limit)])
+            .await
+            .map_err(backend)?;
+        let mut due = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            due.push(send_from(&row)?);
+        }
+
+        let mut taken = Vec::new();
+        for send in due {
+            // The `next_attempt_at <= ?2` is the whole of the exclusion: a
+            // pass that gets here after this row was leased finds it pushed
+            // out of the window and changes nothing, so it is not returned to
+            // that pass either.
+            let moved = conn
+                .execute(
+                    "UPDATE mail_send SET next_attempt_at = ?1 \
+                     WHERE id = ?3 AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?2",
+                    params![stamp(until)?, stamp(now)?, send.id.as_str()],
+                )
+                .await
+                .map_err(backend)?;
+            if moved == 1 {
+                taken.push(ClaimedSend::taken(send));
+            }
+        }
+        Ok(taken)
     }
 
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>> {

@@ -3637,7 +3637,7 @@ async fn the_index_decides_who_owns_a_send() {
     let now = OffsetDateTime::now_utc();
     let first = scratch
         .store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap();
     assert!(first.is_some(), "the first run owns the send");
@@ -3647,7 +3647,7 @@ async fn the_index_decides_who_owns_a_send() {
     // first: the insert loses.
     let second = scratch
         .store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap();
     assert!(second.is_none(), "the second run owns nothing");
@@ -3683,7 +3683,7 @@ async fn a_second_crossing_is_a_second_send() {
         assert!(
             scratch
                 .store
-                .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+                .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
                 .await
                 .unwrap()
                 .is_some()
@@ -3717,7 +3717,7 @@ async fn a_refused_send_is_recorded_and_owed_again() {
     let now = OffsetDateTime::now_utc();
     let send = scratch
         .store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -3770,7 +3770,7 @@ async fn a_refused_address_is_not_retried_forever() {
     let now = OffsetDateTime::now_utc();
     let send = scratch
         .store
-        .claim_send(&rule.id, &transition.id, &task, "gone@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "gone@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -3813,7 +3813,7 @@ async fn an_accepted_send_stops_being_owed() {
     let now = OffsetDateTime::now_utc();
     let send = scratch
         .store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -3903,7 +3903,7 @@ async fn deleting_a_rule_takes_its_ledger_with_it() {
     let now = OffsetDateTime::now_utc();
     scratch
         .store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap();
 
@@ -5006,13 +5006,13 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     let now = OffsetDateTime::now_utc();
 
     let pending = store
-        .claim_send(&rule.id, &transition.id, &task, "pending@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "pending@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
 
     let failed = store
-        .claim_send(&rule.id, &transition.id, &task, "failed@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "failed@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -5022,14 +5022,14 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
         .unwrap();
 
     let sent = store
-        .claim_send(&rule.id, &transition.id, &task, "sent@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "sent@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
     store.record_send_accepted(&sent.id, now).await.unwrap();
 
     let abandoned = store
-        .claim_send(&rule.id, &transition.id, &task, "abandoned@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "abandoned@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -5090,6 +5090,153 @@ async fn an_invite_mail_with_no_sender_is_held_not_failed() {
         .unwrap();
     assert_eq!(held.attempts, 0);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A mailer that takes its time, so a second pass has somewhere to arrive.
+struct Dawdling {
+    sent: Mutex<Vec<Outgoing>>,
+}
+
+#[async_trait::async_trait]
+impl Mailer for Dawdling {
+    async fn send(&self, mail: &Outgoing) -> Result<(), MailError> {
+        // The window the bug lived in: the row still looks owed for as long as
+        // the mail server is thinking about it.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        self.sent.lock().unwrap().push(mail.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn two_passes_over_one_owed_mail_send_it_once() {
+    // Queueing an invite both spawns a delivery pass off the request and wakes
+    // the sweep, so two passes read the ledger at the same moment. Owed is not
+    // ownership: whoever loses the claim must not also send. Three invited
+    // members once arrived as six mails.
+    let (dir, store, _workspace, _admin) = shared().await;
+    let now = OffsetDateTime::now_utc();
+    store
+        .queue_invite("newcomer@izlek.sh", "Join İzlek", "Come aboard.", now)
+        .await
+        .unwrap();
+
+    let mailer = Arc::new(Dawdling {
+        sent: Mutex::new(Vec::new()),
+    });
+    // Two engines over one store, which is what the process actually has: the
+    // request's pass and the sweep's.
+    let request = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let sweep = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let (a, b) = tokio::join!(
+        request.deliver_owed(now, 10),
+        sweep.deliver_owed(now, 10),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+
+    let sent = mailer.sent.lock().unwrap().len();
+    assert_eq!(
+        sent, 1,
+        "one queued invite left as {sent} mails: the loser of the claim sent it too"
+    );
+    assert_eq!(
+        a.sent + b.sent,
+        1,
+        "both passes reported sending the same mail"
+    );
+
+    // The winner wrote down that it went, so the row does not come back when
+    // the lease runs out — the loser leaving it alone is not the same as the
+    // mail being dropped.
+    let owed = store
+        .sends_owed(now + izlek_core::mail::LEASE + Duration::seconds(1), 10)
+        .await
+        .unwrap();
+    assert!(
+        owed.is_empty(),
+        "a mail that was sent is owed again once the lease expires"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_crossing_and_a_sweep_at_the_same_moment_mail_once() {
+    // The unique index stops a crossing being *owed* twice. It does nothing
+    // about the one row being *sent* twice: writing it announces the queue,
+    // which wakes the sweep, while the pass that wrote it is still composing.
+    // The row is therefore born held, and this is the test that says so.
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let _rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+
+    let mailer = Arc::new(Dawdling {
+        sent: Mutex::new(Vec::new()),
+    });
+    let crossing = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let sweep = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+
+    // The sweep passes run while the crossing is inside its send, which is
+    // exactly when the row it just wrote is sitting in the ledger.
+    let (crossed, _swept) = tokio::join!(crossing.on_transition(&transition), async {
+        for _ in 0..4 {
+            let _ = sweep
+                .deliver_owed(OffsetDateTime::now_utc(), 10)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+    });
+    crossed.unwrap();
+
+    let sent = mailer.sent.lock().unwrap().len();
+    assert_eq!(
+        sent, 1,
+        "one crossing left as {sent} mails: the sweep sent the row the crossing was sending"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_lease_that_expires_gives_the_mail_back() {
+    // The claim is a lease, not a deletion: a process that dies between taking
+    // a row and writing down what happened must not take the mail with it.
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+    let invite = store
+        .queue_invite("newcomer@izlek.sh", "Join İzlek", "Come aboard.", now)
+        .await
+        .unwrap();
+
+    let mine = store
+        .claim_sends_owed(now, now + izlek_core::mail::LEASE, 10)
+        .await
+        .unwrap();
+    assert!(
+        mine.iter().any(|s| s.id == invite.id),
+        "the first pass did not get a mail nobody holds"
+    );
+    let theirs = store
+        .claim_sends_owed(now, now + izlek_core::mail::LEASE, 10)
+        .await
+        .unwrap();
+    assert!(
+        !theirs.iter().any(|s| s.id == invite.id),
+        "a second pass was handed a mail that was already held"
+    );
+    // Nobody wrote the outcome down, so once the lease is out the mail is owed
+    // again rather than lost.
+    let owed = store
+        .sends_owed(now + izlek_core::mail::LEASE + Duration::seconds(1), 10)
+        .await
+        .unwrap();
+    assert!(
+        owed.iter().any(|s| s.id == invite.id),
+        "an abandoned lease swallowed the mail"
+    );
 }
 
 #[tokio::test]
@@ -5457,12 +5604,12 @@ async fn decisions_and_sends_for_task_read_only_that_tasks_own_rows() {
         .await
         .unwrap();
     let send = store
-        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "ada@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
     store
-        .claim_send(&rule.id, &other_transition.id, &other_task, "emre@izlek.sh", now)
+        .claim_send(&rule.id, &other_transition.id, &other_task, "emre@izlek.sh", now, now)
         .await
         .unwrap();
 
@@ -5486,7 +5633,7 @@ async fn requeuing_a_send_puts_it_back_in_play_but_leaves_a_sent_one_alone() {
     let now = OffsetDateTime::now_utc();
 
     let failed = store
-        .claim_send(&rule.id, &transition.id, &task, "failed@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "failed@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -5496,7 +5643,7 @@ async fn requeuing_a_send_puts_it_back_in_play_but_leaves_a_sent_one_alone() {
         .unwrap();
 
     let sent = store
-        .claim_send(&rule.id, &transition.id, &task, "sent@izlek.sh", now)
+        .claim_send(&rule.id, &transition.id, &task, "sent@izlek.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -5847,6 +5994,11 @@ fn every_writing_method_announces_or_is_named_here() {
         "record_auth_attempt",
         "clear_auth_attempts",
         "prune_auth_attempts",
+        // A lease is one pass saying "mine" for the length of a send, and the
+        // write that follows it — accepted, refused, held — announces. Saying
+        // so twice would wake every open queue screen on the way past a value
+        // that is about to be overwritten.
+        "claim_sends_owed",
     ];
 
     let source = include_str!("../src/store/turso_store.rs");
