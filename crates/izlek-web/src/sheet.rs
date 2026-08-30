@@ -7,7 +7,7 @@
 
 use std::io::Cursor;
 
-use calamine::{Data, Reader, open_workbook_auto_from_rs};
+use calamine::{Data, Reader, Xlsx, open_workbook_auto_from_rs, open_workbook_from_rs};
 
 /// How much of one sheet is drawn. A workbook is a million rows wide open,
 /// and a table that size is a page that never paints; past this the view says
@@ -32,6 +32,71 @@ pub(crate) struct Sheet {
 /// (a hand-edited query string) falls back to the first sheet rather than
 /// failing.
 pub(crate) fn read(bytes: Vec<u8>, index: usize) -> Option<Sheet> {
+    // xlsx first, because that is the format that holds millions of rows and
+    // the only one calamine will hand over a cell at a time. Reading the
+    // whole range of a 300,000-row book costs about 380MB and most of a
+    // second; stopping at the rows that are drawn costs neither.
+    read_streamed(&bytes, index).or_else(|| read_whole(bytes, index))
+}
+
+/// The lazy path: an xlsx read cell by cell in stream order, abandoned the
+/// moment the rows past [`MAX_ROWS`] start. `None` when the bytes are not an
+/// xlsx at all, which is the caller's cue to try the other formats.
+fn read_streamed(bytes: &[u8], index: usize) -> Option<Sheet> {
+    let mut book: Xlsx<Cursor<Vec<u8>>> = open_workbook_from_rs(Cursor::new(bytes.to_vec())).ok()?;
+    let names = book.sheet_names();
+    if names.is_empty() {
+        return None;
+    }
+    let index = if index < names.len() { index } else { 0 };
+    let mut cells = book.worksheet_cells_reader(&names[index]).ok()?;
+    let bounds = cells.dimensions();
+    let (first_row, first_column) = bounds.start;
+    let height = bounds.end.0.saturating_sub(first_row) as usize + 1;
+    let width = bounds.end.1.saturating_sub(first_column) as usize + 1;
+    let mut clipped = height > MAX_ROWS || width > MAX_COLS;
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    while let Ok(Some(found)) = cells.next_cell() {
+        let (row, column) = found.get_position();
+        // A cell before the sheet's own first row or column is a dimension
+        // that lied; there is nowhere to put it, so it is passed over.
+        let (Some(row), Some(column)) = (
+            row.checked_sub(first_row).map(|row| row as usize),
+            column.checked_sub(first_column).map(|column| column as usize),
+        ) else {
+            continue;
+        };
+        // Cells arrive in row order, so the first one past the last drawn row
+        // is the end of the reading — whatever the dimension claimed.
+        if row >= MAX_ROWS {
+            clipped = true;
+            break;
+        }
+        if column >= MAX_COLS {
+            clipped = true;
+            continue;
+        }
+        if rows.len() <= row {
+            rows.resize(row + 1, Vec::new());
+        }
+        let line = &mut rows[row];
+        if line.len() <= column {
+            line.resize(column + 1, String::new());
+        }
+        line[column] = cell(&Data::from(found.get_value().clone()));
+    }
+    Some(Sheet {
+        names,
+        index,
+        rows,
+        clipped,
+    })
+}
+
+/// The whole-workbook path, for the formats with no cell-at-a-time reader:
+/// xls, xlsb and ods. All three are bounded by the upload limit and by their
+/// own row ceilings, so the range fits in memory in a way an xlsx need not.
+fn read_whole(bytes: Vec<u8>, index: usize) -> Option<Sheet> {
     let mut book = open_workbook_auto_from_rs(Cursor::new(bytes)).ok()?;
     let names = book.sheet_names();
     if names.is_empty() {
@@ -141,6 +206,19 @@ mod tests {
         assert_eq!(column_name(52), "BA");
         assert_eq!(column_name(701), "ZZ");
         assert_eq!(column_name(702), "AAA");
+    }
+
+    /// The clip is what keeps a workbook of any size from becoming a page of
+    /// that size — and on the streamed path, from being read at all past the
+    /// rows that are drawn.
+    #[test]
+    fn a_book_past_the_clip_is_read_only_as_far_as_it_is_drawn() {
+        let bytes = include_bytes!("../tests/fixtures/tall.xlsx").to_vec();
+        let sheet = read(bytes, 0).expect("the workbook opens");
+        assert_eq!(sheet.rows.len(), MAX_ROWS);
+        assert!(sheet.clipped);
+        assert_eq!(sheet.rows[0][0], "Row 1");
+        assert_eq!(sheet.rows[MAX_ROWS - 1][0], format!("Row {MAX_ROWS}"));
     }
 
     #[test]

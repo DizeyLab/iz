@@ -2147,9 +2147,17 @@ pub async fn file_viewer_modal(
     // A workbook is the one viewer whose bytes are read here rather than
     // handed to an element; every other kind streams from `/files/{id}` and
     // never loads the file into the page's own request.
+    // Reading a workbook is the one piece of real CPU a page render does, so
+    // it happens off the runtime's own threads: a big book is most of a
+    // second, and a second of a worker thread is every other request waiting.
     let sheet = if kind == crate::files::ViewerKind::Sheet {
         match store.attachment_bytes(file_id).await {
-            Ok(Some(bytes)) => crate::sheet::read(bytes, sheet_index),
+            Ok(Some(bytes)) => {
+                tokio::task::spawn_blocking(move || crate::sheet::read(bytes, sheet_index))
+                    .await
+                    .ok()
+                    .flatten()
+            }
             _ => None,
         }
     } else {
