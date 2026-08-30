@@ -1962,6 +1962,18 @@ img.avatar {
   font-size: 13px;
 }
 
+// The parts fill their tab and pan inside it, the house way: a task with
+// forty of them does not scroll the document.
+.subtask-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+}
+
 // A part is a lighter thing than a dependency: no box of its own, a rule
 // between rows instead, so a list of eight does not read as eight cards.
 .subtask-row {

@@ -1445,12 +1445,14 @@ async fn a_subtask_is_opened_from_its_parents_page_and_shows_up_there() {
         .await;
     assert_eq!(made.body, "null", "the subtask was refused: {}", made.body);
 
-    // The parent's page lists it; the board does not card it.
-    let page = app.get(&format!("/?task={parent}"), Some(&admin)).await;
+    // The parts live on their own tab; the board does not card them.
+    let page = app
+        .get(&format!("/?task={parent}&tab=subtasks"), Some(&admin))
+        .await;
     let page = String::from_utf8_lossy(&page.bytes);
     assert!(
         page.contains("Write the CSV writer"),
-        "the subtask is not on its parent's page"
+        "the subtask is not on its parent's Subtasks tab"
     );
 
     let workspace_id = app.workspace_id().await;
@@ -1758,6 +1760,53 @@ async fn the_whole_control_box_opens_its_dropdown() {
     assert!(
         page.contains("status-dot") && page.contains("status-select"),
         "the status control changed shape"
+    );
+}
+
+#[tokio::test]
+async fn the_parts_have_a_tab_and_a_subtask_is_not_offered_one() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let columns = columns_of(&app).await;
+    let parent = a_task(&app, &admin, &columns[0], "Ship the exporter").await;
+    let child = a_task(&app, &admin, &columns[0], "Write the CSV writer").await;
+    app.store.set_parent(&child, Some(&parent)).await.unwrap();
+
+    // The whole gets the tab, with the ratio on it.
+    let whole = app.get(&format!("/?task={parent}"), Some(&admin)).await;
+    let whole = String::from_utf8_lossy(&whole.bytes);
+    assert!(
+        whole.contains(&format!("/?task={parent}&amp;tab=subtasks")),
+        "the parent has no Subtasks tab"
+    );
+    assert!(whole.contains("0/1"), "the tab does not carry the ratio");
+    // ...and the parts are not on the Task tab any more.
+    assert!(
+        !whole.contains("subtask-list"),
+        "the parts are still rendered under the task itself"
+    );
+
+    // The part is not offered a tab it can never fill.
+    let part = app.get(&format!("/?task={child}"), Some(&admin)).await;
+    let part = String::from_utf8_lossy(&part.bytes);
+    assert!(
+        !part.contains("tab=subtasks"),
+        "a subtask was offered a Subtasks tab"
+    );
+
+    // And an address that names it anyway lands on the task, not on an empty
+    // panel with no tab lit.
+    let forced = app
+        .get(&format!("/?task={child}&tab=subtasks"), Some(&admin))
+        .await;
+    let forced = String::from_utf8_lossy(&forced.bytes);
+    assert!(
+        !forced.contains("subtask-new"),
+        "a subtask rendered the Subtasks tab"
+    );
+    assert!(
+        forced.contains("detail-parent"),
+        "the fallback did not render the task itself"
     );
 }
 

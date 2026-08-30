@@ -1589,6 +1589,7 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Task,
+    Subtasks,
     Files,
     Comments,
     Activity,
@@ -1598,6 +1599,7 @@ pub enum Tab {
 impl Tab {
     pub fn from_query(tab: Option<&str>) -> Tab {
         match tab {
+            Some("subtasks") => Tab::Subtasks,
             Some("files") => Tab::Files,
             Some("comments") => Tab::Comments,
             Some("activity") => Tab::Activity,
@@ -1609,6 +1611,7 @@ impl Tab {
     fn slug(self) -> &'static str {
         match self {
             Tab::Task => "task",
+            Tab::Subtasks => "subtasks",
             Tab::Files => "files",
             Tab::Comments => "comments",
             Tab::Activity => "activity",
@@ -1670,6 +1673,14 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
 
     let unassigned: Vec<Person> = detail.unassigned().cloned().collect();
     let done_parts = detail.subtasks.iter().filter(|part| part.is_done()).count();
+    // A subtask is never offered the Subtasks tab, so an address bar that
+    // still names it lands on the task itself rather than on an empty panel
+    // with no tab lit.
+    let tab = if tab == Tab::Subtasks && detail.parent.is_some() {
+        Tab::Task
+    } else {
+        tab
+    };
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
     let accept = (!allowed_file_types.is_empty())
         .then(|| {
@@ -1738,6 +1749,18 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
 
                     <nav class="detail-tabs">
                         <a class=(tab_class(tab, Tab::Task)) href=(format!("/?task={}&tab={}", detail.id, Tab::Task.slug()))>(t(lang, Key::TabTask))</a>
+                        // A subtask can never have parts of its own, so it is
+                        // never offered the tab: one level deep is a rule of
+                        // the model, not something to discover from an empty
+                        // list.
+                        if detail.parent.is_none() {
+                            <a class=(tab_class(tab, Tab::Subtasks)) href=(format!("/?task={}&tab={}", detail.id, Tab::Subtasks.slug()))>
+                                (t(lang, Key::Subtasks))
+                                if !detail.subtasks.is_empty() {
+                                    <span class="detail-tab-count">(format!("{}/{}", done_parts, detail.subtasks.len()))</span>
+                                }
+                            </a>
+                        }
                         <a class=(tab_class(tab, Tab::Files)) href=(format!("/?task={}&tab={}", detail.id, Tab::Files.slug()))>
                             (t(lang, Key::Files))
                             if !detail.files.is_empty() { <span class="detail-tab-count">(detail.files.len())</span> }
@@ -1821,43 +1844,43 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     if tab == Tab::Task {
 
 
-                    if detail.parent.is_none() {
-                        <section class="detail-block">
-                            <div class="detail-block-head">
-                                <span class="detail-label">(t(lang, Key::Subtasks))</span>
-                                if !detail.subtasks.is_empty() {
-                                    <span class="detail-count">(format!("{}/{}", done_parts, detail.subtasks.len()))</span>
-                                }
-                                <div class="spacer"></div>
-                                if may_write {
-                                    (adopt_picker(cx, &detail.id, &adoptable, lang).await?)
-                                }
-                            </div>
-                            if may_write {
-                                <form class="subtask-new" method="post" action="/api/create_subtask">
-                                    <input type="hidden" name="parent_id" value=(detail.id.clone())>
-                                    <input class="field-input subtask-new-input" type="text" name="title"
-                                        placeholder=(t(lang, Key::NewSubtask)) required="" maxlength="200">
-                                    <button class="edit-save" type="submit">(t(lang, Key::AddSubtask))</button>
-                                </form>
-                            }
-                            (refused(cx, "create_subtask", lang).await?)
-                            (refused(cx, "set_parent", lang).await?)
-                            if detail.subtasks.is_empty() {
-                                <p class="detail-prose detail-prose-empty">(t(lang, Key::NoSubtasks))</p>
-                            } else {
-                                <div class="dep-list">
-                                    for part in &detail.subtasks {
-                                        (subtask_row(cx, part, &detail.columns, may_write, lang).await?)
-                                    }
-                                </div>
-                            }
-                        </section>
-                    }
-
                     <section class="detail-block">
                         <span class="detail-label">(t(lang, Key::Description))</span>
                         (description_control(cx, &detail, may_write, lang).await?)
+                    </section>
+                    }
+
+                    if tab == Tab::Subtasks {
+                    <section class="detail-block detail-block-fill">
+                        <div class="detail-block-head">
+                            <span class="detail-label">(t(lang, Key::Subtasks))</span>
+                            if !detail.subtasks.is_empty() {
+                                <span class="detail-count">(format!("{}/{}", done_parts, detail.subtasks.len()))</span>
+                            }
+                            <div class="spacer"></div>
+                            if may_write {
+                                (adopt_picker(cx, &detail.id, &adoptable, lang).await?)
+                            }
+                        </div>
+                        if may_write {
+                            <form class="subtask-new" method="post" action="/api/create_subtask">
+                                <input type="hidden" name="parent_id" value=(detail.id.clone())>
+                                <input class="field-input subtask-new-input" type="text" name="title"
+                                    placeholder=(t(lang, Key::NewSubtask)) required="" maxlength="200">
+                                <button class="edit-save" type="submit">(t(lang, Key::AddSubtask))</button>
+                            </form>
+                        }
+                        (refused(cx, "create_subtask", lang).await?)
+                        (refused(cx, "set_parent", lang).await?)
+                        if detail.subtasks.is_empty() {
+                            <p class="detail-prose detail-prose-empty">(t(lang, Key::NoSubtasks))</p>
+                        } else {
+                            <div class="subtask-list">
+                                for part in &detail.subtasks {
+                                    (subtask_row(cx, part, &detail.columns, may_write, lang).await?)
+                                }
+                            </div>
+                        }
                     </section>
                     }
 
