@@ -26,7 +26,7 @@ use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
 use topcoat::view::view;
 
 use izlek_core::detail::ActivityKind;
-use izlek_core::store::{NewSender, SenderTest, User};
+use izlek_core::store::{NewSender, SenderCheck, SenderTest, Store, User};
 
 use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, mail, require_admin, require_user};
@@ -187,7 +187,7 @@ fn redirect_to(query: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
 /// the panel the form it answers actually lives in.
 fn section_of_call(call: &str) -> &'static str {
     match call {
-        "save_sender" | "send_test_mail" => "outgoing",
+        "save_sender" | "send_test_mail" | "check_sender" => "outgoing",
         "save_limits" => "limits",
         "invite_member" | "set_role" | "resend_link" => "members",
         "send_message" => "message",
@@ -436,6 +436,17 @@ async fn save_sender(
         }
         Err(problem) => Err(problem),
     };
+    if outcome.is_ok() {
+        // The settings just changed, so anything known about the old server is
+        // about a server that is no longer configured. Ask again at once,
+        // rather than leaving the panel unchecked until somebody presses a
+        // button.
+        probe_sender(
+            mail(cx),
+            accounts(cx).store().clone(),
+            admin.workspace_id.clone(),
+        );
+    }
     let refusal = match outcome {
         Ok(()) => {
             let _ = store
@@ -462,6 +473,79 @@ async fn save_sender(
 /// It goes to their own address and nowhere else. A test that could be
 /// pointed at an address somebody typed would be a way to make İzlek mail a
 /// stranger on demand, which is a thing worth not building.
+/// How long to wait for a mail server before writing the attempt off.
+///
+/// Long enough for a slow but healthy server on a bad link, short enough that
+/// an admin who mistyped the port is told while still looking at the screen.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Asks the mail server whether it would take mail from us, and writes down
+/// what it said.
+///
+/// Nothing is sent to anybody: this is a handshake — connect, TLS, hello,
+/// authenticate, hang up. Spawned rather than awaited by its callers so that
+/// saving the settings stays as fast as saving anything else; the result
+/// announces itself on the live channel, so the panel catches up on its own a
+/// moment later without anybody reloading.
+fn probe_sender(
+    engine: crate::server::Mail,
+    store: std::sync::Arc<dyn Store>,
+    workspace_id: String,
+) {
+    tokio::spawn(async move {
+        // This is the bound that actually does the work, not the transport's
+        // own. Measured: a socket that accepts the connection and then never
+        // says a word is NOT caught by lettre's `timeout` — the probe sat
+        // there until this fired. A probe that never records leaves the panel
+        // on "Unchecked" forever, with nothing to tell anybody it is stuck, so
+        // something outside the library has to be the backstop.
+        let dialled = tokio::time::timeout(PROBE_TIMEOUT, engine.check()).await;
+        let outcome = match dialled {
+            Ok(outcome) => outcome,
+            Err(_) => Some(Err(izlek_core::MailError::retryable(
+                "the mail server did not answer",
+            ))),
+        };
+        let Some(outcome) = outcome else {
+            // No engine in this process. Nothing to say, and a failure written
+            // down here would be about this build rather than these settings.
+            return;
+        };
+        let at = time::OffsetDateTime::now_utc();
+        let check = match outcome {
+            Ok(took) => SenderCheck {
+                at,
+                took_ms: took.whole_milliseconds().max(0) as u64,
+                error: None,
+            },
+            Err(problem) => SenderCheck {
+                at,
+                took_ms: 0,
+                // Built from what the server said, never from what we sent it.
+                error: Some(problem.message.clone()),
+            },
+        };
+        if let Err(problem) = store.record_sender_check(&workspace_id, check).await {
+            eprintln!("store error: {problem}");
+        }
+    });
+}
+
+/// Dials the mail server without sending anything, on an admin's say-so.
+#[route(POST "/api/check_sender")]
+async fn check_sender(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    let admin = match require_admin(cx).await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(saved_or_refused("check_sender", Some(refusal))),
+    };
+    probe_sender(
+        mail(cx),
+        accounts(cx).store().clone(),
+        admin.workspace_id.clone(),
+    );
+    Ok(saved_or_refused("check_sender", None))
+}
+
 #[route(POST "/api/send_test_mail")]
 async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let admin = match require_admin(cx).await {
@@ -864,6 +948,12 @@ struct TestResult {
     error: Option<String>,
 }
 
+/// The last handshake, rendered.
+struct CheckResult {
+    moment: String,
+    error: Option<String>,
+}
+
 /// The sender as the admin's screen may see it, plus the last test's
 /// outcome — persisted, so it survives the reload the redirect gives it
 /// rather than living only in this request's memory.
@@ -875,17 +965,53 @@ struct Sender {
     from_address: String,
     password_set: bool,
     test: Option<TestResult>,
+    /// How the last handshake went, and when. `None` means nobody has asked
+    /// the server yet since these settings were saved.
+    check: Option<CheckResult>,
     /// The origin mailed links point at, empty when the configured one is
     /// still in use.
     public_url: String,
 }
 
+/// What the panel says about the mail server, in the order the states happen.
+///
+/// The point of four states rather than two is that "the fields are filled in"
+/// and "the server let us in" are different facts, and the old chip said
+/// `Connected` for the first. A host typed correctly with the wrong password
+/// showed green while every mail was refused.
+#[derive(PartialEq, Eq)]
+enum Standing {
+    /// Something the sender needs is missing.
+    NotConfigured,
+    /// Complete, but nobody has asked the server yet.
+    Unchecked,
+    /// The server accepted our credentials, at this moment.
+    Connected(String),
+    /// The server would not have us, in its own words.
+    Refused(String),
+}
+
 impl Sender {
-    fn is_connected(&self) -> bool {
+    /// Whether the form holds everything a sender needs. Says nothing about
+    /// whether any of it is right — see [`Standing`].
+    fn is_complete(&self) -> bool {
         !self.host.trim().is_empty()
             && !self.username.trim().is_empty()
             && !self.from_address.trim().is_empty()
             && self.password_set
+    }
+
+    fn standing(&self) -> Standing {
+        if !self.is_complete() {
+            return Standing::NotConfigured;
+        }
+        match &self.check {
+            None => Standing::Unchecked,
+            Some(check) => match &check.error {
+                Some(said) => Standing::Refused(said.clone()),
+                None => Standing::Connected(check.moment.clone()),
+            },
+        }
     }
 }
 
@@ -900,6 +1026,7 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
             from_address: String::new(),
             password_set: false,
             test: None,
+            check: None,
             public_url: String::new(),
         },
         Some(workspace) => Sender {
@@ -916,6 +1043,10 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
                 moment: izlek_core::detail::moment_label_in(test.at, zone),
                 took: test.error.is_none().then(|| took_label(test.took_ms)),
                 error: test.error,
+            }),
+            check: workspace.sender_check.map(|check| CheckResult {
+                moment: izlek_core::detail::moment_label_in(check.at, zone),
+                error: check.error,
             }),
             public_url: workspace.public_url.unwrap_or_default(),
         },
@@ -1193,20 +1324,41 @@ async fn settings_page(cx: &Cx) -> Result {
                 }
 
                 if section == Section::Outgoing && let Some(sender) = &sender {
-                    let connected = sender.is_connected();
+                    let standing = sender.standing();
+                    let complete = sender.is_complete();
                     let password_set = sender.password_set;
+                    // One chip, four states. `Connected` carries the moment the
+                    // server said so, because the claim is about a moment: a
+                    // password rotated since is not something this can know.
+                    let (chip_class, chip_text) = match &standing {
+                        Standing::NotConfigured => {
+                            ("chip chip-off", t(lang, Key::NotConfiguredChip).to_string())
+                        }
+                        Standing::Unchecked => {
+                            ("chip chip-off", t(lang, Key::Unchecked).to_string())
+                        }
+                        Standing::Connected(at) => (
+                            "chip chip-connected",
+                            format!("{} {}", t(lang, Key::Connected), at),
+                        ),
+                        Standing::Refused(_) => {
+                            ("chip chip-off", t(lang, Key::Refused).to_string())
+                        }
+                    };
                     <section class="panel" id="outgoing">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::OutgoingMail))</h2>
                             <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
-                            if connected {
-                                <span class="chip chip-connected">(t(lang, Key::Connected))</span>
-                            } else {
-                                <span class="chip chip-off">(t(lang, Key::NotConfiguredChip))</span>
-                            }
+                            <span class=(chip_class)>(chip_text)</span>
                         </div>
                         <div class="panel-body">
-                            if !connected {
+                            // The server's own words when it refused us:
+                            // "535 authentication failed" is something an admin
+                            // can act on, and a bare chip is not.
+                            if let Standing::Refused(said) = &standing {
+                                <p class="panel-lede">(said)</p>
+                            }
+                            if !complete {
                                 <p class="panel-lede">(t(lang, Key::NotConnectedNote))</p>
                             }
                             <form method="post" action="/api/save_sender" id="sender-settings">
@@ -1282,6 +1434,11 @@ async fn settings_page(cx: &Cx) -> Result {
                             </form>
                             <div class="panel-foot panel-foot-split">
                                 <div class="foot-side">
+                                    <form method="post" action="/api/check_sender">
+                                        <button class="quiet" type="submit" disabled=(!complete)>
+                                            (t(lang, Key::CheckConnection))
+                                        </button>
+                                    </form>
                                     <form method="post" action="/api/send_test_mail">
                                         <button class="quiet" type="submit">(t(lang, Key::SendTestMail))</button>
                                     </form>

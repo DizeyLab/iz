@@ -101,14 +101,18 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 1);
+    // Whatever the newest migration is — pinning the number here only means
+    // editing this line every time one is added, which tests the constant
+    // rather than the behaviour.
+    let applied = first.schema_version().await.unwrap();
+    assert!(applied >= 1, "no migration applied at all");
     claim(&first).await;
     drop(first);
 
-    // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
-    // must not lose what the first open wrote.
+    // Re-opening must not re-run a migration (0001's CREATE TABLE would fail)
+    // and must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 1);
+    assert_eq!(second.schema_version().await.unwrap(), applied);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "İzlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -5714,4 +5718,253 @@ async fn a_stored_address_is_the_one_mail_links_point_at() {
         sent.last().unwrap().body
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -- live announcements -----------------------------------------------------
+
+/// Drains whatever the store has announced so far into the set of topic names.
+/// `try_recv` rather than `recv` on purpose: the point is what has ALREADY been
+/// said by the time the write returned, not what might arrive later.
+fn announced(rx: &mut tokio::sync::broadcast::Receiver<izlek_core::Change>) -> Vec<String> {
+    let mut seen = Vec::new();
+    while let Ok(change) = rx.try_recv() {
+        seen.push(change.topic.kind().to_string());
+    }
+    seen
+}
+
+/// Every family of write announces the surface it changed. This is the property
+/// the whole live layer rests on: a surface nobody announces is a surface that
+/// stays stale until the reader reloads by hand.
+#[tokio::test]
+async fn every_kind_of_write_announces_its_surface() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let column_id = column_named(store, &workspace, "Backlog").await;
+    let now = OffsetDateTime::now_utc();
+
+    let mut rx = store.subscribe();
+
+    // Board + Task + Activity.
+    store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            parent_id: None,
+            title: "Ship the exporter",
+            description: "",
+            deadline: None,
+            created_by: &admin,
+        })
+        .await
+        .unwrap();
+    // Members.
+    member(store, &workspace, "bo@izlek.sh", "Bo").await;
+    // Queue.
+    store
+        .queue_notice("bo@izlek.sh", "Subject", "Body", now)
+        .await
+        .unwrap();
+    // Rules.
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::StatusBecomes(Some(column_id.clone())),
+            "Something moved",
+            Audience::Board,
+            now,
+            false,
+        )
+        .await
+        .unwrap();
+    // Settings.
+    store
+        .set_public_url(&workspace, Some("https://izlek.example"))
+        .await
+        .unwrap();
+    // Activity with no task of its own.
+    store
+        .record_event(
+            Some(&admin),
+            &izlek_core::detail::ActivityKind::Other("settings".to_string()),
+            "",
+            now,
+        )
+        .await
+        .unwrap();
+
+    let seen = announced(&mut rx);
+    for topic in ["board", "task", "members", "queue", "rules", "settings", "activity"] {
+        assert!(
+            seen.iter().any(|k| k == topic),
+            "no {topic} announcement; heard {seen:?}"
+        );
+    }
+}
+
+/// A write that failed says nothing. A client woken by a change that never
+/// committed would re-read the state it already had — harmless once, and a
+/// permanent background hum if every refused mail sent one.
+#[tokio::test]
+async fn a_write_that_failed_announces_nothing() {
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let mut rx = store.subscribe();
+
+    let missing = Ulid::new().to_string();
+    assert!(matches!(
+        store
+            .record_send_accepted(&missing, OffsetDateTime::now_utc())
+            .await,
+        Err(StoreError::NotFound)
+    ));
+
+    assert!(
+        announced(&mut rx).is_empty(),
+        "a refused write announced a change"
+    );
+}
+
+/// Every write announces, and this is what keeps it true tomorrow.
+///
+/// The live layer's whole promise — that no surface goes stale until somebody
+/// reloads by hand — rests on one thing: a method that changes a row also says
+/// so. That is not a property a running test can observe in general, because
+/// the failure is a method nobody wrote a test for. So it is checked against
+/// the source instead: every method of the `Store` impl that issues an INSERT,
+/// UPDATE or DELETE must also announce, and a method that deliberately does
+/// not has to say so here, by name, with a reason.
+///
+/// A new write with no announcement fails this test rather than shipping a
+/// screen that quietly stops updating.
+#[test]
+fn every_writing_method_announces_or_is_named_here() {
+    // Rate-limit bookkeeping. No surface renders an auth attempt, and
+    // announcing one would wake every connected client on every failed
+    // sign-in — traffic bought for a screen that would look identical.
+    const SILENT_ON_PURPOSE: &[&str] = &[
+        "record_auth_attempt",
+        "clear_auth_attempts",
+        "prune_auth_attempts",
+    ];
+
+    let source = include_str!("../src/store/turso_store.rs");
+    let start = source
+        .find("impl Store for TursoStore {")
+        .expect("the Store impl moved");
+    // The impl ends at the first line that is a lone `}` in column zero.
+    let end = source[start..]
+        .find("\n}\n")
+        .map(|at| start + at)
+        .expect("unterminated impl block");
+    let impl_block = &source[start..end];
+
+    let mut silent = Vec::new();
+    let mut methods = impl_block.split("\n    async fn ").skip(1).peekable();
+    while let Some(chunk) = methods.next() {
+        let name = chunk
+            .split(['(', '<', ' '])
+            .next()
+            .expect("a method with no name");
+        let writes = chunk.contains("INSERT INTO")
+            || chunk.contains("UPDATE ")
+            || chunk.contains("DELETE FROM");
+        if writes && !chunk.contains("announce(") && !SILENT_ON_PURPOSE.contains(&name) {
+            silent.push(name.to_string());
+        }
+    }
+
+    assert!(
+        silent.is_empty(),
+        "these methods change rows without announcing it, so the screens \
+         showing those rows will go stale until someone reloads by hand: {silent:?}. \
+         Either call `self.announce(..)` after the write commits, or add the \
+         method to SILENT_ON_PURPOSE with the reason."
+    );
+}
+
+/// The sweep sleeps on this answer, so it has to be the earliest moment
+/// anything is owed — not merely some moment, and not the newest.
+#[tokio::test]
+async fn the_next_due_moment_is_the_earliest_one() {
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+
+    assert_eq!(
+        store.next_due_at().await.unwrap(),
+        None,
+        "an empty queue owes nothing"
+    );
+
+    let now = OffsetDateTime::now_utc();
+    // Queued out of order on purpose: the answer is the earliest, not the first.
+    store
+        .queue_notice("late@izlek.sh", "Later", "body", now + Duration::hours(2))
+        .await
+        .unwrap();
+    store
+        .queue_notice("soon@izlek.sh", "Sooner", "body", now + Duration::minutes(5))
+        .await
+        .unwrap();
+
+    let due = store.next_due_at().await.unwrap().expect("nothing owed");
+    // Stored to the second, so compare at that grain.
+    assert!(
+        (due - (now + Duration::minutes(5))).abs() < Duration::seconds(1),
+        "expected the sooner of the two, got {due}"
+    );
+}
+
+/// A handshake and a delivered mail are different facts, kept in different
+/// columns, and editing the sender invalidates both — they were about a server
+/// that is no longer the one configured.
+#[tokio::test]
+async fn a_sender_check_is_recorded_apart_from_a_test_and_cleared_on_edit() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let now = OffsetDateTime::now_utc();
+
+    let sender = |host: &str| NewSender {
+        host: host.to_string(),
+        port: 465,
+        username: "izlek".into(),
+        password: Some("hunter2".into()),
+        from_name: "İzlek".into(),
+        from_address: "izlek@izlek.sh".into(),
+    };
+    store.set_sender(&workspace, sender("smtp.one.test")).await.unwrap();
+
+    // A login that worked, and a mail that did not: both true at once, and
+    // neither may be rendered as the other.
+    store
+        .record_sender_check(
+            &workspace,
+            izlek_core::store::SenderCheck { at: now, took_ms: 120, error: None },
+        )
+        .await
+        .unwrap();
+    store
+        .record_sender_test(
+            &workspace,
+            izlek_core::store::SenderTest { at: now, took_ms: 0, error: Some("550 not allowed".into()) },
+        )
+        .await
+        .unwrap();
+
+    let ws = store.workspace().await.unwrap().unwrap();
+    let check = ws.sender_check.expect("no check recorded");
+    assert_eq!(check.error, None, "the handshake succeeded");
+    assert_eq!(check.took_ms, 120);
+    assert_eq!(
+        ws.sender_test.expect("no test recorded").error.as_deref(),
+        Some("550 not allowed"),
+        "the send still failed, and says why"
+    );
+
+    // Point it at a different server: what was known is now about nothing.
+    store.set_sender(&workspace, sender("smtp.two.test")).await.unwrap();
+    let ws = store.workspace().await.unwrap().unwrap();
+    assert!(ws.sender_check.is_none(), "a stale handshake survived an edit");
+    assert!(ws.sender_test.is_none(), "a stale test survived an edit");
 }

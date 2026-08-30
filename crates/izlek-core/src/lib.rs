@@ -17,6 +17,8 @@ pub mod accounts;
 #[cfg(feature = "server")]
 pub mod auth;
 #[cfg(feature = "server")]
+pub mod live;
+#[cfg(feature = "server")]
 pub mod config;
 #[cfg(feature = "server")]
 pub mod mail;
@@ -31,6 +33,8 @@ pub use board::{BoardReads, load as load_board};
 pub use config::{Config, ConfigError};
 #[cfg(feature = "server")]
 pub use detail::{DetailReads, load as load_detail};
+#[cfg(feature = "server")]
+pub use live::{Change, Topic};
 #[cfg(feature = "server")]
 pub use mail::{Engine as MailEngine, MailError, Mailer, Outgoing};
 #[cfg(feature = "server")]

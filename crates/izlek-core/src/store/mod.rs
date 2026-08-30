@@ -68,6 +68,10 @@ pub struct Workspace {
     /// How the last "send test mail to myself" went, if one has been pressed
     /// since the sender was last edited.
     pub sender_test: Option<SenderTest>,
+    /// How the last handshake with the mail server went, if one has happened
+    /// since the sender was last edited. See [`SenderCheck`] on why this is
+    /// not the same thing as `sender_test`.
+    pub sender_check: Option<SenderCheck>,
     pub attachment_limit_bytes: u64,
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
@@ -123,6 +127,26 @@ pub struct NewAttachment<'a> {
 /// act on and "535 authentication failed" is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SenderTest {
+    pub at: OffsetDateTime,
+    pub took_ms: u64,
+    pub error: Option<String>,
+}
+
+/// How the last handshake with the mail server went.
+///
+/// Not the same fact as [`SenderTest`], and kept apart on purpose. A test sends
+/// a real message to a real inbox and proves delivery. A check connects,
+/// negotiates TLS, says hello, authenticates and hangs up — it proves the host,
+/// the port, the encryption and the password without sending anything to
+/// anybody. What it cannot prove is that the from-address is one this account
+/// is allowed to send as, which is the usual reason a login that works is
+/// followed by mail that bounces.
+///
+/// `error` is `None` when the server let us in, and otherwise holds what the
+/// server said, because "535 authentication failed" is actionable and "it did
+/// not work" is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderCheck {
     pub at: OffsetDateTime,
     pub took_ms: u64,
     pub error: Option<String>,
@@ -589,6 +613,16 @@ pub struct Recipient {
 /// trait a test can wrap and count.
 #[async_trait]
 pub trait Store: BoardReads + DetailReads + 'static {
+
+    // -- live updates ------------------------------------------------------
+
+    /// A receiver of committed-write announcements. One [`Change`] per
+    /// write that committed, carrying the topic to re-fetch and no data:
+    /// the channel cannot say more than the reader may hear, because it
+    /// says nothing — the woken client re-fetches through the ordinary
+    /// role-gated route. Sending to zero subscribers is normal and silent,
+    /// and a slow subscriber's overflow is the client's cue to resync.
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::live::Change>;
     // -- workspace ---------------------------------------------------------
 
     /// Claims an empty database: writes the workspace, its first account and
@@ -618,6 +652,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Writes down how the last test send went. Editing the sender clears it,
     /// so what is stored is always about the settings that are stored.
     async fn record_sender_test(&self, workspace_id: &str, test: SenderTest) -> Result<()>;
+
+    /// Writes down how the last handshake went. Separate from
+    /// [`Store::record_sender_test`] so a login that worked can never be
+    /// rendered as a mail that arrived.
+    async fn record_sender_check(&self, workspace_id: &str, check: SenderCheck) -> Result<()>;
 
     /// Reads the sender's password. Only the mailer calls this, and nothing it
     /// returns reaches a response body.
@@ -1029,6 +1068,13 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Sends owed right now: claimed but never accepted, and due.
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>>;
+
+    /// When the next mail falls due, whether or not that is yet.
+    ///
+    /// The sweep asks this so it can sleep exactly that long instead of waking
+    /// on a fixed beat. A beat is what makes a retry promised for 16:42:47 go
+    /// out at 16:43: the row was due, and nothing was awake to notice.
+    async fn next_due_at(&self) -> Result<Option<OffsetDateTime>>;
 
     /// Every send a rule has made, newest first, for the admin's trail.
     async fn sends_for_rule(&self, rule_id: &str, limit: u32) -> Result<Vec<MailSend>>;

@@ -51,6 +51,10 @@ database = "izlek.db"
 # this is the only thing that decides where İzlek binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
 listen = "127.0.0.1:7654"
+# How long a live-update connection is held before the browser is asked to
+# reconnect, in seconds. The reconnect is what re-checks the session, so a
+# revoked sign-in stops receiving within this long.
+live_seconds = 300
 "#;
 
 /// The default `listen` when the file is silent about it. A file missing this
@@ -63,18 +67,38 @@ listen = "127.0.0.1:7654"
 /// range, so the kernel never hands it to an outgoing connection either.
 const DEFAULT_LISTEN: &str = "127.0.0.1:7654";
 
+/// How long one live-update connection lasts before the server ends it and the
+/// browser opens another. Five minutes is a compromise: a stream is
+/// authenticated once, when it opens, so a session revoked mid-stream keeps
+/// hearing until the next reconnect — and a reconnect costs one request, so
+/// doing it every few seconds to shorten that window would be worse than the
+/// window. Long enough to be cheap, short enough that a revoked session goes
+/// quiet while the person who revoked it is still watching.
+const DEFAULT_LIVE_SECONDS: u64 = 300;
+
 /// Every optional key, with the comment and default a file missing it is
 /// completed with. `database` is not here: it has no default worth guessing,
 /// so its absence stops the boot instead.
-const OPTIONAL_KEYS: &[(&str, &str)] = &[(
-    "listen",
-    concat!(
-        "# The address the server listens on. Environment variables are ignored —\n",
-        "# this is the only thing that decides where İzlek binds. It is also the\n",
-        "# address mail links fall back to, until an admin sets one in Settings.\n",
-        "listen = \"127.0.0.1:7654\"\n"
+const OPTIONAL_KEYS: &[(&str, &str)] = &[
+    (
+        "listen",
+        concat!(
+            "# The address the server listens on. Environment variables are ignored —\n",
+            "# this is the only thing that decides where İzlek binds. It is also the\n",
+            "# address mail links fall back to, until an admin sets one in Settings.\n",
+            "listen = \"127.0.0.1:7654\"\n"
+        ),
     ),
-)];
+    (
+        "live_seconds",
+        concat!(
+            "# How long a live-update connection is held before the browser is asked to\n",
+            "# reconnect, in seconds. The reconnect is what re-checks the session, so a\n",
+            "# revoked sign-in stops receiving within this long.\n",
+            "live_seconds = 300\n"
+        ),
+    ),
+];
 
 /// The shape of `config/izlek.toml`, before the values are checked. Anything
 /// else the file says lands in `other`, which is read for its key names only
@@ -83,6 +107,7 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[(
 struct Toml {
     database: Option<String>,
     listen: Option<String>,
+    live_seconds: Option<u64>,
     #[serde(flatten)]
     other: std::collections::BTreeMap<String, toml::Value>,
 }
@@ -98,6 +123,10 @@ pub struct Config {
     /// Keys the file sets that nothing here reads, in the order the file
     /// gives them. Named at startup so a typo is visible.
     pub ignored: Vec<String>,
+    /// How long one live-update connection is held open before the browser is
+    /// asked to reconnect. The reconnect re-authenticates, which is how a
+    /// session revoked mid-stream stops being fed.
+    pub live_seconds: u64,
     /// Whether `config/izlek.toml` did not exist and was just written with the
     /// development defaults this boot.
     pub defaulted: bool,
@@ -197,9 +226,22 @@ impl Config {
             why: format!("{listen:?} is not a host:port address — {err}"),
         })?;
 
+        // Zero would mean a stream that ends the moment it opens, which is a
+        // reconnect loop rather than a live feed; the key is refused rather
+        // than quietly corrected, because a deployment that meant to say
+        // "never expire" should find out here and not at three in the morning.
+        let live_seconds = toml.live_seconds.unwrap_or(DEFAULT_LIVE_SECONDS);
+        if live_seconds == 0 {
+            return Err(ConfigError::Invalid {
+                key: "live_seconds",
+                why: "0 would close every live connection as soon as it opened".to_string(),
+            });
+        }
+
         Ok(Config {
             database: absolute(dir, Path::new(&database)),
             listen,
+            live_seconds,
             ignored: toml.other.into_keys().collect(),
             defaulted,
         })
@@ -393,12 +435,38 @@ mod tests {
     fn completion_leaves_a_key_that_is_already_there() {
         let dir = scratch();
         std::fs::create_dir_all(dir.join("config")).unwrap();
-        let mine = "database = \"izlek.db\"\nlisten = \"0.0.0.0:8080\"\n";
+        let mine =
+            "database = \"izlek.db\"\nlisten = \"0.0.0.0:8080\"\nlive_seconds = 30\n";
         std::fs::write(dir.join(FILE_NAME), mine).unwrap();
         let config = Config::load_from(&dir).unwrap();
         assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(config.live_seconds, 30);
         assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), mine);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live connection that expires instantly is a reconnect loop, so the
+    /// key is refused rather than silently corrected.
+    #[test]
+    fn a_zero_live_window_stops_the_boot_naming_the_key() {
+        let problem = Config::parse(
+            "database = \"izlek.db\"\nlive_seconds = 0\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(problem, ConfigError::Invalid { key: "live_seconds", .. }),
+            "{problem:?}"
+        );
+    }
+
+    /// A file that never mentions the key still boots, on the default.
+    #[test]
+    fn a_file_without_a_live_window_takes_the_default() {
+        let config =
+            Config::parse("database = \"izlek.db\"\n", Path::new("."), false).unwrap();
+        assert_eq!(config.live_seconds, 300);
     }
 
     #[test]

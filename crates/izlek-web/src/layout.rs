@@ -81,7 +81,11 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     let class = format!("avatar avatar-tone-{tone} {extra}");
     let name = person.display_name.clone();
     if person.has_photo {
-        let src = format!("/photo/{}", person.id);
+        let src = format!(
+            "/photo/{}?v={}",
+            person.id,
+            crate::photo::photo_stamp(cx, &person.id)
+        );
         view! {
             cx =>
             <img class=(class) src=(src) alt=(name.clone()) data-name=(name)>
@@ -237,7 +241,111 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 document.querySelectorAll('.comment-list').forEach(function (list) { list.scrollTop = list.scrollHeight; }); \
                 document.dispatchEvent(new Event('izlek:wire')); \
             } \
-            function swap(html, url, fresh, push) { \
+            function keyOf(el) { \
+                var form = el.form ? (el.form.getAttribute('action') || '') : ''; \
+                return form + '|' + (el.name || '') + '|' + (el.type || '') + '|' + (el.tagName || ''); \
+            } \
+            function editable(el) { \
+                return el.type !== 'hidden' && el.type !== 'password' && el.type !== 'file'; \
+            } \
+            function captureFields() { \
+                var active = document.activeElement, out = []; \
+                document.querySelectorAll('input, textarea, select').forEach(function (el) { \
+                    if (!editable(el)) { return; } \
+                    var moved; \
+                    if (el.type === 'checkbox' || el.type === 'radio') { moved = el.checked !== el.defaultChecked; } \
+                    else if (el.tagName === 'SELECT') { \
+                        var def = -1; \
+                        for (var j = 0; j < el.options.length; j++) { if (el.options[j].defaultSelected) { def = j; break; } } \
+                        if (def < 0) { def = 0; } \
+                        moved = el.selectedIndex !== def; \
+                    } else { moved = el.value !== el.defaultValue; } \
+                    var focused = el === active; \
+                    if (!moved && !focused) { return; } \
+                    var start = -1, end = -1; \
+                    try { if (el.selectionStart != null) { start = el.selectionStart; end = el.selectionEnd; } } catch (err) { } \
+                    out.push({ k: keyOf(el), v: el.value, c: el.checked, i: el.selectedIndex, f: focused, s: start, e: end }); \
+                }); \
+                return out; \
+            } \
+            function restoreFields(saved) { \
+                if (!saved || !saved.length) { return; } \
+                var fields = document.querySelectorAll('input, textarea, select'); \
+                saved.forEach(function (was) { \
+                    var el = null; \
+                    for (var i = 0; i < fields.length; i++) { \
+                        if (keyOf(fields[i]) === was.k) { el = fields[i]; break; } \
+                    } \
+                    if (!el) { return; } \
+                    if (el.type === 'checkbox' || el.type === 'radio') { el.checked = was.c; } \
+                    else if (el.tagName === 'SELECT') { el.selectedIndex = was.i; } \
+                    else { el.value = was.v; } \
+                    if (was.f) { \
+                        try { \
+                            el.focus(); \
+                            if (was.s >= 0 && el.setSelectionRange) { el.setSelectionRange(was.s, was.e); } \
+                        } catch (err) { } \
+                    } \
+                }); \
+            } \
+            function clientMade(node) { \
+                return node.nodeType === 1 && node.classList \
+                    && (node.classList.contains('dd-panel') || node.classList.contains('dd-trigger')); \
+            } \
+            function pairable(a, b) { \
+                if (a.nodeType !== b.nodeType) { return false; } \
+                if (a.nodeType !== 1) { return true; } \
+                if (a.nodeName !== b.nodeName) { return false; } \
+                if (a.id || b.id) { return a.id === b.id; } \
+                return true; \
+            } \
+            function syncAttrs(from, to) { \
+                var i, at; \
+                for (i = to.attributes.length - 1; i >= 0; i--) { \
+                    at = to.attributes[i]; \
+                    if (from.getAttribute(at.name) !== at.value) { from.setAttribute(at.name, at.value); } \
+                } \
+                for (i = from.attributes.length - 1; i >= 0; i--) { \
+                    at = from.attributes[i]; \
+                    if (at.name.indexOf('data-dd') === 0) { continue; } \
+                    if (!to.hasAttribute(at.name)) { from.removeAttribute(at.name); } \
+                } \
+            } \
+            function morph(from, to) { \
+                if (from.nodeType !== 1) { \
+                    if (from.nodeValue !== to.nodeValue) { from.nodeValue = to.nodeValue; } \
+                    return; \
+                } \
+                syncAttrs(from, to); \
+                if (from.nodeName === 'SCRIPT') { \
+                    if (from.textContent !== to.textContent) { \
+                        var live = document.createElement('script'); \
+                        if (to.hasAttribute('src')) { live.setAttribute('src', to.getAttribute('src')); } \
+                        live.textContent = to.textContent; \
+                        from.replaceWith(live); \
+                    } \
+                    return; \
+                } \
+                morphChildren(from, to); \
+            } \
+            function morphChildren(from, to) { \
+                var mine = [], theirs = [], n; \
+                for (n = from.firstChild; n; n = n.nextSibling) { if (!clientMade(n)) { mine.push(n); } } \
+                for (n = to.firstChild; n; n = n.nextSibling) { theirs.push(n); } \
+                var i; \
+                for (i = 0; i < theirs.length; i++) { \
+                    if (i < mine.length) { \
+                        if (pairable(mine[i], theirs[i])) { morph(mine[i], theirs[i]); } \
+                        else { mine[i].replaceWith(document.importNode(theirs[i], true)); } \
+                    } else { \
+                        from.appendChild(document.importNode(theirs[i], true)); \
+                    } \
+                } \
+                for (i = theirs.length; i < mine.length; i++) { mine[i].remove(); } \
+            } \
+            function swap(html, url, fresh, push, morphing) { \
+                var keep = window.__izlekKeep ? captureFields() : null; \
+                window.__izlekKeep = false; \
                 var doc = new DOMParser().parseFromString(html, 'text/html'); \
                 var x = window.scrollX, y = window.scrollY; \
                 var root = doc.documentElement; \
@@ -247,15 +355,20 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 if (root.hasAttribute('data-ui')) { document.documentElement.setAttribute('data-ui', root.getAttribute('data-ui')); } \
                 else { document.documentElement.removeAttribute('data-ui'); } \
                 if (url) { history[push ? 'pushState' : 'replaceState'](null, '', url); } \
-                document.body.replaceChildren(); \
-                while (doc.body.firstChild) { document.body.appendChild(doc.body.firstChild); } \
-                document.body.querySelectorAll('script').forEach(function (old) { \
-                    var live = document.createElement('script'); \
-                    if (old.hasAttribute('src')) { live.setAttribute('src', old.getAttribute('src')); } \
-                    live.textContent = old.textContent; \
-                    old.replaceWith(live); \
-                }); \
-                window.scrollTo(fresh ? 0 : x, fresh ? 0 : y); \
+                if (morphing) { \
+                    morph(document.body, doc.body); \
+                } else { \
+                    document.body.replaceChildren(); \
+                    while (doc.body.firstChild) { document.body.appendChild(doc.body.firstChild); } \
+                    document.body.querySelectorAll('script').forEach(function (old) { \
+                        var live = document.createElement('script'); \
+                        if (old.hasAttribute('src')) { live.setAttribute('src', old.getAttribute('src')); } \
+                        live.textContent = old.textContent; \
+                        old.replaceWith(live); \
+                    }); \
+                    window.scrollTo(fresh ? 0 : x, fresh ? 0 : y); \
+                } \
+                restoreFields(keep); \
                 wire(); \
             } \
             function sweepPanels() { \
@@ -267,6 +380,12 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 fetch(url).then( \
                     function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
                     function () { window.location.href = url; } \
+                ); \
+            }; \
+            window.__izlekRefresh = function () { \
+                fetch(window.location.href).then( \
+                    function (r) { return r.text().then(function (t) { swap(t, r.url, false, false, true); }); }, \
+                    function () {} \
                 ); \
             }; \
             window.__izlekPost = function (action, fields) { \
@@ -394,6 +513,95 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
 /// | 40 | the topbar `.user-menu` (pin+blur), then the rules composer, then a rules edit row (back to `/rules`) | `layout.rs`'s `escape_script` |
 /// | 20 | the datepicker popover | `board.rs`'s `card_menu_script` |
 /// | 10 | the card context menu | `board.rs`'s `card_menu_script` |
+/// The live channel's browser half: one `EventSource` per tab, and the slow
+/// tick that keeps clock-driven text honest.
+///
+/// Everything here is one script because both halves end in the same act —
+/// re-fetch the current URL through `__izlekGo` and let `swap()` do what it
+/// already does after every form post. There is deliberately no second render
+/// path: a partial-update mechanism would be a second way for the page to be
+/// wrong, and the full swap is the one the app exercises constantly.
+///
+/// Three things it must not get wrong:
+///
+/// The `__izlekLive` guard is not decoration. `swap()` re-executes every
+/// swapped-in script, so without it each soft navigation would open another
+/// `EventSource` and the tab would end up holding one connection per page it
+/// had ever visited.
+///
+/// A refresh must not disturb what somebody is in the middle of. The first
+/// attempt held the refresh back while a form was dirty, which was wrong twice
+/// over: one unsubmitted form froze every other surface on the screen, and a
+/// dropdown could never be used at all while the workspace was busy, because
+/// each update slammed it shut.
+///
+/// The cause of both was the refresh throwing the whole page away. So the live
+/// path does not: it MORPHS. `swap`'s morphing mode walks the freshly fetched
+/// document against the live one and touches only what actually differs —
+/// changed text, changed attributes, added and removed nodes. Everything else
+/// is the same DOM node it was a moment ago, so an open dropdown stays open, a
+/// caret stays where it was, a half-typed comment keeps its text, and a scrolled
+/// panel keeps its position. Not because any of them is special-cased, but
+/// because nothing touched them.
+///
+/// Two kinds of node need naming for this to hold. The dropdown builds a
+/// `.dd-trigger` beside each select and appends a `.dd-panel` to the body, and
+/// neither exists in the server's HTML — a morph that did not know this would
+/// delete them as strays on the first update. And a `<script>` whose text is
+/// unchanged is left alone rather than re-created, so the live path stops
+/// re-running every script on the page; the `__izlek*` guards remain the
+/// backstop for the full-swap path, which still re-runs them.
+///
+/// Morphing is used only for the live refresh. Navigations and form posts keep
+/// the full replace: they are a different page or a submitted form, where
+/// carrying the old DOM's state over is wrong rather than kind.
+///
+/// The tick exists because some text goes stale with no write behind it: the
+/// queue's next-try time and a card's overdue mark change because the clock
+/// moved, and no announcement will ever fire for that. Rather than re-format
+/// those in JavaScript — which would mean a second implementation of the
+/// locale- and timezone-aware formatting the server already does, free to
+/// disagree with it — the tick re-fetches, and the server stays the only thing
+/// that decides what a moment reads as. It runs only on pages carrying a
+/// `data-tick` element, so a page with no clock-driven text is silent.
+pub async fn live_script(cx: &Cx) -> Result {
+    const JS: &str = "\
+        (function () { \
+            if (window.__izlekLive) { return; } \
+            window.__izlekLive = true; \
+            var timer = null; \
+            function refresh() { \
+                window.__izlekKeep = true; \
+                if (window.__izlekRefresh) { window.__izlekRefresh(); } \
+            } \
+            function schedule() { \
+                if (timer) { clearTimeout(timer); } \
+                timer = setTimeout(function () { timer = null; refresh(); }, 200); \
+            } \
+            function wanted(topic) { \
+                if (topic === 'resync') { return true; } \
+                var path = window.location.pathname; \
+                if (path === '/logs') { return topic !== 'board' && topic !== 'task'; } \
+                if (path === '/rules') { return topic === 'rules' || topic === 'members'; } \
+                if (path === '/settings') { return topic === 'settings' || topic === 'members'; } \
+                return topic === 'board' || topic === 'task' || topic === 'members'; \
+            } \
+            try { \
+                var src = new EventSource('/api/live'); \
+                src.onmessage = function (e) { \
+                    var frame; \
+                    try { frame = JSON.parse(e.data); } catch (err) { return; } \
+                    if (frame && wanted(frame.topic)) { schedule(); } \
+                }; \
+            } catch (err) { } \
+            setInterval(function () { \
+                if (document.querySelector('[data-tick]')) { refresh(); } \
+            }, 60000); \
+        })(); \
+    ";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+
 pub async fn escape_manager_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
@@ -510,6 +718,10 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
             <body>
                 (escape_manager_script(cx).await?)
                 (soft_nav_script(cx).await?)
+                // Only for a signed-in page: `/api/live` answers 401 to
+                // everybody else, and an auth screen that opened a stream
+                // would just reconnect against that refusal forever.
+                if asking.is_some() { (live_script(cx).await?) }
                 (content)
             </body>
         </html>

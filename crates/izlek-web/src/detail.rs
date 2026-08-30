@@ -1530,6 +1530,14 @@ async fn dep_row(
     }
 }
 
+/// The version stamp a `/files/{id}` URL carries: the row's `uploaded_at`.
+/// Uploads are insert-only — nothing in the store rewrites an attachment —
+/// so the stamp is the one moment the bytes have ever changed, and a URL
+/// that carries it can be cached as if it were the bytes themselves.
+fn attachment_stamp(attachment: &izlek_core::store::Attachment) -> String {
+    (attachment.uploaded_at.unix_timestamp_nanos() / 1_000).to_string()
+}
+
 async fn file_chip(
     cx: &Cx,
     task_id: &str,
@@ -1545,7 +1553,13 @@ async fn file_chip(
     let href = if crate::files::viewer_kind(&file.mime_type).is_some() {
         format!("/?task={task_id}&tab={}&file={}", Tab::Files.slug(), file.id)
     } else {
-        format!("/files/{}", file.id)
+        // The stamp rides on the row, which the chip's `FileLine` does not
+        // carry: one lookup per plain-download chip buys the same versioned
+        // URL the viewer streams from.
+        match accounts(cx).store().attachment(&file.id).await {
+            Ok(Some(row)) => format!("/files/{}?v={}", file.id, attachment_stamp(&row)),
+            _ => format!("/files/{}", file.id),
+        }
     };
     view! {
         cx =>
@@ -2143,8 +2157,9 @@ pub async fn file_viewer_modal(
     // Closing a file returns to the panel exactly as it stood, tab and all:
     // a viewer is opened from a section, not from the task at large.
     let close_href = format!("/?task={task_id}&tab={}", tab.slug());
-    let src = format!("/files/{file_id}");
-    let download_href = format!("/files/{file_id}?dl=1");
+    let stamp = attachment_stamp(&attachment);
+    let src = format!("/files/{file_id}?v={stamp}");
+    let download_href = format!("/files/{file_id}?dl=1&v={stamp}");
     let name = attachment.file_name.clone();
     // A workbook is the one viewer whose bytes are read here rather than
     // handed to an element; every other kind streams from `/files/{id}` and

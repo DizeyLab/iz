@@ -479,6 +479,16 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
     // without one. Sent on every response, not only media — harmless either
     // way and one less type to special-case.
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    // An attachment's bytes are write-once — nothing in the store rewrites
+    // a row — so the id in the URL is already its own version, and the
+    // `?v=` stamp the render sites attach only makes that visible. A year
+    // of `immutable` costs nothing because the URL can never outlive its
+    // bytes; `private` keeps a shared proxy from handing one workspace's
+    // attachments to another.
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
 
     let total = bytes.len() as u64;
     let range = request_headers(cx)

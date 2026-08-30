@@ -365,6 +365,25 @@ pub fn moment_label_in(at: OffsetDateTime, offset: UtcOffset) -> String {
     )
 }
 
+/// The same label, down to the second.
+///
+/// Minutes are the right grain for something that already happened — a comment
+/// was left at 16:42 and nobody cares which second. They are the wrong grain
+/// for a moment that has not arrived yet: a retry shown as "16:42" that fires
+/// at 16:42:47 looks forty-seven seconds broken to whoever is watching the
+/// clock, and a promise about the future has to be readable against the future
+/// it promises.
+pub fn moment_label_with_seconds_in(at: OffsetDateTime, offset: UtcOffset) -> String {
+    let at = at.to_offset(offset);
+    format!(
+        "{} {:02}:{:02}:{:02}",
+        day_label(at.date()),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
+}
+
 /// Parses a stored `User::timezone` value — `"UTC"` or `"UTC+03:00"` /
 /// `"UTC-05:00"` — into the offset it names. There is no tz-database here
 /// (see the settings vocabulary decision), only fixed offsets, so anything

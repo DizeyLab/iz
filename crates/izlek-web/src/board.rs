@@ -376,7 +376,9 @@ async fn render_card(
             </div>
             <div class="card-title">(card.title.clone())</div>
             <div class="card-foot">
-                <span class=(class!("card-deadline", "card-deadline-overdue" if overdue, "card-deadline-none" if !dated))>
+                // Overdue is a comparison against today, so a tab left open
+                // over midnight is wrong until something re-renders it.
+                <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue, "card-deadline-none" if !dated))>
                     (deadline)
                 </span>
                 if let Some(parts) = subtasks.clone() {

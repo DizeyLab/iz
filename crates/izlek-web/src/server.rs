@@ -136,6 +136,12 @@ impl Mail {
         Some(engine.send_test(to).await)
     }
 
+    /// Asks the mail server whether it would have us, sending nothing.
+    pub async fn check(&self) -> Option<Result<time::Duration, izlek_core::MailError>> {
+        let engine = self.0.clone()?;
+        Some(engine.check_sender().await)
+    }
+
     fn log(report: izlek_core::store::Result<izlek_core::mail::Report>) {
         match report {
             Ok(report) if report.sent + report.failed + report.abandoned > 0 => {

@@ -92,6 +92,16 @@ pub struct Outgoing {
 #[async_trait]
 pub trait Mailer: Send + Sync {
     async fn send(&self, mail: &Outgoing) -> Result<(), MailError>;
+
+    /// Asks the mail server whether it would have us, without sending anything
+    /// to anybody: connect, negotiate TLS, say hello, authenticate, hang up.
+    ///
+    /// The default answers yes. That is right for a mailer with no server
+    /// behind it — the ones the tests hold, which accept everything — and the
+    /// real SMTP sender overrides it with the handshake.
+    async fn check(&self) -> Result<(), MailError> {
+        Ok(())
+    }
 }
 
 /// How many times a retryable failure is tried before it is given up on and
@@ -166,6 +176,18 @@ impl Engine {
         };
         let started = std::time::Instant::now();
         self.mailer.send(&mail).await?;
+        Ok(Duration::milliseconds(
+            started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        ))
+    }
+
+    /// Asks the mail server whether it would take mail from us, without
+    /// sending any. Hands back how long the handshake took, the way
+    /// [`Engine::send_test`] does, so an admin can see a server that answers
+    /// slowly as well as one that refuses.
+    pub async fn check_sender(&self) -> std::result::Result<Duration, MailError> {
+        let started = std::time::Instant::now();
+        self.mailer.check().await?;
         Ok(Duration::milliseconds(
             started.elapsed().as_millis().min(i64::MAX as u128) as i64,
         ))

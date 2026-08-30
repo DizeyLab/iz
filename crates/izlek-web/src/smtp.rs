@@ -38,6 +38,16 @@ pub struct Sending {
     pub from: String,
 }
 
+/// How long to wait on a mail server that has accepted the connection and then
+/// stopped talking.
+///
+/// This bounds a server that stalls mid-conversation, and it is why a send
+/// cannot hang forever. It is NOT sufficient on its own: measured, a socket
+/// that accepts the connection and then says nothing at all is not caught by
+/// it, which is why the settings probe wraps its own timeout around the whole
+/// call. Both are needed — this one for sends, which nothing else bounds.
+const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A sender holding one connection pool.
 pub struct Smtp {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -63,6 +73,7 @@ impl Smtp {
         Ok(Self {
             transport: builder
                 .port(mail.port)
+                .timeout(Some(REPLY_TIMEOUT))
                 .credentials(Credentials::new(
                     mail.username.clone(),
                     mail.password.clone(),
@@ -107,6 +118,31 @@ impl Mailer for Smtp {
                     MailError::retryable(said)
                 }
             })
+    }
+
+    async fn check(&self) -> Result<(), MailError> {
+        // `test_connection` opens a connection the same way a send does —
+        // TLS, EHLO, and AUTH with these credentials — then NOOPs and leaves.
+        // So a pass means the host, the port, the encryption and the password
+        // are all right. It does NOT mean mail will arrive: the from-address
+        // is checked by the server per envelope, and an account that logs in
+        // fine can still be refused as a sender.
+        match self.transport.test_connection().await {
+            Ok(true) => Ok(()),
+            // Connected, then would not answer a NOOP. Nothing about the
+            // settings is proven wrong, so it is worth asking again.
+            Ok(false) => Err(MailError::retryable(
+                "the mail server accepted the connection and then went quiet",
+            )),
+            Err(problem) => {
+                let said = problem.to_string();
+                Err(if problem.is_permanent() {
+                    MailError::permanent(said)
+                } else {
+                    MailError::retryable(said)
+                })
+            }
+        }
     }
 }
 
@@ -199,5 +235,12 @@ impl Mailer for WorkspaceSmtp {
             return Err(MailError::unsent("no sender configured"));
         };
         self.transport(&want).await?.send(mail).await
+    }
+
+    async fn check(&self) -> Result<(), MailError> {
+        let Some(want) = self.sending().await? else {
+            return Err(MailError::unsent("no sender configured"));
+        };
+        self.transport(&want).await?.check().await
     }
 }

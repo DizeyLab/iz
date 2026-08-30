@@ -18,9 +18,11 @@ use super::{
     ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, CommentWritten, Deletion,
     Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule, MailSend,
     NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
-    SenderTest, Session, SigninLink, Store, StoreError, TaskCreated, Trigger, User, Workspace,
+    SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, TaskCreated, Trigger, User,
+    Workspace,
 };
 use crate::Role;
+use crate::live::{Change, Topic};
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
 use crate::detail::{
     ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, FileLine,
@@ -35,6 +37,7 @@ use time::macros::format_description;
 /// second file is for the day there is data worth keeping.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
+    (2, include_str!("../../migrations/0002_sender_check.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -57,9 +60,28 @@ pub struct TursoStore {
     /// exposed through the `Store` trait — callers keep passing and receiving
     /// plaintext, this field is the detail that makes the row not be one.
     key: secret::Key,
+    /// Where committed writes are announced. Held as the sender so the store
+    /// can hand out a receiver per subscriber; nothing is ever read from here
+    /// by the store itself.
+    live: tokio::sync::broadcast::Sender<Change>,
 }
 
 impl TursoStore {
+    /// Announces a committed write. Called only once the write is durable —
+    /// after commit for a transaction, and never on a path that returned an
+    /// error — because a subscriber's whole job is to re-read, and waking it
+    /// before the row lands makes it read the past.
+    ///
+    /// A send with no subscribers returns `Err`, which is the ordinary state
+    /// of a server nobody is looking at. It is dropped on purpose: an
+    /// announcement nobody is waiting for is not a problem, and logging it
+    /// would fill the log with the sound of an idle app.
+    fn announce(&self, topics: impl IntoIterator<Item = Topic>) {
+        for topic in topics {
+            let _ = self.live.send(Change { topic, seq: crate::live::next_seq() });
+        }
+    }
+
     /// Opens (creating if needed) the database at `path` and brings the schema
     /// up to date. `:memory:` gives a throwaway database for tests.
     pub async fn open(path: &str) -> Result<Self> {
@@ -88,7 +110,13 @@ impl TursoStore {
             restrict_if_present(&sibling(path, "-shm"))?;
         }
         let key = load_key(path)?;
-        let store = Self { conn: tokio::sync::Mutex::new(conn), db, key };
+        // 256 is deep enough that a client which pauses for a moment catches
+        // up without noticing, and shallow enough that one wedged subscriber
+        // cannot pin an unbounded backlog. Overflowing it is not a failure:
+        // the reader is told it lagged and resyncs, which is cheaper than the
+        // memory a larger buffer would cost to avoid saying so.
+        let (live, _) = tokio::sync::broadcast::channel(256);
+        let store = Self { conn: tokio::sync::Mutex::new(conn), db, key, live };
         store.migrate().await?;
         store.encrypt_plaintext_passwords().await?;
         Ok(store)
@@ -560,6 +588,14 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
             }),
             None => None,
         },
+        sender_check: match opt_stamp(row, 16)? {
+            Some(at) => Some(SenderCheck {
+                at,
+                took_ms: row.get::<i64>(17).map_err(backend)?.max(0) as u64,
+                error: opt_text(row, 18)?,
+            }),
+            None => None,
+        },
         public_url: opt_text(row, 15)?,
     })
 }
@@ -571,7 +607,8 @@ const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
      allowed_file_types, photo_limit_bytes, smtp_host, smtp_port, smtp_username, \
      smtp_from_name, smtp_from_address, \
      (smtp_password IS NOT NULL AND smtp_password <> ''), \
-     smtp_test_at, smtp_test_ms, smtp_test_error, public_url";
+     smtp_test_at, smtp_test_ms, smtp_test_error, public_url, \
+     smtp_check_at, smtp_check_ms, smtp_check_error";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -624,6 +661,10 @@ fn fold_email(email: &str) -> String {
 
 #[async_trait]
 impl Store for TursoStore {
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Change> {
+        self.live.subscribe()
+    }
+
     async fn claim_workspace(
         &self,
         workspace_name: &str,
@@ -720,6 +761,9 @@ impl Store for TursoStore {
                 });
             }
         }
+        // First write in the database's life: settings, members and the
+        // board all begin here, so a subscriber on any of the three wakes.
+        self.announce([Topic::Settings, Topic::Members, Topic::Board]);
 
         let workspace = self.workspace().await?.ok_or(StoreError::NotFound)?;
         let admin = self.user(&admin_id).await?.ok_or(StoreError::NotFound)?;
@@ -764,7 +808,8 @@ impl Store for TursoStore {
                 "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
                  smtp_password = COALESCE(?4, smtp_password), smtp_from_name = ?5, \
                  smtp_from_address = ?6, smtp_test_at = NULL, smtp_test_ms = NULL, \
-                 smtp_test_error = NULL WHERE id = ?7",
+                 smtp_test_error = NULL, smtp_check_at = NULL, smtp_check_ms = NULL, \
+                 smtp_check_error = NULL WHERE id = ?7",
                 params![
                     sender.host,
                     sender.port as i64,
@@ -777,6 +822,28 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
+        Ok(())
+    }
+
+    async fn record_sender_check(&self, workspace_id: &str, check: SenderCheck) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn
+            .execute(
+                "UPDATE workspace SET smtp_check_at = ?1, smtp_check_ms = ?2, \
+                 smtp_check_error = ?3 WHERE id = ?4",
+                params![
+                    stamp(check.at)?,
+                    check.took_ms as i64,
+                    check.error,
+                    workspace_id
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
         Ok(())
     }
 
@@ -795,6 +862,8 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
         Ok(())
     }
 
@@ -828,6 +897,8 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
         Ok(())
     }
 
@@ -854,6 +925,8 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
         Ok(())
     }
 
@@ -892,6 +965,7 @@ impl Store for TursoStore {
                     backend(e)
                 }
             })?;
+        self.announce([Topic::Members]);
         self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
@@ -955,6 +1029,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -971,6 +1047,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -987,6 +1065,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -1003,6 +1083,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -1046,6 +1128,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -1069,6 +1153,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -1085,6 +1171,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -1101,6 +1189,8 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
@@ -1128,6 +1218,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        self.announce([Topic::Members]);
         match self
             .one_row(
                 "SELECT id, user_id, created_at, expires_at, used_at FROM signin_link WHERE id = ?1",
@@ -1170,6 +1261,9 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         tx.commit().await.map_err(backend)?;
+        if n == 1 {
+            self.announce([Topic::Members]);
+        }
         Ok(n == 1)
     }
 
@@ -1196,6 +1290,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        self.announce([Topic::Members]);
         let sql = format!("SELECT {SESSION_COLUMNS} FROM session WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => session_from(&row),
@@ -1233,21 +1328,30 @@ impl Store for TursoStore {
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
+            drop(conn);
+            self.announce([Topic::Members]);
             Ok(())
         }
     }
 
     async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64> {
         let conn = self.conn.lock().await;
-        conn
+        let n = conn
             .execute(
                 "UPDATE session SET revoked_at = ?1 WHERE user_id = ?2 AND revoked_at IS NULL",
                 params![stamp(at)?, user_id],
             )
             .await
-            .map_err(backend)
+            .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Members]);
+        Ok(n)
     }
 
+    // The three auth-attempt methods below announce nothing, alone among the
+    // writes here. They are rate-limit bookkeeping that no surface renders, and
+    // announcing them would wake every connected client on every failed
+    // sign-in — traffic in exchange for a screen that would look identical.
     async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()> {
         let conn = self.conn.lock().await;
         conn
@@ -1317,6 +1421,8 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Board]);
         Ok(Column {
             id,
             name: name.to_string(),
@@ -1473,6 +1579,8 @@ impl Store for TursoStore {
         };
         tx.commit().await.map_err(backend)?;
 
+        // Task birth touches the board, the task page and the feed at once.
+        self.announce([Topic::Board, Topic::Task(id.clone()), Topic::Activity]);
         let (task_key, position) = written;
         Ok(TaskCreated {
             row: TaskRow {
@@ -1572,6 +1680,7 @@ impl Store for TursoStore {
         match outcome {
             Ok(Ok(())) => {
                 tx.commit().await.map_err(backend)?;
+                self.announce([Topic::Board, Topic::Task(task_id.to_string())]);
                 Ok(())
             }
             Ok(Err(refused)) => {
@@ -1614,25 +1723,33 @@ impl Store for TursoStore {
 
     async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
+        let n = conn
             .execute(
                 "INSERT OR IGNORE INTO task_assignee (task_id, user_id) VALUES (?1, ?2)",
                 params![task_id, user_id],
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        if n > 0 {
+            self.announce([Topic::Task(task_id.to_string())]);
+        }
         Ok(())
     }
 
     async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
+        let n = conn
             .execute(
                 "DELETE FROM task_assignee WHERE task_id = ?1 AND user_id = ?2",
                 params![task_id, user_id],
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        if n > 0 {
+            self.announce([Topic::Task(task_id.to_string())]);
+        }
         Ok(())
     }
 
@@ -1734,7 +1851,16 @@ impl Store for TursoStore {
         .await;
 
         match written {
-            Ok(true) => tx.commit().await.map_err(backend),
+            Ok(true) => {
+                tx.commit().await.map_err(backend)?;
+                // An edge is visible from both endpoints and on the board.
+                self.announce([
+                    Topic::Board,
+                    Topic::Task(blocked_task_id.to_string()),
+                    Topic::Task(blocking_task_id.to_string()),
+                ]);
+                Ok(())
+            }
             Ok(false) => {
                 let _ = tx.rollback().await;
                 Err(StoreError::Cycle)
@@ -1753,7 +1879,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
+        let n = conn
             .execute(
                 "UPDATE task_dependency SET cleared_at = ?3 \
                  WHERE blocked_task_id = ?1 AND blocking_task_id = ?2 AND cleared_at IS NULL",
@@ -1761,6 +1887,14 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        if n > 0 {
+            self.announce([
+                Topic::Board,
+                Topic::Task(blocked_task_id.to_string()),
+                Topic::Task(blocking_task_id.to_string()),
+            ]);
+        }
         Ok(())
     }
 
@@ -1810,6 +1944,7 @@ impl Store for TursoStore {
         }
         tx.commit().await.map_err(backend)?;
 
+        self.announce([Topic::Task(task_id.to_string()), Topic::Activity]);
         Ok(CommentWritten {
             comment_id,
             activity_id,
@@ -1839,6 +1974,8 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Task(new.task_id.to_string())]);
         Ok(id)
     }
 
@@ -1889,11 +2026,25 @@ impl Store for TursoStore {
     }
 
     async fn delete_attachment(&self, id: &str) -> Result<bool> {
+        // Which task loses the file has to be read before the row goes: after
+        // the delete there is nothing left to ask, and a detail panel that is
+        // never told still shows the attachment.
+        let owner = self
+            .one_row("SELECT task_id FROM attachment WHERE id = ?1", params![id])
+            .await?
+            .map(|row| row.get::<String>(0).map_err(backend))
+            .transpose()?;
         let conn = self.conn.lock().await;
         let gone = conn
             .execute("DELETE FROM attachment WHERE id = ?1", params![id])
             .await
             .map_err(backend)?;
+        drop(conn);
+        if gone > 0
+            && let Some(task_id) = owner
+        {
+            self.announce([Topic::Task(task_id)]);
+        }
         Ok(gone > 0)
     }
 
@@ -1969,7 +2120,16 @@ impl Store for TursoStore {
         .await;
 
         match written {
-            Ok(Some(ids)) => tx.commit().await.map(|_| ids).map_err(backend),
+            Ok(Some(ids)) => {
+                tx.commit().await.map_err(backend)?;
+                // An edit shows on the card face as well as in the panel.
+                self.announce([
+                    Topic::Board,
+                    Topic::Task(task_id.to_string()),
+                    Topic::Activity,
+                ]);
+                Ok(ids)
+            }
             Ok(None) => {
                 let _ = tx.rollback().await;
                 Err(StoreError::NotFound)
@@ -2148,6 +2308,14 @@ impl Store for TursoStore {
         match written {
             Ok(Outcome::Wrote) => {
                 tx.commit().await.map_err(backend)?;
+                // Past the commit, so a woken client re-reads the move rather
+                // than the state before it. The rolled-back arms below say
+                // nothing on purpose: nothing changed to re-read.
+                self.announce([
+                    Topic::Board,
+                    Topic::Task(task_id.to_string()),
+                    Topic::Activity,
+                ]);
                 Ok(Moved::Recorded(Transition {
                     id: transition_id,
                     task_id: task_id.to_string(),
@@ -2332,6 +2500,13 @@ impl Store for TursoStore {
         match written {
             Ok(Some(deletion)) => {
                 tx.commit().await.map_err(backend)?;
+                // The card left the board and its detail panel is now a page
+                // about nothing — both need to hear, and only after commit.
+                self.announce([
+                    Topic::Board,
+                    Topic::Task(task_id.to_string()),
+                    Topic::Activity,
+                ]);
                 Ok(deletion)
             }
             Ok(None) => {
@@ -2444,6 +2619,9 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        // Task-scoped: the task's own trail and the workspace feed both grew.
+        self.announce([Topic::Activity, Topic::Task(task_id.to_string())]);
         Ok(id)
     }
 
@@ -2464,6 +2642,9 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        // Workspace-wide, belonging to no task — the feed only.
+        self.announce([Topic::Activity]);
         Ok(id)
     }
 
@@ -2501,6 +2682,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        self.announce([Topic::Rules]);
         let sql = format!("SELECT {RULE_COLUMNS} FROM mail_rule WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => rule_from(&row),
@@ -2552,6 +2734,8 @@ impl Store for TursoStore {
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        drop(conn);
+        self.announce([Topic::Rules]);
         Ok(())
     }
 
@@ -2646,6 +2830,8 @@ impl Store for TursoStore {
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        drop(conn);
+        self.announce([Topic::Rules]);
         Ok(())
     }
 
@@ -2660,6 +2846,9 @@ impl Store for TursoStore {
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        drop(conn);
+        // The rule's queued mail cascaded away with it, so the queue moved too.
+        self.announce([Topic::Rules, Topic::Queue]);
         Ok(())
     }
 
@@ -2720,6 +2909,8 @@ impl Store for TursoStore {
         if n == 0 {
             return Ok(None);
         }
+        // A mail joined the queue, so the queue panel is out of date.
+        self.announce([Topic::Queue]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row).map(Some),
@@ -2747,6 +2938,9 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        // Two surfaces at once: the invite is a queued mail, and an invited
+        // person shows up in the members list before they ever sign in.
+        self.announce([Topic::Queue, Topic::Members]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row),
@@ -2774,6 +2968,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        self.announce([Topic::Queue]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row),
@@ -2796,6 +2991,11 @@ impl Store for TursoStore {
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        // The connection guard goes first: announcing is a send on a channel
+        // whose subscribers may turn round and read this store, and holding
+        // the single connection while they do is how that deadlocks.
+        drop(conn);
+        self.announce([Topic::Queue]);
         Ok(())
     }
 
@@ -2831,6 +3031,10 @@ impl Store for TursoStore {
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        drop(conn);
+        // The attempt counter and the next-try time both just moved, and the
+        // queue panel renders both.
+        self.announce([Topic::Queue]);
         Ok(())
     }
 
@@ -2857,7 +3061,28 @@ impl Store for TursoStore {
         if n == 0 {
             return Err(StoreError::NotFound);
         }
+        drop(conn);
+        self.announce([Topic::Queue]);
         Ok(())
+    }
+
+    async fn next_due_at(&self) -> Result<Option<OffsetDateTime>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT MIN(next_attempt_at) FROM mail_send WHERE next_attempt_at IS NOT NULL",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        let Some(row) = rows.next().await.map_err(backend)? else {
+            return Ok(None);
+        };
+        // MIN over no rows is one row holding NULL, not an empty result.
+        match row.get_value(0).map_err(backend)? {
+            Value::Text(at) => parse_stamp(&at).map(Some),
+            _ => Ok(None),
+        }
     }
 
     async fn sends_owed(&self, now: OffsetDateTime, limit: u32) -> Result<Vec<MailSend>> {
@@ -2922,6 +3147,8 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Queue]);
         Ok(())
     }
 
@@ -2948,6 +3175,9 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        drop(conn);
+        // A decision is what the rules page's decisions tab renders.
+        self.announce([Topic::Rules]);
         Ok(())
     }
 

@@ -10,6 +10,7 @@ pub mod dropdown;
 pub mod files;
 pub mod i18n;
 pub mod layout;
+pub mod live;
 pub mod logs;
 pub mod pages;
 pub mod photo;

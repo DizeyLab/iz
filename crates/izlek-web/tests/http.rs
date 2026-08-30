@@ -44,11 +44,22 @@ fn asset_dir() -> PathBuf {
     ))
 }
 
+/// A live connection in the suite outlives any test that reads it. The bound
+/// on a live test is [`live_until`]'s own timeout — waiting for the frame it
+/// expects — not this window: a window short enough to end the stream promptly
+/// is also short enough to lose the race on a loaded machine, which is a
+/// flaky test rather than a fast one.
+const TEST_LIVE_WINDOW: izlek_web::live::LiveWindow =
+    izlek_web::live::LiveWindow(std::time::Duration::from_secs(10));
+
 /// A throwaway workspace: its own database file and its own router.
 struct App {
     dir: PathBuf,
     router: Router,
     store: Arc<dyn Store>,
+    /// Stands in for Ctrl+C. Held so a test can stop this router the way the
+    /// process stops the real one.
+    stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl App {
@@ -61,6 +72,7 @@ impl App {
                 .unwrap(),
         );
         let accounts = Accounts::new(store.clone(), base_url);
+        let (stop, _) = tokio::sync::watch::channel(false);
         let router = Router::builder()
             .discover()
             .layer(
@@ -73,9 +85,12 @@ impl App {
                     .expect("run `topcoat asset bundle` before the http suite"),
             )
             .app_context(accounts)
+            .app_context(izlek_web::photo::PhotoStamps::default())
+            .app_context(TEST_LIVE_WINDOW)
+            .app_context(izlek_web::live::Shutdown(stop.subscribe()))
             .app_context(mail)
             .build();
-        Self { dir, router, store }
+        Self { dir, router, store, stop }
     }
 
     async fn open() -> Self {
@@ -99,6 +114,7 @@ impl App {
             "https://izlek.sh",
         ));
         let accounts = Accounts::new(store.clone(), "https://izlek.sh");
+        let (stop, _) = tokio::sync::watch::channel(false);
         let router = Router::builder()
             .discover()
             .layer(
@@ -111,9 +127,29 @@ impl App {
                     .expect("run `topcoat asset bundle` before the http suite"),
             )
             .app_context(accounts)
+            .app_context(izlek_web::photo::PhotoStamps::default())
+            .app_context(TEST_LIVE_WINDOW)
+            .app_context(izlek_web::live::Shutdown(stop.subscribe()))
             .app_context(Mail::sending(engine))
             .build();
-        Self { dir, router, store }
+        Self { dir, router, store, stop }
+    }
+
+    /// Opens `/api/live`. The response is returned as soon as the handler has
+    /// subscribed, so a caller writes AFTER this returns and the announcement
+    /// still lands in the feed.
+    async fn live_open(
+        &self,
+        cookie: Option<&str>,
+    ) -> topcoat::router::response::Response<Body> {
+        let mut request = Request::builder().method("GET").uri("/api/live");
+        if let Some(cookie) = cookie {
+            request = request.header(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
+            );
+        }
+        self.router.handle(request.body(Body::empty()).unwrap()).await
     }
 
     /// The single workspace's id, read straight off the store: `TursoStore` is
@@ -1980,7 +2016,7 @@ async fn the_soft_swap_rewrites_the_url_before_the_new_pages_scripts_run() {
     let page = app.get("/", Some(&cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     let (_, after) = html
-        .split_once("function swap(html, url, fresh, push)")
+        .split_once("function swap(html, url, fresh, push, morphing)")
         .unwrap_or_else(|| panic!("no soft-nav swap on the board page: {html}"));
     let body = after
         .split_once("window.__izlekGo")
@@ -3014,7 +3050,11 @@ async fn an_admin_sees_the_sender_and_never_a_password() {
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("smtp.fastmail.com"), "{html}");
     assert!(html.contains("izlek@izlek.sh"), "{html}");
-    assert!(html.contains("Connected"), "{html}");
+    // Saved in full, and nobody has dialled the server — this router has no
+    // mail engine at all. "Connected" would be a claim about a handshake that
+    // never happened, which is the whole reason the chip has four states.
+    assert!(html.contains("Unchecked"), "{html}");
+    assert!(!html.contains("chip-connected"), "{html}");
     assert!(
         !html.contains(SENDER_PASSWORD),
         "the settings page carried the SMTP password: {html}"
@@ -5167,6 +5207,52 @@ async fn an_unknown_photo_id_is_not_found_and_the_photo_revalidates_by_etag() {
     assert!(cached.bytes.is_empty());
 }
 
+/// The whole point of a versioned photo URL: replacing the photo must move
+/// the stamp the avatar renders, or the browser keeps serving the bytes it
+/// cached under the old URL and the replacement never shows.
+#[tokio::test]
+async fn a_replaced_photo_moves_the_avatar_url_stamp() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@izlek.sh").await;
+
+    app.post_multipart(
+        "/api/profile_photo",
+        Some(&admin),
+        &[],
+        Some(("me.png", "image/png", &PNG)),
+    )
+    .await;
+    let page = app.get("/settings", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    let first = avatar_stamp(&html, &admin_id).expect("avatar photo URL on the settings page");
+
+    let mut replaced = PNG;
+    replaced[11] ^= 0xff;
+    app.post_multipart(
+        "/api/profile_photo",
+        Some(&admin),
+        &[],
+        Some(("me.png", "image/png", &replaced)),
+    )
+    .await;
+    let page = app.get("/settings", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    let second = avatar_stamp(&html, &admin_id).expect("avatar photo URL after replace");
+
+    assert!(second > first, "stamp must move: {first} -> {second}");
+}
+
+/// The `?v=` on an avatar's `/photo/{id}` src, parsed out of a rendered page.
+fn avatar_stamp(html: &str, user_id: &str) -> Option<i64> {
+    let marker = format!("/photo/{user_id}?v=");
+    let rest = &html[html.find(&marker)? + marker.len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 /// The nav shows a page only to a role that can act on it: an admin's board
 /// carries all four links, a member's carries neither Rules nor Logs.
 #[tokio::test]
@@ -6625,4 +6711,339 @@ async fn a_big_sheet_pages_down_its_rows_and_across_its_columns() {
     let html = String::from_utf8_lossy(&nowhere.bytes);
     assert!(html.contains("sheet-table"), "the grid is gone: {html}");
     assert!(!html.contains("Col A"), "row 4951 is not row 1: {html}");
+}
+
+
+// -- the live channel -------------------------------------------------------
+
+/// Reads a live connection until it says `needle`, or until `patience` runs
+/// out, and hands back everything it said. Bounded by the frame it is waiting
+/// for rather than by a fixed sleep: the positive assertions return the moment
+/// the announcement lands, and the negative ones spend their whole patience
+/// proving the silence.
+async fn live_until(
+    response: topcoat::router::response::Response<Body>,
+    needle: &str,
+    patience: std::time::Duration,
+) -> String {
+    use http_body_util::BodyExt;
+
+    let mut body = response.into_body();
+    let mut heard = String::new();
+    let deadline = tokio::time::Instant::now() + patience;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return heard;
+        }
+        match tokio::time::timeout(left, body.frame()).await {
+            Err(_) => return heard,
+            Ok(None) => return heard,
+            Ok(Some(Err(_))) => return heard,
+            Ok(Some(Ok(frame))) => {
+                if let Some(chunk) = frame.data_ref() {
+                    heard.push_str(&String::from_utf8_lossy(chunk));
+                    if heard.contains(needle) {
+                        return heard;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A browser nobody signed in gets no feed at all.
+#[tokio::test]
+async fn the_live_channel_refuses_a_signed_out_caller() {
+    let app = App::open().await;
+    admin(&app).await;
+    let response = app.live_open(None).await;
+    assert_eq!(response.status(), 401);
+}
+
+/// The role gate reaches the channel: a member is never told that an
+/// admin-only surface moved, because being told is itself knowing something
+/// about it. The assertion is on the raw bytes on purpose — the topic name
+/// must not appear at all, not merely go unrendered.
+#[tokio::test]
+async fn the_live_channel_never_names_an_admin_surface_to_a_member() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let member = invited(&app, &boss, "bo@izlek.sh", "Bo", Role::Member).await;
+
+    let member_feed = app.live_open(Some(&member)).await;
+    let admin_feed = app.live_open(Some(&boss)).await;
+
+    // An admin-only write: a mail rule.
+    let workspace_id = app.workspace_id().await;
+    let board = app.store.board(&workspace_id).await.unwrap().unwrap().id;
+    app.store
+        .create_mail_rule(
+            &board,
+            &izlek_core::store::Trigger::Created,
+            "Something happened",
+            izlek_core::store::Audience::Board,
+            time::OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    // The admin's stream is the clock: once it has the announcement, the
+    // member's has had every chance to receive one too.
+    let heard_by_admin = live_until(admin_feed, "rules", std::time::Duration::from_secs(10)).await;
+    let heard_by_member =
+        live_until(member_feed, "rules", std::time::Duration::from_millis(500)).await;
+
+    assert!(
+        !heard_by_member.contains("rules"),
+        "a member was told about the rules: {heard_by_member}"
+    );
+    assert!(
+        heard_by_admin.contains("rules"),
+        "the admin was not told about the rules: {heard_by_admin}"
+    );
+}
+
+/// A surface everybody can see is announced to everybody.
+#[tokio::test]
+async fn the_live_channel_announces_a_shared_surface_to_a_member() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let member = invited(&app, &boss, "bo@izlek.sh", "Bo", Role::Member).await;
+    let column = first_column(&app).await;
+
+    let feed = app.live_open(Some(&member)).await;
+    a_task(&app, &boss, &column, "Ship the exporter").await;
+    let heard = live_until(feed, "board", std::time::Duration::from_secs(10)).await;
+
+    assert!(heard.contains("board"), "no board announcement: {heard}");
+}
+
+/// The guard is what stops a soft navigation stacking a second `EventSource`
+/// on the tab: `swap()` re-executes every script it swaps in, so the script
+/// must refuse to run twice. Emitted once, and only once, per page.
+#[tokio::test]
+async fn the_live_script_is_emitted_once_and_guarded() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let html = String::from_utf8(app.get("/", Some(&boss)).await.bytes).unwrap();
+
+    assert_eq!(
+        html.matches("__izlekLive").count(),
+        2,
+        "the live script should appear once, as a guard read and a guard set"
+    );
+    assert!(html.contains("EventSource('/api/live')"), "no live connection");
+}
+
+/// A signed-out page opens no stream: `/api/live` refuses it, and a tab on the
+/// sign-in screen would otherwise reconnect against that refusal forever.
+#[tokio::test]
+async fn a_signed_out_page_opens_no_live_connection() {
+    let app = App::open().await;
+    admin(&app).await;
+    let html = String::from_utf8(app.get("/", None).await.bytes).unwrap();
+    assert!(
+        !html.contains("__izlekLive"),
+        "the sign-in page carries the live script"
+    );
+}
+
+/// Text that goes stale on the clock rather than on a write carries the mark
+/// the tick looks for — a queued mail's next-try time is the case that started
+/// this: nothing writes when the minute changes.
+#[tokio::test]
+async fn a_queued_mails_next_try_is_marked_for_the_tick() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    app.store
+        .queue_notice(
+            "bo@izlek.sh",
+            "Your \u{130}zlek sign-in link",
+            "body",
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(app.get("/logs?section=queue", Some(&boss)).await.bytes).unwrap();
+    assert!(
+        html.contains("data-tick"),
+        "the queue's next-try stamp is not marked for the tick"
+    );
+}
+
+/// A live update changes only what actually changed. It morphs the fetched
+/// document onto the live one instead of replacing the body, which is what
+/// leaves an open dropdown open, a caret where it was and a half-typed comment
+/// intact — not because any of those is special-cased, but because nothing
+/// touched them. Asserted here so a refactor back to a wholesale replace fails
+/// loudly rather than quietly making the app unusable while anyone is typing.
+#[tokio::test]
+async fn a_live_update_morphs_rather_than_replacing_the_page() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let html = String::from_utf8(app.get("/", Some(&boss)).await.bytes).unwrap();
+
+    assert!(html.contains("function morph("), "no morph: the live path replaces the page");
+    assert!(
+        html.contains("swap(t, r.url, false, false, true)"),
+        "the live refresh does not ask for a morphing swap"
+    );
+    // The dropdown's trigger and panel are built by script and are in no
+    // server response; a morph that did not know that would delete them.
+    assert!(
+        html.contains("function clientMade(") && html.contains("dd-panel"),
+        "the morph would delete the dropdown's own nodes as strays"
+    );
+    // Navigations and form posts must still replace: restoring a sent comment
+    // over the server's cleared box would look like the message never went.
+    assert!(
+        html.contains("document.body.replaceChildren()"),
+        "the full-replace path is gone, so form posts would carry stale state"
+    );
+    assert!(html.contains("captureFields"), "the swap captures no field state");
+    assert!(html.contains("restoreFields"), "the swap restores no field state");
+}
+
+/// A promise about the future is shown to the second. A retry that says 16:42
+/// but fires at 16:42:47 reads as forty-seven seconds of broken clock to
+/// whoever is watching one; the queue names the second it means.
+#[tokio::test]
+async fn the_queues_next_try_is_shown_to_the_second() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    app.store
+        .queue_notice(
+            "bo@izlek.sh",
+            "Subject",
+            "body",
+            time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+    let html = String::from_utf8(app.get("/logs?section=queue", Some(&boss)).await.bytes).unwrap();
+    let (_, after) = html.split_once("rule-stamp").expect("no next-try stamp on the queue");
+    let stamp: String = after.chars().take(60).collect();
+    // hh:mm:ss — three groups, not two.
+    let seconds = stamp
+        .split(|c: char| !c.is_ascii_digit() && c != ':')
+        .find(|part| part.matches(':').count() == 2);
+    assert!(
+        seconds.is_some(),
+        "the next-try stamp is not shown to the second: {stamp}"
+    );
+}
+
+/// The chip reports what the server said, not what the form contains. A
+/// refusal shows the server's own words, because "535 authentication failed"
+/// is something an admin can act on and a grey chip is not.
+#[tokio::test]
+async fn a_refused_handshake_is_shown_with_what_the_server_said() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    assert!(sender_saved(&app, &admin_cookie).await);
+
+    let workspace = app.workspace_id().await;
+    app.store
+        .record_sender_check(
+            &workspace,
+            izlek_core::store::SenderCheck {
+                at: time::OffsetDateTime::now_utc(),
+                took_ms: 0,
+                error: Some("535 authentication failed".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let html = String::from_utf8(
+        app.get("/settings?section=outgoing", Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .unwrap();
+    assert!(html.contains("Refused"), "{html}");
+    assert!(
+        html.contains("535 authentication failed"),
+        "the server's words are not on the page: {html}"
+    );
+    assert!(!html.contains("chip-connected"), "a refusal rendered as connected");
+}
+
+/// A handshake that worked says when, because the claim is about a moment: a
+/// password rotated an hour later is not something the panel can know.
+#[tokio::test]
+async fn a_passed_handshake_says_when_it_passed() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    assert!(sender_saved(&app, &admin_cookie).await);
+
+    let workspace = app.workspace_id().await;
+    app.store
+        .record_sender_check(
+            &workspace,
+            izlek_core::store::SenderCheck {
+                at: time::OffsetDateTime::now_utc(),
+                took_ms: 84,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let html = String::from_utf8(
+        app.get("/settings?section=outgoing", Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .unwrap();
+    assert!(html.contains("chip-connected"), "{html}");
+    assert!(html.contains("Connected"), "{html}");
+}
+
+/// Dialling the mail server is an admin's business.
+#[tokio::test]
+async fn a_member_may_not_check_the_sender() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let member = invited(&app, &boss, "bo@izlek.sh", "Bo", Role::Member).await;
+    let answer = app.post("/api/check_sender", Some(&member), &[]).await;
+    assert_ne!(answer.body, "null", "a member was allowed to dial the server");
+}
+
+/// An open live stream must not be something the shutdown has to wait out.
+///
+/// The server stops accepting connections and then gives in-flight requests
+/// thirty seconds to finish. A live stream intends to sit there for the whole
+/// window, and every open tab is one, so before this the answer to Ctrl+C was
+/// a thirty-second pause — measured at 30.00s with three tabs open, 0.003s
+/// after. The stream is told, and it ends.
+#[tokio::test]
+async fn a_live_stream_ends_when_the_server_is_told_to_stop() {
+    use http_body_util::BodyExt;
+
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let mut body = app.live_open(Some(&admin_cookie)).await.into_body();
+
+    // It is open and it is staying open: nothing has changed, so a read now
+    // finds nothing to say.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), body.frame())
+            .await
+            .is_err(),
+        "the stream ended on its own before anything asked it to"
+    );
+
+    app.stop.send(true).unwrap();
+
+    // The window is ten seconds and the patience here is one, so a pass cannot
+    // be the window expiring.
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(Ok(_)) = body.frame().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "the stream outlived the stop");
 }

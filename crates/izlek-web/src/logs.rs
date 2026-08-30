@@ -561,7 +561,7 @@ async fn snapshot(
                     format!(
                         "{} {}",
                         t(lang, Key::NextTry),
-                        izlek_core::detail::moment_label_in(at, zone)
+                        izlek_core::detail::moment_label_with_seconds_in(at, zone)
                     )
                 }
             }),
@@ -957,6 +957,11 @@ async fn logs_screen(
                                     line.state.clone()
                                 };
                                 let chip_class = format!("rule-term rule-term-{}", line.state_kind);
+                                // A queued mail's next-try time goes stale on
+                                // the clock, not on a write, so it carries the
+                                // mark the tick looks for. A row with no retry
+                                // left has nothing that moves.
+                                let ticking = line.next_attempt.is_some();
                                 let next_attempt = line.next_attempt.unwrap_or_else(|| t(lang, Key::NoRetry).to_string());
                                 <div class="rule-row">
                                     <div class="rule-sentence">
@@ -965,7 +970,7 @@ async fn logs_screen(
                                         <span class=(chip_class)>(state_note)</span>
                                         <span>(crate::i18n::attempt_label(lang, line.attempts))</span>
                                     </div>
-                                    <span class="rule-stamp">(next_attempt)</span>
+                                    <span class="rule-stamp" data-tick=(ticking.then_some(""))>(next_attempt)</span>
                                     if line.state_kind == "failed" || line.state_kind == "abandoned" {
                                         <form method="post" action="/api/retry_send">
                                             <input type="hidden" name="send_id" value=(line.id.clone())>

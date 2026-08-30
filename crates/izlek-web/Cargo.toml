@@ -17,6 +17,7 @@ topcoat = { version = "0.6.2", default-features = false, features = [
   "serve",
   "compression",
   "multipart",
+  "sse",
 ] }
 izlek-core = { workspace = true, features = ["server"] }
 serde.workspace = true
@@ -25,6 +26,9 @@ time.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
 async-trait = "0.1.92"
+# The live stream is built with `futures_util::stream::unfold`; topcoat does
+# not re-export the futures traits, so this is named directly.
+futures-util = { version = "0.3", default-features = false }
 # TLS through rustls with the ring provider: no OpenSSL on the deployment box,
 # and no system certificate store to be missing inside a container.
 lettre = { version = "0.11.23", default-features = false, features = [
@@ -42,4 +46,7 @@ grass = "0.13"
 
 [dev-dependencies]
 http = "1.5"
+# Reads an SSE body frame by frame, so a live-channel test can wait for the
+# announcement it expects instead of for a clock.
+http-body-util = "0.1"
 ulid = { workspace = true }
