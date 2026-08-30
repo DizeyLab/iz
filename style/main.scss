@@ -364,28 +364,45 @@ a {
   padding: 0 24px;
 }
 
+// The brand lockup is the one thing the two skins do NOT restyle: same
+// monogram, same face, same size in Instrument and Ledger, light and dark.
+// The mark takes the ink from `currentColor` and the tittle from the accent,
+// so it re-tints with the theme without a second drawing.
 .wordmark {
   display: flex;
-  align-items: baseline;
-  gap: 1px;
+  align-items: center;
+  gap: 10px;
   text-decoration: none;
   color: inherit;
 
   &:hover { color: inherit; }
 
-  &-text {
-    font-size: 18px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
+  &-mark {
+    flex: none;
+    display: block;
+    width: 24px;
+    height: 24px;
   }
 
-  &-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    display: inline-block;
-    margin-left: 3px;
+  // The word without the mark, on the sign-in and setup pages: nothing else
+  // in that chrome, so it can take the room the topbar version cannot.
+  &-lone &-text {
+    font-size: 18px;
+    letter-spacing: 0.01em;
+  }
+
+  &-tittle {
+    fill: var(--accent);
+  }
+
+  // Lower case, and not by taste: capitalised, the dotted `i` becomes `I` and
+  // the name reads as the English word. The tittle is the Turkish one, in the
+  // word as it is in the mark.
+  &-text {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
   }
 }
 

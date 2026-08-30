@@ -9,15 +9,10 @@
 [data-ui="ledger"] {
   // --- Ledger skin: typography -------------------------------------------------
 
-  // The display face carries named things: the wordmark, page/board/panel
-  // titles, task titles, people. Keys, dates, counts and labels stay IBM
-  // Plex Mono 10px uppercase — main.scss's metadata idiom is left alone.
-  .wordmark-text {
-    font-family: var(--font-display);
-    font-size: 21px;
-    font-weight: 600;
-  }
-
+  // The display face carries named things: page/board/panel titles, task
+  // titles, people. Keys, dates, counts and labels stay IBM Plex Mono 10px
+  // uppercase — main.scss's metadata idiom is left alone, and so is the
+  // wordmark, which is the same lockup on both skins.
   .auth-title,
   .settings-title,
   .detail-title,

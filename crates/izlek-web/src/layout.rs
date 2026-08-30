@@ -18,6 +18,57 @@ use izlek_core::board::Person;
 use crate::i18n::{Key, Lang, t};
 use crate::server::current_user;
 
+/// The İz monogram again, as the tab icon: the same drawing as `wordmark`,
+/// inlined because it must carry its own colours — a data URI has no page to
+/// inherit `currentColor` or the accent token from, so the two themes are
+/// spelled out in a media query inside the SVG.
+const FAVICON: &str = "data:image/svg+xml,\
+    <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>\
+    <style>.i{fill:%231a1b1d}.t{fill:%2346557b}.s{stroke:%231a1b1d}\
+    @media(prefers-color-scheme:dark){.i{fill:%23e6e4de}.t{fill:%238ba1e8}\
+    .s{stroke:%23e6e4de}}</style>\
+    <rect class='i' x='3.1' y='9.4' width='4.4' height='11.6' rx='2.2'/>\
+    <circle class='t' cx='5.3' cy='4.9' r='2.6'/>\
+    <path class='s' d='M11.4 10.6h9.3L11.4 19.8h9.5' fill='none' \
+    stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/></svg>";
+
+/// The İz monogram — a dotted `i` beside a stroked `z`, the trace the product
+/// is named for. It takes `currentColor` for its strokes and the accent for
+/// its tittle, so one drawing serves both skins and both themes.
+///
+/// The monogram and the wordmark are alternates, never a pair: `İz` spells the
+/// first two letters of `İzlek`, so standing them side by side reads as a
+/// stutter no amount of space or framing repairs. The mark carries the chrome,
+/// where the name is already known and the room is 44px; the word carries the
+/// front door, where a stranger arrives and nothing else has said it yet.
+pub(crate) async fn mark(cx: &Cx) -> Result {
+    view! {
+        cx =>
+        <a class="wordmark" href="/" aria-label="İzlek">
+            <svg class="wordmark-mark" width="24" height="24" viewBox="0 0 24 24"
+                aria-hidden="true">
+                <rect x="3.1" y="9.4" width="4.4" height="11.6" rx="2.2"
+                    fill="currentColor"></rect>
+                <circle class="wordmark-tittle" cx="5.3" cy="4.9" r="2.6"></circle>
+                <path d="M11.4 10.6h9.3L11.4 19.8h9.5" fill="none"
+                    stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                    stroke-linejoin="round"></path>
+            </svg>
+        </a>
+    }
+}
+
+/// The wordmark, the monogram's other half: the name alone, in the one face
+/// both skins agree on. The sign-in and setup pages wear it — see `mark`.
+pub(crate) async fn wordmark(cx: &Cx) -> Result {
+    view! {
+        cx =>
+        <a class="wordmark wordmark-lone" href="/">
+            <span class="wordmark-text">"İzlek"</span>
+        </a>
+    }
+}
+
 /// A person as a circle (or, on the Instrument skin, a square) — the initials
 /// avatar when there is no photo, an `<img>` reading `/photo/{id}` otherwise.
 /// Shared by the board, the modal and every topbar user menu.
@@ -450,7 +501,8 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                     rel="stylesheet"
                     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,600;1,400;1,600&display=swap"
                 >
-                <title>"Izlek"</title>
+                <title>"İzlek"</title>
+                <link rel="icon" href=(FAVICON)>
                 <link rel="stylesheet" href=(STYLE)>
                 topcoat::runtime::script()
                 topcoat::dev::script()

@@ -69,15 +69,12 @@ async fn topbar(cx: &Cx) -> Result {
     view! {
         cx =>
         <header class="topbar">
-            <a class="wordmark" href="/">
-                <span class="wordmark-text">"izlek"</span>
-                <span class="wordmark-dot"></span>
-            </a>
+            (crate::layout::wordmark(cx).await?)
         </header>
     }
 }
 
-/// "Set up Izlek" — the first account in an empty workspace.
+/// "Set up İzlek" — the first account in an empty workspace.
 async fn setup_card(cx: &Cx) -> Result {
     let refusal = refusal_of(cx, "claim_workspace");
     let lang = Lang::En;

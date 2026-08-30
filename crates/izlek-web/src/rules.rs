@@ -878,10 +878,7 @@ async fn rules_page(cx: &Cx) -> Result {
 
     view! {
         <header class="topbar">
-            <a class="wordmark" href="/">
-                <span class="wordmark-text">"izlek"</span>
-                <span class="wordmark-dot"></span>
-            </a>
+            (crate::layout::mark(cx).await?)
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Rules, user.role, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)

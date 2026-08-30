@@ -573,10 +573,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     view! {
         cx =>
         <header class="topbar">
-            <a class="wordmark" href="/">
-                <span class="wordmark-text">"izlek"</span>
-                <span class="wordmark-dot"></span>
-            </a>
+            (crate::layout::mark(cx).await?)
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Board, user.role, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &crate::detail::Me::from(user), lang).await?)
