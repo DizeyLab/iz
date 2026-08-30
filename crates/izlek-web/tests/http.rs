@@ -537,6 +537,68 @@ async fn queued_join_token(app: &App, email: &str) -> String {
 
 /// Invites someone in the given role and signs them in, returning their cookie.
 #[tokio::test]
+async fn an_admin_can_send_a_signin_link_to_somebody_who_already_has_a_password() {
+    // Somebody who forgets their password is the person who needs a fresh
+    // link, and they were the one person the button was hidden from: it was
+    // drawn only while `!has_password`. There was no other way back into the
+    // workspace — no reset anywhere — so a forgotten password was the end of
+    // that account.
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    // `invited` redeems the link, so this member has a password.
+    let _member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
+
+    let page = app.get("/settings?section=members", Some(&admin_cookie)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        page.contains("Send a sign-in link"),
+        "no way to send a link to a member who has a password: {page}"
+    );
+
+    // And the link it sends actually works: a new password, set on the
+    // strength of it.
+    let workspace_id = app.workspace_id().await;
+    let member_id = app
+        .store
+        .user_by_email(&workspace_id, "emre@izlek.sh")
+        .await
+        .unwrap()
+        .expect("the member is not in the store")
+        .id;
+    let answer = app
+        .post(
+            "/api/resend_link",
+            Some(&admin_cookie),
+            &[("user_id", &member_id)],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+
+    let token = queued_join_token(&app, "emre@izlek.sh").await;
+    let answer = app
+        .post(
+            "/api/redeem_link",
+            None,
+            &[("token", &token), ("password", "second thoughts about oats")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert_eq!(answer.body, "null", "the reissued link was refused");
+
+    let back = app
+        .post(
+            "/api/sign_in",
+            None,
+            &[
+                ("email", "emre@izlek.sh"),
+                ("password", "second thoughts about oats"),
+            ],
+        )
+        .await;
+    assert!(back.session.is_some(), "the new password does not sign in: {}", back.body);
+}
+
+#[tokio::test]
 async fn a_password_may_be_made_of_punctuation() {
     // An invited member reported "it would not accept the *". Nothing in the
     // rules mentions characters, so if one is refused it is the wire eating

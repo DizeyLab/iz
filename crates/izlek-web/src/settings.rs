@@ -1583,11 +1583,29 @@ async fn settings_page(cx: &Cx) -> Result {
                                             <td class="member-col-account member-account">
                                                 <span class="member-account-row">
                                                     <span class="member-status">(account)</span>
-                                                    if !member.has_password {
-                                                        <form method="post" action="/api/resend_link" class="member-resend">
-                                                            <input type="hidden" name="user_id" value=(member.id.clone())>
-                                                            <button class="quiet" type="submit">(t(lang, Key::ResendMail))</button>
-                                                        </form>
+                                                    // The control is here for everyone an admin could
+                                                    // send a link to, which is everyone. It used to be
+                                                    // drawn only for a member who had never set a
+                                                    // password — so the one person who needs a fresh
+                                                    // link, the one who forgot theirs, was the one
+                                                    // person the button was hidden from, and the
+                                                    // workspace had no way back in for them at all.
+                                                    // `resend_invitation` never cared: it mints a link
+                                                    // for any member of this workspace. Not for
+                                                    // yourself: your own password is in Your profile,
+                                                    // and mailing yourself a link to it is a longer
+                                                    // way round to the same pane.
+                                                    if !member.is_you {
+                                                    <form method="post" action="/api/resend_link" class="member-resend">
+                                                        <input type="hidden" name="user_id" value=(member.id.clone())>
+                                                        <button class="quiet" type="submit">
+                                                            (if member.has_password {
+                                                                t(lang, Key::SendSigninLink)
+                                                            } else {
+                                                                t(lang, Key::ResendMail)
+                                                            })
+                                                        </button>
+                                                    </form>
                                                     }
                                                 </span>
                                             </td>

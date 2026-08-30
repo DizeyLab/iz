@@ -187,6 +187,17 @@ pub fn check_password(
 mod tests {
     use super::*;
 
+    /// The exact report: an invited member typed `abcde*abcde` and was told it
+    /// looked like his address or his name. It is eleven characters and shares
+    /// nothing with either.
+    #[test]
+    fn a_password_sharing_nothing_with_the_person_is_accepted() {
+        assert_eq!(
+            check_password("abcde*abcde", "burakboduroglu0@gmail.com", "Burak Boduroğlu"),
+            Ok(())
+        );
+    }
+
     #[test]
     fn a_password_round_trips_and_a_wrong_one_does_not() {
         let phc = hash_password("correct horse battery").unwrap();
