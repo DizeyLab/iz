@@ -86,14 +86,16 @@ pub struct Accounts {
     store: Arc<dyn Store>,
     /// The origin the sign-in link in an invite mail points at, with no
     /// trailing slash.
-    base_url: String,
+    /// The address a mailed link carries when no admin has set one: the
+    /// address the process binds, from `config/izlek.toml`.
+    fallback_url: String,
 }
 
 impl Accounts {
-    pub fn new(store: Arc<dyn Store>, base_url: impl Into<String>) -> Self {
+    pub fn new(store: Arc<dyn Store>, fallback_url: impl Into<String>) -> Self {
         Self {
             store,
-            base_url: base_url.into(),
+            fallback_url: fallback_url.into(),
         }
     }
 
@@ -195,23 +197,23 @@ impl Accounts {
         Ok(())
     }
 
-    /// The address the process was configured with — what a link falls back
-    /// to when no admin has set one.
-    pub fn configured_url(&self) -> &str {
-        &self.base_url
+    /// What a link falls back to when no admin has set an address: where the
+    /// process listens.
+    pub fn fallback_url(&self) -> &str {
+        &self.fallback_url
     }
 
     /// The origin a mailed link points at: the address an admin set in
-    /// Settings, or the one the process was configured with. A box behind a
-    /// proxy answers on localhost and is reached on a public name, and only
-    /// the admin knows which — so the stored one wins whenever it is there.
+    /// Settings, or the one the process listens on. A box behind a proxy
+    /// answers on localhost and is reached on a public name, and only the
+    /// admin knows which — so the stored one wins whenever it is there.
     async fn base(&self) -> Result<String> {
         Ok(self
             .store
             .workspace()
             .await?
             .and_then(|workspace| workspace.public_url)
-            .unwrap_or_else(|| self.base_url.clone()))
+            .unwrap_or_else(|| self.fallback_url.clone()))
     }
 
     async fn mint_link(&self, actor: &User, user: &User) -> Result<Invitation> {

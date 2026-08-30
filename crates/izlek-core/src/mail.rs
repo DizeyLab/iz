@@ -130,19 +130,21 @@ pub struct Engine {
     store: Arc<dyn Store>,
     mailer: Arc<dyn Mailer>,
     /// The origin links in mail point at, with no trailing slash.
-    base_url: String,
+    /// Where a mailed link points when no admin has set an address: the
+    /// address the process listens on.
+    fallback_url: String,
 }
 
 impl Engine {
     pub fn new(
         store: Arc<dyn Store>,
         mailer: Arc<dyn Mailer>,
-        base_url: impl Into<String>,
+        fallback_url: impl Into<String>,
     ) -> Self {
         Self {
             store,
             mailer,
-            base_url: base_url.into(),
+            fallback_url: fallback_url.into(),
         }
     }
 
@@ -719,15 +721,16 @@ impl Engine {
                 | ActivityKind::Other(_) => format!("{} touched it.", actor),
             },
         };
-        // The address an admin set in Settings wins over the configured one:
-        // a box behind a proxy answers on localhost and is reached on a
-        // public name, and a mail nobody can click is a mail not sent.
+        // The address an admin set in Settings wins over the one the process
+        // listens on: a box behind a proxy answers on localhost and is
+        // reached on a public name, and a mail nobody can click is a mail
+        // not sent.
         let base = self
             .store
             .workspace()
             .await?
             .and_then(|workspace| workspace.public_url)
-            .unwrap_or_else(|| self.base_url.clone());
+            .unwrap_or_else(|| self.fallback_url.clone());
         let mut body = format!(
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",
             key = facts.row.task_key,

@@ -38,7 +38,8 @@ async fn main() {
         .await
         .expect("failed to open the database");
     let store: Arc<dyn izlek_core::store::Store> = Arc::new(store);
-    let accounts = Accounts::new(store.clone(), config.base_url.clone());
+    // The address mail links carry when no admin has set one in Settings.
+    let accounts = Accounts::new(store.clone(), config.listen_url());
 
     // The engine is always built, because a sender can appear at any moment:
     // an admin fills the panel in and the next sweep sends what was held. It
@@ -47,7 +48,7 @@ async fn main() {
     let engine = Arc::new(izlek_core::MailEngine::new(
         store.clone(),
         Arc::new(izlek_web::smtp::WorkspaceSmtp::new(store.clone())),
-        config.base_url.clone(),
+        config.listen_url(),
     ));
     tokio::spawn(sweep(engine.clone()));
 

@@ -1033,7 +1033,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let zone = izlek_core::detail::parse_zone(&user.timezone);
     // What a link falls back to when the field is empty — the placeholder
     // shows it rather than an invented example.
-    let configured_url = accounts(cx).configured_url().to_string();
+    let configured_url = accounts(cx).fallback_url().to_string();
     let sender = if administers {
         Some(sender_now(cx, zone).await?)
     } else {

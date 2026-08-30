@@ -72,9 +72,9 @@ pub struct Workspace {
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
     /// The origin mail links point at, when an admin has set one. `None`
-    /// means the address the process was configured with — a box behind a
-    /// proxy answers on localhost and is reached on a public name, and only
-    /// an admin knows which.
+    /// means the address the process listens on — a box behind a proxy
+    /// answers on localhost and is reached on a public name, and only an
+    /// admin knows which.
     pub public_url: Option<String>,
 }
 
@@ -624,7 +624,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn smtp_password(&self, workspace_id: &str) -> Result<Option<String>>;
 
     /// Writes the address mail links point at. `None` clears it, and the
-    /// configured `base_url` is what a cleared one falls back to.
+    /// address the process listens on is what a cleared one falls back to.
     async fn set_public_url(&self, workspace_id: &str, public_url: Option<&str>) -> Result<()>;
 
     async fn set_limits(

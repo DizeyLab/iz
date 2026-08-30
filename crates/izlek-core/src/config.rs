@@ -6,8 +6,7 @@
 //! `database` does not mean "no data", it means a second Izlek quietly
 //! writing a different file while everyone believes they are looking at the
 //! same board — and Turso is single-writer, so the two are not even
-//! reconcilable afterwards. A wrong `base_url` mails people a sign-in link
-//! pointing at a host that is not us.
+//! reconcilable afterwards.
 //!
 //! Development still needs to be one command, so the *absence* of
 //! `config/izlek.toml` is the opt-in that takes the development defaults: the
@@ -19,8 +18,16 @@
 //! choices, because it only writes when the file is not there at all.
 //!
 //! Whatever is finally resolved is printed once at startup — the database
-//! path absolute, the base URL as it will appear in mail — so "which file
-//! are we on" is answered by the log rather than by someone's memory.
+//! path absolute, the address bound, the address mail will fall back to — so
+//! "which file are we on" is answered by the log rather than by someone's
+//! memory.
+//!
+//! The file is kept complete: a key it does not mention is appended, with its
+//! comment and the default already in effect, so reading the file is the way
+//! to learn what can be changed. A key nobody here knows is named in the
+//! startup report rather than obeyed or refused — a typo should be visible
+//! without being a boot failure, and a key this file has stopped honouring
+//! must never half-configure anything.
 //!
 //! The sender is not here. Host, port, username, password and from-address
 //! are workspace settings an admin writes on the Settings screen, so that
@@ -40,24 +47,38 @@ const FILE_NAME: &str = "config/izlek.toml";
 /// defaults, so that a plain `izlek` in an empty directory is one command.
 const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One process holds it.
 database = "izlek.db"
-# The origin sign-in links in mail point at.
-base_url = "http://127.0.0.1:3000"
 # The address the server listens on. Environment variables are ignored —
-# this is the only thing that decides where Izlek binds.
+# this is the only thing that decides where Izlek binds. It is also the
+# address mail links fall back to, until an admin sets one in Settings.
 listen = "127.0.0.1:3000"
 "#;
 
-/// The default `listen` when the file is silent about it — an existing
-/// deployment's `config/izlek.toml` from before this key existed still
-/// loads, and still listens where it always did.
+/// The default `listen` when the file is silent about it. A file missing this
+/// key is completed with it on the next boot, so the silence lasts one run.
 const DEFAULT_LISTEN: &str = "127.0.0.1:3000";
 
-/// The shape of `config/izlek.toml`, before the values are checked.
+/// Every optional key, with the comment and default a file missing it is
+/// completed with. `database` is not here: it has no default worth guessing,
+/// so its absence stops the boot instead.
+const OPTIONAL_KEYS: &[(&str, &str)] = &[(
+    "listen",
+    concat!(
+        "# The address the server listens on. Environment variables are ignored —\n",
+        "# this is the only thing that decides where Izlek binds. It is also the\n",
+        "# address mail links fall back to, until an admin sets one in Settings.\n",
+        "listen = \"127.0.0.1:3000\"\n"
+    ),
+)];
+
+/// The shape of `config/izlek.toml`, before the values are checked. Anything
+/// else the file says lands in `other`, which is read for its key names only
+/// — enough for the report to say a key was seen and not obeyed.
 #[derive(Deserialize)]
 struct Toml {
     database: Option<String>,
-    base_url: Option<String>,
     listen: Option<String>,
+    #[serde(flatten)]
+    other: std::collections::BTreeMap<String, toml::Value>,
 }
 
 /// What the process needs to know before it opens a socket.
@@ -65,11 +86,12 @@ struct Toml {
 pub struct Config {
     /// The database file, absolute. One process holds it.
     pub database: PathBuf,
-    /// The origin links in mail point at, with no trailing slash.
-    pub base_url: String,
     /// The address the server binds. The only source for this — `HOST` and
     /// `PORT` environment variables are never read.
     pub listen: SocketAddr,
+    /// Keys the file sets that nothing here reads, in the order the file
+    /// gives them. Named at startup so a typo is visible.
+    pub ignored: Vec<String>,
     /// Whether `config/izlek.toml` did not exist and was just written with the
     /// development defaults this boot.
     pub defaulted: bool,
@@ -127,7 +149,11 @@ impl Config {
     pub fn load_from(dir: &Path) -> Result<Config, ConfigError> {
         let path = dir.join(FILE_NAME);
         match std::fs::read_to_string(&path) {
-            Ok(text) => Config::parse(&text, dir, false),
+            Ok(text) => {
+                let config = Config::parse(&text, dir, false)?;
+                complete(&path, &text);
+                Ok(config)
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|err| {
@@ -158,15 +184,6 @@ impl Config {
         let value = |raw: Option<String>| raw.filter(|value| !value.trim().is_empty());
 
         let database = value(toml.database).ok_or(ConfigError::Missing("database"))?;
-        let base_url = value(toml.base_url).ok_or(ConfigError::Missing("base_url"))?;
-
-        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-            return Err(ConfigError::Invalid {
-                key: "base_url",
-                why: format!("{base_url:?} is not an http:// or https:// origin"),
-            });
-        }
-        let base_url = base_url.trim_end_matches('/').to_string();
 
         let listen = value(toml.listen).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
         let listen: SocketAddr = listen.parse().map_err(|err| ConfigError::Invalid {
@@ -176,20 +193,49 @@ impl Config {
 
         Ok(Config {
             database: absolute(dir, Path::new(&database)),
-            base_url,
             listen,
+            ignored: toml.other.into_keys().collect(),
             defaulted,
         })
+    }
+
+    /// The address a mailed link points at until an admin sets one in
+    /// Settings: the address the server binds, as a URL.
+    ///
+    /// A bind that names no interface — `0.0.0.0`, `::` — answers everywhere
+    /// and is reachable at none of it by name, so the loopback stands in: a
+    /// link somebody on the box can click beats a link nobody can. Whoever
+    /// puts Izlek behind a proxy sets the real address in Settings, which is
+    /// the only thing this defers to.
+    pub fn listen_url(&self) -> String {
+        let ip = self.listen.ip();
+        let host = if ip.is_unspecified() {
+            "127.0.0.1".to_string()
+        } else if self.listen.is_ipv6() {
+            format!("[{ip}]")
+        } else {
+            ip.to_string()
+        };
+        match self.listen.port() {
+            80 => format!("http://{host}"),
+            port => format!("http://{host}:{port}"),
+        }
     }
 
     /// The lines to print once at startup. Nothing secret is among them.
     pub fn report(&self) -> Vec<String> {
         let mut lines = vec![
             format!("database  {}", self.database.display()),
-            format!("base url  {}", self.base_url),
             format!("listen    {}", self.listen),
+            format!("mail url  {} until an admin sets one", self.listen_url()),
         ];
         lines.push("mail      the sender is in Settings, not here".to_string());
+        if !self.ignored.is_empty() {
+            lines.push(format!(
+                "ignored   {FILE_NAME} sets {}, which nothing reads",
+                self.ignored.join(", ")
+            ));
+        }
         if self.defaulted {
             lines.push(format!(
                 "dev       {FILE_NAME} did not exist, development defaults written and taken"
@@ -197,6 +243,54 @@ impl Config {
         }
         lines
     }
+}
+
+/// Appends the keys the file does not mention, each with its own comment and
+/// the default already in effect. The file is how a reader learns what can be
+/// changed, so a key that is silently defaulted is a key nobody discovers.
+///
+/// Only ever adds, never rewrites: whatever else the file says — comments,
+/// ordering, a value somebody chose — is theirs. A file that cannot be
+/// written is not a reason not to start; the defaults it is missing are the
+/// ones already in force, so the run is correct either way and the note says
+/// what could not be done.
+fn complete(path: &Path, text: &str) {
+    let missing: Vec<&str> = OPTIONAL_KEYS
+        .iter()
+        .filter(|(key, _)| !mentions(text, key))
+        .map(|(_, block)| *block)
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let mut completed = text.to_string();
+    if !completed.is_empty() && !completed.ends_with('\n') {
+        completed.push('\n');
+    }
+    completed.push('\n');
+    completed.push_str(&missing.join("\n"));
+    match std::fs::write(path, completed) {
+        Ok(()) => println!(
+            "izlek    added {} to {FILE_NAME}, at the default already in use",
+            OPTIONAL_KEYS
+                .iter()
+                .filter(|(key, _)| !mentions(text, key))
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(err) => println!("izlek    could not complete {FILE_NAME}: {err}"),
+    }
+}
+
+/// Whether the file sets this key — a line whose first word it is. A key
+/// named inside a comment or a value does not count.
+fn mentions(text: &str, key: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(key)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    })
 }
 
 /// An absolute path for a file that may not exist yet: the directory is
@@ -248,8 +342,8 @@ mod tests {
         assert!(config.defaulted);
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("izlek.db"));
-        assert_eq!(config.base_url, "http://127.0.0.1:3000");
         assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(config.listen_url(), "http://127.0.0.1:3000");
 
         let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert_eq!(written, DEVELOPMENT_DEFAULTS);
@@ -258,23 +352,59 @@ mod tests {
         let again = Config::load_from(&dir).unwrap();
         assert!(!again.defaulted);
         assert_eq!(again, Config { defaulted: false, ..config });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every key the file can carry is written into a file that was made
+    /// without it, so what can be changed is learnt by reading the file
+    /// rather than by reading the source.
+    #[test]
+    fn a_file_missing_a_key_is_completed_with_it() {
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join(FILE_NAME),
+            "# mine\ndatabase = \"state/izlek.db\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from(&dir).unwrap();
+        assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
+
+        let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        assert!(written.contains("listen = \"127.0.0.1:3000\""), "{written}");
+        // What was there is untouched, comment and all.
+        assert!(written.starts_with("# mine\ndatabase = \"state/izlek.db\"\n"), "{written}");
+
+        // Completing is not rewriting: a second load leaves the file alone.
+        Config::load_from(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), written);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A key that is already set is not touched, whatever its value.
+    #[test]
+    fn completion_leaves_a_key_that_is_already_there() {
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let mine = "database = \"izlek.db\"\nlisten = \"0.0.0.0:8080\"\n";
+        std::fs::write(dir.join(FILE_NAME), mine).unwrap();
+        let config = Config::load_from(&dir).unwrap();
+        assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), mine);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn an_empty_string_is_not_a_value() {
-        let problem = Config::parse(
-            "database = \"   \"\nbase_url = \"https://izlek.sh\"\n",
-            Path::new("."),
-            false,
-        )
-        .unwrap_err();
+        let problem = Config::parse("database = \"   \"\n", Path::new("."), false).unwrap_err();
         assert_eq!(problem, ConfigError::Missing("database"));
     }
 
     #[test]
     fn a_missing_key_names_itself_rather_than_guessing() {
-        let problem = Config::parse("base_url = \"https://izlek.sh\"\n", Path::new("."), false)
-            .unwrap_err();
+        let problem =
+            Config::parse("listen = \"127.0.0.1:3000\"\n", Path::new("."), false).unwrap_err();
         assert_eq!(problem, ConfigError::Missing("database"));
         let said = problem.to_string();
         assert!(said.contains("database"), "{said}");
@@ -283,8 +413,8 @@ mod tests {
 
     #[test]
     fn unparseable_toml_names_the_file_not_a_stack_trace() {
-        let problem = Config::parse("this is not toml at all {{{", Path::new("."), false)
-            .unwrap_err();
+        let problem =
+            Config::parse("this is not toml at all {{{", Path::new("."), false).unwrap_err();
         assert!(
             matches!(problem, ConfigError::Unparseable { .. }),
             "{problem:?}"
@@ -295,12 +425,7 @@ mod tests {
     #[test]
     fn a_relative_database_is_reported_absolute() {
         let dir = scratch();
-        let config = Config::parse(
-            "database = \"state/izlek.db\"\nbase_url = \"https://izlek.sh\"\n",
-            &dir,
-            false,
-        )
-        .unwrap();
+        let config = Config::parse("database = \"state/izlek.db\"\n", &dir, false).unwrap();
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("izlek.db"));
         let report = config.report().join("\n");
@@ -308,45 +433,21 @@ mod tests {
             report.contains(&config.database.display().to_string()),
             "{report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_base_url_that_is_not_an_origin_stops_the_boot() {
-        let problem = Config::parse(
-            "database = \"/srv/izlek.db\"\nbase_url = \"izlek.sh\"\n",
-            Path::new("."),
-            false,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                problem,
-                ConfigError::Invalid {
-                    key: "base_url",
-                    ..
-                }
-            ),
-            "{problem:?}"
-        );
-    }
-
-    /// A `config/izlek.toml` written before `listen` existed must still load,
-    /// and must still bind where it always did.
+    /// A file written before `listen` existed still loads, and still binds
+    /// where it always did.
     #[test]
     fn a_file_without_listen_falls_back_to_the_old_default() {
-        let config = Config::parse(
-            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh\"\n",
-            Path::new("."),
-            false,
-        )
-        .unwrap();
+        let config = Config::parse("database = \"/srv/izlek.db\"\n", Path::new("."), false).unwrap();
         assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
     }
 
     #[test]
     fn an_unparseable_listen_stops_the_boot_naming_the_key() {
         let problem = Config::parse(
-            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh\"\nlisten = \"not an address\"\n",
+            "database = \"/srv/izlek.db\"\nlisten = \"not an address\"\n",
             Path::new("."),
             false,
         )
@@ -357,36 +458,54 @@ mod tests {
         );
     }
 
+    /// The address mail falls back to is the address the server answers on —
+    /// there is no second key to keep in step with the first.
     #[test]
-    fn the_base_url_keeps_no_trailing_slash_so_links_are_built_once() {
-        let config = Config::parse(
-            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh/\"\n",
-            Path::new("."),
-            false,
-        )
-        .unwrap();
-        assert_eq!(config.base_url, "https://izlek.sh");
+    fn the_mail_fallback_is_the_address_the_server_binds() {
+        let url = |listen: &str| {
+            Config::parse(
+                &format!("database = \"/srv/izlek.db\"\nlisten = \"{listen}\"\n"),
+                Path::new("."),
+                false,
+            )
+            .unwrap()
+            .listen_url()
+        };
+        assert_eq!(url("127.0.0.1:3000"), "http://127.0.0.1:3000");
+        assert_eq!(url("192.168.1.20:8080"), "http://192.168.1.20:8080");
+        // Port 80 is the one a URL does not say.
+        assert_eq!(url("10.0.0.4:80"), "http://10.0.0.4");
+        // A bind that names no interface is reachable by no name, so the
+        // loopback stands in: a link somebody on the box can click beats a
+        // link nobody can.
+        assert_eq!(url("0.0.0.0:3000"), "http://127.0.0.1:3000");
+        assert_eq!(url("[::]:3000"), "http://127.0.0.1:3000");
+        assert_eq!(url("[::1]:3000"), "http://[::1]:3000");
     }
 
-    /// The sender used to be environment variables read directly. It is
-    /// workspace settings now, so unrelated keys left in the file must do
-    /// nothing at all — not half-configure a sender, not stop the boot, and
-    /// above all not quietly send through an account the Settings screen
-    /// does not show.
+    /// The sender used to be environment variables read directly, and the
+    /// base URL used to be a key of its own. Both are gone, so a file that
+    /// still carries them must do nothing at all — not half-configure a
+    /// sender, not stop the boot, and above all not quietly send through an
+    /// account the Settings screen does not show. The report says they were
+    /// seen, so a typo is visible too.
     #[test]
-    fn unrelated_keys_are_ignored_entirely() {
+    fn keys_nothing_reads_are_named_rather_than_obeyed() {
         let config = Config::parse(
-            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh\"\nsmtp_password = \"hunter2-and-then-some\"\n",
+            "database = \"/srv/izlek.db\"\nbase_url = \"https://izlek.sh\"\n\
+             smtp_password = \"hunter2-and-then-some\"\n",
             Path::new("."),
             false,
         )
-        .expect("an unrelated key in the file is not an error");
+        .expect("a key the file no longer honours is not an error");
 
+        assert_eq!(config.ignored, vec!["base_url", "smtp_password"]);
         let report = config.report().join("\n");
         assert!(
             !report.contains("hunter2-and-then-some"),
             "the report read a key it no longer honours: {report}"
         );
+        assert!(report.contains("base_url"), "{report}");
         assert!(
             report.contains("the sender is in Settings"),
             "the report should say where the sender lives: {report}"
