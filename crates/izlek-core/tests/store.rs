@@ -101,14 +101,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 1);
+    assert_eq!(first.schema_version().await.unwrap(), 2);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 1);
+    assert_eq!(second.schema_version().await.unwrap(), 2);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -5652,5 +5652,50 @@ async fn an_every_column_rule_survives_the_round_trip() {
         .expect("the rule is on the board");
     assert_eq!(read.trigger, Trigger::StatusBecomes(None));
     let _ = admin;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A box behind a proxy answers on one address and is reached on another, so
+/// an admin can set the origin mail links point at. What is stored wins over
+/// what the process was configured with.
+#[tokio::test]
+async fn a_stored_address_is_the_one_mail_links_point_at() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Task completed").await;
+    store
+        .set_public_url(&workspace, Some("https://board.example"))
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "http://127.0.0.1:3000");
+    let moved = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&moved).await.unwrap();
+
+    let sent = mailer.sent();
+    assert!(
+        sent[0].body.contains("https://board.example/?task="),
+        "the mail did not use the stored address: {}",
+        sent[0].body
+    );
+
+    // Cleared, the configured address is what is left.
+    store.set_public_url(&workspace, None).await.unwrap();
+    let back = add_task(&store, &workspace, "Backlog", "Ship it too", None, &admin).await;
+    store.assign_task(&back, &mate).await.unwrap();
+    let moved = moved_to(&store, &workspace, &back, "Backlog", "Done", &admin).await;
+    engine.on_transition(&moved).await.unwrap();
+    let sent = mailer.sent();
+    assert!(
+        sent.last()
+            .unwrap()
+            .body
+            .contains("http://127.0.0.1:3000/?task="),
+        "a cleared address did not fall back: {}",
+        sent.last().unwrap().body
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

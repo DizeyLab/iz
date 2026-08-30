@@ -33,6 +33,7 @@ use time::macros::format_description;
 /// Every migration, in order. Adding one means appending a file and a line.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
+    (2, include_str!("../../migrations/0002_public_url.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -562,6 +563,7 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
             }),
             None => None,
         },
+        public_url: opt_text(row, 15)?,
     })
 }
 
@@ -572,7 +574,7 @@ const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
      allowed_file_types, photo_limit_bytes, smtp_host, smtp_port, smtp_username, \
      smtp_from_name, smtp_from_address, \
      (smtp_password IS NOT NULL AND smtp_password <> ''), \
-     smtp_test_at, smtp_test_ms, smtp_test_error";
+     smtp_test_at, smtp_test_ms, smtp_test_error, public_url";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -818,6 +820,18 @@ impl Store for TursoStore {
         // crashing or poisoning the settings screen, and the admin retypes
         // the password once through the existing write-only field to heal it.
         Ok(sealed.as_deref().and_then(|s| secret::open(&self.key, s)))
+    }
+
+    async fn set_public_url(&self, workspace_id: &str, public_url: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn
+            .execute(
+                "UPDATE workspace SET public_url = ?1 WHERE id = ?2",
+                params![public_url, workspace_id],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(())
     }
 
     async fn set_limits(

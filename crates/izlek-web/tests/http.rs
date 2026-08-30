@@ -6423,3 +6423,74 @@ async fn the_queue_says_when_the_next_try_fires() {
         logs.body
     );
 }
+
+/// An admin can set the address mail links point at — the box answers on
+/// localhost and is reached through a proxy on a public name. A trailing
+/// slash is trimmed, something that is not an origin is refused, and an empty
+/// field puts the configured address back.
+#[tokio::test]
+async fn an_admin_sets_the_address_mail_links_point_at() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    async fn sender_with(app: &App, admin: &str, public_url: &str) -> Answer {
+        app.post(
+            "/api/save_sender",
+            Some(admin),
+            &[
+                ("host", "smtp.fastmail.com"),
+                ("port", "465"),
+                ("username", "izlek"),
+                ("password", SENDER_PASSWORD),
+                ("from_name", "Izlek"),
+                ("from_address", "izlek@izlek.sh"),
+                ("public_url", public_url),
+            ],
+        )
+        .await
+    }
+
+    let answer = sender_with(&app, &admin_cookie, "https://board.example/").await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .is_some_and(|location| !location.contains("refusal=")),
+        "the address was refused: {:?}",
+        answer.location
+    );
+    assert_eq!(
+        app.store.workspace().await.unwrap().unwrap().public_url,
+        Some("https://board.example".to_string()),
+        "the trailing slash was kept"
+    );
+
+    // The field shows what is stored, so a reload does not blank it.
+    let page = app
+        .get("/settings?section=outgoing", Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("https://board.example"), "{html}");
+
+    let refused = sender_with(&app, &admin_cookie, "board.example").await;
+    assert!(
+        refused
+            .location
+            .as_deref()
+            .is_some_and(|location| location.contains("refusal=")),
+        "a bare host was taken as an origin: {:?}",
+        refused.location
+    );
+    assert_eq!(
+        app.store.workspace().await.unwrap().unwrap().public_url,
+        Some("https://board.example".to_string()),
+        "the refused save wrote anyway"
+    );
+
+    sender_with(&app, &admin_cookie, "").await;
+    assert_eq!(
+        app.store.workspace().await.unwrap().unwrap().public_url,
+        None,
+        "an empty field did not clear the stored address"
+    );
+}

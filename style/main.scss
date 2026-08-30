@@ -1237,6 +1237,10 @@ img.avatar {
   flex-direction: column;
   gap: 10px;
   width: min(86vw, 900px);
+  // The viewer body is a row flex, so without this the sheet's automatic
+  // minimum size is the whole table's width and a wide book pushes the panel
+  // off the screen instead of panning inside it.
+  min-width: 0;
 }
 
 .sheet-tabs {
@@ -1265,6 +1269,7 @@ img.avatar {
 
 .sheet-grid {
   max-height: 70vh;
+  min-width: 0;
   overflow: auto;
   scrollbar-width: none;
   border: 1px solid var(--border);

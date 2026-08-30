@@ -719,12 +719,20 @@ impl Engine {
                 | ActivityKind::Other(_) => format!("{} touched it.", actor),
             },
         };
+        // The address an admin set in Settings wins over the configured one:
+        // a box behind a proxy answers on localhost and is reached on a
+        // public name, and a mail nobody can click is a mail not sent.
+        let base = self
+            .store
+            .workspace()
+            .await?
+            .and_then(|workspace| workspace.public_url)
+            .unwrap_or_else(|| self.base_url.clone());
         let mut body = format!(
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",
             key = facts.row.task_key,
             title = facts.row.title,
             when = day_and_time(event.at()),
-            base = self.base_url,
             id = facts.row.id,
         );
         if rule.include_task_details {

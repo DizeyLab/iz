@@ -342,6 +342,10 @@ struct SaveSenderForm {
     password: String,
     from_name: String,
     from_address: String,
+    /// The origin mailed links point at. Empty falls back to the address the
+    /// process was configured with.
+    #[serde(default)]
+    public_url: String,
 }
 
 /// Writes the workspace's sender. Admin-only, checked here.
@@ -370,6 +374,9 @@ async fn save_sender(
     let username = input.username.trim().to_string();
     let from_name = input.from_name.trim().to_string();
     let from_address = input.from_address.trim().to_string();
+    // Trailing slashes go: every link built from this appends its own path,
+    // and `https://izlek.sh//?task=X` is a link that works by luck.
+    let public_url = input.public_url.trim().trim_end_matches('/').to_string();
     // Not typed is not the same as blanked. Nothing here can clear a stored
     // password; replacing it means typing a new one.
     let password = (!input.password.is_empty()).then_some(input.password);
@@ -393,6 +400,8 @@ async fn save_sender(
         Some(Key::PasswordNeededFirstTime)
     } else if !is_address(&from_address) {
         Some(Key::NotFromAddress)
+    } else if !public_url.is_empty() && !is_origin(&public_url) {
+        Some(Key::NotAnOrigin)
     } else {
         None
     };
@@ -403,7 +412,7 @@ async fn save_sender(
         ));
     }
 
-    let outcome = store
+    let outcome = match store
         .set_sender(
             &admin.workspace_id,
             NewSender {
@@ -415,7 +424,18 @@ async fn save_sender(
                 from_address,
             },
         )
-        .await;
+        .await
+    {
+        Ok(()) => {
+            store
+                .set_public_url(
+                    &admin.workspace_id,
+                    (!public_url.is_empty()).then_some(public_url.as_str()),
+                )
+                .await
+        }
+        Err(problem) => Err(problem),
+    };
     let refusal = match outcome {
         Ok(()) => {
             let _ = store
@@ -855,6 +875,9 @@ struct Sender {
     from_address: String,
     password_set: bool,
     test: Option<TestResult>,
+    /// The origin mailed links point at, empty when the configured one is
+    /// still in use.
+    public_url: String,
 }
 
 impl Sender {
@@ -877,6 +900,7 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
             from_address: String::new(),
             password_set: false,
             test: None,
+            public_url: String::new(),
         },
         Some(workspace) => Sender {
             host: workspace.smtp_host.unwrap_or_default(),
@@ -893,8 +917,26 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
                 took: test.error.is_none().then(|| took_label(test.took_ms)),
                 error: test.error,
             }),
+            public_url: workspace.public_url.unwrap_or_default(),
         },
     })
+}
+
+/// Whether a typed address is an origin a link can be built on: an http or
+/// https scheme, a host after it, and no whitespace anywhere. A path is
+/// allowed — Izlek behind `example.com/izlek` is a real deployment — but a
+/// bare host or a mail address is not.
+fn is_origin(value: &str) -> bool {
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    !host.is_empty()
+        && !host.contains('@')
+        && !value.chars().any(char::is_whitespace)
 }
 
 /// The refusal that landed on this call's redirect, if any, and this call's
@@ -989,6 +1031,9 @@ async fn settings_page(cx: &Cx) -> Result {
     };
 
     let zone = izlek_core::detail::parse_zone(&user.timezone);
+    // What a link falls back to when the field is empty — the placeholder
+    // shows it rather than an invented example.
+    let configured_url = accounts(cx).configured_url().to_string();
     let sender = if administers {
         Some(sender_now(cx, zone).await?)
     } else {
@@ -1227,6 +1272,16 @@ async fn settings_page(cx: &Cx) -> Result {
                                         >
                                     </label>
                                 </div>
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::LinkAddressLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="text"
+                                        name="public_url"
+                                        value=(sender.public_url.clone())
+                                        placeholder=(configured_url.clone())
+                                    >
+                                </label>
                             </form>
                             <div class="panel-foot panel-foot-split">
                                 <div class="foot-side">

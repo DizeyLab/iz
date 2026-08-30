@@ -195,6 +195,25 @@ impl Accounts {
         Ok(())
     }
 
+    /// The address the process was configured with — what a link falls back
+    /// to when no admin has set one.
+    pub fn configured_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The origin a mailed link points at: the address an admin set in
+    /// Settings, or the one the process was configured with. A box behind a
+    /// proxy answers on localhost and is reached on a public name, and only
+    /// the admin knows which — so the stored one wins whenever it is there.
+    async fn base(&self) -> Result<String> {
+        Ok(self
+            .store
+            .workspace()
+            .await?
+            .and_then(|workspace| workspace.public_url)
+            .unwrap_or_else(|| self.base_url.clone()))
+    }
+
     async fn mint_link(&self, actor: &User, user: &User) -> Result<Invitation> {
         let token = Token::mint();
         let expires_at = OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME;
@@ -205,7 +224,7 @@ impl Accounts {
         let body = format!(
             "{actor} added you to Izlek.\n\n{base}/join/{token}\n\nThe link works once and expires in 7 days.\n",
             actor = actor.display_name,
-            base = self.base_url,
+            base = self.base().await?,
             token = token.expose(),
         );
         self.store

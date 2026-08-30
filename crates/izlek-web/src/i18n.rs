@@ -161,6 +161,8 @@ pub enum Key {
     SmtpUsernameRequired,
     PasswordNeededFirstTime,
     NotFromAddress,
+    NotAnOrigin,
+    LinkAddressLabel,
     SenderNotConfiguredYet,
 
     // pages.rs
@@ -598,6 +600,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (PasswordNeededFirstTime, Tr) => "İlk seferde bir parola gerekir.",
         (NotFromAddress, En) => "That is not a from-address.",
         (NotFromAddress, Tr) => "Bu bir gönderen adresi değil.",
+        (NotAnOrigin, En) => "Not an http:// or https:// address.",
+        (NotAnOrigin, Tr) => "http:// veya https:// adresi değil.",
+        (LinkAddressLabel, En) => "Link address",
+        (LinkAddressLabel, Tr) => "Bağlantı adresi",
         (SenderNotConfiguredYet, En) => "No sender to test.",
         (SenderNotConfiguredYet, Tr) => "Test edilecek gönderen yok.",
 
