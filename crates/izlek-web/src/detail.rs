@@ -1120,6 +1120,14 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
     }
 }
 
+/// The deadline field: a calendar popover that commits on the day you press.
+///
+/// It used to carry Save and Cancel under the grid, which put the commit two
+/// gestures away from the choice — and picking a day closes the popover, so
+/// the Save it was waiting for was no longer on screen. Every date chosen
+/// this way was silently discarded. The grid now autosubmits, the way the
+/// log filters already did, and closing is what Escape and a click outside
+/// are for.
 async fn deadline_control(
     cx: &Cx,
     task: &TaskDetail,
@@ -1160,11 +1168,7 @@ async fn deadline_control(
             <div class="edit-form pop-panel datepick-panel">
                 <form class="pop-form" method="post" action="/api/save_task">
                     <input type="hidden" name="task_id" value=(task.id.clone())>
-                    (datepicker_grid(cx, "deadline", &input_value, false, lang).await?)
-                    <div class="edit-row">
-                        <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
-                        <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
-                    </div>
+                    (datepicker_grid(cx, "deadline", &input_value, true, lang).await?)
                 </form>
                 (refused(cx, "save_task", lang).await?)
             </div>
