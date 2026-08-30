@@ -612,16 +612,16 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (LinkExpiredTitle, En) => "This link no longer works",
         (LinkExpiredTitle, Tr) => "Bu bağlantı artık çalışmıyor",
-        (SetupTitle, En) => "Set up Izlek",
-        (SetupTitle, Tr) => "Izlek'i kur",
+        (SetupTitle, En) => "Set up İzlek",
+        (SetupTitle, Tr) => "İzlek'i kur",
         (SetupSub, En) => "First account becomes the admin.",
         (SetupSub, Tr) => "İlk hesap yönetici olur.",
         (YourNameLabel, En) => "YOUR NAME",
         (YourNameLabel, Tr) => "ADIN",
         (CreateWorkspace, En) => "Create workspace",
         (CreateWorkspace, Tr) => "Çalışma alanı oluştur",
-        (SignInTitle, En) => "Sign in to Izlek",
-        (SignInTitle, Tr) => "Izlek'e giriş yap",
+        (SignInTitle, En) => "Sign in to İzlek",
+        (SignInTitle, Tr) => "İzlek'e giriş yap",
         (SignInSub, En) => {
             "Accounts are made by the admin. If you were invited, use the link you were sent — it is where you choose your password."
         }

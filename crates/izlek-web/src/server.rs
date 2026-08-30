@@ -158,7 +158,7 @@ pub fn mail(cx: &Cx) -> Mail {
         .unwrap_or_else(Mail::silent)
 }
 
-/// The application cookie jar, with the attributes every Izlek cookie wants.
+/// The application cookie jar, with the attributes every İzlek cookie wants.
 fn app_cookies(cx: &Cx) -> impl Cookies {
     cookies(cx)
         .default_secure(true)
@@ -182,7 +182,7 @@ pub fn presented_cookie(cx: &Cx, name: &str) -> Option<String> {
 }
 
 /// A stable-enough label for the client, for rate limiting. A proxy header is
-/// only trusted because Izlek is meant to sit behind one; the address bucket is
+/// only trusted because İzlek is meant to sit behind one; the address bucket is
 /// the limit that actually protects the Argon2 work either way.
 ///
 /// topcoat 0.6.2 exposes no peer address; x-forwarded-for or nothing.
@@ -634,7 +634,7 @@ pub fn refusal_of(cx: &Cx, call: &str) -> Option<Refusal> {
 /// function handler answers with a redirect back to the page it came from, and
 /// the value — the whole refusal — sits in a body nobody will ever look at.
 /// The click then looks like nothing happening, which is the worst answer
-/// Izlek can give.
+/// İzlek can give.
 ///
 /// So the refusal is copied onto the `Location`, as `?refusal=<code>&on=<call>`,
 /// and the page renders it from the query. This is one place rather than
@@ -712,7 +712,7 @@ fn carrying(location: &str, code: &str, called: &str) -> Option<String> {
     }
     // The Location we are rewriting came from the form post's Referer, and on a
     // cross-origin post the Referer is whatever the other site is. Sending the
-    // browser back there would make Izlek an open redirect, so the address is
+    // browser back there would make İzlek an open redirect, so the address is
     // rebuilt from its path and query alone and anything that is not a plain
     // absolute path is answered with the board.
     let here = same_origin(location);
@@ -785,7 +785,7 @@ mod refusal_redirect_tests {
     }
 
     // The Referer of a cross-origin post is the other site's address, and it
-    // reaches this function as the Location. Izlek answers on its own ground or
+    // reaches this function as the Location. İzlek answers on its own ground or
     // not at all.
     #[test]
     fn another_site_cannot_be_redirected_to() {
@@ -804,7 +804,7 @@ mod refusal_redirect_tests {
         }
         // An address with a path keeps the path — it is read as a path on this
         // site, which is the point: whatever the Referer claimed, the browser
-        // is sent somewhere on Izlek.
+        // is sent somewhere on İzlek.
         let carried = carrying(
             "http://elsewhere.example/steal?task=DZ-01",
             "cycle",

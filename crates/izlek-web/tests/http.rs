@@ -450,7 +450,7 @@ async fn sender_saved(app: &App, admin: &str) -> bool {
                 ("port", "465"),
                 ("username", "izlek"),
                 ("password", SENDER_PASSWORD),
-                ("from_name", "Izlek"),
+                ("from_name", "İzlek"),
                 ("from_address", "izlek@izlek.sh"),
             ],
         )
@@ -2378,7 +2378,7 @@ async fn only_an_admin_may_write_the_sender() {
                 ("port", "587"),
                 ("username", "emre"),
                 ("password", "let-me-in"),
-                ("from_name", "Izlek"),
+                ("from_name", "İzlek"),
                 ("from_address", "emre@izlek.sh"),
             ],
         )
@@ -2415,7 +2415,7 @@ async fn a_signed_out_browser_may_not_write_the_sender() {
                 ("port", "587"),
                 ("username", "nobody"),
                 ("password", "let-me-in"),
-                ("from_name", "Izlek"),
+                ("from_name", "İzlek"),
                 ("from_address", "nobody@izlek.sh"),
             ],
         )
@@ -2449,7 +2449,7 @@ async fn an_edit_with_no_password_typed_keeps_the_stored_one() {
                 ("port", "587"),
                 ("username", "izlek"),
                 ("password", ""),
-                ("from_name", "Izlek"),
+                ("from_name", "İzlek"),
                 ("from_address", "izlek@izlek.sh"),
             ],
         )
@@ -2486,7 +2486,7 @@ async fn a_first_sender_with_no_password_is_refused_and_says_why() {
                 ("port", "587"),
                 ("username", "izlek"),
                 ("password", ""),
-                ("from_name", "Izlek"),
+                ("from_name", "İzlek"),
                 ("from_address", "izlek@izlek.sh"),
             ],
         )
@@ -2545,7 +2545,7 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
             ("port", "587"),
             ("username", "izlek"),
             ("password", SENDER_PASSWORD),
-            ("from_name", "Izlek"),
+            ("from_name", "İzlek"),
             ("from_address", "izlek@izlek.sh"),
         ];
         for (key, value) in *overrides {
@@ -6328,7 +6328,7 @@ async fn a_member_who_may_only_read_still_gets_the_tab_strip() {
     );
 }
 
-/// A spreadsheet has no browser element behind it: Izlek reads the workbook
+/// A spreadsheet has no browser element behind it: İzlek reads the workbook
 /// itself and lays the sheet out as a table, tab strip and all. The upload is
 /// a real xlsx, so this covers the sniffer, the reader and the view together.
 #[tokio::test]
@@ -6497,7 +6497,7 @@ async fn an_admin_sets_the_address_mail_links_point_at() {
                 ("port", "465"),
                 ("username", "izlek"),
                 ("password", SENDER_PASSWORD),
-                ("from_name", "Izlek"),
+                ("from_name", "İzlek"),
                 ("from_address", "izlek@izlek.sh"),
                 ("public_url", public_url),
             ],

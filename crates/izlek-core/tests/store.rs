@@ -55,7 +55,7 @@ async fn workspace_with_admin() -> (Scratch, String, String) {
     let (ws, admin) = scratch
         .store
         .claim_workspace(
-            "Izlek",
+            "İzlek",
             "ada@izlek.sh",
             "Ada",
             &hash_password("tide-tables-1892").unwrap(),
@@ -70,7 +70,7 @@ async fn workspace_with_admin() -> (Scratch, String, String) {
 async fn claim(store: &TursoStore) -> (String, String) {
     let (ws, admin) = store
         .claim_workspace(
-            "Izlek",
+            "İzlek",
             "ada@izlek.sh",
             "Ada",
             &hash_password("tide-tables-1892").unwrap(),
@@ -109,7 +109,7 @@ async fn migrations_apply_once_and_survive_reopen() {
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
     assert_eq!(second.schema_version().await.unwrap(), 1);
-    assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
+    assert_eq!(second.workspace().await.unwrap().unwrap().name, "İzlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -600,7 +600,7 @@ async fn a_second_claim_loses_and_changes_nothing() {
     // The loser must not have joined as anything at all.
     assert_eq!(
         scratch.store.workspace().await.unwrap().unwrap().name,
-        "Izlek"
+        "İzlek"
     );
     assert_eq!(scratch.store.count_users("").await.unwrap(), 0);
     let ws_id = scratch.store.workspace().await.unwrap().unwrap().id;
@@ -630,7 +630,7 @@ async fn concurrent_claims_produce_exactly_one_admin() {
         claims.push(tokio::spawn(async move {
             store
                 .claim_workspace(
-                    "Izlek",
+                    "İzlek",
                     &format!("claimant{i}@izlek.sh"),
                     &format!("Claimant {i}"),
                     &hash,
@@ -710,7 +710,7 @@ async fn workspace_defaults_match_the_settings_screen() {
     let (ws, _) = scratch
         .store
         .claim_workspace(
-            "Izlek",
+            "İzlek",
             "ada@izlek.sh",
             "Ada",
             &hash_password("tide-tables-1892").unwrap(),
@@ -744,7 +744,7 @@ async fn the_workspace_record_carries_the_sender_but_never_its_password() {
                 port: 587,
                 username: "izlek".into(),
                 password: Some("a-very-secret-string".into()),
-                from_name: "Izlek".into(),
+                from_name: "İzlek".into(),
                 from_address: "izlek@izlek.sh".into(),
             },
         )
@@ -755,7 +755,7 @@ async fn the_workspace_record_carries_the_sender_but_never_its_password() {
     assert_eq!(ws.smtp_host.as_deref(), Some("smtp.fastmail.com"));
     assert_eq!(ws.smtp_port, Some(587));
     assert_eq!(ws.smtp_username.as_deref(), Some("izlek"));
-    assert_eq!(ws.smtp_from_name.as_deref(), Some("Izlek"));
+    assert_eq!(ws.smtp_from_name.as_deref(), Some("İzlek"));
     assert_eq!(ws.smtp_from_address.as_deref(), Some("izlek@izlek.sh"));
     assert!(ws.smtp_password_set, "the screen must be able to say 'set'");
 
@@ -777,7 +777,7 @@ async fn a_save_with_no_password_typed_keeps_the_stored_one() {
         port: 587,
         username: "izlek".into(),
         password: Some("keep-me".into()),
-        from_name: "Izlek".into(),
+        from_name: "İzlek".into(),
         from_address: "izlek@izlek.sh".into(),
     };
     scratch.store.set_sender(&ws_id, sender.clone()).await.unwrap();
@@ -805,7 +805,7 @@ async fn a_typed_password_replaces_the_stored_one() {
         port: 587,
         username: "izlek".into(),
         password: Some("the-old-one".into()),
-        from_name: "Izlek".into(),
+        from_name: "İzlek".into(),
         from_address: "izlek@izlek.sh".into(),
     };
     scratch.store.set_sender(&ws_id, sender.clone()).await.unwrap();
@@ -833,7 +833,7 @@ async fn the_stored_password_is_not_the_plaintext_on_disk() {
                 port: 587,
                 username: "izlek".into(),
                 password: Some("a-very-secret-string".into()),
-                from_name: "Izlek".into(),
+                from_name: "İzlek".into(),
                 from_address: "izlek@izlek.sh".into(),
             },
         )
@@ -876,7 +876,7 @@ async fn a_password_that_will_not_decrypt_reads_back_as_none() {
                 port: 587,
                 username: "izlek".into(),
                 password: Some("a-very-secret-string".into()),
-                from_name: "Izlek".into(),
+                from_name: "İzlek".into(),
                 from_address: "izlek@izlek.sh".into(),
             },
         )
@@ -910,7 +910,7 @@ async fn a_password_that_will_not_decrypt_reads_back_as_none() {
                 port: 587,
                 username: "izlek".into(),
                 password: Some("a-fresh-password".into()),
-                from_name: "Izlek".into(),
+                from_name: "İzlek".into(),
                 from_address: "izlek@izlek.sh".into(),
             },
         )
@@ -1282,7 +1282,7 @@ async fn the_store_is_usable_behind_a_trait_object() {
     let scratch = Scratch::open().await;
     let store: &dyn Store = &scratch.store;
     store
-        .claim_workspace("Izlek", "ada@izlek.sh", "Ada", "$argon2id$fake")
+        .claim_workspace("İzlek", "ada@izlek.sh", "Ada", "$argon2id$fake")
         .await
         .unwrap();
     assert!(store.workspace().await.unwrap().is_some());
@@ -1541,7 +1541,7 @@ async fn accounts() -> (Scratch, Accounts) {
 async fn claimed() -> (Scratch, Accounts, User) {
     let (scratch, accounts) = accounts().await;
     let (_, signed_in) = accounts
-        .claim_workspace("Izlek", "ada@izlek.sh", "Ada", "tide-tables-1892")
+        .claim_workspace("İzlek", "ada@izlek.sh", "Ada", "tide-tables-1892")
         .await
         .unwrap();
     (scratch, accounts, signed_in.user)
@@ -1551,10 +1551,10 @@ async fn claimed() -> (Scratch, Accounts, User) {
 async fn claiming_makes_an_admin_and_signs_them_in() {
     let (_scratch, accounts) = accounts().await;
     let (workspace, signed_in) = accounts
-        .claim_workspace("Izlek", "ada@izlek.sh", "Ada", "tide-tables-1892")
+        .claim_workspace("İzlek", "ada@izlek.sh", "Ada", "tide-tables-1892")
         .await
         .unwrap();
-    assert_eq!(workspace.name, "Izlek");
+    assert_eq!(workspace.name, "İzlek");
     assert_eq!(signed_in.user.role, Role::Admin);
 
     // The cookie value works and is not what is stored.
@@ -1577,7 +1577,7 @@ async fn claiming_makes_an_admin_and_signs_them_in() {
 async fn the_claim_screen_enforces_its_own_password_rules() {
     let (_scratch, accounts) = accounts().await;
     let too_short = accounts
-        .claim_workspace("Izlek", "ada@izlek.sh", "Ada", "short")
+        .claim_workspace("İzlek", "ada@izlek.sh", "Ada", "short")
         .await;
     assert!(matches!(
         too_short,
@@ -4523,7 +4523,7 @@ async fn nobody_is_mailed_about_what_they_did_themselves() {
     let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
 
     // Emre is the only assignee and Emre moved the card. Telling him what he
-    // just did is how a person learns to filter Izlek's mail away.
+    // just did is how a person learns to filter İzlek's mail away.
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
     let report = engine.on_transition(&transition).await.unwrap();
     assert_eq!(report, Default::default());
@@ -5049,7 +5049,7 @@ async fn an_invite_mail_is_owed_without_a_rule() {
     let now = OffsetDateTime::now_utc();
 
     let invite = store
-        .queue_invite("newcomer@izlek.sh", "Join Izlek", "Come aboard.", now)
+        .queue_invite("newcomer@izlek.sh", "Join İzlek", "Come aboard.", now)
         .await
         .unwrap();
     assert_eq!(invite.rule_id, None);
@@ -5069,7 +5069,7 @@ async fn an_invite_mail_with_no_sender_is_held_not_failed() {
     let (dir, store, _workspace, _admin) = shared().await;
     let now = OffsetDateTime::now_utc();
     store
-        .queue_invite("newcomer@izlek.sh", "Join Izlek", "Come aboard.", now)
+        .queue_invite("newcomer@izlek.sh", "Join İzlek", "Come aboard.", now)
         .await
         .unwrap();
 

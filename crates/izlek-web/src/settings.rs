@@ -460,7 +460,7 @@ async fn save_sender(
 /// went so the answer survives a reload.
 ///
 /// It goes to their own address and nowhere else. A test that could be
-/// pointed at an address somebody typed would be a way to make Izlek mail a
+/// pointed at an address somebody typed would be a way to make İzlek mail a
 /// stranger on demand, which is a thing worth not building.
 #[route(POST "/api/send_test_mail")]
 async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
@@ -924,7 +924,7 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
 
 /// Whether a typed address is an origin a link can be built on: an http or
 /// https scheme, a host after it, and no whitespace anywhere. A path is
-/// allowed — Izlek behind `example.com/izlek` is a real deployment — but a
+/// allowed — İzlek behind `example.com/izlek` is a real deployment — but a
 /// bare host or a mail address is not.
 fn is_origin(value: &str) -> bool {
     let Some(rest) = value
@@ -1258,7 +1258,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                             type="text"
                                             name="from_name"
                                             value=(sender.from_name.clone())
-                                            placeholder="Izlek"
+                                            placeholder="İzlek"
                                         >
                                     </label>
                                     <label class="field">

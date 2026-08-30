@@ -1938,7 +1938,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             for entry in &detail.activity {
                                 <div class="activity-line">
                                     <span class="activity-stamp">(entry.moment_in(zone))</span>
-                                    <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "Izlek".to_string()))</strong>
+                                    <strong class="activity-who">(entry.actor.as_ref().map(|person| person.display_name.clone()).unwrap_or_else(|| "İzlek".to_string()))</strong>
                                     <span class="activity-what">(entry.sentence())</span>
                                 </div>
                             }

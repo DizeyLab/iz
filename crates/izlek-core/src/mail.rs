@@ -9,7 +9,7 @@
 //!
 //! Nobody is ever mailed about their own action. A rule's audience is resolved
 //! and the person who did the thing is taken off it, on every audience, always:
-//! three people on one board do not need Izlek telling each of them what they
+//! three people on one board do not need İzlek telling each of them what they
 //! themselves just did. A rule whose audience is only the actor sends nothing
 //! and owes nothing — that is not a failure and does not appear as one.
 //!
@@ -158,8 +158,8 @@ impl Engine {
     pub async fn send_test(&self, to: &str) -> std::result::Result<Duration, MailError> {
         let mail = Outgoing {
             to: to.to_string(),
-            subject: "Izlek test mail".to_string(),
-            body: "Somebody pressed the test button in Izlek's settings, and this \
+            subject: "İzlek test mail".to_string(),
+            body: "Somebody pressed the test button in İzlek's settings, and this \
                    is what came out. Nothing else was sent, and nobody else was \
                    written to.\n"
                 .to_string(),

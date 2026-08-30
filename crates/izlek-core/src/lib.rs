@@ -1,4 +1,4 @@
-//! Domain model and storage for Izlek.
+//! Domain model and storage for İzlek.
 //!
 //! The vocabulary — roles and record shapes — compiles everywhere, so the UI
 //! and the server speak the same types. The `server` feature adds the halves

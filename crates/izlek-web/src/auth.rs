@@ -25,7 +25,7 @@ use crate::settings::encode_q;
 
 /// The workspace has exactly one name and no screen that sets it, so it is a
 /// constant rather than a field nobody was shown.
-pub const WORKSPACE_NAME: &str = "Izlek";
+pub const WORKSPACE_NAME: &str = "İzlek";
 
 /// The name and address an invitation was made out to.
 #[derive(Clone, Debug, Serialize)]

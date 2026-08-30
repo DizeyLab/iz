@@ -3894,7 +3894,7 @@ mod probe {
         use crate::store::Store as _;
 
         let (ws, _admin) = store
-            .claim_workspace("Izlek", "ada@izlek.sh", "Ada", "hash")
+            .claim_workspace("İzlek", "ada@izlek.sh", "Ada", "hash")
             .await
             .unwrap();
         store
@@ -3905,7 +3905,7 @@ mod probe {
                     port: 587,
                     username: "izlek".into(),
                     password: Some("hunter2-and-then-some".into()),
-                    from_name: "Izlek".into(),
+                    from_name: "İzlek".into(),
                     from_address: "izlek@izlek.sh".into(),
                 },
             )

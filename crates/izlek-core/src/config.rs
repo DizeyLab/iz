@@ -1,9 +1,9 @@
-//! Everything Izlek reads from `config/izlek.toml`, in one place.
+//! Everything İzlek reads from `config/izlek.toml`, in one place.
 //!
 //! Nothing here has a silent default once the file exists. A key that is
 //! missing, empty or unusable stops the boot and says which key and which
 //! file, because the alternative is worse than not starting: a wrong
-//! `database` does not mean "no data", it means a second Izlek quietly
+//! `database` does not mean "no data", it means a second İzlek quietly
 //! writing a different file while everyone believes they are looking at the
 //! same board — and Turso is single-writer, so the two are not even
 //! reconcilable afterwards.
@@ -48,7 +48,7 @@ const FILE_NAME: &str = "config/izlek.toml";
 const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One process holds it.
 database = "izlek.db"
 # The address the server listens on. Environment variables are ignored —
-# this is the only thing that decides where Izlek binds. It is also the
+# this is the only thing that decides where İzlek binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
 listen = "127.0.0.1:7654"
 "#;
@@ -70,7 +70,7 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[(
     "listen",
     concat!(
         "# The address the server listens on. Environment variables are ignored —\n",
-        "# this is the only thing that decides where Izlek binds. It is also the\n",
+        "# this is the only thing that decides where İzlek binds. It is also the\n",
         "# address mail links fall back to, until an admin sets one in Settings.\n",
         "listen = \"127.0.0.1:7654\"\n"
     ),
@@ -211,7 +211,7 @@ impl Config {
     /// A bind that names no interface — `0.0.0.0`, `::` — answers everywhere
     /// and is reachable at none of it by name, so the loopback stands in: a
     /// link somebody on the box can click beats a link nobody can. Whoever
-    /// puts Izlek behind a proxy sets the real address in Settings, which is
+    /// puts İzlek behind a proxy sets the real address in Settings, which is
     /// the only thing this defers to.
     pub fn listen_url(&self) -> String {
         let ip = self.listen.ip();

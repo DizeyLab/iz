@@ -812,7 +812,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
     ) -> Result<CommentWritten>;
 
     /// Hangs a file off a task. The bytes go into the database file with the
-    /// row: there is no second place for a Izlek deployment to keep, and no
+    /// row: there is no second place for an İzlek deployment to keep, and no
     /// path for an uploaded name to become.
     ///
     /// Nothing here decides whether the file was allowed — its size, its type

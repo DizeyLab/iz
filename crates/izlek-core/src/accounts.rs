@@ -222,9 +222,9 @@ impl Accounts {
         self.store
             .create_signin_link(&user.id, &token.hash(), expires_at)
             .await?;
-        let subject = "Your Izlek sign-in link";
+        let subject = "Your İzlek sign-in link";
         let body = format!(
-            "{actor} added you to Izlek.\n\n{base}/join/{token}\n\nThe link works once and expires in 7 days.\n",
+            "{actor} added you to İzlek.\n\n{base}/join/{token}\n\nThe link works once and expires in 7 days.\n",
             actor = actor.display_name,
             base = self.base().await?,
             token = token.expose(),
