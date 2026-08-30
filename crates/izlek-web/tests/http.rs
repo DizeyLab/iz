@@ -1800,6 +1800,85 @@ async fn the_whole_control_box_opens_its_dropdown() {
 }
 
 #[tokio::test]
+async fn the_morph_keeps_what_the_client_owns_and_names_none_of_it() {
+    // The live refresh morphs the server's HTML over the live DOM. The server
+    // knows nothing about the trigger the dropdown built or the class hiding
+    // the select underneath it, so a morph that trusted the server's
+    // attributes wholesale unhid every select under its own trigger — one
+    // dropdown drawn twice, per field, after a single save.
+    //
+    // The fix is not a longer exemption list. A node declares what belongs to
+    // the client at the moment the client takes it, and the morph reads only
+    // that. These assertions are the guard on that shape: reintroducing a
+    // name into the morph is what makes them fail.
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let page = app.get("/settings", Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+
+    assert!(
+        page.contains("window.__izlekOwn = function (node, classes, attrs)"),
+        "there is no way left for an enhancement to declare what it owns"
+    );
+    assert!(
+        page.contains("window.__izlekAdded = function (node)"),
+        "a client-built node can no longer say it is not a stray"
+    );
+    // The morph asks the node, never a list of names it was told to remember.
+    assert!(
+        page.contains("function clientMade(node) { return node.__izlekAdded === true; }"),
+        "the stray test is back to sniffing class names"
+    );
+    assert!(
+        page.contains("var own = from.__izlekMine"),
+        "the attribute sweep no longer reads what the node owns"
+    );
+    // class is merged, not overwritten. This is the exact line the bug was.
+    assert!(
+        page.contains("syncClass(from, to, own)") && page.contains("own.c.forEach"),
+        "the server's class list is overwriting the client's again"
+    );
+
+    // And the dropdown declares, rather than relying on the morph to know.
+    assert!(
+        page.contains("window.__izlekOwn(select, ['dd-native'], [])"),
+        "the select's hidden state is no longer declared as the client's"
+    );
+    assert!(
+        page.contains("window.__izlekAdded(trigger)") && page.contains("window.__izlekAdded(panel)"),
+        "the trigger and panel no longer say they are the client's"
+    );
+}
+
+#[tokio::test]
+async fn a_rewired_dropdown_repairs_itself_instead_of_being_skipped() {
+    // Ownership stops the morph from breaking the enhancement. It does not
+    // make the enhancement follow the data: the trigger's label is drawn from
+    // the select, so when a live refresh moves the selection the trigger has
+    // to re-read it. An already-enhanced select is therefore repaired on
+    // `izlek:wire`, not skipped.
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let page = app.get("/settings", Some(&admin)).await;
+    let page = String::from_utf8_lossy(&page.bytes);
+
+    assert!(
+        page.contains("if (select.dataset.ddDone) { resync(select); return; }"),
+        "an already-enhanced select is skipped again instead of repaired"
+    );
+    assert!(
+        page.contains("if (!rowsMatch(panel, select)) { fillRows(panel, select); }"),
+        "the panel no longer follows the select's option list"
+    );
+    // Repairing under an open panel would move the rows out from under the
+    // pointer; stale for that moment is the better failure.
+    assert!(
+        page.contains("if (panel.classList.contains('dd-open')) { return; }"),
+        "the repair now runs under an open panel"
+    );
+}
+
+#[tokio::test]
 async fn the_parts_have_a_tab_and_a_subtask_is_not_offered_one() {
     let app = App::open().await;
     let admin = admin(&app).await;

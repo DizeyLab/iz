@@ -237,6 +237,17 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
         (function () { \
             if (window.__izlekSoft) { return; } \
             window.__izlekSoft = true; \
+            window.__izlekOwn = function (node, classes, attrs) { \
+                var own = node.__izlekMine; \
+                if (!own) { own = node.__izlekMine = { c: [], a: [] }; } \
+                (classes || []).forEach(function (c) { \
+                    if (own.c.indexOf(c) === -1) { own.c.push(c); } \
+                    node.classList.add(c); \
+                }); \
+                (attrs || []).forEach(function (a) { if (own.a.indexOf(a) === -1) { own.a.push(a); } }); \
+                return node; \
+            }; \
+            window.__izlekAdded = function (node) { node.__izlekAdded = true; return node; }; \
             function wire() { \
                 document.querySelectorAll('.comment-list').forEach(function (list) { list.scrollTop = list.scrollHeight; }); \
                 document.dispatchEvent(new Event('izlek:wire')); \
@@ -288,10 +299,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                     } \
                 }); \
             } \
-            function clientMade(node) { \
-                return node.nodeType === 1 && node.classList \
-                    && (node.classList.contains('dd-panel') || node.classList.contains('dd-trigger')); \
-            } \
+            function clientMade(node) { return node.__izlekAdded === true; } \
             function pairable(a, b) { \
                 if (a.nodeType !== b.nodeType) { return false; } \
                 if (a.nodeType !== 1) { return true; } \
@@ -299,17 +307,31 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 if (a.id || b.id) { return a.id === b.id; } \
                 return true; \
             } \
+            function syncClass(from, to, own) { \
+                var want = []; \
+                to.classList.forEach(function (c) { want.push(c); }); \
+                if (own) { \
+                    own.c.forEach(function (c) { \
+                        if (from.classList.contains(c) && want.indexOf(c) === -1) { want.push(c); } \
+                    }); \
+                } \
+                if (want.length) { from.setAttribute('class', want.join(' ')); } \
+                else if (from.hasAttribute('class')) { from.removeAttribute('class'); } \
+            } \
             function syncAttrs(from, to) { \
-                var i, at; \
+                var own = from.__izlekMine, i, at; \
                 for (i = to.attributes.length - 1; i >= 0; i--) { \
                     at = to.attributes[i]; \
+                    if (at.name === 'class') { continue; } \
                     if (from.getAttribute(at.name) !== at.value) { from.setAttribute(at.name, at.value); } \
                 } \
                 for (i = from.attributes.length - 1; i >= 0; i--) { \
                     at = from.attributes[i]; \
-                    if (at.name.indexOf('data-dd') === 0) { continue; } \
+                    if (at.name === 'class') { continue; } \
+                    if (own && own.a.indexOf(at.name) !== -1) { continue; } \
                     if (!to.hasAttribute(at.name)) { from.removeAttribute(at.name); } \
                 } \
+                syncClass(from, to, own); \
             } \
             function morph(from, to) { \
                 if (from.nodeType !== 1) { \
@@ -544,13 +566,45 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
 /// panel keeps its position. Not because any of them is special-cased, but
 /// because nothing touched them.
 ///
-/// Two kinds of node need naming for this to hold. The dropdown builds a
-/// `.dd-trigger` beside each select and appends a `.dd-panel` to the body, and
-/// neither exists in the server's HTML — a morph that did not know this would
-/// delete them as strays on the first update. And a `<script>` whose text is
-/// unchanged is left alone rather than re-created, so the live path stops
-/// re-running every script on the page; the `__izlek*` guards remain the
-/// backstop for the full-swap path, which still re-runs them.
+/// A `<script>` whose text is unchanged is left alone rather than re-created,
+/// so the live path stops re-running every script on the page; the `__izlek*`
+/// guards remain the backstop for the full-swap path, which still re-runs them.
+///
+/// ## The client declares what is its own
+///
+/// A morph rebuilds the page from HTML that knows nothing about the client.
+/// Two things it would therefore destroy: nodes the client created, which
+/// look like strays, and the marks an enhancement leaves on a node the server
+/// *did* render — `dd-native` hiding a replaced select, `data-wired` on a
+/// wired player, the position an open context menu was placed at.
+///
+/// The first version of this knew their names: `clientMade` tested for
+/// `.dd-panel`/`.dd-trigger`, and the attribute sweep skipped anything
+/// starting with `data-dd`. That is a list, and a list is wrong the first
+/// time somebody adds an enhancement without reading it. It was already
+/// wrong: `data-dd-done` was on the list and `class` was not, so a save
+/// unhid every native select underneath its own trigger while `enhanceAll`
+/// skipped them as already done — one dropdown drawn twice, per field.
+///
+/// So the morph knows no names at all. A node says what belongs to the
+/// client, at the moment the client takes it:
+///
+/// - `__izlekOwn(node, classes, attrs)` — the classes and attributes on this
+///   server-rendered node are the client's. It adds the classes itself, so
+///   there is no way to apply one without registering it.
+/// - `__izlekAdded(node)` — this whole node is the client's; it is not a
+///   stray and must not be deleted.
+///
+/// Both record on a DOM *property*, which no morph can strip, and both are
+/// defined here — before any script that could enhance anything runs.
+/// `syncAttrs` then merges `class` (the server's list plus whatever owned
+/// classes are still on the node) instead of overwriting it, and skips owned
+/// attributes when it sweeps. Nothing in this file mentions a dropdown.
+///
+/// The other half of the contract is `izlek:wire`: an enhancement re-derives
+/// whatever it draws from server data rather than assuming it is still true.
+/// Ownership keeps the morph from breaking the enhancement; the wire pass is
+/// how the enhancement follows the server when the data underneath it moves.
 ///
 /// Morphing is used only for the live refresh. Navigations and form posts keep
 /// the full replace: they are a different page or a submitted form, where
@@ -642,7 +696,7 @@ pub async fn escape_script(cx: &Cx) -> Result {
         window.__izlekEsc.register(40, function () { \
             var menu = document.querySelector('.user-menu'); \
             if (menu && (menu.matches(':hover') || menu.contains(document.activeElement))) { \
-                menu.classList.add('user-menu-esc'); \
+                window.__izlekOwn(menu, ['user-menu-esc'], []); \
                 var focused = document.activeElement; \
                 if (focused && focused.closest('.user-menu')) { focused.blur(); } \
                 return true; \

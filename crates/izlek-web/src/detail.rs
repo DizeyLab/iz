@@ -2081,6 +2081,7 @@ async fn audio_player_script(cx: &Cx) -> Result {
             function wireAll() { document.querySelectorAll('.audio-player').forEach(wirePlayer); } \
             function wirePlayer(player) { \
             if (player.dataset.wired) { return; } \
+            window.__izlekOwn(player, [], ['data-wired']); \
             player.dataset.wired = '1'; \
             var audio = player.querySelector('.audio-el'); \
             var play = player.querySelector('.audio-play'); \
@@ -2097,7 +2098,7 @@ async fn audio_player_script(cx: &Cx) -> Result {
                 if (audio.paused) { audio.play(); } else { audio.pause(); } \
             }); \
             audio.addEventListener('play', function () { \
-                player.classList.add('audio-playing'); \
+                window.__izlekOwn(player, ['audio-playing'], []); \
                 play.setAttribute('aria-label', play.getAttribute('data-pause')); \
             }); \
             audio.addEventListener('pause', function () { \

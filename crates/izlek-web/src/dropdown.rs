@@ -44,7 +44,16 @@ use topcoat::view::{Unescaped, view};
 
 /// Emitted once per page that renders a `<select>`; the enhancement is
 /// per-element and idempotent (`data-dd-done`), re-run on `izlek:wire` so
-/// selects arriving in a soft page swap get theirs too. Owns its own
+/// selects arriving in a soft page swap get theirs too. A select that is
+/// already done is not skipped but repaired: the live refresh morphs the
+/// server's HTML over the live DOM, and what it writes is the select — its
+/// selected option, its option list, its class — while the trigger and panel
+/// standing in for it are the client's and are left untouched. So `resync`
+/// re-asserts `dd-native`, re-reads the label off the select, and rebuilds
+/// the rows when the options themselves changed. Without it the two halves
+/// drift: the select unhides itself under its own trigger, or the trigger
+/// keeps announcing a status somebody else has already changed. An open
+/// panel is left alone — repairing under a pointer is worse than stale. Owns its own
 /// `Escape` resolver on `window.__izlekEsc` (priority 95 — the dropdown
 /// outranks the modal chain: Escape on an open panel closes just the
 /// panel, never the modal above it. The old per-script listeners made
@@ -126,34 +135,9 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                 activate(panel, panel.querySelector('.dd-option-selected') || panel.querySelector('.dd-option'));\
                 if (search) { search.focus(); }\
             }\
-            function enhance(select) {\
-                if (select.dataset.ddDone) { return; }\
-                select.dataset.ddDone = '1';\
-                var trigger = document.createElement('button');\
-                trigger.type = 'button';\
-                trigger.className = select.className + ' dd-trigger';\
-                var current = select.options[select.selectedIndex];\
-                trigger.textContent = current ? current.textContent : '';\
-                trigger.setAttribute('aria-haspopup', 'listbox');\
-                trigger.setAttribute('aria-expanded', 'false');\
-                select.parentNode.insertBefore(trigger, select);\
-                select.classList.add('dd-native');\
-                var panel = document.createElement('div');\
-                panel.className = 'dd-panel';\
-                panel.setAttribute('role', 'listbox');\
-                panel.__ddTrigger = trigger;\
-                trigger.__ddPanel = panel;\
-                trigger.__ddSelect = select;\
-                var allOpts = opts(select);\
-                var search = null;\
-                if (allOpts.length > 7 || select.hasAttribute('data-search')) {\
-                    search = document.createElement('input');\
-                    search.type = 'text';\
-                    search.className = 'dd-search';\
-                    panel.appendChild(search);\
-                    panel.__ddSearch = search;\
-                }\
-                allOpts.forEach(function (opt) {\
+            function fillRows(panel, select) {\
+                panel.querySelectorAll('.dd-option').forEach(function (r) { r.remove(); });\
+                opts(select).forEach(function (opt) {\
                     var row = document.createElement('button');\
                     row.type = 'button';\
                     row.className = 'dd-option' + (opt.selected ? ' dd-option-selected' : '');\
@@ -163,6 +147,65 @@ pub async fn dropdown_script(cx: &Cx) -> Result {
                     row.setAttribute('aria-selected', opt.selected ? 'true' : 'false');\
                     panel.appendChild(row);\
                 });\
+            }\
+            function rowsMatch(panel, select) {\
+                var rows = panel.querySelectorAll('.dd-option');\
+                var all = opts(select);\
+                if (rows.length !== all.length) { return false; }\
+                for (var i = 0; i < all.length; i++) {\
+                    if (rows[i].dataset.value !== all[i].value) { return false; }\
+                    if (rows[i].textContent !== all[i].textContent) { return false; }\
+                }\
+                return true;\
+            }\
+            function resync(select) {\
+                var trigger = select.__ddTrigger, panel = select.__ddPanel;\
+                if (!trigger || !panel) { return; }\
+                window.__izlekOwn(select, ['dd-native'], []);\
+                if (panel.classList.contains('dd-open')) { return; }\
+                if (!rowsMatch(panel, select)) { fillRows(panel, select); }\
+                var current = select.options[select.selectedIndex];\
+                var label = current ? current.textContent : '';\
+                if (trigger.textContent !== label) { trigger.textContent = label; }\
+                panel.querySelectorAll('.dd-option').forEach(function (r) {\
+                    var on = !!current && r.dataset.value === current.value;\
+                    r.classList.toggle('dd-option-selected', on);\
+                    r.setAttribute('aria-selected', on ? 'true' : 'false');\
+                });\
+            }\
+            function enhance(select) {\
+                if (select.dataset.ddDone) { resync(select); return; }\
+                window.__izlekOwn(select, [], ['data-dd-done']);\
+                select.dataset.ddDone = '1';\
+                var trigger = document.createElement('button');\
+                trigger.type = 'button';\
+                trigger.className = select.className + ' dd-trigger';\
+                var current = select.options[select.selectedIndex];\
+                trigger.textContent = current ? current.textContent : '';\
+                trigger.setAttribute('aria-haspopup', 'listbox');\
+                trigger.setAttribute('aria-expanded', 'false');\
+                window.__izlekAdded(trigger);\
+                select.parentNode.insertBefore(trigger, select);\
+                window.__izlekOwn(select, ['dd-native'], []);\
+                var panel = document.createElement('div');\
+                panel.className = 'dd-panel';\
+                panel.setAttribute('role', 'listbox');\
+                panel.__ddTrigger = trigger;\
+                trigger.__ddPanel = panel;\
+                trigger.__ddSelect = select;\
+                select.__ddTrigger = trigger;\
+                select.__ddPanel = panel;\
+                var allOpts = opts(select);\
+                var search = null;\
+                if (allOpts.length > 7 || select.hasAttribute('data-search')) {\
+                    search = document.createElement('input');\
+                    search.type = 'text';\
+                    search.className = 'dd-search';\
+                    panel.appendChild(search);\
+                    panel.__ddSearch = search;\
+                }\
+                fillRows(panel, select);\
+                window.__izlekAdded(panel);\
                 document.body.appendChild(panel);\
                 trigger.addEventListener('click', function (e) {\
                     e.stopPropagation();\

@@ -448,7 +448,7 @@ async fn card_menu_script(cx: &Cx) -> Result {
             if (!menu) { return; } \
             menu.style.left = e.clientX + 'px'; \
             menu.style.top = e.clientY + 'px'; \
-            menu.classList.add('card-menu-open'); \
+            window.__izlekOwn(menu, ['card-menu-open'], ['style']); \
         }; \
         document.addEventListener('click', closeCardMenus); \
         window.__izlekEsc.register(20, function () { \
