@@ -1455,6 +1455,10 @@ img.avatar {
   align-items: baseline;
   gap: 6px;
   min-width: 0;
+  // The key used to sit flush under a much larger title and got away with
+  // it; a crumb is a whole line of text with an underline dipping below its
+  // baseline, and flush reads as collided.
+  margin-bottom: 9px;
   // The parent's title is the only part allowed to give way; a key broken
   // across two lines is not a key any more.
   flex-wrap: nowrap;
