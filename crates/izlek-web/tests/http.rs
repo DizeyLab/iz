@@ -1521,7 +1521,7 @@ async fn taking_a_task_in_and_letting_it_out_are_the_same_form() {
     let page = String::from_utf8_lossy(&page.bytes);
     // The way back up: a link that names the whole, not a caption.
     assert!(
-        page.contains("detail-parent") && page.contains(&format!("/?task={parent}")),
+        page.contains("detail-crumb-up") && page.contains(&format!("/?task={parent}")),
         "the part does not link back to its whole"
     );
     assert!(
@@ -1805,7 +1805,7 @@ async fn the_parts_have_a_tab_and_a_subtask_is_not_offered_one() {
         "a subtask rendered the Subtasks tab"
     );
     assert!(
-        forced.contains("detail-parent"),
+        forced.contains("detail-crumb-up"),
         "the fallback did not render the task itself"
     );
 }

@@ -1711,14 +1711,19 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 <div class="detail-mast">
                     <header class="detail-head">
                         <div class="detail-headline">
-                            if let Some(parent) = detail.parent.clone() {
-                                <a class="detail-parent" href=(format!("/?task={}", parent.id))>
-                                    <span class="detail-parent-arrow">"\u{2190}"</span>
-                                    <span class="detail-parent-key">(parent.task_key.clone())</span>
-                                    <span class="detail-parent-title">(parent.title.clone())</span>
-                                </a>
-                            }
-                            <span class="detail-key">(detail.task_key.clone())</span>
+                            // One line, read left to right: the whole, then
+                            // this. Two keys stacked in the same mono said
+                            // nothing about which was which — order does.
+                            <div class="detail-crumbs">
+                                if let Some(parent) = detail.parent.clone() {
+                                    <a class="detail-crumb detail-crumb-up" href=(format!("/?task={}", parent.id))>
+                                        <span class="detail-crumb-key">(parent.task_key.clone())</span>
+                                        <span class="detail-crumb-title">(parent.title.clone())</span>
+                                    </a>
+                                    <span class="detail-crumb-sep" aria-hidden="true">"\u{203a}"</span>
+                                }
+                                <span class="detail-key">(detail.task_key.clone())</span>
+                            </div>
                             (title_control(cx, &detail, may_write, lang).await?)
                         </div>
                         <span class="detail-state">

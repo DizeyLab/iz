@@ -1446,35 +1446,71 @@ img.avatar {
   color: var(--muted-soft);
 }
 
-// A subtask names the whole it belongs to, above its own key, and that name
-// is the way back up. An arrow and the parent's title rather than a bare
-// caption: "Part of DZ-14" read as a label, and nobody tried to click it.
-.detail-parent {
+// Where this task sits, on one line above its title. A subtask stacked its
+// parent's key above its own read as two near-identical mono strings with
+// nothing to say which was which; left-to-right order says it instead, and
+// the parent's title is what makes its key legible at all.
+.detail-crumbs {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
-  font-size: 11px;
+  min-width: 0;
+  // The parent's title is the only part allowed to give way; a key broken
+  // across two lines is not a key any more.
+  flex-wrap: nowrap;
+
+  .detail-key {
+    flex: none;
+    white-space: nowrap;
+  }
+}
+
+.detail-crumb {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
   color: var(--muted);
   text-decoration: none;
-  width: fit-content;
 
   &:hover {
     color: var(--ink);
 
-    .detail-parent-title { text-decoration: underline; }
+    .detail-crumb-title { text-decoration: underline; }
   }
 }
 
-.detail-parent-arrow,
-.detail-parent-key {
+.detail-crumb-key {
+  flex: none;
   font-family: var(--font-mono);
+  font-size: 11px;
 }
 
-.detail-parent-title {
+// Underlined at rest, solid: the ledger skin marks a record's own key with a
+// *dotted* underline, so without this the one thing on the line that is not
+// a link was the only thing that looked like one.
+.detail-crumb-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 30ch;
+  max-width: 28ch;
+  flex: 0 1 auto;
+  min-width: 3ch;
+  font-size: 12px;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.detail-crumb:hover .detail-crumb-title {
+  text-decoration-color: currentColor;
+}
+
+.detail-crumb-sep {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted-soft);
 }
 
 .detail-title {
