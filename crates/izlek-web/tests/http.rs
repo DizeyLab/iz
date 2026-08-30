@@ -6272,3 +6272,74 @@ async fn a_member_who_may_only_read_still_gets_the_tab_strip() {
         "no tab strip for a member: {html}"
     );
 }
+
+/// A spreadsheet has no browser element behind it: Izlek reads the workbook
+/// itself and lays the sheet out as a table, tab strip and all. The upload is
+/// a real xlsx, so this covers the sniffer, the reader and the view together.
+#[tokio::test]
+async fn a_workbook_opens_as_a_table_and_its_other_sheet_is_one_link_away() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Read the book").await;
+
+    let book = include_bytes!("fixtures/book.xlsx");
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some((
+            "costs.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            book,
+        )),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let file_id = attachment_id_named(&snapshot.body, "costs.xlsx");
+
+    let page = app
+        .get(
+            &format!("/?task={task}&file={file_id}"),
+            Some(&admin_cookie),
+        )
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("sheet-table"), "no sheet table: {html}");
+    assert!(html.contains("Cable"), "a cell's text is missing: {html}");
+    assert!(html.contains("1250"), "a number is missing: {html}");
+    assert!(html.contains("Ledger"), "the sheet tab is missing: {html}");
+    assert!(
+        html.contains(&format!("file={file_id}&amp;sheet=1")),
+        "no link to the second sheet: {html}"
+    );
+
+    // The tab strip is navigation, so the second sheet is a page of its own.
+    let second = app
+        .get(
+            &format!("/?task={task}&file={file_id}&sheet=1"),
+            Some(&admin_cookie),
+        )
+        .await;
+    let second_html = String::from_utf8_lossy(&second.bytes);
+    assert!(
+        second_html.contains("Second sheet cell"),
+        "the second sheet did not render: {second_html}"
+    );
+
+    // A hand-edited sheet index is the first sheet, not an error.
+    let past_the_end = app
+        .get(
+            &format!("/?task={task}&file={file_id}&sheet=99"),
+            Some(&admin_cookie),
+        )
+        .await;
+    assert!(String::from_utf8_lossy(&past_the_end.bytes).contains("Cable"));
+}

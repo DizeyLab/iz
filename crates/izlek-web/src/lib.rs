@@ -16,4 +16,5 @@ pub mod photo;
 pub mod rules;
 pub mod server;
 pub mod settings;
+pub mod sheet;
 pub mod smtp;

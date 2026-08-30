@@ -2113,7 +2113,13 @@ async fn audio_player_script(cx: &Cx) -> Result {
 /// mime type with no viewer element: a filename's own link only ever points
 /// here when [`crate::files::viewer_kind`] already said yes, but a hand-edited
 /// query string gets the same silent no as a stale or foreign id.
-pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str, tab: Tab) -> Result {
+pub async fn file_viewer_modal(
+    cx: &Cx,
+    task_id: &str,
+    file_id: &str,
+    tab: Tab,
+    sheet_index: usize,
+) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(_) => return view! { cx => },
@@ -2138,6 +2144,17 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str, tab: Tab) 
     let src = format!("/files/{file_id}");
     let download_href = format!("/files/{file_id}?dl=1");
     let name = attachment.file_name.clone();
+    // A workbook is the one viewer whose bytes are read here rather than
+    // handed to an element; every other kind streams from `/files/{id}` and
+    // never loads the file into the page's own request.
+    let sheet = if kind == crate::files::ViewerKind::Sheet {
+        match store.attachment_bytes(file_id).await {
+            Ok(Some(bytes)) => crate::sheet::read(bytes, sheet_index),
+            _ => None,
+        }
+    } else {
+        None
+    };
     view! {
         cx =>
         <div class="modal-scrim viewer-scrim">
@@ -2166,9 +2183,88 @@ pub async fn file_viewer_modal(cx: &Cx, task_id: &str, file_id: &str, tab: Tab) 
                             (audio_player_script(cx).await?)
                         </div>,
                         crate::files::ViewerKind::Pdf => <object class="viewer-media viewer-pdf" data=(src) type="application/pdf"></object>,
+                        crate::files::ViewerKind::Sheet => (sheet_view(cx, sheet, task_id, file_id, tab, lang).await?),
                     }
                 </div>
             </div>
+        </div>
+    }
+}
+
+/// One sheet of a workbook as a table: the tab strip when the book has more
+/// than one sheet, the grid with its column letters and row numbers, and the
+/// clipped line when the sheet ran past what [`crate::sheet`] draws. A
+/// workbook no reader here understands says so in one line — the header's
+/// download link is still the whole file.
+async fn sheet_view(
+    cx: &Cx,
+    sheet: Option<crate::sheet::Sheet>,
+    task_id: &str,
+    file_id: &str,
+    tab: Tab,
+    lang: Lang,
+) -> Result {
+    let Some(sheet) = sheet else {
+        return view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> };
+    };
+    let width = sheet.rows.iter().map(Vec::len).max().unwrap_or(0);
+    let columns: Vec<String> = (0..width).map(crate::sheet::column_name).collect();
+    // The tab strip is a row of links, not a control: switching sheets is a
+    // navigation like every other overlay state on this page.
+    let tabs: Vec<(String, String, &'static str)> = sheet
+        .names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            (
+                name.clone(),
+                format!(
+                    "/?task={task_id}&tab={}&file={file_id}&sheet={index}",
+                    tab.slug()
+                ),
+                if index == sheet.index {
+                    "sheet-tab sheet-tab-on"
+                } else {
+                    "sheet-tab"
+                },
+            )
+        })
+        .collect();
+    view! {
+        cx =>
+        <div class="viewer-sheet">
+            if tabs.len() > 1 {
+                <nav class="sheet-tabs">
+                    for tab in &tabs {
+                        <a class=(tab.2) href=(tab.1.clone())>(tab.0.clone())</a>
+                    }
+                </nav>
+            }
+            <div class="sheet-grid">
+                <table class="sheet-table">
+                    <thead>
+                        <tr>
+                            <th class="sheet-gutter"></th>
+                            for column in &columns {
+                                <th>(column.clone())</th>
+                            }
+                        </tr>
+                    </thead>
+                    <tbody>
+                        for (index, row) in sheet.rows.iter().enumerate() {
+                            <tr>
+                                <th class="sheet-gutter">(format!("{}", index + 1))</th>
+                                for column in 0..width {
+                                    <td>(row.get(column).cloned().unwrap_or_default())</td>
+                                }
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            if sheet.clipped {
+                <p class="sheet-note">(t(lang, Key::SheetClipped))</p>
+            }
         </div>
     }
 }

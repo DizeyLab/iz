@@ -499,6 +499,7 @@ struct BoardQuery {
     task: Option<String>,
     tab: Option<String>,
     file: Option<String>,
+    sheet: Option<String>,
     refusal: Option<String>,
     on: Option<String>,
     sort: Option<String>,
@@ -542,6 +543,13 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
     let open_tab = crate::detail::Tab::from_query(query.tab.as_deref());
+    // Which sheet of an open workbook is drawn. Anything that is not a number
+    // — a stale or hand-edited query string — is the first sheet.
+    let open_sheet = query
+        .sheet
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     // `?task=X&new=1` together would render both modals at once — two
     // document-level datepicker listeners double-stepping the month nav — so
     // an open task wins and `new` is ignored.
@@ -596,7 +604,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         if let Some(task_id) = &open_task {
             (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?)
             if let Some(file_id) = &query.file {
-                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab).await?)
+                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab, open_sheet).await?)
             }
         }
         if open_new {

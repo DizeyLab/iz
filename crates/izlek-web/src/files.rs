@@ -81,7 +81,26 @@ pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
     } else if bytes.starts_with(b"%PDF-") {
         "application/pdf"
     } else if bytes.starts_with(b"PK\x03\x04") {
-        "application/zip"
+        // Every OOXML and OpenDocument file is a zip; what kind it is lives in
+        // the entry names, which a zip stores uncompressed. `xl/workbook.xml`
+        // is the one part an xlsx cannot be without, and an ods declares its
+        // type in the `mimetype` entry the format requires be stored first.
+        if contains(bytes, b"xl/workbook.xml") {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        } else if contains(bytes, b"opendocument.spreadsheet") {
+            "application/vnd.oasis.opendocument.spreadsheet"
+        } else {
+            "application/zip"
+        }
+    } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        // The pre-2007 OLE compound file .xls, .doc and .ppt all share. Its
+        // directory holds stream names in UTF-16, and only a workbook carries
+        // one called `Workbook` — a .doc or .ppt stays an unnamed container.
+        if contains(bytes, b"W\0o\0r\0k\0b\0o\0o\0k\0") {
+            "application/vnd.ms-excel"
+        } else {
+            "application/x-ole-storage"
+        }
     } else if bytes.starts_with(&[0x1F, 0x8B]) {
         "application/gzip"
     } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
@@ -121,6 +140,14 @@ pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
     } else {
         "application/octet-stream"
     }
+}
+
+/// Whether `haystack` holds `needle` anywhere in it. Used on zip bytes, where
+/// the entry names sit in the clear even when the entries themselves do not.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// The `Content-Disposition` header for one download. `inline` is only ever
@@ -180,6 +207,22 @@ pub(crate) enum ViewerKind {
     Video,
     Audio,
     Pdf,
+    /// A spreadsheet Izlek reads itself and lays out as a table — no browser
+    /// renders one, so this is the only viewer whose bytes are parsed here
+    /// rather than handed to an element.
+    Sheet,
+}
+
+/// The stored mime types [`crate::sheet`] opens: the two Excel workbook
+/// formats and OpenDocument's. A file that sniffs as one of these still has
+/// to parse before a table is drawn; [`ViewerKind::Sheet`] only says to try.
+pub(crate) fn is_spreadsheet(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.ms-excel"
+            | "application/vnd.oasis.opendocument.spreadsheet"
+    )
 }
 
 pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
@@ -193,6 +236,8 @@ pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
         Some(ViewerKind::Audio)
     } else if mime_type == "application/pdf" {
         Some(ViewerKind::Pdf)
+    } else if is_spreadsheet(mime_type) {
+        Some(ViewerKind::Sheet)
     } else {
         None
     }
