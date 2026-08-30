@@ -25,6 +25,13 @@ pub const ARGON2_PARALLELISM: u32 = 1;
 /// How many bytes of randomness every token carries.
 pub const TOKEN_BYTES: usize = 16;
 
+/// The shortest password this app accepts.
+///
+/// Named because the form that takes a new password carries it too — as
+/// `minlength`, so the browser enforces the rule where it is being broken
+/// rather than the server explaining it afterwards. Two places, one number.
+pub const MIN_PASSWORD_CHARS: usize = 10;
+
 /// A password rule the person's choice broke. The wording is the wording on the
 /// first-sign-in screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -155,7 +162,7 @@ pub fn check_password(
 ) -> Result<(), PasswordProblem> {
     // Counted in characters, not bytes: a ten-character password is ten
     // characters whatever alphabet it is in.
-    if password.chars().count() < 10 {
+    if password.chars().count() < MIN_PASSWORD_CHARS {
         return Err(PasswordProblem::TooShort);
     }
 

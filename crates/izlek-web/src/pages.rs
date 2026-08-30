@@ -117,6 +117,7 @@ async fn setup_card(cx: &Cx) -> Result {
                                 type="password"
                                 name="password"
                                 autocomplete="new-password"
+                                minlength=(izlek_core::auth::MIN_PASSWORD_CHARS.to_string())
                                 required=""
                             >
                         </label>
@@ -222,6 +223,7 @@ async fn join_card(cx: &Cx, token: &str, person: Invited) -> Result {
                                 type="password"
                                 name="password"
                                 autocomplete="new-password"
+                                minlength=(izlek_core::auth::MIN_PASSWORD_CHARS.to_string())
                                 required=""
                             >
                         </label>

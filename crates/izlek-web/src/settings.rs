@@ -1311,7 +1311,7 @@ async fn settings_page(cx: &Cx) -> Result {
                         </label>
                         <label class="field">
                             <span class="field-label">(t(lang, Key::NewPasswordLabel))</span>
-                            <input class="field-input" type="password" name="new" autocomplete="new-password" required="">
+                            <input class="field-input" type="password" name="new" autocomplete="new-password" minlength=(izlek_core::auth::MIN_PASSWORD_CHARS.to_string()) required="">
                         </label>
                         <div class="panel-foot">
                             if let Some(refusal) = &password_refusal {

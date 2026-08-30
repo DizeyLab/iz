@@ -536,6 +536,55 @@ async fn queued_join_token(app: &App, email: &str) -> String {
 }
 
 /// Invites someone in the given role and signs them in, returning their cookie.
+#[tokio::test]
+async fn a_password_may_be_made_of_punctuation() {
+    // An invited member reported "it would not accept the *". Nothing in the
+    // rules mentions characters, so if one is refused it is the wire eating
+    // it, not the policy: a form body is url-encoded, where `+` means space
+    // and `%` starts an escape, and a password that survives the round trip
+    // in a test is a password that survives it in a browser.
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let email = "punct@izlek.sh";
+    let answer = app
+        .post(
+            "/api/invite_member",
+            Some(&admin_cookie),
+            &[("email", email), ("display_name", "Pat"), ("role", "member")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let token = queued_join_token(&app, email).await;
+
+    let password = "*+&%= ?#/\\ tulip 42";
+    let answer = app
+        .post(
+            "/api/redeem_link",
+            None,
+            &[("token", &token), ("password", password)],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert_eq!(answer.body, "null", "the punctuation password was refused");
+
+    // And it is the same password on the way back in — an encoding that ate a
+    // character on the way in would let them set one thing and sign in with
+    // another.
+    let back = app
+        .post(
+            "/api/sign_in",
+            None,
+            &[("email", email), ("password", password)],
+        )
+        .await;
+    assert_eq!(back.status, StatusCode::SEE_OTHER, "{}", back.body);
+    assert!(
+        back.session.is_some(),
+        "the password that was set does not sign in: {}",
+        back.body
+    );
+}
+
 async fn invited(app: &App, admin: &str, email: &str, name: &str, role: Role) -> String {
     let role = match role {
         Role::Admin => "admin",
