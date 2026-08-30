@@ -50,12 +50,18 @@ database = "izlek.db"
 # The address the server listens on. Environment variables are ignored —
 # this is the only thing that decides where Izlek binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
-listen = "127.0.0.1:3000"
+listen = "127.0.0.1:7654"
 "#;
 
 /// The default `listen` when the file is silent about it. A file missing this
 /// key is completed with it on the next boot, so the silence lasts one run.
-const DEFAULT_LISTEN: &str = "127.0.0.1:3000";
+///
+/// 7654 rather than a round number: 3000, 4000, 5000, 8000 and 8080 are what
+/// every other thing on a developer's machine already took, and a first run
+/// that dies on "address already in use" is a first run that teaches nothing.
+/// This one is unassigned in IANA's registry and sits below the ephemeral
+/// range, so the kernel never hands it to an outgoing connection either.
+const DEFAULT_LISTEN: &str = "127.0.0.1:7654";
 
 /// Every optional key, with the comment and default a file missing it is
 /// completed with. `database` is not here: it has no default worth guessing,
@@ -66,7 +72,7 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[(
         "# The address the server listens on. Environment variables are ignored —\n",
         "# this is the only thing that decides where Izlek binds. It is also the\n",
         "# address mail links fall back to, until an admin sets one in Settings.\n",
-        "listen = \"127.0.0.1:3000\"\n"
+        "listen = \"127.0.0.1:7654\"\n"
     ),
 )];
 
@@ -342,8 +348,8 @@ mod tests {
         assert!(config.defaulted);
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("izlek.db"));
-        assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
-        assert_eq!(config.listen_url(), "http://127.0.0.1:3000");
+        assert_eq!(config.listen, "127.0.0.1:7654".parse().unwrap());
+        assert_eq!(config.listen_url(), "http://127.0.0.1:7654");
 
         let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert_eq!(written, DEVELOPMENT_DEFAULTS);
@@ -369,10 +375,10 @@ mod tests {
         .unwrap();
 
         let config = Config::load_from(&dir).unwrap();
-        assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(config.listen, "127.0.0.1:7654".parse().unwrap());
 
         let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
-        assert!(written.contains("listen = \"127.0.0.1:3000\""), "{written}");
+        assert!(written.contains("listen = \"127.0.0.1:7654\""), "{written}");
         // What was there is untouched, comment and all.
         assert!(written.starts_with("# mine\ndatabase = \"state/izlek.db\"\n"), "{written}");
 
@@ -404,7 +410,7 @@ mod tests {
     #[test]
     fn a_missing_key_names_itself_rather_than_guessing() {
         let problem =
-            Config::parse("listen = \"127.0.0.1:3000\"\n", Path::new("."), false).unwrap_err();
+            Config::parse("listen = \"127.0.0.1:7654\"\n", Path::new("."), false).unwrap_err();
         assert_eq!(problem, ConfigError::Missing("database"));
         let said = problem.to_string();
         assert!(said.contains("database"), "{said}");
@@ -436,12 +442,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file written before `listen` existed still loads, and still binds
-    /// where it always did.
+    /// A file that does not mention `listen` still loads, and binds at the
+    /// default it is about to be completed with.
     #[test]
-    fn a_file_without_listen_falls_back_to_the_old_default() {
+    fn a_file_without_listen_takes_the_default() {
         let config = Config::parse("database = \"/srv/izlek.db\"\n", Path::new("."), false).unwrap();
-        assert_eq!(config.listen, "127.0.0.1:3000".parse().unwrap());
+        assert_eq!(config.listen, "127.0.0.1:7654".parse().unwrap());
     }
 
     #[test]
@@ -471,16 +477,16 @@ mod tests {
             .unwrap()
             .listen_url()
         };
-        assert_eq!(url("127.0.0.1:3000"), "http://127.0.0.1:3000");
+        assert_eq!(url("127.0.0.1:7654"), "http://127.0.0.1:7654");
         assert_eq!(url("192.168.1.20:8080"), "http://192.168.1.20:8080");
         // Port 80 is the one a URL does not say.
         assert_eq!(url("10.0.0.4:80"), "http://10.0.0.4");
         // A bind that names no interface is reachable by no name, so the
         // loopback stands in: a link somebody on the box can click beats a
         // link nobody can.
-        assert_eq!(url("0.0.0.0:3000"), "http://127.0.0.1:3000");
-        assert_eq!(url("[::]:3000"), "http://127.0.0.1:3000");
-        assert_eq!(url("[::1]:3000"), "http://[::1]:3000");
+        assert_eq!(url("0.0.0.0:7654"), "http://127.0.0.1:7654");
+        assert_eq!(url("[::]:7654"), "http://127.0.0.1:7654");
+        assert_eq!(url("[::1]:7654"), "http://[::1]:7654");
     }
 
     /// The sender used to be environment variables read directly, and the

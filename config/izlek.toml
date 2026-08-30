@@ -3,4 +3,4 @@ database = "izlek.db"
 # The address the server listens on. Environment variables are ignored —
 # this is the only thing that decides where Izlek binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
-listen = "127.0.0.1:3000"
+listen = "127.0.0.1:7654"
