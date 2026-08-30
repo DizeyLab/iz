@@ -1232,15 +1232,35 @@ img.avatar {
 // A workbook has no element of its own, so the viewer draws it: a tab strip
 // when the book has more than one sheet, and a grid that pans inside its own
 // box — the document never scrolls.
+// A workbook is wider and taller than anything else the viewer opens, so it
+// takes the panel the whole way out: the modal grows to the viewport and no
+// further, and the grid takes whatever is left under the tab strip and pans
+// inside that — the panel itself never leaves the screen.
+.viewer:has(.viewer-sheet) {
+  width: min(96vw, 1400px);
+  max-width: min(96vw, 1400px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  .viewer-body {
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+    padding: 16px 20px 20px;
+  }
+}
+
 .viewer-sheet {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(86vw, 900px);
-  // The viewer body is a row flex, so without this the sheet's automatic
-  // minimum size is the whole table's width and a wide book pushes the panel
-  // off the screen instead of panning inside it.
+  width: 100%;
+  // The viewer body is a row flex, so without these the sheet's automatic
+  // minimum size is the whole table's width and height, and a wide book
+  // pushes the panel off the screen instead of panning inside it.
   min-width: 0;
+  min-height: 0;
 }
 
 .sheet-tabs {
@@ -1268,8 +1288,9 @@ img.avatar {
 }
 
 .sheet-grid {
-  max-height: 70vh;
+  flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
   scrollbar-width: none;
   border: 1px solid var(--border);
@@ -1288,7 +1309,7 @@ img.avatar {
     padding: 4px 8px;
     border-right: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
-    max-width: 220px;
+    max-width: 180px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
