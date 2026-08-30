@@ -101,14 +101,14 @@ async fn migrations_apply_once_and_survive_reopen() {
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    assert_eq!(first.schema_version().await.unwrap(), 2);
+    assert_eq!(first.schema_version().await.unwrap(), 1);
     claim(&first).await;
     drop(first);
 
     // Re-opening must not re-run 0001 (which would fail on CREATE TABLE) and
     // must not lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), 2);
+    assert_eq!(second.schema_version().await.unwrap(), 1);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "Izlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -3481,11 +3481,11 @@ async fn a_rule(store: &TursoStore, workspace: &str, column: &str, subject: &str
 }
 
 #[tokio::test]
-async fn a_rule_that_fires_on_nothing_is_refused_by_the_schema() {
-    // The store's own API cannot build a half-written rule, so this reaches
-    // past it: a status rule with no column, straight at the table. The check
-    // constraint is the guard, and if it were ever dropped this insert would
-    // quietly succeed and the engine would carry a rule that matches nothing.
+async fn a_rule_naming_a_column_it_cannot_act_on_is_refused_by_the_schema() {
+    // The store's own API cannot build a rule like these, so this reaches
+    // past it, straight at the table. The check constraint is the guard: a
+    // column on a trigger that never reads one is a rule whose author meant
+    // something the engine will not do.
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
@@ -3504,11 +3504,27 @@ async fn a_rule_that_fires_on_nothing_is_refused_by_the_schema() {
         .execute(
             "INSERT INTO mail_rule \
              (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at) \
-             VALUES ('r1', ?1, 'status', NULL, 'Task completed', 'assignees', 1, '2026-08-26')",
+             SELECT 'r1', ?1, 'created', id, 'Task completed', 'assignees', 1, '2026-08-26' \
+             FROM board_column LIMIT 1",
             turso::params![board.id.clone()],
         )
         .await;
-    assert!(refused.is_err(), "a status rule with no column was stored");
+    assert!(
+        refused.is_err(),
+        "a rule that reads no column was stored carrying one"
+    );
+
+    // A status rule with no column is not half-written: it is the rule that
+    // watches every column, and the schema has to let it through.
+    let every_column = conn
+        .execute(
+            "INSERT INTO mail_rule \
+             (id, board_id, trigger_kind, trigger_column, subject, audience, enabled, created_at) \
+             VALUES ('r3', ?1, 'status', NULL, 'It moved', 'assignees', 1, '2026-08-26')",
+            turso::params![board.id.clone()],
+        )
+        .await;
+    assert!(every_column.is_ok(), "the every-column rule was refused");
 
     let missing_column = conn
         .execute(

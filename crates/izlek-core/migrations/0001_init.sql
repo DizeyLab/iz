@@ -6,12 +6,13 @@
 -- creation, and Crockford-uppercase already, which is what lets a task key
 -- borrow its tail.
 --
--- This file replaces a chain of twenty migrations. Three of them (the old
--- 0013, 0014, 0019) did not tweak a table but rebuilt it — SQLite cannot drop
--- a CHECK or a foreign key in place — so the shape a reader found here no
--- longer matched the shape a running database had. Nothing has been released,
--- so the chain was collapsed into this: the tables as they actually are. The
--- reasoning those migrations carried is kept, on the tables it explains.
+-- This file is the whole schema, not the first link of a chain. Nothing has
+-- been released, so a change to a table is made here, in the table, and the
+-- database it describes is recreated — twenty migrations were collapsed into
+-- this file once for that reason, and a twenty-first would start the same rot
+-- over. The reasoning the old migrations carried is kept, on the tables it
+-- explains. The day Izlek runs somewhere with data worth keeping, the next
+-- change becomes 0002 and this note goes away.
 
 CREATE TABLE workspace (
     id                     TEXT PRIMARY KEY,
@@ -47,9 +48,15 @@ CREATE TABLE workspace (
     -- back tomorrow wondering whether it ever worked. `smtp_test_error` is the
     -- mail server's own words, so the admin can act on them; the mailer builds
     -- its errors from what the server said, never from the credentials it sent.
-    smtp_test_at           INTEGER,
+    smtp_test_at           TEXT,
     smtp_test_ms           INTEGER,
-    smtp_test_error        TEXT
+    smtp_test_error        TEXT,
+    -- The address mail links point at, when the one the process was
+    -- configured with is not the one people reach. A box behind a proxy
+    -- answers on localhost and is known by a public name, and only an admin
+    -- knows which — so it is workspace content, and `config/izlek.toml`'s
+    -- `base_url` is what an empty one falls back to.
+    public_url             TEXT
 );
 
 CREATE TABLE user (
@@ -203,6 +210,10 @@ CREATE TABLE task_dependency (
     PRIMARY KEY (blocked_task_id, blocking_task_id),
     CHECK (blocked_task_id <> blocking_task_id)
 );
+-- The primary key answers "what is this task waiting on"; the other
+-- direction — "who is waiting on this one", which every finish and every
+-- delete asks — has no prefix of it to use.
+CREATE INDEX task_dependency_by_blocking ON task_dependency(blocking_task_id);
 
 CREATE TABLE comment (
     id         TEXT PRIMARY KEY,
@@ -309,9 +320,10 @@ CREATE TABLE mail_rule (
     -- being all the recipient reads. Off by default.
     include_task_details INTEGER NOT NULL DEFAULT 0,
     created_at           TEXT NOT NULL,
-    -- A status rule names a column and an unblocked rule does not. The check
-    -- is here so a half-written rule cannot be stored at all.
-    CHECK ((trigger_kind = 'status') = (trigger_column IS NOT NULL))
+    -- Only a status rule names a column, and a status rule that names none
+    -- watches every column. The check is here so a rule that names a column
+    -- it could not act on cannot be stored at all.
+    CHECK (trigger_column IS NULL OR trigger_kind = 'status')
 );
 CREATE INDEX mail_rule_by_board ON mail_rule(board_id);
 
@@ -348,6 +360,9 @@ CREATE TABLE mail_send (
 CREATE UNIQUE INDEX mail_send_once ON mail_send(rule_id, event_id, task_id, recipient);
 CREATE INDEX mail_send_owed ON mail_send(next_attempt_at);
 CREATE INDEX mail_send_by_rule ON mail_send(rule_id, sent_at);
+-- The task's own mail strip reads by task, which neither index above starts
+-- with: both lead on `rule_id`, and an invite has none.
+CREATE INDEX mail_send_by_task ON mail_send(task_id);
 
 -- What the mail engine decided, for every rule and every event, not just the
 -- mails it sent.
@@ -373,21 +388,4 @@ CREATE TABLE mail_decision (
 );
 CREATE UNIQUE INDEX mail_decision_once ON mail_decision(rule_id, event_id, task_id);
 CREATE INDEX mail_decision_recent ON mail_decision(created_at);
-
--- Read-only links: izlek.sh/v/<id>. Only the hash of the token is stored, so a
--- database copy does not hand out working links; revoking is server-side and
--- immediate. Designed but not yet built — no store method writes this table.
-CREATE TABLE view_link (
-    id           TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspace(id),
-    board_id     TEXT NOT NULL REFERENCES board(id),
-    token_hash   TEXT NOT NULL,
-    -- 'whole_board' | 'deadlines'
-    scope        TEXT NOT NULL,
-    created_by   TEXT NOT NULL REFERENCES user(id),
-    created_at   TEXT NOT NULL,
-    expires_at   TEXT,
-    revoked_at   TEXT,
-    open_count   INTEGER NOT NULL DEFAULT 0
-);
-CREATE UNIQUE INDEX view_link_token ON view_link(token_hash);
+CREATE INDEX mail_decision_by_task ON mail_decision(task_id);

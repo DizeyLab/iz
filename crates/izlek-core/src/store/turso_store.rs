@@ -30,10 +30,11 @@ use time::Date;
 use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
 
-/// Every migration, in order. Adding one means appending a file and a line.
+/// Every migration, in order. There is one: nothing has been released, so a
+/// schema change is made in `0001_init.sql` and the database recreated. A
+/// second file is for the day there is data worth keeping.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
-    (2, include_str!("../../migrations/0002_public_url.sql")),
 ];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
@@ -158,12 +159,12 @@ impl TursoStore {
 
     /// One migration and the row that says it ran, in one transaction.
     ///
-    /// A migration is not only a thing that can fail — 0005 rebuilds
-    /// `mail_send` to drop a foreign key, and a crash between the DROP and the
-    /// RENAME would leave the mail ledger gone rather than merely unmigrated.
-    /// So the file and its `schema_version` row commit together or not at all,
-    /// and a half-applied migration is a boot that starts over rather than a
-    /// database with a hole in it.
+    /// A migration is not only a thing that can fail: one that rebuilds a
+    /// table — which is how SQLite drops a CHECK or a foreign key — would
+    /// leave the table gone rather than merely unmigrated if it died between
+    /// the DROP and the RENAME. So the file and its `schema_version` row
+    /// commit together or not at all, and a half-applied migration is a boot
+    /// that starts over rather than a database with a hole in it.
     ///
     /// SQLite's DDL is transactional, which is what makes this possible at all.
     async fn apply(&self, version: i64, sql: &str) -> Result<()> {
@@ -250,12 +251,9 @@ const SEND_COLUMNS: &str = "id, rule_id, event_id, task_id, recipient, state, at
 
 fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
     match trigger {
-        // The every-column rule is its own stored kind rather than a status
-        // row with no column: the schema's check ties `status` to a column
-        // it names, and a kind of its own keeps that check honest without
-        // rebuilding the table under a live ledger.
-        Trigger::StatusBecomes(Some(column)) => ("status", Some(column.clone())),
-        Trigger::StatusBecomes(None) => ("status_any", None),
+        // A status rule with no column is the every-column rule; the schema
+        // allows the null, and nothing has to invent a second kind to say so.
+        Trigger::StatusBecomes(column) => ("status", column.clone()),
         Trigger::Unblocked => ("unblocked", None),
         Trigger::Created => ("created", None),
         Trigger::Assigned => ("assigned", None),
@@ -285,8 +283,7 @@ fn rule_from(row: &Row) -> Result<MailRule> {
     let kind = text(row, 2)?;
     let column = opt_text(row, 3)?;
     let trigger = match (kind.as_str(), column) {
-        ("status", Some(column)) => Trigger::StatusBecomes(Some(column)),
-        ("status_any", None) => Trigger::StatusBecomes(None),
+        ("status", column) => Trigger::StatusBecomes(column),
         ("unblocked", None) => Trigger::Unblocked,
         ("created", None) => Trigger::Created,
         ("assigned", None) => Trigger::Assigned,
