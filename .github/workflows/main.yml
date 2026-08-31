@@ -63,14 +63,16 @@ jobs:
         run: |
           set -euo pipefail
           # `topcoat asset bundle` runs its own `cargo build` and strips every
-          # CARGO_* variable from it, so neither the target nor its linker can
-          # be passed by environment. They go into the cargo config that inner
-          # build reads. This file is written in CI only; it is not committed.
+          # CARGO_* variable from it, so the target cannot be passed by
+          # environment; it goes into the cargo config that inner build reads.
+          # This file is written in CI only; it is not committed.
           mkdir -p .cargo
-          {
-            printf '[build]\ntarget = "%s"\n\n' "$TARGET"
-            printf '[target.x86_64-unknown-linux-musl]\nlinker = "musl-gcc"\n'
-          } >> .cargo/config.toml
+          printf '[build]\ntarget = "%s"\n' "$TARGET" >> .cargo/config.toml
+          # The linker stays rustc's default (the bundled rust-lld): a warm
+          # relink of this binary measured 142s under musl-gcc's BFD against
+          # 23s under rust-lld, and that link was the largest single chunk of
+          # the deploy build. musl-gcc remains the C compiler below — ring's
+          # assembly needs it, and lld links the objects it produces.
           # C dependencies (ring, under lettre's TLS) compile against musl too.
           echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
 
