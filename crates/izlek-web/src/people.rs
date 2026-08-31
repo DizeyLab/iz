@@ -19,16 +19,14 @@ use crate::server::{accounts, require_user};
 
 path_param!(user_id);
 
-/// The account line the members table renders, read the same way here: a
-/// named state (owner, invited) while there is nothing newer to say, and the
-/// last-seen day once there is.
-fn account_line(lang: Lang, is_owner: bool, has_signed_in: bool, last_day: Option<String>) -> String {
-    if is_owner {
-        t(lang, Key::OwnerStatus).to_string()
-    } else if !has_signed_in {
+/// What the account itself is doing: the owner reads as the owner, somebody
+/// who has never chosen a password reads as invited, and everybody else is
+/// the day they were last here.
+fn last_seen(lang: Lang, has_signed_in: bool, last_day: Option<String>) -> String {
+    if !has_signed_in {
         t(lang, Key::InvitedStatus).to_string()
     } else if let Some(day) = last_day {
-        crate::i18n::last_seen_label(lang, &day)
+        day
     } else {
         t(lang, Key::ActiveStatus).to_string()
     }
@@ -82,14 +80,20 @@ async fn people_page(cx: &Cx) -> Result {
         .owner()
         .await?
         .is_some_and(|owner| owner.id == person.id);
-    let account = account_line(
+    let joined = izlek_core::board::day_label(person.created_at.to_offset(zone).date());
+    let seen = last_seen(
         lang,
-        is_owner,
         person.has_signed_in(),
         person
             .last_signed_in_at
             .map(|at| izlek_core::board::day_label(at.to_offset(zone).date())),
     );
+    // Who let them in, as a name that leads to that person's own page. The
+    // first account was invited by nobody.
+    let inviter = match &person.invited_by {
+        Some(id) => store.user(id).await?,
+        None => None,
+    };
     let role_key = match person.role {
         izlek_core::Role::Admin => Key::RoleAdminOption,
         izlek_core::Role::Member => Key::RoleMemberOption,
@@ -117,52 +121,90 @@ async fn people_page(cx: &Cx) -> Result {
         </header>
 
         <main class="people-shell">
-            <section class="panel" id="profile">
-                <div class="panel-head">
-                    (crate::layout::avatar(cx, &who, "avatar-lg").await?)
-                    <h2 class="panel-title">(person.display_name.clone())</h2>
-                    <span class="chip chip-role">(t(lang, role_key))</span>
+            <section class="panel person-card">
+                <div class="person-head">
+                    (crate::layout::avatar(cx, &who, "avatar-xl").await?)
+                    <div class="person-heading">
+                        <h2 class="person-name">(person.display_name.clone())</h2>
+                        <div class="person-marks">
+                            <span class="chip chip-role">(t(lang, role_key))</span>
+                            if is_owner {
+                                <span class="chip chip-admin">(t(lang, Key::OwnerStatus))</span>
+                            }
+                        </div>
+                    </div>
                     if mine {
-                        <a class="quiet" href="/settings?section=profile">(t(lang, Key::EditLabel))</a>
+                        <a class="quiet person-edit" href="/settings?section=profile">(t(lang, Key::EditLabel))</a>
                     }
                 </div>
-                <div class="panel-body">
-                    <p>(person.email.clone())</p>
-                    <p>(account)</p>
-                </div>
+                <dl class="person-fields">
+                    <div class="person-field">
+                        <dt>(t(lang, Key::EmailLabel))</dt>
+                        <dd class="person-address">(person.email.clone())</dd>
+                    </div>
+                    <div class="person-field">
+                        <dt>(t(lang, Key::JoinedLabel))</dt>
+                        <dd>(joined)</dd>
+                    </div>
+                    <div class="person-field">
+                        <dt>(t(lang, Key::LastSeenLabel))</dt>
+                        <dd>(seen)</dd>
+                    </div>
+                    if let Some(inviter) = inviter {
+                        <div class="person-field">
+                            <dt>(t(lang, Key::InvitedByLabel))</dt>
+                            <dd><a href=(format!("/people/{}", inviter.id))>(inviter.display_name.clone())</a></dd>
+                        </div>
+                    }
+                </dl>
             </section>
 
             <section class="panel">
-                <div class="panel-body">
-                    <dl class="people-stats">
-                        <div><dt>(t(lang, Key::TasksOpenLabel))</dt><dd>(stats.assigned_open)</dd></div>
-                        <div><dt>(t(lang, Key::TasksDoneLabel))</dt><dd>(stats.assigned_done)</dd></div>
-                        <div><dt>(t(lang, Key::TasksCreatedLabel))</dt><dd>(stats.created)</dd></div>
-                        <div><dt>(t(lang, Key::CommentsLabel))</dt><dd>(stats.comments)</dd></div>
-                    </dl>
-                </div>
+                <dl class="person-stats">
+                    <div class="person-stat">
+                        <dd>(stats.assigned_open)</dd>
+                        <dt>(t(lang, Key::TasksOpenLabel))</dt>
+                    </div>
+                    <div class="person-stat">
+                        <dd>(stats.assigned_done)</dd>
+                        <dt>(t(lang, Key::TasksDoneLabel))</dt>
+                    </div>
+                    <div class="person-stat">
+                        <dd>(stats.created)</dd>
+                        <dt>(t(lang, Key::TasksCreatedLabel))</dt>
+                    </div>
+                    <div class="person-stat">
+                        <dd>(stats.comments)</dd>
+                        <dt>(t(lang, Key::CommentsLabel))</dt>
+                    </div>
+                </dl>
             </section>
 
             <section class="panel">
                 <div class="panel-head">
                     <h2 class="panel-title">(t(lang, Key::RecentActivity))</h2>
                 </div>
-                <div class="panel-body">
-                    if feed.is_empty() {
-                        <p>(t(lang, Key::NothingYet))</p>
+                if feed.is_empty() {
+                    <div class="panel-body"><p class="muted">(t(lang, Key::NothingYet))</p></div>
+                }
+                <ul class="person-feed">
+                    for line in feed {
+                        <li class="person-line">
+                            <span class="person-verb">(kind_word(lang, &line.kind))</span>
+                            if let Some(task_id) = line.task_id.clone() {
+                                <a class="person-task" href=(format!("/?task={task_id}"))>
+                                    if let Some(key) = line.task_key.clone() {
+                                        <span class="person-key">(key)</span>
+                                    }
+                                    <span class="person-title">(line.title.clone().unwrap_or_default())</span>
+                                </a>
+                            } else {
+                                <span class="person-title">(line.title.clone().unwrap_or_default())</span>
+                            }
+                            <span class="person-day">(izlek_core::board::day_label(line.at.to_offset(zone).date()))</span>
+                        </li>
                     }
-                    <ul class="people-feed">
-                        for line in feed {
-                            <li>
-                                <span>(kind_word(lang, &line.kind))</span>
-                                if let Some(title) = line.title {
-                                    <span>(title)</span>
-                                }
-                                <span class="people-feed-day">(izlek_core::board::day_label(line.at.to_offset(zone).date()))</span>
-                            </li>
-                        }
-                    </ul>
-                </div>
+                </ul>
             </section>
         </main>
 

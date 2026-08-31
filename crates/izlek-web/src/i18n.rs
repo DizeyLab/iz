@@ -348,6 +348,9 @@ pub enum Key {
     TasksCreatedLabel,
     CommentsLabel,
     RecentActivity,
+    JoinedLabel,
+    LastSeenLabel,
+    InvitedByLabel,
     MailBatchLabel,
 }
 
@@ -989,6 +992,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (CommentsLabel, Tr) => "Yorumlar",
         (RecentActivity, En) => "Recent activity",
         (RecentActivity, Tr) => "Son etkinlik",
+        (JoinedLabel, En) => "JOINED",
+        (JoinedLabel, Tr) => "KATILDI",
+        (LastSeenLabel, En) => "LAST SEEN",
+        (LastSeenLabel, Tr) => "SON GÖRÜLME",
+        (InvitedByLabel, En) => "INVITED BY",
+        (InvitedByLabel, Tr) => "DAVET EDEN",
         (MailBatchLabel, En) => "Mail delay (minutes)",
         (MailBatchLabel, Tr) => "Posta gecikmesi (dakika)",
     }

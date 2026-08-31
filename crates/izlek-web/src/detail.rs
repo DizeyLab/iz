@@ -1365,8 +1365,10 @@ async fn assignee_chip(
     view! {
         cx =>
         <span class="assignee-chip">
-            (crate::layout::avatar(cx, person, "avatar-sm").await?)
-            <span class="assignee-name">(person.display_name.clone())</span>
+            <a class="person-link" href=(format!("/people/{}", person.id))>
+                (crate::layout::avatar(cx, person, "avatar-sm").await?)
+                <span class="assignee-name">(person.display_name.clone())</span>
+            </a>
             if may_write {
                 <form class="assignee-drop" method="post" action="/api/unassign">
                     <input type="hidden" name="task_id" value=(task_id.to_string())>
@@ -1641,10 +1643,12 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
     view! {
         cx =>
         <div class="comment">
-            (crate::layout::avatar(cx, &comment.author, "avatar-lg").await?)
+            <a class="person-link" href=(format!("/people/{}", comment.author.id))>
+                (crate::layout::avatar(cx, &comment.author, "avatar-lg").await?)
+            </a>
             <div class="comment-said">
                 <div class="comment-head">
-                    <span class="comment-who">(comment.author.display_name.clone())</span>
+                    <a class="comment-who person-link" href=(format!("/people/{}", comment.author.id))>(comment.author.display_name.clone())</a>
                     <span class="comment-when">(moment_label_in(comment.at, zone))</span>
                 </div>
                 <div class="comment-body">(comment.body.clone())</div>
@@ -1879,7 +1883,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                 if may_write {
                                     <form class="status-form" method="post" action="/api/set_task_tag">
                                         <input type="hidden" name="task_id" value=(detail.id.clone())>
-                                        <select class="status-select" name="tag_id" data-autosubmit="">
+                                        <select class="status-select" name="tag_id" data-autosubmit="" data-search="">
                                             for tag in &tags {
                                                 <option value=(tag.id.clone()) selected=(Some(tag.id.as_str()) == detail.tag.as_ref().map(|t| t.id.as_str()))>(tag.name.clone())</option>
                                             }

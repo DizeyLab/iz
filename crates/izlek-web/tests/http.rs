@@ -7647,6 +7647,92 @@ async fn a_member_may_read_another_members_profile_name_address_and_counts() {
     }
 }
 
+/// Every fact on a profile sits in a named cell, and the person who let this
+/// member in is a link to their own page rather than a name in prose.
+#[tokio::test]
+async fn a_profile_names_its_fields_and_links_the_person_who_invited_them() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
+    let mem_id = user_id(&app, "mem@izlek.sh").await;
+    let admin_id = app
+        .store
+        .users(&app.workspace_id().await)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|user| user.role == Role::Admin)
+        .unwrap()
+        .id;
+
+    let page = app.get(&format!("/people/{mem_id}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8(page.bytes).unwrap();
+    for label in ["EMAIL", "JOINED", "LAST SEEN", "INVITED BY"] {
+        assert!(html.contains(label), "the {label} field is not on the page: {html}");
+    }
+    assert!(
+        html.contains(&format!(r#"href="/people/{admin_id}""#)),
+        "the inviter is not a way to their own page: {html}"
+    );
+    assert!(
+        html.contains("avatar-xl"),
+        "the profile picture is not the page's own size: {html}"
+    );
+
+    // The first account was invited by nobody, so it carries no such cell.
+    let owner = app.get(&format!("/people/{admin_id}"), Some(&admin_cookie)).await;
+    let owner_html = String::from_utf8(owner.bytes).unwrap();
+    assert!(
+        !owner_html.contains("INVITED BY"),
+        "the owner was invited by somebody: {owner_html}"
+    );
+}
+
+/// A face or a name in the task modal leads to the person it names.
+#[tokio::test]
+async fn a_comment_author_and_an_assignee_lead_to_their_profiles() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
+    let mem_id = user_id(&app, "mem@izlek.sh").await;
+    let workspace_id = app.workspace_id().await;
+    let board = app.store.board(&workspace_id).await.unwrap().unwrap();
+    let open = app.store.columns(&board.id).await.unwrap()[0].id.clone();
+    let task = a_task_by(&app, &board.id, &open, "Hold the door", &mem_id).await;
+    app.store.assign_task(&task, &mem_id).await.unwrap();
+    app.store
+        .add_comment(&task, &mem_id, "a note", time::OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let page = app
+        .get(&format!("/?task={task}&tab=comments"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8(page.bytes).unwrap();
+    assert!(
+        html.matches(&format!(r#"href="/people/{mem_id}""#)).count() >= 2,
+        "the comment's author and the assignee do not both lead anywhere: {html}"
+    );
+}
+
+/// The board's project filter is typed into, like the pickers on the logs
+/// page: a workspace with many tags is not a list to scroll.
+#[tokio::test]
+async fn the_project_filter_is_written_into() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let page = app.get("/", Some(&admin_cookie)).await;
+    let html = String::from_utf8(page.bytes).unwrap();
+    let filter = html
+        .split("<select")
+        .find(|chunk| chunk.contains(r#"name="tag""#))
+        .unwrap_or_else(|| panic!("no project filter on the board: {html}"));
+    assert!(
+        filter.contains("data-search"),
+        "the project filter cannot be typed into: {filter}"
+    );
+}
+
 #[tokio::test]
 async fn a_profile_is_not_found_signed_out_or_outside_the_workspace() {
     let app = App::open().await;

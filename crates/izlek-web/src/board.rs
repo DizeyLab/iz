@@ -630,7 +630,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             </form>
             <form class="field-box field-box-sort" method="get" action="/">
                 <span class="field-text">(t(lang, Key::Project))</span>
-                <select class="status-select" name="tag" data-autosubmit="">
+                <select class="status-select" name="tag" data-autosubmit="" data-search="">
                     <option value="" selected=(tag_filter.is_none())>(t(lang, Key::AllTags))</option>
                     for tag in &tags {
                         <option value=(tag.id.clone()) selected=(tag_filter.as_deref() == Some(tag.id.as_str()))>(tag.name.clone())</option>

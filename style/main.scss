@@ -941,18 +941,34 @@ a {
   // The modal asks for two other sizes: 18px inside an assignee chip, 28px
   // beside a comment. The border is the board's overlap trick and has no job
   // on a lone avatar, so these drop it.
-  &-sm {
+  //
+  // They are written as `.avatar.avatar-sm` on purpose: the Instrument skin
+  // sizes `.avatar` from a `[data-ui]` scope, which outweighs a lone class —
+  // a plain `.avatar-lg` lost to it, and every size modifier collapsed to
+  // 18px on that skin without anybody noticing.
+  &.avatar-sm {
     width: 18px;
     height: 18px;
     border: none;
     font-size: 10px;
   }
 
-  &-lg {
+  &.avatar-lg {
     width: 28px;
     height: 28px;
     border: none;
     font-size: 11px;
+    flex: none;
+  }
+
+  // The profile page's own picture: the one place a face is the subject of
+  // the screen rather than a mark beside somebody's name.
+  &.avatar-xl {
+    width: 92px;
+    height: 92px;
+    border: none;
+    font-size: 30px;
+    font-weight: 500;
     flex: none;
   }
 
@@ -3561,43 +3577,192 @@ input[type="radio"] {
   > * { flex: none; }
 }
 
-.people-stats {
+// A face or a name that leads to the person it names. The chrome stays the
+// chrome — the link exists to be clicked, not to look like one.
+.person-link {
+  display: inline-flex;
+  align-items: center;
+  gap: inherit;
+  color: inherit;
+  text-decoration: none;
+  min-width: 0;
+
+  &:hover { text-decoration: underline; }
+}
+
+.person-card {
+  overflow: hidden;
+}
+
+// The head is the identity: a picture big enough to be a picture, the name,
+// what the workspace calls this person, and — on your own page only — the way
+// to the one screen that can change any of it.
+.person-head {
   display: flex;
-  flex-wrap: wrap;
-  gap: 28px;
+  align-items: center;
+  gap: 18px;
+  padding: 22px 22px 20px;
+}
+
+.person-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.person-name {
   margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-marks {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.person-edit {
+  margin-left: auto;
+  flex: none;
+}
+
+// Every fact sits in a named cell instead of floating as a line of text. The
+// cells share the panel's own hairlines, so the block reads as one table
+// rather than as paragraphs that happen to be near each other.
+.person-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.person-field {
+  padding: 12px 22px 14px;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+
+  &:last-child { border-right: none; }
 
   dt {
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.09em;
     color: var(--muted);
   }
 
   dd {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
-.people-feed {
+.person-field dd.person-address {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+// The hover tooltip names a face that is standing beside its own name.
+.person-head .avatar[data-name]:hover::after { content: none; }
+
+// Four counts, four boxes. The number leads and the label sits under it, so a
+// column reads as one thing rather than as a word with a digit beside it.
+.person-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+
+  @media (max-width: 620px) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.person-stat {
+  padding: 16px 22px 18px;
+  border-right: 1px solid var(--border);
+
+  &:last-child { border-right: none; }
+
+  dd {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 26px;
+    font-weight: 500;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  dt {
+    margin-top: 6px;
+    font-size: 10px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+}
+
+.person-feed {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-
-  li {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-  }
 }
 
-.people-feed-day {
+.person-line {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 18px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+
+  &:first-child { border-top: none; }
+  &:hover { background: var(--surface-muted); }
+}
+
+.person-verb {
+  flex: none;
+  width: 88px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.person-task {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+
+  &:hover .person-title { text-decoration: underline; }
+}
+
+.person-key {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.person-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.person-day {
   margin-left: auto;
   flex: none;
   white-space: nowrap;
