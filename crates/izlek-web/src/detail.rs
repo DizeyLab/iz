@@ -295,7 +295,7 @@ async fn load_snapshot(
     };
     let store = accounts(cx).store().clone();
 
-    let Some(detail) = load(store.as_ref(), &user.workspace_id, task_id).await? else {
+    let Some(mut detail) = load(store.as_ref(), &user.workspace_id, task_id).await? else {
         return Ok(Err(Refusal::NotFound));
     };
 
@@ -374,6 +374,12 @@ async fn load_snapshot(
     let may_administer = user.role.can_administer();
     let lang = Lang::from_code(&user.language);
     let zone = parse_zone(&user.timezone);
+    // Column names are stored data; the task's own status and the move
+    // picker's choices read in the viewer's language.
+    detail.column.name = crate::i18n::column_name(lang, &detail.column.name);
+    for column in &mut detail.columns {
+        column.name = crate::i18n::column_name(lang, &column.name);
+    }
 
     let decisions = store.decisions_for_task(&detail.id, 10).await?;
     let sends = store.sends_for_task(&detail.id, 50).await?;

@@ -260,6 +260,7 @@ async fn board_columns(
         };
     };
     for column in &mut view_data.columns {
+        column.column.name = crate::i18n::column_name(lang, &column.column.name);
         sort_column_cards(&mut column.cards, &sort);
         if let Some(tag_id) = &tag_filter {
             column
@@ -553,12 +554,18 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         izlek_core::board::load(store.as_ref(), &user.workspace_id).await?
     };
     let lang = Lang::from_code(&user.language);
-    let Some(view_data) = view_data else {
+    let Some(mut view_data) = view_data else {
         return view! {
             cx =>
             <main class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></main>
         };
     };
+    // Column names are stored data; the viewer reads them in their own
+    // language, and every name this page derives — headers, the card move
+    // menus — inherits the translated ones.
+    for column in &mut view_data.columns {
+        column.column.name = crate::i18n::column_name(lang, &column.column.name);
+    }
     let tags = {
         let store = accounts(cx).store().clone();
         store.tags(&view_data.board.id).await?

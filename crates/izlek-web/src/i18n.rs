@@ -1318,3 +1318,40 @@ pub fn watches_unblock_phrase(lang: Lang) -> &'static str {
         Lang::Tr => "son engelinin kalkmasını",
     }
 }
+
+/// A board column's name, in the viewer's language. Column names are stored
+/// data — the seeded defaults ship in English (`turso_store.rs`'s seed) and
+/// mail rules match on the stored string — so translation happens at the
+/// edge, like [`activity_kind_word`]: the four seeded names read Turkish,
+/// and any other name (a renamed or custom column) passes through as data.
+pub fn column_name(lang: Lang, name: &str) -> String {
+    match (name, lang) {
+        ("Backlog", Lang::Tr) => "Bekleyen".to_string(),
+        ("In Progress", Lang::Tr) => "Devam Ediyor".to_string(),
+        ("Review", Lang::Tr) => "İncelemede".to_string(),
+        ("Done", Lang::Tr) => "Tamamlandı".to_string(),
+        (other, _) => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four seeded columns read Turkish for a Turkish viewer and stay
+    /// English otherwise; a column that is not one of the seeds is data and
+    /// passes through in every language.
+    #[test]
+    fn seeded_columns_translate() {
+        for (stored, tr) in [
+            ("Backlog", "Bekleyen"),
+            ("In Progress", "Devam Ediyor"),
+            ("Review", "İncelemede"),
+            ("Done", "Tamamlandı"),
+        ] {
+            assert_eq!(column_name(Lang::Tr, stored), tr);
+            assert_eq!(column_name(Lang::En, stored), stored);
+        }
+        assert_eq!(column_name(Lang::Tr, "Shipped"), "Shipped");
+    }
+}

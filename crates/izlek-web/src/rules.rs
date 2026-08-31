@@ -190,7 +190,7 @@ fn sentence_of(
                     .find(|column| &column.id == column_id)
                     // A rule can outlive the column it names. Saying so is
                     // better than printing an id nobody can read.
-                    .map(|column| column.name.clone())
+                    .map(|column| crate::i18n::column_name(lang, &column.name))
                     .unwrap_or_else(|| t(lang, Key::ColumnGone).to_string()),
             ),
             "status".to_string(),
@@ -337,7 +337,7 @@ async fn snapshot_of(
             .into_iter()
             .map(|column| ColumnChoice {
                 id: column.id,
-                name: column.name,
+                name: crate::i18n::column_name(lang, &column.name),
             })
             .collect(),
         sender_connected,

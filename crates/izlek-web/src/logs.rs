@@ -207,7 +207,12 @@ pub(crate) async fn event_happened(
             Ok(columns
                 .into_iter()
                 .find(|column| column.id == transition.to_column)
-                .map(|column| crate::i18n::moved_to_label(lang, &column.name)))
+                .map(|column| {
+                    crate::i18n::moved_to_label(
+                        lang,
+                        &crate::i18n::column_name(lang, &column.name),
+                    )
+                }))
         }
         Event::Freed(_) => Ok(Some(t(lang, Key::UnblockedWord).to_string())),
         // Not a wired path yet — S4's work — so this only needs to be
@@ -268,7 +273,7 @@ pub(crate) async fn decision_detail(
         columns
             .iter()
             .find(|column| column.id == id)
-            .map(|column| column.name.clone())
+            .map(|column| crate::i18n::column_name(lang, &column.name))
             .unwrap_or_else(|| t(lang, Key::AColumn).to_string())
     };
     if let Some(rest) = detail.strip_prefix("moved:") {
