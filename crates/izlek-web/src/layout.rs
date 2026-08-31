@@ -201,6 +201,17 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
 /// arrive with the swap because the redirect URL's query params rendered
 /// them server-side; `history.replaceState` keeps the address bar honest.
 ///
+/// Every fetch that ends in a swap carries the navigation counter it started
+/// under (`window.__izlekNav`), and its answer is thrown away if that counter
+/// has moved. Without it the newest paint is not the newest intent: the live
+/// refresh fetches the URL it was on, and a click landing during that flight
+/// pushed a new page that the refresh's answer then overwrote — the page
+/// arriving and reverting to the previous one two hundred milliseconds later.
+/// Navigations, form posts and the overlay closes each step the counter, so a
+/// second click also wins over a first one still in flight, and a refresh —
+/// which is not an intent, only an update of what is already on screen —
+/// steps nothing and lands only if nothing else has happened.
+///
 /// The address bar and the `<html>` attributes are rewritten *before* the
 /// new body's scripts run, never after: a swapped-in script that reads
 /// `location.href` (the log-fit reload in `logs.rs`) would otherwise read
@@ -369,6 +380,9 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 } \
                 for (i = theirs.length; i < mine.length; i++) { mine[i].remove(); } \
             } \
+            window.__izlekNav = 0; \
+            function navStep() { return ++window.__izlekNav; } \
+            function stillCurrent(n) { return window.__izlekNav === n; } \
             function swap(html, url, fresh, push, morphing) { \
                 var keep = window.__izlekKeep ? captureFields() : null; \
                 window.__izlekKeep = false; \
@@ -403,20 +417,23 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 }); \
             } \
             window.__izlekGo = function (url) { \
+                var n = navStep(); \
                 fetch(url).then( \
-                    function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
+                    function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url); } }); }, \
                     function () { window.location.href = url; } \
                 ); \
             }; \
             window.__izlekRefresh = function () { \
+                var n = window.__izlekNav; \
                 fetch(window.location.href).then( \
-                    function (r) { return r.text().then(function (t) { swap(t, r.url, false, false, true); }); }, \
+                    function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url, false, false, true); } }); }, \
                     function () {} \
                 ); \
             }; \
             window.__izlekPost = function (action, fields) { \
+                var n = navStep(); \
                 fetch(action, { method: 'POST', body: new URLSearchParams(fields) }).then( \
-                    function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
+                    function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url); } }); }, \
                     function () {} \
                 ); \
             }; \
@@ -424,6 +441,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 var scrim = document.querySelector('.viewer-scrim'); \
                 if (!scrim) { return false; } \
                 var back = scrim.querySelector('.viewer-close').getAttribute('href'); \
+                navStep(); \
                 scrim.remove(); \
                 sweepPanels(); \
                 history.replaceState(null, '', back); \
@@ -434,6 +452,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
             window.__izlekCloseModal = function () { \
                 var scrims = document.querySelectorAll('.modal-scrim'); \
                 if (!scrims.length) { return false; } \
+                navStep(); \
                 scrims.forEach(function (el) { el.remove(); }); \
                 sweepPanels(); \
                 var u = new URL(window.location.href); \
@@ -455,8 +474,9 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 e.preventDefault(); \
                 var data = e.submitter ? new FormData(form, e.submitter) : new FormData(form); \
                 var multipart = (form.getAttribute('enctype') || '').indexOf('multipart') !== -1; \
+                var n = navStep(); \
                 fetch(form.getAttribute('action'), { method: 'POST', body: multipart ? data : new URLSearchParams(data) }).then( \
-                    function (r) { return r.text().then(function (t) { swap(t, r.url); }); }, \
+                    function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url); } }); }, \
                     function () { form.submit(); } \
                 ); \
             }, true); \
@@ -498,8 +518,9 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 var href = link.getAttribute('href'); \
                 if (!href || href.charAt(0) !== '/' || href.indexOf('/files/') === 0) { return; } \
                 e.preventDefault(); \
+                var n = navStep(); \
                 fetch(href).then( \
-                    function (r) { return r.text().then(function (t) { swap(t, r.url, true, true); }); }, \
+                    function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url, true, true); } }); }, \
                     function () { window.location.href = href; } \
                 ); \
             }, true); \
