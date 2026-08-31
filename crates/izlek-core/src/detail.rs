@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, UtcOffset};
 
-use crate::board::{Column, DeadlineParts, DeadlineState, Person, day_label};
+use crate::board::{Column, DeadlineParts, DeadlineState, Person, TagChip, day_label};
 
 /// The stored task, plus the two ids the reader needs to know it is allowed to
 /// see it. The description lives here rather than on
@@ -420,14 +420,8 @@ mod zone_tests {
     fn a_stamp_shifts_with_the_stored_offset() {
         let at = time::macros::datetime!(2026-08-19 11:04 UTC);
         assert_eq!(moment_label(at), "Aug 19 11:04");
-        assert_eq!(
-            moment_label_in(at, parse_zone("UTC+03:00")),
-            "Aug 19 14:04"
-        );
-        assert_eq!(
-            moment_label_in(at, parse_zone("UTC-05:00")),
-            "Aug 19 06:04"
-        );
+        assert_eq!(moment_label_in(at, parse_zone("UTC+03:00")), "Aug 19 14:04");
+        assert_eq!(moment_label_in(at, parse_zone("UTC-05:00")), "Aug 19 06:04");
     }
 
     #[test]
@@ -449,6 +443,8 @@ pub struct TaskDetail {
     /// Every column on the board, so the status control has its options
     /// without a second call.
     pub columns: Vec<Column>,
+    /// The tag the task wears — its project — when it wears one.
+    pub tag: Option<TagChip>,
     pub deadline: Option<Date>,
     pub done_at: Option<OffsetDateTime>,
     pub assignees: Vec<Person>,
@@ -505,7 +501,11 @@ impl TaskDetail {
     pub fn deadline_parts(&self, today: Date) -> Option<DeadlineParts> {
         self.deadline.map(|day| DeadlineParts {
             date: day_label(day),
-            state: if !self.is_done() && day < today { DeadlineState::Overdue } else { DeadlineState::OnTime },
+            state: if !self.is_done() && day < today {
+                DeadlineState::Overdue
+            } else {
+                DeadlineState::OnTime
+            },
         })
     }
 
@@ -538,7 +538,9 @@ pub use reads::{DetailReads, load};
 mod reads {
     use async_trait::async_trait;
 
-    use super::{ActivityEntry, Comment, DependencyEdge, FileLine, SubtaskLine, TaskDetail, TaskFacts};
+    use super::{
+        ActivityEntry, Comment, DependencyEdge, FileLine, SubtaskLine, TaskDetail, TaskFacts,
+    };
     use crate::board::{Column, Person};
     use crate::store::Result;
 
@@ -642,6 +644,7 @@ mod reads {
             description: facts.description,
             column,
             columns,
+            tag: task.tag,
             deadline: task.deadline,
             done_at: task.done_at,
             assignees,

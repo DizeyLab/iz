@@ -1,16 +1,18 @@
 -- Izlek's schema, whole, in one file.
 --
--- One plain SQL file, applied at boot to an empty database: Turso has no
--- migration runner of its own, and keeping the schema as SQL is what makes
--- the store trait swappable.
+-- Plain versioned SQL applied at boot: Turso has no migration runner of its
+-- own, and keeping the schema as SQL is what makes the store trait swappable.
 -- Timestamps are RFC 3339 text in UTC. Ids are ULIDs as text — sortable by
 -- creation, and Crockford-uppercase already, which is what lets a task key
 -- borrow its tail.
 --
--- This file is the whole schema, and it is edited in place: a change to a
--- table is made here, in the table, never appended as an ALTER. An existing
--- database is brought up to it by `izlek reconcile`, not by the store, so a
--- change to a table lands in two places — here, and in that tool's copy map.
+-- This file is the whole schema, not the first link of a chain. Nothing has
+-- been released, so a change to a table is made here, in the table, and the
+-- database it describes is recreated — twenty migrations were collapsed into
+-- this file once for that reason, and a twenty-first would start the same rot
+-- over. The reasoning the old migrations carried is kept, on the tables it
+-- explains. The day Izlek runs somewhere with data worth keeping, the next
+-- change becomes 0002 and this note goes away.
 
 CREATE TABLE workspace (
     id                     TEXT PRIMARY KEY,
@@ -23,12 +25,6 @@ CREATE TABLE workspace (
     photo_limit_bytes      INTEGER NOT NULL DEFAULT 2097152,
     -- JSON array of allowed extensions. An empty array means every type.
     allowed_file_types     TEXT NOT NULL DEFAULT '[]',
-    -- How long a notification waits for the rest of its workflow. One normal
-    -- sequence — open a card, fix the column, assign it, set a deadline — is
-    -- four writes and was four mails; held for a few quiet minutes it is one
-    -- mail saying where the card ended up. Zero sends each one the moment it
-    -- is owed, which is what this did before the column existed.
-    mail_batch_minutes     INTEGER NOT NULL DEFAULT 5,
     -- The single sender every mail in the workspace goes through, written by
     -- the admin in Settings rather than by whoever has a shell on the box: a
     -- three-person team has those be different people, and the second one is
@@ -55,19 +51,6 @@ CREATE TABLE workspace (
     smtp_test_at           TEXT,
     smtp_test_ms           INTEGER,
     smtp_test_error        TEXT,
-    -- Whether the mail server let us in, which is a different fact from
-    -- whether a mail was delivered. `smtp_test_*` above records a real
-    -- message going out to a real inbox; these record a handshake —
-    -- connect, negotiate TLS, say hello, authenticate, hang up. It proves
-    -- the host, the port, the encryption and the credentials, and proves
-    -- nothing about whether the from-address is one this account may send
-    -- as — a server that accepts the login can still refuse the envelope.
-    -- Kept apart so neither can be read as the other. Cleared whenever the
-    -- sender is edited, for the same reason the test result is: it was
-    -- about settings that no longer exist.
-    smtp_check_at           TEXT,
-    smtp_check_ms           INTEGER,
-    smtp_check_error        TEXT,
     -- The address mail links point at, when the one the process was
     -- configured with is not the one people reach. A box behind a proxy
     -- answers on localhost and is known by a public name, and only an admin
@@ -164,29 +147,6 @@ CREATE TABLE board_column (
     is_done  INTEGER NOT NULL DEFAULT 0
 );
 
--- A tag is the project a task belongs to. A task wears at most one, so the
--- link is a column on `task` rather than a join table: two projects on one
--- task is a mistake the schema can refuse outright.
---
--- A tag belongs to a board, as a mail rule does. Its order is the admin's —
--- set by hand, up and down — so it is stored rather than derived from
--- anything the board already knows.
---
--- `is_default` marks the board's one fallback: every task must wear a tag,
--- so the board has one tag that catches whatever loses its own. That there
--- is exactly one is the partial index's job, not the store's.
-CREATE TABLE tag (
-    id         TEXT PRIMARY KEY,
-    board_id   TEXT NOT NULL REFERENCES board(id),
-    name       TEXT NOT NULL,
-    position   INTEGER NOT NULL,
-    is_default INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-CREATE UNIQUE INDEX tag_one_default ON tag(board_id) WHERE is_default = 1;
-CREATE UNIQUE INDEX tag_name_unique ON tag(board_id, name);
-CREATE INDEX tag_by_board ON tag(board_id, position);
-
 -- A task, and a subtask, which is the same thing with a parent.
 --
 -- `parent_id` is the whole of the subtask feature in this schema: a subtask
@@ -212,10 +172,6 @@ CREATE TABLE task (
     title       TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     column_id   TEXT NOT NULL REFERENCES board_column(id),
-    -- The project the task belongs to — NOT NULL on purpose, which a
-    -- declared schema can say where an ALTER could not: every task wears a
-    -- tag, and the board's default one catches whatever loses its own.
-    tag_id      TEXT NOT NULL REFERENCES tag(id),
     deadline    TEXT,
     position    REAL NOT NULL DEFAULT 0,
     created_by  TEXT NOT NULL REFERENCES user(id),
@@ -338,14 +294,6 @@ CREATE TABLE activity (
     id         TEXT PRIMARY KEY,
     task_id    TEXT REFERENCES task(id),
     actor_id   TEXT REFERENCES user(id),
-    -- Who an activity line is about, as opposed to the actor who did it:
-    -- an Assigned line is about the person just assigned, an Unassigned one
-    -- about the person just removed. A mail rule aimed at the assignees
-    -- re-derives its one recipient from this id, on a retry as well as on
-    -- the first run — the detail column carries only a display name, and
-    -- two people can share a name. NULL for lines that are about nobody: a
-    -- comment, a move, a delete.
-    subject_id TEXT REFERENCES user(id),
     kind       TEXT NOT NULL,
     detail     TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL

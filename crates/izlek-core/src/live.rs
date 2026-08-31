@@ -28,6 +28,9 @@ pub enum Topic {
     Queue,
     /// Mail rules and the decisions they made.
     Rules,
+    /// The board's tags — the projects tasks wear. Every member sees them on
+    /// the board, so every member may hear.
+    Tags,
     /// Workspace settings, sender, limits, public URL.
     Settings,
     /// The activity and event log.
@@ -44,6 +47,7 @@ impl Topic {
             Topic::Members => "members",
             Topic::Queue => "queue",
             Topic::Rules => "rules",
+            Topic::Tags => "tags",
             Topic::Settings => "settings",
             Topic::Activity => "activity",
         }

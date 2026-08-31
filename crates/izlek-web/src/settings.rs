@@ -39,6 +39,9 @@ use crate::server::{Refusal, accounts, mail, require_admin, require_user};
 /// one (per the settings lane's note there).
 pub const WIDEST_ATTACHMENT_MB: u64 = 500;
 pub const WIDEST_PHOTO_MB: u64 = 20;
+/// The longest a notification may be held waiting for the rest of its
+/// workflow. Two hours is already far past the point where a mail is news.
+pub const LONGEST_BATCH_MINUTES: u32 = 120;
 
 const MB: u64 = 1024 * 1024;
 
@@ -277,6 +280,7 @@ struct SaveLimitsForm {
     attachment_limit_mb: u64,
     photo_limit_mb: u64,
     allowed_file_types: String,
+    mail_batch_minutes: u32,
 }
 
 /// Changes the workspace's limits. Admin-only, checked here.
@@ -297,6 +301,7 @@ async fn save_limits(
         || input.photo_limit_mb == 0
         || input.attachment_limit_mb > WIDEST_ATTACHMENT_MB
         || input.photo_limit_mb > WIDEST_PHOTO_MB
+        || input.mail_batch_minutes > LONGEST_BATCH_MINUTES
     {
         return Ok(saved_or_refused("save_limits", Some(Refusal::BadLimit)));
     }
@@ -310,6 +315,7 @@ async fn save_limits(
             input.attachment_limit_mb * MB,
             input.photo_limit_mb * MB,
             &types,
+            input.mail_batch_minutes,
         )
         .await;
     let refusal = match outcome {
@@ -926,7 +932,7 @@ async fn members_now(cx: &Cx, asking: &User) -> Result<Vec<Member>> {
         .collect())
 }
 
-async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String>)> {
+async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String>, u32)> {
     let workspace = accounts(cx)
         .store()
         .workspace()
@@ -937,6 +943,7 @@ async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String
         workspace.attachment_limit_bytes / MB,
         workspace.photo_limit_bytes / MB,
         workspace.allowed_file_types,
+        workspace.mail_batch_minutes,
     ))
 }
 
@@ -1171,8 +1178,8 @@ async fn settings_page(cx: &Cx) -> Result {
         None
     };
     let (limits, allowed_types) = if administers {
-        let (attachment, photo, types) = limits_now(cx, &user.workspace_id).await?;
-        (Some((attachment, photo)), types)
+        let (attachment, photo, types, batch) = limits_now(cx, &user.workspace_id).await?;
+        (Some((attachment, photo, batch)), types)
     } else {
         (None, Vec::new())
     };
@@ -1466,7 +1473,9 @@ async fn settings_page(cx: &Cx) -> Result {
                     </section>
                 }
 
-                if section == Section::Limits && let Some((attachment_limit_mb, photo_limit_mb)) = limits {
+                if section == Section::Limits
+                    && let Some((attachment_limit_mb, photo_limit_mb, mail_batch_minutes)) = limits
+                {
                     <section class="panel" id="limits">
                         <div class="panel-head">
                             <h2 class="panel-title">(t(lang, Key::WorkspaceLimits))</h2>
@@ -1499,6 +1508,18 @@ async fn settings_page(cx: &Cx) -> Result {
                                     >
                                 </label>
                             </div>
+                            <label class="field">
+                                <span class="field-label">(t(lang, Key::MailBatchLabel))</span>
+                                <input
+                                    class="field-input"
+                                    type="number"
+                                    name="mail_batch_minutes"
+                                    min="0"
+                                    max=(LONGEST_BATCH_MINUTES.to_string())
+                                    value=(mail_batch_minutes.to_string())
+                                    required=""
+                                >
+                            </label>
                             <label class="field">
                                 <span class="field-label">(t(lang, Key::AllowedFileTypesLabel))</span>
                                 <input
@@ -1558,7 +1579,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                             <td class="member-col-name member-name">
                                                 <span class="member-name-row">
                                                     (crate::layout::avatar(cx, &member_person, "avatar-sm").await?)
-                                                    (member.display_name.clone())
+                                                    <a href=(format!("/people/{}", member.id))>(member.display_name.clone())</a>
                                                     if member.is_you {
                                                         <span class="member-you">(t(lang, Key::You))</span>
                                                     }

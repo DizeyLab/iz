@@ -123,6 +123,11 @@ pub const HOLD: Duration = Duration::minutes(1);
 /// that is thinking about it, short enough that a crash is not a lost day.
 pub const LEASE: Duration = Duration::minutes(5);
 
+/// How far past its first trigger a batch can be pushed. A card somebody is
+/// working on all afternoon would otherwise never settle, and its mail would
+/// never go — so the debounce yields after four windows and sends what it has.
+pub const MAX_HOLD_WINDOWS: i32 = 4;
+
 /// The wait before the next attempt, doubling and capped: five minutes, ten,
 /// twenty, forty, an hour.
 pub fn backoff(attempts: u32) -> Duration {
@@ -144,6 +149,9 @@ pub struct Report {
     /// Mails held back because there is no sender to send them through. Owed,
     /// not failed: no attempt was spent and none will be until one exists.
     pub held: u32,
+    /// Mails written down and left to wait out the workspace's quiet window,
+    /// so the rest of the workflow can join them in one envelope.
+    pub batched: u32,
 }
 
 pub struct Engine {
@@ -495,6 +503,12 @@ impl Engine {
     /// anything is claimed: an empty audience leaves no ledger row at all, so
     /// a rule that only ever resolves to the actor is silent rather than being
     /// a row the admin has to read as a failure.
+    ///
+    /// A line that is about one person narrows the audience to that person:
+    /// an Assigned rule is for the one just assigned, not for everybody
+    /// already on the card. The subject is read from the stored row rather
+    /// than from the name in the detail, so the audience a restart resolves
+    /// is the audience the first pass resolved — two people can share a name.
     async fn owe(
         &self,
         rule: &MailRule,
@@ -502,10 +516,22 @@ impl Engine {
         task_id: &str,
         report: &mut Report,
     ) -> crate::store::Result<()> {
-        let recipients = match rule.audience {
-            Audience::Assignees => self.store.recipients_for_task(task_id).await?,
-            Audience::Board => self.store.recipients_for_board(&rule.board_id).await?,
-            Audience::Creator => self.store.recipients_for_task_creator(task_id).await?,
+        let recipients = match (rule.audience, event) {
+            (
+                Audience::Assignees,
+                Event::Happened(ActivityEvent {
+                    subject_id: Some(about),
+                    ..
+                }),
+            ) => self
+                .store
+                .recipient(about)
+                .await?
+                .map(|one| vec![one])
+                .unwrap_or_default(),
+            (Audience::Assignees, _) => self.store.recipients_for_task(task_id).await?,
+            (Audience::Board, _) => self.store.recipients_for_board(&rule.board_id).await?,
+            (Audience::Creator, _) => self.store.recipients_for_task_creator(task_id).await?,
         };
         let resolved_nobody = recipients.is_empty();
         let now = OffsetDateTime::now_utc();
@@ -531,18 +557,39 @@ impl Engine {
                 .await?;
             return Ok(());
         }
+        // The workspace's quiet window. Zero is what İzlek did before it had
+        // one: every trigger its own mail, sent as soon as it is owed.
+        let window = self
+            .store
+            .workspace()
+            .await?
+            .map(|workspace| i64::from(workspace.mail_batch_minutes))
+            .unwrap_or(0);
+        let hold = Duration::minutes(window);
         for recipient in audience {
+            // A held row comes due when the window closes rather than when the
+            // lease does; with no window it keeps the lease it always had,
+            // which is what stops the pass that queued it from grabbing it
+            // back before it has been composed.
+            let due = if window > 0 { now + hold } else { now + LEASE };
             let claimed = self
                 .store
-                .claim_send(
-                    &rule.id,
-                    event.id(),
-                    task_id,
-                    &recipient.email,
-                    now,
-                    now + LEASE,
-                )
+                .claim_send(&rule.id, event.id(), task_id, &recipient.email, now, due)
                 .await?;
+            if window > 0 {
+                // Everything this person is already owed about this card waits
+                // for the new arrival: that is the debounce. The ceiling is
+                // measured from the oldest mail in the batch, so a card under
+                // constant edit still goes out.
+                self.store
+                    .hold_batch(
+                        task_id,
+                        &recipient.email,
+                        now + hold,
+                        hold * MAX_HOLD_WINDOWS,
+                    )
+                    .await?;
+            }
             match claimed {
                 Some(send) => {
                     self.store
@@ -555,8 +602,15 @@ impl Engine {
                             now,
                         )
                         .await?;
-                    let mail = self.compose(&send, rule, event).await?;
-                    self.attempt(&send, mail, report).await?;
+                    // With a window the row is left where it lies: the
+                    // delivery pass picks it up when it comes due, together
+                    // with everything else this person is owed about the card.
+                    if window > 0 {
+                        report.batched += 1;
+                    } else {
+                        let mail = self.compose(&send, rule, event).await?;
+                        self.attempt(&send, mail, report).await?;
+                    }
                 }
                 None => {
                     self.store
@@ -588,11 +642,15 @@ impl Engine {
         // pass and the same write wakes the sweep, so two passes reach the
         // same row together. Each is handed only what it took, and only a
         // `ClaimedSend` can be mailed. See `Store::claim_sends_owed`.
+        // Rule rows are answered one mail per task per person: several
+        // triggers about one card, held through the same quiet window, are
+        // one thing that happened as far as the reader is concerned. Invites
+        // and notices are never folded in — each carries its own subject and
+        // body, composed once at mint time, and belongs to nobody's card.
+        let mut batches: Vec<(String, String, Vec<ClaimedSend>)> = Vec::new();
         for send in self.store.claim_sends_owed(now, now + LEASE, limit).await? {
-            // An invite and an admin's notice both owe no rule and no event:
-            // each carries its own subject and body, composed once at mint
-            // time. Without this arm a notice falls through to the rule path,
-            // finds no rule_id, and is skipped every run — queued forever.
+            // Without this arm a notice falls through to the rule path, finds
+            // no rule_id, and is skipped every run — queued forever.
             if matches!(send.kind, SendKind::Invite | SendKind::Notice) {
                 let mail = Outgoing {
                     to: send.recipient.clone(),
@@ -602,47 +660,110 @@ impl Engine {
                 self.attempt(&send, Some(mail), &mut report).await?;
                 continue;
             }
-            let Some(rule_id) = send.rule_id.as_deref() else {
+            let Some(task_id) = send.task_id.clone() else {
                 continue;
             };
-            let Some(event_id) = send.event_id.as_deref() else {
+            let recipient = send.recipient.clone();
+            match batches
+                .iter_mut()
+                .find(|(task, to, _)| task == &task_id && to == &recipient)
+            {
+                Some((_, _, group)) => group.push(send),
+                None => batches.push((task_id, recipient, vec![send])),
+            }
+        }
+
+        for (_, _, group) in batches {
+            // The newest event is the one that decides the mail: its rule
+            // supplies the subject, and its moment is the moment the mail
+            // speaks about.
+            let mut newest: Option<(Event, MailRule)> = None;
+            let mut details = false;
+            for send in &group {
+                let (Some(rule_id), Some(event_id)) =
+                    (send.rule_id.as_deref(), send.event_id.as_deref())
+                else {
+                    continue;
+                };
+                let (Some(rule), Some(event)) = (
+                    self.store.mail_rule(rule_id).await?,
+                    self.store.event(event_id).await?,
+                ) else {
+                    continue;
+                };
+                details |= rule.include_task_details;
+                let newer = newest
+                    .as_ref()
+                    .map(|(known, _)| event.at() > known.at())
+                    .unwrap_or(true);
+                if newer {
+                    newest = Some((event, rule));
+                }
+            }
+            let Some((event, rule)) = newest else {
                 continue;
             };
-            let Some(rule) = self.store.mail_rule(rule_id).await? else {
+            let Some(first) = group.first() else {
                 continue;
             };
-            let Some(event) = self.store.event(event_id).await? else {
-                continue;
+            let mail = if group.len() == 1 {
+                self.compose(first, &rule, &event).await?
+            } else {
+                self.compose_batch(first, &rule, &event, details).await?
             };
-            let mail = self.compose(&send, &rule, &event).await?;
-            self.attempt(&send, mail, &mut report).await?;
+            self.attempt_group(&group, mail, &mut report).await?;
         }
         Ok(report)
     }
 
-    /// One attempt, and the ledger line it leaves behind.
+    /// One attempt for one claimed row.
     async fn attempt(
         &self,
         send: &ClaimedSend,
         mail: Option<Outgoing>,
         report: &mut Report,
     ) -> crate::store::Result<()> {
+        self.attempt_group(std::slice::from_ref(send), mail, report)
+            .await
+    }
+
+    /// One attempt, and the ledger lines it leaves behind — one per row in
+    /// the group.
+    ///
+    /// A batch is several owed rows answered by a single mail, so the send
+    /// happens once and every row in it is marked with the same outcome: they
+    /// were all in that envelope. The claim invariant is unchanged — this
+    /// takes `ClaimedSend`s, so a row that was merely read still cannot be
+    /// mailed.
+    async fn attempt_group(
+        &self,
+        sends: &[ClaimedSend],
+        mail: Option<Outgoing>,
+        report: &mut Report,
+    ) -> crate::store::Result<()> {
         let Some(mail) = mail else {
+            return Ok(());
+        };
+        let Some(send) = sends.first() else {
             return Ok(());
         };
         let now = OffsetDateTime::now_utc();
         match self.mailer.send(&mail).await {
             Ok(()) => {
-                self.store.record_send_accepted(&send.id, now).await?;
+                for one in sends {
+                    self.store.record_send_accepted(&one.id, now).await?;
+                }
                 report.sent += 1;
             }
             Err(problem) if !problem.attempted => {
                 // No sender. The mail keeps its place in the ledger and its
                 // attempts, and is looked at again on the next sweep — by then
                 // an admin may have filled the panel in.
-                self.store
-                    .defer_send(&send.id, &problem.message, now + HOLD, now)
-                    .await?;
+                for one in sends {
+                    self.store
+                        .defer_send(&one.id, &problem.message, now + HOLD, now)
+                        .await?;
+                }
                 report.held += 1;
             }
             Err(problem) => {
@@ -651,9 +772,11 @@ impl Engine {
                 // left looking like it is still coming.
                 let retry_at =
                     (problem.retryable && attempts < MAX_ATTEMPTS).then(|| now + backoff(attempts));
-                self.store
-                    .record_send_refused(&send.id, &problem.message, retry_at, now)
-                    .await?;
+                for one in sends {
+                    self.store
+                        .record_send_refused(&one.id, &problem.message, retry_at, now)
+                        .await?;
+                }
                 if retry_at.is_some() {
                     report.failed += 1;
                 } else {
@@ -807,6 +930,76 @@ impl Engine {
         Ok(Some(Outgoing {
             to: send.recipient.clone(),
             subject: rule.subject.clone(),
+            body,
+        }))
+    }
+
+    /// The mail a whole batch answers with: where the task stands NOW.
+    ///
+    /// A batch is several triggers about one task for one person, held
+    /// together through a quiet window. Naming each of them would be a diary,
+    /// and half its entries are already wrong — a column set by mistake and
+    /// corrected inside the window happened, but is not the case. So the mail
+    /// reads the task as it is at send time and says that; the subject comes
+    /// from the rule behind the newest event, which is the reason the mail is
+    /// going out at all.
+    async fn compose_batch(
+        &self,
+        send: &MailSend,
+        newest_rule: &MailRule,
+        newest_event: &Event,
+        details: bool,
+    ) -> crate::store::Result<Option<Outgoing>> {
+        let Some(task_id) = send.task_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(facts) = self.store.task(task_id).await? else {
+            return Ok(None);
+        };
+        let columns = self.store.columns_for_board(&facts.board_id).await?;
+        let column = columns
+            .iter()
+            .find(|column| column.id == facts.row.column_id)
+            .map(|column| column.name.clone())
+            .unwrap_or_else(|| "somewhere".to_string());
+        let assignees = self.store.assignees_for_task(task_id).await?;
+        let assignees = if assignees.is_empty() {
+            "none".to_string()
+        } else {
+            assignees
+                .iter()
+                .map(|person| person.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let deadline = facts
+            .row
+            .deadline
+            .map(|date| date.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let base = self
+            .store
+            .workspace()
+            .await?
+            .and_then(|workspace| workspace.public_url)
+            .unwrap_or_else(|| self.fallback_url.clone());
+        let mut body = format!(
+            "{key} — {title}\n\nColumn: {column}\nDeadline: {deadline}\nAssignees: {assignees}\n\n{when}\n\n{base}/?task={id}\n",
+            key = facts.row.task_key,
+            title = facts.row.title,
+            when = day_and_time(newest_event.at()),
+            id = facts.row.id,
+        );
+        if details {
+            body.push_str(&format!(
+                "\nKey: {key}\nTitle: {title}\n",
+                key = facts.row.task_key,
+                title = facts.row.title,
+            ));
+        }
+        Ok(Some(Outgoing {
+            to: send.recipient.clone(),
+            subject: newest_rule.subject.clone(),
             body,
         }))
     }

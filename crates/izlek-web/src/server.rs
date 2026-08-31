@@ -357,6 +357,8 @@ pub enum Refusal {
     NotAnImage,
     /// A rule with no subject line: the mail it sends would arrive blank.
     EmptySubject,
+    /// A tag with no name is not a tag the board can show.
+    EmptyTag,
     /// A message with no body: there is nothing for the recipient to read.
     EmptyBody,
     /// The date field did not hold a date.
@@ -419,6 +421,7 @@ impl Refusal {
             }
             Refusal::NotAnImage => "That is not an image.".to_string(),
             Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
+            Refusal::EmptyTag => "Give the tag a name.".to_string(),
             Refusal::EmptyBody => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -477,6 +480,7 @@ impl Refusal {
             // language off of, so it falls back to English like the rest.
             Refusal::BadSender(_) => self.message(),
             Refusal::EmptySubject => "Kurala bir konu ver.".to_string(),
+            Refusal::EmptyTag => "Etikete bir ad ver.".to_string(),
             Refusal::EmptyBody => "Önce bir şey yaz.".to_string(),
             Refusal::Rejected => "Bu işe yaramadı.".to_string(),
             Refusal::RateLimited => {
@@ -526,6 +530,7 @@ impl Refusal {
             "file-type" => Refusal::FileTypeNotAllowed,
             "not-an-image" => Refusal::NotAnImage,
             "empty-subject" => Refusal::EmptySubject,
+            "empty-tag" => Refusal::EmptyTag,
             "empty-body" => Refusal::EmptyBody,
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
@@ -581,6 +586,7 @@ impl Refusal {
             Refusal::FileTypeNotAllowed => "file-type",
             Refusal::NotAnImage => "not-an-image",
             Refusal::EmptySubject => "empty-subject",
+            Refusal::EmptyTag => "empty-tag",
             Refusal::EmptyBody => "empty-body",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",

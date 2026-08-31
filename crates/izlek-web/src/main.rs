@@ -13,6 +13,43 @@ async fn healthz() -> Result<&'static str> {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("reconcile") {
+        let mut dry_run = false;
+        let mut yes = false;
+        for arg in &args[2..] {
+            match arg.as_str() {
+                "--dry-run" => dry_run = true,
+                "--yes" => yes = true,
+                _ => {
+                    eprintln!("izlek reconcile: unknown option {arg}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let config = match izlek_core::Config::load() {
+            Ok(config) => config,
+            Err(problem) => {
+                eprintln!("izlek: {problem}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(problem) = izlek_core::store::reconcile(
+            &config.database.to_string_lossy(),
+            izlek_core::store::ReconcileOptions {
+                dry_run,
+                yes,
+                auto: false,
+            },
+        )
+        .await
+        {
+            eprintln!("izlek reconcile: {problem}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // config/izlek.toml is read here, before anything is opened, and written with
     // development defaults if it is not there yet. A broken key stops the
     // boot with its name in the message: the failure this prevents is not an

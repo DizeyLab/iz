@@ -102,9 +102,22 @@ pub enum Key {
     // Topbar nav / chrome shared by board.rs, rules.rs, logs.rs, settings.rs.
     NavBoard,
     NavMailRules,
+    NavTags,
     NavLogs,
     NavSettings,
     AdminOnly,
+
+    // tags.rs — Project/AllTags also serve board.rs's filter and detail.rs.
+    NewTag,
+    NameLabel,
+    AddTag,
+    SaveTag,
+    EditThisTag,
+    DeleteThisTag,
+    MoveTagUp,
+    MoveTagDown,
+    Project,
+    AllTags,
 
     // settings.rs
     YourProfile,
@@ -329,6 +342,13 @@ pub enum Key {
     Oldest,
     From,
     To,
+    // people.rs
+    TasksOpenLabel,
+    TasksDoneLabel,
+    TasksCreatedLabel,
+    CommentsLabel,
+    RecentActivity,
+    MailBatchLabel,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -496,6 +516,29 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (NavSettings, Tr) => "Ayarlar",
         (AdminOnly, En) => "Admin only",
         (AdminOnly, Tr) => "Sadece yönetici",
+
+        (NavTags, En) => "Tags",
+        (NavTags, Tr) => "Etiketler",
+        (NewTag, En) => "New tag",
+        (NewTag, Tr) => "Yeni etiket",
+        (NameLabel, En) => "NAME",
+        (NameLabel, Tr) => "İSİM",
+        (AddTag, En) => "Add tag",
+        (AddTag, Tr) => "Etiket ekle",
+        (SaveTag, En) => "Save tag",
+        (SaveTag, Tr) => "Etiketi kaydet",
+        (EditThisTag, En) => "Edit this tag",
+        (EditThisTag, Tr) => "Bu etiketi düzenle",
+        (DeleteThisTag, En) => "Delete this tag",
+        (DeleteThisTag, Tr) => "Bu etiketi sil",
+        (MoveTagUp, En) => "Move up",
+        (MoveTagUp, Tr) => "Yukarı taşı",
+        (MoveTagDown, En) => "Move down",
+        (MoveTagDown, Tr) => "Aşağı taşı",
+        (Project, En) => "Project",
+        (Project, Tr) => "Proje",
+        (AllTags, En) => "All",
+        (AllTags, Tr) => "Tümü",
 
         (YourProfile, En) => "Your profile",
         (YourProfile, Tr) => "Profilin",
@@ -936,6 +979,18 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (From, Tr) => "Başlangıç",
         (To, En) => "To",
         (To, Tr) => "Bitiş",
+        (TasksOpenLabel, En) => "Open tasks",
+        (TasksOpenLabel, Tr) => "Açık görevler",
+        (TasksDoneLabel, En) => "Done tasks",
+        (TasksDoneLabel, Tr) => "Biten görevler",
+        (TasksCreatedLabel, En) => "Tasks created",
+        (TasksCreatedLabel, Tr) => "Oluşturulan görevler",
+        (CommentsLabel, En) => "Comments",
+        (CommentsLabel, Tr) => "Yorumlar",
+        (RecentActivity, En) => "Recent activity",
+        (RecentActivity, Tr) => "Son etkinlik",
+        (MailBatchLabel, En) => "Mail delay (minutes)",
+        (MailBatchLabel, Tr) => "Posta gecikmesi (dakika)",
     }
 }
 

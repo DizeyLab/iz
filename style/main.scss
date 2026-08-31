@@ -348,6 +348,18 @@ body:has(.settings-shell) {
   > .settings-shell { flex: 1; min-height: 0; }
 }
 
+// A profile is one column of its own; it pans inside itself like every other
+// page here, and the document never grows a scrollbar.
+body:has(.people-shell) {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  > * { flex: none; }
+  > .people-shell { flex: 1; min-height: 0; }
+}
+
 a {
   color: var(--accent);
   transition: color var(--dur-fast) var(--ease);
@@ -880,6 +892,15 @@ a {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
+}
+
+.card-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
 }
 
 /// Parts still open is the same warning the blocker chips carry: this card
@@ -3460,4 +3481,126 @@ input[type="radio"] {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.tag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.tag-name {
+  flex-grow: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-new {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.tag-new-open {
+  display: flex;
+  align-items: center;
+  height: var(--control-h);
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  cursor: pointer;
+  list-style: none;
+
+  &::marker, &::-webkit-details-marker { display: none; }
+  &::before { content: '+'; margin-right: 8px; font-size: 13px; }
+}
+
+.tag-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.tag-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+// --- Profile (a member's page) ----------------------------------------------
+
+.people-shell {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 32px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+  > * { flex: none; }
+}
+
+.people-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  margin: 0;
+
+  dt {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  dd {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.people-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  li {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+}
+
+.people-feed-day {
+  margin-left: auto;
+  flex: none;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
 }

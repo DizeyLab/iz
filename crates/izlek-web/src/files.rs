@@ -424,6 +424,7 @@ async fn upload(
             .record_activity(
                 &task_id,
                 Some(&user.id),
+                None,
                 &izlek_core::detail::ActivityKind::FileAdded,
                 &label,
                 OffsetDateTime::now_utc(),

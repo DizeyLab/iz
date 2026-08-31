@@ -56,7 +56,9 @@ pub struct Shutdown(pub tokio::sync::watch::Receiver<bool>);
 /// moved, because being told is itself knowing something about the queue.
 fn may_hear(topic: &Topic, admin: bool) -> bool {
     match topic {
-        Topic::Board | Topic::Task(_) | Topic::Members => true,
+        // Tags ride with the board: every member sees a card's tag, so being
+        // told the tags moved tells them nothing they cannot already read.
+        Topic::Board | Topic::Task(_) | Topic::Members | Topic::Tags => true,
         Topic::Queue | Topic::Rules | Topic::Settings | Topic::Activity => admin,
     }
 }

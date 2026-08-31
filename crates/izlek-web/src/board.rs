@@ -214,6 +214,11 @@ fn valid_sort(sort: Option<&str>) -> &'static str {
         _ => "deadline",
     }
 }
+/// The `?tag=` filter: an id only counts while it names a tag on this
+/// board — a stale or hand-edited query string falls back to all.
+fn valid_tag(tag: Option<&str>, tags: &[izlek_core::store::Tag]) -> Option<String> {
+    tag.and_then(|id| tags.iter().find(|t| t.id == id).map(|t| t.id.clone()))
+}
 
 /// `deadline` is the order [`izlek_core::board::load`] already hands back
 /// (soonest first); the other two re-order in place here so core stays free
@@ -228,7 +233,12 @@ fn sort_column_cards(cards: &mut [TaskCard], sort: &str) {
 }
 
 /// The whole column list.
-async fn board_columns(cx: &Cx, sort: String) -> Result {
+async fn board_columns(
+    cx: &Cx,
+    sort: String,
+    tag_filter: Option<String>,
+    default_tag_id: Option<&str>,
+) -> Result {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => {
@@ -251,6 +261,11 @@ async fn board_columns(cx: &Cx, sort: String) -> Result {
     };
     for column in &mut view_data.columns {
         sort_column_cards(&mut column.cards, &sort);
+        if let Some(tag_id) = &tag_filter {
+            column
+                .cards
+                .retain(|card| card.tag.as_ref().is_some_and(|tag| tag.id == *tag_id));
+        }
     }
     let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
@@ -262,7 +277,7 @@ async fn board_columns(cx: &Cx, sort: String) -> Result {
         .collect();
     let mut columns = Vec::new();
     for column in view_data.columns {
-        columns.push(render_column(cx, column, today, may_write, &all_columns, lang).await?);
+        columns.push(render_column(cx, column, today, may_write, &all_columns, default_tag_id, lang).await?);
     }
 
     view! {
@@ -277,6 +292,7 @@ async fn render_column(
     today: Date,
     may_write: bool,
     all_columns: &[(String, String)],
+    default_tag_id: Option<&str>,
     lang: Lang,
 ) -> Result {
     let column_id = column.column.id;
@@ -295,6 +311,7 @@ async fn render_column(
                 &column_id,
                 may_write,
                 all_columns,
+                default_tag_id,
                 lang,
             )
             .await?,
@@ -327,6 +344,7 @@ async fn render_card(
     column_id: &str,
     may_write: bool,
     all_columns: &[(String, String)],
+    default_tag_id: Option<&str>,
     lang: Lang,
 ) -> Result {
     let blocks = card.blocks.len();
@@ -381,6 +399,11 @@ async fn render_card(
                 <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue, "card-deadline-none" if !dated))>
                     (deadline)
                 </span>
+                if let Some(tag) = &card.tag {
+                    if Some(tag.id.as_str()) != default_tag_id {
+                        <span class="card-tag">(tag.name.clone())</span>
+                    }
+                }
                 if let Some(parts) = subtasks.clone() {
                     <span class=(class!("card-subtasks", "card-subtasks-open" if subtasks_open))>(format!("{parts} \u{2630}"))</span>
                 }
@@ -509,6 +532,7 @@ struct BoardQuery {
     sort: Option<String>,
     confirm: Option<String>,
     new: Option<String>,
+    tag: Option<String>,
 }
 
 /// The noun a sort key shows in the `<select>` — terse, no explainer.
@@ -534,6 +558,10 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             cx =>
             <main class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></main>
         };
+    };
+    let tags = {
+        let store = accounts(cx).store().clone();
+        store.tags(&view_data.board.id).await?
     };
     let today = OffsetDateTime::now_utc().date();
     let overdue = view_data.overdue_count(today);
@@ -567,6 +595,8 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     // an open task wins and `new` is ignored.
     let open_new = may_write && query.new.is_some() && open_task.is_none();
     let sort = valid_sort(query.sort.as_deref()).to_string();
+    let tag_filter = valid_tag(query.tag.as_deref(), &tags);
+    let default_tag_id = tags.iter().find(|tag| tag.is_default).map(|tag| tag.id.as_str());
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
         _ => None,
@@ -598,6 +628,20 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                     <path d="M4 6l4 4 4-4"></path>
                 </svg>
             </form>
+            <form class="field-box field-box-sort" method="get" action="/">
+                <span class="field-text">(t(lang, Key::Project))</span>
+                <select class="status-select" name="tag" data-autosubmit="">
+                    <option value="" selected=(tag_filter.is_none())>(t(lang, Key::AllTags))</option>
+                    for tag in &tags {
+                        <option value=(tag.id.clone()) selected=(tag_filter.as_deref() == Some(tag.id.as_str()))>(tag.name.clone())</option>
+                    }
+                </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
+            </form>
             <div class="spacer"></div>
             if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} {}", t(lang, Key::Overdue)))</span> }
             if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} {}", t(lang, Key::Blocked)))</span> }
@@ -607,7 +651,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         }
         <main class="board-stage">
             <div class="board-columns">
-                (board_columns(cx, sort.clone()).await?)
+            (board_columns(cx, sort.clone(), tag_filter.clone(), default_tag_id).await?)
             </div>
         </main>
         if let Some(task_id) = &open_task {
@@ -644,6 +688,7 @@ mod sort_tests {
             blocks: Vec::new(),
             subtask_total: 0,
             subtask_done: 0,
+            tag: None,
         }
     }
 

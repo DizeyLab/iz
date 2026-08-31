@@ -42,6 +42,9 @@ pub struct TaskRow {
     /// is still read with the rest, because a key it owns can appear on
     /// somebody else's card as a blocker.
     pub parent_id: Option<String>,
+    /// The tag — the project — the task wears, if any. The name rides along
+    /// so a card can show a chip without a second sweep.
+    pub tag: Option<TagChip>,
 }
 
 /// One card crossing from one column into another, as it was written.
@@ -111,6 +114,14 @@ impl Person {
     }
 }
 
+/// A tag's id and name, as a card and the detail carry them: enough to show
+/// a chip and to filter the board on, and nothing more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagChip {
+    pub id: String,
+    pub name: String,
+}
+
 /// A card, assembled. Dependencies carry the *keys* of the tasks on the other
 /// end, because that is what the card shows and it saves the UI a second lookup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +143,8 @@ pub struct TaskCard {
     /// Both are zero for a card with none, which is what hides the chip.
     pub subtask_total: u32,
     pub subtask_done: u32,
+    /// The tag the card wears — its project — when it has one.
+    pub tag: Option<TagChip>,
 }
 
 impl TaskCard {
@@ -143,8 +156,7 @@ impl TaskCard {
     /// also the only place the count appears when a move is refused, which is
     /// why the refusal itself does not carry one.
     pub fn subtask_label(&self) -> Option<String> {
-        (self.subtask_total > 0)
-            .then(|| format!("{}/{}", self.subtask_done, self.subtask_total))
+        (self.subtask_total > 0).then(|| format!("{}/{}", self.subtask_done, self.subtask_total))
     }
 
     /// Whether finishing this card is currently refused.
@@ -190,11 +202,18 @@ impl TaskCard {
     /// `None` when there's nothing to show (no deadline, not done).
     pub fn deadline_parts(&self, today: Date) -> Option<DeadlineParts> {
         if let Some(done) = self.done_at {
-            return Some(DeadlineParts { date: day_label(done.date()), state: DeadlineState::Done });
+            return Some(DeadlineParts {
+                date: day_label(done.date()),
+                state: DeadlineState::Done,
+            });
         }
         self.deadline.map(|day| DeadlineParts {
             date: day_label(day),
-            state: if day < today { DeadlineState::Overdue } else { DeadlineState::OnTime },
+            state: if day < today {
+                DeadlineState::Overdue
+            } else {
+                DeadlineState::OnTime
+            },
         })
     }
 }
@@ -370,6 +389,7 @@ pub fn assemble(
             done_at: task.done_at,
             position: task.position,
             column_id: task.column_id,
+            tag: task.tag,
         };
         cards.entry(card.column_id.clone()).or_default().push(card);
     }

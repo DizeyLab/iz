@@ -103,6 +103,14 @@
     &-off { background: transparent; }
   }
 
+  .tag-row {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    padding: 14px 2px;
+  }
+
   // Activity log reads as a ruled ledger column too: no boxes, the actor
   // named in the display face like .member-name.
   .log-row {

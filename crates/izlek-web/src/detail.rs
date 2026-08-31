@@ -88,6 +88,9 @@ pub struct DetailSnapshot {
     pub attachment_limit_mb: u64,
     pub notifications: Vec<NotificationLine>,
     pub may_administer: bool,
+    /// Every tag on this workspace's board, in the admin's hand-set order —
+    /// the tag field reads both its options and its current value from here.
+    pub tags: Vec<izlek_core::store::Tag>,
 }
 
 /// One send's fate, joined to the sends of its decision's event.
@@ -360,6 +363,13 @@ async fn load_snapshot(
         linkable.sort_by(|a, b| a.id.cmp(&b.id));
     }
 
+    // The tag field's options: every tag on the board, in the admin's
+    // hand-set order. A workspace with no board yet has no tags either.
+    let tags = match store.board(&user.workspace_id).await? {
+        Some(board) => store.tags(&board.id).await?,
+        None => Vec::new(),
+    };
+
     let may_write = user.role.can_write_tasks();
     let may_administer = user.role.can_administer();
     let lang = Lang::from_code(&user.language);
@@ -446,6 +456,7 @@ async fn load_snapshot(
         allowed_file_types,
         attachment_limit_mb,
         notifications,
+        tags,
         may_administer,
         me: Me::from(&user),
         today: OffsetDateTime::now_utc().date(),
@@ -515,6 +526,34 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
     redirect(cx, None)
 }
 
+#[derive(Deserialize)]
+struct SetTaskTagForm {
+    task_id: String,
+    tag_id: String,
+}
+
+/// Files a task under a tag. A Viewer can read tags but not set them; the
+/// tag has to be this workspace board's own. No activity is recorded and no
+/// mail follows — re-labeling a card is not a thing anybody needs told
+/// about.
+#[route(POST "/api/set_task_tag")]
+async fn set_task_tag(cx: &Cx, Form(input): Form<SetTaskTagForm>) -> Redirect {
+    let (actor, _) = match writer_and_task(cx, &input.task_id).await {
+        Ok(pair) => pair,
+        Err(refusal) => return redirect(cx, Some(refusal)),
+    };
+    let store = accounts(cx).store().clone();
+    let Some(board) = store.board(&actor.workspace_id).await? else {
+        return redirect(cx, Some(Refusal::Unavailable));
+    };
+    let tags = store.tags(&board.id).await?;
+    if !tags.iter().any(|tag| tag.id == input.tag_id) {
+        return redirect(cx, Some(Refusal::NotFound));
+    }
+    store.set_task_tag(&input.task_id, &input.tag_id).await?;
+    redirect(cx, None)
+}
+
 /// Puts someone on a task. A Viewer can neither do this nor be the target.
 #[route(POST "/api/assign")]
 async fn assign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
@@ -542,6 +581,7 @@ async fn assign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
         .record_activity(
             &input.task_id,
             Some(&actor.id),
+            Some(&person.id),
             &ActivityKind::Assigned,
             &person.display_name,
             OffsetDateTime::now_utc(),
@@ -573,6 +613,7 @@ async fn unassign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
         .record_activity(
             &input.task_id,
             Some(&actor.id),
+            Some(&person.id),
             &ActivityKind::Unassigned,
             &person.display_name,
             OffsetDateTime::now_utc(),
@@ -611,6 +652,7 @@ async fn link_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
         .record_activity(
             &input.task_id,
             Some(&actor.id),
+            None,
             &ActivityKind::Linked,
             &other.row.task_key,
             now,
@@ -644,6 +686,7 @@ async fn unlink_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
         .record_activity(
             &input.task_id,
             Some(&actor.id),
+            None,
             &ActivityKind::Unlinked,
             &other.row.task_key,
             now,
@@ -742,6 +785,7 @@ async fn set_parent(cx: &Cx, Form(input): Form<ParentForm>) -> Redirect {
         .record_activity(
             &input.task_id,
             Some(&actor.id),
+            None,
             &kind,
             &other_key,
             OffsetDateTime::now_utc(),
@@ -852,6 +896,7 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
         .record_activity(
             &attachment.task_id,
             Some(&user.id),
+            None,
             &izlek_core::detail::ActivityKind::FileRemoved,
             &attachment.file_name,
             time::OffsetDateTime::now_utc(),
@@ -1694,6 +1739,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
         allowed_file_types,
         attachment_limit_mb: _,
         notifications,
+        tags,
         may_administer: _,
     } = snapshot;
     let lang = Lang::from_code(&me.language);
@@ -1825,6 +1871,25 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                     <span class="field-box">
                                         <span class="status-dot"></span>
                                         <span class="field-text">(detail.column.name.clone())</span>
+                                    </span>
+                                }
+                            </div>
+                            <div class="detail-field detail-field-tag">
+                                <span class="detail-label">(t(lang, Key::Project))</span>
+                                if may_write {
+                                    <form class="status-form" method="post" action="/api/set_task_tag">
+                                        <input type="hidden" name="task_id" value=(detail.id.clone())>
+                                        <select class="status-select" name="tag_id" data-autosubmit="">
+                                            for tag in &tags {
+                                                <option value=(tag.id.clone()) selected=(Some(tag.id.as_str()) == detail.tag.as_ref().map(|t| t.id.as_str()))>(tag.name.clone())</option>
+                                            }
+                                        </select>
+                                    </form>
+                                } else {
+                                    <span class="field-box">
+                                        <span class="field-text">(
+                                            detail.tag.as_ref().map(|tag| tag.name.clone()).unwrap_or_default()
+                                        )</span>
                                     </span>
                                 }
                             </div>

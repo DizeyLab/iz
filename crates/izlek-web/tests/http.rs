@@ -2477,6 +2477,7 @@ async fn a_member_who_posts_new_limits_anyway_is_refused() {
                 ("attachment_limit_mb", "400"),
                 ("photo_limit_mb", "19"),
                 ("allowed_file_types", "png"),
+                ("mail_batch_minutes", "5"),
             ],
         )
         .await;
@@ -2508,6 +2509,7 @@ async fn an_admin_changes_the_limits_and_they_stay_changed() {
                 ("attachment_limit_mb", "10"),
                 ("photo_limit_mb", "1"),
                 ("allowed_file_types", ".PNG, png, pdf"),
+                ("mail_batch_minutes", "5"),
             ],
         )
         .await;
@@ -2544,6 +2546,7 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
                     ("attachment_limit_mb", attachment),
                     ("photo_limit_mb", photo),
                     ("allowed_file_types", ""),
+                    ("mail_batch_minutes", "5"),
                 ],
             )
             .await;
@@ -2575,6 +2578,7 @@ async fn a_file_type_that_is_not_an_extension_is_refused() {
                 ("attachment_limit_mb", "25"),
                 ("photo_limit_mb", "2"),
                 ("allowed_file_types", "../etc/passwd"),
+                ("mail_batch_minutes", "5"),
             ],
         )
         .await;
@@ -4112,6 +4116,7 @@ async fn a_file_past_the_workspace_limit_is_refused_before_it_is_kept() {
                 ("attachment_limit_mb", "1"),
                 ("photo_limit_mb", "2"),
                 ("allowed_file_types", ""),
+                ("mail_batch_minutes", "5"),
             ],
         )
         .await;
@@ -4165,6 +4170,7 @@ async fn a_file_type_off_the_list_is_refused() {
                 ("attachment_limit_mb", "25"),
                 ("photo_limit_mb", "2"),
                 ("allowed_file_types", "png"),
+                ("mail_batch_minutes", "5"),
             ],
         )
         .await;
@@ -5347,6 +5353,7 @@ async fn a_photo_over_the_workspace_limit_is_refused_and_stores_nothing() {
                 ("attachment_limit_mb", "25"),
                 ("photo_limit_mb", "1"),
                 ("allowed_file_types", ""),
+                ("mail_batch_minutes", "5"),
             ],
         )
         .await;
@@ -7304,6 +7311,220 @@ async fn a_member_may_not_check_the_sender() {
     assert_ne!(answer.body, "null", "a member was allowed to dial the server");
 }
 
+// --- tags -------------------------------------------------------------------
+
+/// Makes a tag over HTTP and hands the store row back — the tests need the
+/// id, and the mutation itself is still a real post.
+async fn a_tag(app: &App, cookie: &str, name: &str) -> izlek_core::store::Tag {
+    let answer = app.post("/api/create_tag", Some(cookie), &[("name", name)]).await;
+    assert_eq!(answer.body, "null", "the tag was refused: {}", answer.body);
+    let workspace_id = app.workspace_id().await;
+    let board = app
+        .store
+        .board(&workspace_id)
+        .await
+        .unwrap()
+        .expect("no board");
+    app.store
+        .tags(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tag| tag.name == name)
+        .expect("the new tag is not on the board")
+}
+
+#[tokio::test]
+async fn a_non_admin_cannot_create_rename_delete_or_move_a_tag() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
+
+    let create = app.post("/api/create_tag", Some(&member), &[("name", "Sneak")]).await;
+    assert!(create.body.contains("Forbidden"), "{}", create.body);
+    let rename = app
+        .post(
+            "/api/rename_tag",
+            Some(&member),
+            &[("tag_id", "t1"), ("name", "Sneak")],
+        )
+        .await;
+    assert!(rename.body.contains("Forbidden"), "{}", rename.body);
+    let delete = app.post("/api/delete_tag", Some(&member), &[("tag_id", "t1")]).await;
+    assert!(delete.body.contains("Forbidden"), "{}", delete.body);
+    let move_it = app
+        .post(
+            "/api/move_tag",
+            Some(&member),
+            &[("tag_id", "t1"), ("direction", "up")],
+        )
+        .await;
+    assert!(move_it.body.contains("Forbidden"), "{}", move_it.body);
+}
+
+#[tokio::test]
+async fn a_viewer_cannot_set_a_task_tag() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let viewer = invited(&app, &admin_cookie, "hush@izlek.sh", "Hush Rao", Role::Viewer).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Label me not").await;
+    let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
+
+    let answer = app
+        .post(
+            "/api/set_task_tag",
+            Some(&viewer),
+            &[("task_id", &task), ("tag_id", &aurora.id)],
+        )
+        .await;
+    assert!(answer.body.contains("Forbidden"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn the_task_modal_lists_every_tag_and_names_the_current_one() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Sort into color").await;
+    let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
+
+    let workspace_id = app.workspace_id().await;
+    let board = app
+        .store
+        .board(&workspace_id)
+        .await
+        .unwrap()
+        .expect("no board");
+    let default_id = app
+        .store
+        .tags(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tag| tag.is_default)
+        .expect("no default tag")
+        .id;
+    let selected = |html: &str, id: &str| html.contains(&format!(r#"value="{id}" selected"#));
+
+    let page = String::from_utf8(
+        app.get(&format!("/?task={task}"), Some(&admin_cookie)).await.bytes,
+    )
+    .unwrap();
+    assert!(page.contains(r#"name="tag_id""#), "no tag field in the modal: {page}");
+    assert!(page.contains("General"), "the default tag is not offered: {page}");
+    assert!(page.contains("Aurora"), "the new tag is not offered: {page}");
+    assert!(selected(&page, &default_id), "the current tag is not named: {page}");
+    assert!(!selected(&page, &aurora.id), "an unchosen tag reads as current: {page}");
+
+    let switched = app
+        .post(
+            "/api/set_task_tag",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("tag_id", &aurora.id)],
+        )
+        .await;
+    assert_eq!(switched.body, "null", "the switch was refused: {}", switched.body);
+
+    let page = String::from_utf8(
+        app.get(&format!("/?task={task}"), Some(&admin_cookie)).await.bytes,
+    )
+    .unwrap();
+    assert!(selected(&page, &aurora.id), "the switch did not name Aurora: {page}");
+    assert!(!selected(&page, &default_id), "the old tag still reads current: {page}");
+}
+
+#[tokio::test]
+async fn the_board_tag_filter_narrows_cards_and_an_unknown_tag_falls_back_to_all() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let first = a_task(&app, &admin_cookie, &column, "Aurora work").await;
+    let second = a_task(&app, &admin_cookie, &column, "Boreal work").await;
+    let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
+    let boreal = a_tag(&app, &admin_cookie, "Boreal").await;
+
+    let switched = app
+        .post(
+            "/api/set_task_tag",
+            Some(&admin_cookie),
+            &[("task_id", &second), ("tag_id", &boreal.id)],
+        )
+        .await;
+    assert_eq!(switched.body, "null", "the switch was refused: {}", switched.body);
+
+    let tagged = app
+        .post(
+            "/api/set_task_tag",
+            Some(&admin_cookie),
+            &[("task_id", &first), ("tag_id", &aurora.id)],
+        )
+        .await;
+    assert_eq!(tagged.body, "null", "the first switch was refused: {}", tagged.body);
+
+    let filtered = String::from_utf8(
+        app.get(&format!("/?tag={}", aurora.id), Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .unwrap();
+    assert!(filtered.contains("Aurora work"), "the tagged card is gone: {filtered}");
+    assert!(
+        !filtered.contains("Boreal work"),
+        "the other card did not filter out: {filtered}"
+    );
+
+    let everything = String::from_utf8(
+        app.get("/?tag=bogus", Some(&admin_cookie)).await.bytes,
+    )
+    .unwrap();
+    assert!(
+        everything.contains("Aurora work") && everything.contains("Boreal work"),
+        "an unknown tag did not fall back to all: {everything}"
+    );
+    assert!(
+        everything.contains("General"),
+        "the default tag is not an option in the filter: {everything}"
+    );
+}
+
+#[tokio::test]
+async fn the_default_tag_cannot_be_deleted_and_ships_no_delete_button() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _aurora = a_tag(&app, &admin_cookie, "Aurora").await;
+
+    let workspace_id = app.workspace_id().await;
+    let board = app
+        .store
+        .board(&workspace_id)
+        .await
+        .unwrap()
+        .expect("no board");
+    let default_id = app
+        .store
+        .tags(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tag| tag.is_default)
+        .expect("no default tag")
+        .id;
+
+    let refused = app
+        .post("/api/delete_tag", Some(&admin_cookie), &[("tag_id", &default_id)])
+        .await;
+    assert!(refused.body.contains("Unavailable"), "{}", refused.body);
+
+    let page = String::from_utf8(app.get("/tags", Some(&admin_cookie)).await.bytes).unwrap();
+    assert_eq!(
+        page.matches(r#"action="/api/delete_tag""#).count(),
+        1,
+        "the default tag's row ships a delete control: {page}"
+    );
+    assert!(page.contains("Aurora"), "the created tag is not listed: {page}");
+}
+
 /// An open live stream must not be something the shutdown has to wait out.
 ///
 /// The server stops accepting connections and then gives in-flight requests
@@ -7337,4 +7558,140 @@ async fn a_live_stream_ends_when_the_server_is_told_to_stop() {
     })
     .await;
     assert!(ended.is_ok(), "the stream outlived the stop");
+}
+// --- profile page -----------------------------------------------------------
+
+/// One task row id, for the profile fixture. Fixture setup goes through the
+/// store directly, the way `record_sender_check`'s test does.
+async fn a_task_by(app: &App, board_id: &str, column_id: &str, title: &str, creator: &str) -> String {
+    app.store
+        .create_task(izlek_core::store::NewTask {
+            board_id,
+            column_id,
+            parent_id: None,
+            title,
+            description: "",
+            deadline: None,
+            created_by: creator,
+        })
+        .await
+        .unwrap()
+        .row
+        .id
+}
+
+/// Two tasks on Mem's plate, one finished under her, three she opened, four
+/// comments — the numbers the profile page has to show: 2 / 1 / 3 / 4.
+async fn profile_counts_fixture(app: &App, member: &str, admin: &str) {
+    let workspace = app.workspace_id().await;
+    let board = app.store.board(&workspace).await.unwrap().expect("no board");
+    let columns = app.store.columns(&board.id).await.unwrap();
+    let open = columns
+        .iter()
+        .find(|column| !column.is_done)
+        .expect("no open column")
+        .id
+        .clone();
+    let done = columns
+        .iter()
+        .find(|column| column.is_done)
+        .expect("no done column")
+        .id
+        .clone();
+    let now = time::OffsetDateTime::now_utc();
+
+    let hold = a_task_by(app, &board.id, &open, "Hold the door", admin).await;
+    app.store.assign_task(&hold, member).await.unwrap();
+    let other = a_task_by(app, &board.id, &open, "Oil the hinges", admin).await;
+    app.store.assign_task(&other, member).await.unwrap();
+    let finished = a_task_by(app, &board.id, &open, "Paint the frame", admin).await;
+    app.store.assign_task(&finished, member).await.unwrap();
+    app.store.move_task(&finished, &open, &done, admin, now).await.unwrap();
+    for title in ["Sweep", "Mop", "Dust"] {
+        a_task_by(app, &board.id, &open, title, member).await;
+    }
+    for _ in 0..4 {
+        app.store.add_comment(&hold, member, "a note", now).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_member_may_read_another_members_profile_name_address_and_counts() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
+    let reader = invited(&app, &admin_cookie, "ivy@izlek.sh", "Ivy Lear", Role::Member).await;
+    let mem_id = user_id(&app, "mem@izlek.sh").await;
+    let admin_id = app
+        .store
+        .users(&app.workspace_id().await)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|user| user.role == Role::Admin)
+        .unwrap()
+        .id;
+    profile_counts_fixture(&app, &mem_id, &admin_id).await;
+
+    let page = app.get(&format!("/people/{mem_id}"), Some(&reader)).await;
+    assert_eq!(page.status.as_u16(), 200);
+    let html = String::from_utf8(page.bytes).unwrap();
+    assert!(html.contains("Mem Ber"), "{html}");
+    assert!(html.contains("mem@izlek.sh"), "{html}");
+    for count in [2, 1, 3, 4] {
+        assert_eq!(
+            html.matches(&format!(">{count}</dd>")).count(),
+            1,
+            "the {count} stat is not on the page once: {html}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_profile_is_not_found_signed_out_or_outside_the_workspace() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
+    let mem_id = user_id(&app, "mem@izlek.sh").await;
+
+    let signed_out = app.get(&format!("/people/{mem_id}"), None).await;
+    assert_eq!(signed_out.status.as_u16(), 404, "never a 403, never a page");
+
+    // A person who exists, but in another workspace, reads exactly like a
+    // missing one — the id is not looked at twice.
+    let other = App::open().await;
+    // A workspace has to be claimed before it holds anybody to be a stranger.
+    let _ = admin(&other).await;
+    let stranger = other.store.users(&other.workspace_id().await).await.unwrap()[0]
+        .id
+        .clone();
+    let foreign = app.get(&format!("/people/{stranger}"), Some(&admin_cookie)).await;
+    assert_eq!(foreign.status.as_u16(), 404);
+
+    let missing = app.get("/people/nobody", Some(&admin_cookie)).await;
+    assert_eq!(missing.status.as_u16(), 404);
+}
+
+#[tokio::test]
+async fn only_your_own_profile_offers_the_edit_link() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
+    let mem_id = user_id(&app, "mem@izlek.sh").await;
+    let ivy = invited(&app, &admin_cookie, "ivy@izlek.sh", "Ivy Lear", Role::Member).await;
+    let ivy_id = user_id(&app, "ivy@izlek.sh").await;
+
+    let own = app.get(&format!("/people/{ivy_id}"), Some(&ivy)).await;
+    let own_html = String::from_utf8(own.bytes).unwrap();
+    assert!(
+        own_html.contains(r#"href="/settings?section=profile""#),
+        "no edit link on your own profile: {own_html}"
+    );
+
+    let theirs = app.get(&format!("/people/{mem_id}"), Some(&ivy)).await;
+    let theirs_html = String::from_utf8(theirs.bytes).unwrap();
+    assert!(
+        !theirs_html.contains("settings?section=profile"),
+        "someone else's profile grew an editor: {theirs_html}"
+    );
 }

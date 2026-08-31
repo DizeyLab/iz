@@ -124,6 +124,7 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
                 <div class="user-menu-name">(me.display_name.clone())</div>
                 <div class="user-menu-email">(me.email.clone())</div>
                 <div class="user-menu-role">(t(lang, role_key))</div>
+                <a class="user-menu-item" href=(format!("/people/{}", me.id))>(t(lang, Key::YourProfile))</a>
                 <form class="user-menu-item-form" method="post" action="/api/sign_out" data-hard="">
                     <button class="user-menu-item" type="submit">(t(lang, Key::SignOut))</button>
                 </form>
@@ -132,23 +133,25 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
     }
 }
 
-/// The four signed-in pages, as the topbar nav links between them.
+/// The five signed-in pages, as the topbar nav links between them.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NavPage {
     Board,
     Rules,
     Logs,
+    Tags,
     Settings,
 }
 
 impl NavPage {
-    const ALL: [Self; 4] = [Self::Board, Self::Rules, Self::Logs, Self::Settings];
+    const ALL: [Self; 5] = [Self::Board, Self::Rules, Self::Logs, Self::Tags, Self::Settings];
 
     fn href(self) -> &'static str {
         match self {
             Self::Board => "/",
             Self::Rules => "/rules",
             Self::Logs => "/logs",
+            Self::Tags => "/tags",
             Self::Settings => "/settings",
         }
     }
@@ -158,13 +161,14 @@ impl NavPage {
             Self::Board => Key::NavBoard,
             Self::Rules => Key::NavMailRules,
             Self::Logs => Key::NavLogs,
+            Self::Tags => Key::NavTags,
             Self::Settings => Key::NavSettings,
         }
     }
 }
 
-/// The topbar's page nav, shared by every signed-in page: the four pages
-/// with the current one marked, the admin-only ones (rules, logs) shown
+/// The topbar's page nav, shared by every signed-in page: the five pages
+/// with the current one marked, the admin-only ones (rules, logs, tags) shown
 /// only to roles that can administer. Plain `<a>`s — the soft-nav forwarder
 /// swaps them like any same-origin link, so `data-hard` stays off.
 pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: Lang) -> Result {
@@ -172,7 +176,7 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
         cx =>
         <nav class="topbar-nav-links">
             for page in NavPage::ALL {
-                if role.can_administer() || !matches!(page, NavPage::Rules | NavPage::Logs) {
+                if role.can_administer() || !matches!(page, NavPage::Rules | NavPage::Logs | NavPage::Tags) {
                 <a
                     class=(if page == active { "topbar-nav topbar-nav-on" } else { "topbar-nav" })
                     href=(page.href())
@@ -637,7 +641,9 @@ pub async fn live_script(cx: &Cx) -> Result {
                 var path = window.location.pathname; \
                 if (path === '/logs') { return topic !== 'board' && topic !== 'task'; } \
                 if (path === '/rules') { return topic === 'rules' || topic === 'members'; } \
+                if (path === '/tags') { return topic === 'tags' || topic === 'members'; } \
                 if (path === '/settings') { return topic === 'settings' || topic === 'members'; } \
+                if (path.indexOf('/people/') === 0) { return topic === 'members'; } \
                 return topic === 'board' || topic === 'task' || topic === 'members'; \
             } \
             try { \

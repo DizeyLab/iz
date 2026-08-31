@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use rand::Rng;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use time::format_description::well_known::Rfc3339;
 use turso::transaction::TransactionBehavior;
 use turso::{Builder, Connection, Row, Value, params};
@@ -15,31 +15,23 @@ use ulid::Ulid;
 
 use super::secret;
 use super::{
-    ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, CommentWritten, Deletion,
-    ClaimedSend, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
-    MailSend,
-    NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
-    SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, TaskCreated, Trigger, User,
-    Workspace,
+    ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, ClaimedSend, CommentWritten,
+    Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
+    MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
+    SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, Tag, TaskCreated, Trigger,
+    User, UserStats, Workspace,
 };
+use super::{reconcile, ReconcileOptions, schema};
 use crate::Role;
-use crate::live::{Change, Topic};
-use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TaskRow, Transition};
+use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TagChip, TaskRow, Transition};
 use crate::detail::{
     ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, FileLine,
     SubtaskLine, TaskFacts,
 };
+use crate::live::{Change, Topic};
 use time::Date;
 use time::format_description::BorrowedFormatItem;
 use time::macros::format_description;
-
-/// Every migration, in order. There is one: nothing has been released, so a
-/// schema change is made in `0001_init.sql` and the database recreated. A
-/// second file is for the day there is data worth keeping.
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, include_str!("../../migrations/0001_init.sql")),
-    (2, include_str!("../../migrations/0002_sender_check.sql")),
-];
 
 /// The board a fresh workspace gets, and its columns. `Done` is the column
 /// that stamps a card finished.
@@ -79,7 +71,10 @@ impl TursoStore {
     /// would fill the log with the sound of an idle app.
     fn announce(&self, topics: impl IntoIterator<Item = Topic>) {
         for topic in topics {
-            let _ = self.live.send(Change { topic, seq: crate::live::next_seq() });
+            let _ = self.live.send(Change {
+                topic,
+                seq: crate::live::next_seq(),
+            });
         }
     }
 
@@ -87,6 +82,10 @@ impl TursoStore {
     /// up to date. `:memory:` gives a throwaway database for tests.
     pub async fn open(path: &str) -> Result<Self> {
         let existed = path != ":memory:" && std::path::Path::new(path).exists();
+        // Before anything holds this file open: a database of an older shape is
+        // rebuilt now, while no handle of ours points at the file that the
+        // rebuild is about to replace.
+        Self::repair_if_stale(path).await?;
         let db = Builder::new_local(path).build().await.map_err(backend)?;
         let conn = db.connect().map_err(backend)?;
         // Turso is a single-writer engine. Two connections on one Database
@@ -117,9 +116,21 @@ impl TursoStore {
         // the reader is told it lagged and resyncs, which is cheaper than the
         // memory a larger buffer would cost to avoid saying so.
         let (live, _) = tokio::sync::broadcast::channel(256);
-        let store = Self { conn: tokio::sync::Mutex::new(conn), db, key, live };
-        store.migrate().await?;
+        let store = Self {
+            conn: tokio::sync::Mutex::new(conn),
+            db,
+            key,
+            live,
+        };
+        store.migrate(path).await?;
         store.encrypt_plaintext_passwords().await?;
+        // The file may have been rebuilt from a backup; its permissions and
+        // any transient WAL/SHM siblings should still be private.
+        if path != ":memory:" {
+            restrict_if_present(std::path::Path::new(path))?;
+            restrict_if_present(&sibling(path, "-wal"))?;
+            restrict_if_present(&sibling(path, "-shm"))?;
+        }
         Ok(store)
     }
 
@@ -151,107 +162,145 @@ impl TursoStore {
         }
         for (id, plaintext) in pending {
             let sealed = secret::seal(&self.key, &plaintext);
-            conn
-                .execute(
-                    "UPDATE workspace SET smtp_password = ?1 WHERE id = ?2",
-                    params![sealed, id],
-                )
-                .await
-                .map_err(backend)?;
+            conn.execute(
+                "UPDATE workspace SET smtp_password = ?1 WHERE id = ?2",
+                params![sealed, id],
+            )
+            .await
+            .map_err(backend)?;
         }
         Ok(())
     }
 
-    async fn migrate(&self) -> Result<()> {
-        self.conn
-            .lock()
-            .await
-            .execute(
-                "CREATE TABLE IF NOT EXISTS schema_version (
-                     version    INTEGER PRIMARY KEY,
-                     applied_at TEXT NOT NULL
-                 )",
+    /// Brings the database to the declared schema.
+    ///
+    /// - An empty database is created from `migrations/0001_init.sql`.
+    /// - A database that already matches the declared schema is left alone.
+    /// - A stale database is backed up, rebuilt, and re-verified once.
+    ///   If the rebuilt database still does not match, the process stops
+    ///   with the original backed up and untouched.
+    ///
+    /// SQLite's DDL is transactional, so a schema that dies halfway leaves
+    /// nothing behind: a half-created database is a boot that starts over,
+    /// not a database with a hole in it.
+    async fn migrate(&self, path: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
                 (),
             )
             .await
             .map_err(backend)?;
+        let empty = match rows.next().await.map_err(backend)? {
+            Some(row) => row.get::<i64>(0).map_err(backend)? == 0,
+            None => true,
+        };
+        drop(rows);
 
-        let applied = self.applied_versions().await?;
-        for (version, sql) in MIGRATIONS {
-            if applied.contains(version) {
-                continue;
+        if empty {
+            conn.execute("BEGIN IMMEDIATE", ()).await.map_err(backend)?;
+            if let Err(e) = conn.execute_batch(super::schema::SCHEMA).await {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(backend(e));
             }
-            self.apply(*version, sql).await?;
+            return conn.execute("COMMIT", ()).await.map_err(backend).map(|_| ());
+        }
+
+        if path == ":memory:" {
+            // Tests own an in-memory database; its schema is whatever the
+            // test created, and the open should not try to reconcile it.
+            return Ok(());
+        }
+
+        // `repair_if_stale` ran before this handle was ever opened, so by now
+        // the file on disk matches. Saying so here is cheap and turns a
+        // reordering mistake into a refusal to start rather than a store
+        // running against a schema the code does not expect.
+        let have = schema::fingerprint(&conn).await.map_err(backend)?;
+        let want = schema::declared_fingerprint().await.map_err(backend)?;
+        if have != want {
+            return Err(StoreError::Backend(format!(
+                "database does not match the declared schema and was not repaired; \
+                 do not restart. diff:\n{}",
+                schema::diff_report(&have, &want)
+            )));
         }
         Ok(())
     }
 
-    /// One migration and the row that says it ran, in one transaction.
+    /// Brings a database of an older shape onto the declared schema, BEFORE
+    /// any long-lived handle is opened on it.
     ///
-    /// A migration is not only a thing that can fail: one that rebuilds a
-    /// table — which is how SQLite drops a CHECK or a foreign key — would
-    /// leave the table gone rather than merely unmigrated if it died between
-    /// the DROP and the RENAME. So the file and its `schema_version` row
-    /// commit together or not at all, and a half-applied migration is a boot
-    /// that starts over rather than a database with a hole in it.
-    ///
-    /// SQLite's DDL is transactional, which is what makes this possible at all.
-    async fn apply(&self, version: i64, sql: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn
-            .execute("BEGIN IMMEDIATE", ())
-            .await
-            .map_err(backend)?;
-        let written = async {
-            conn.execute_batch(sql).await?;
-            conn
-                .execute(
-                    "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
-                    params![
-                        version,
-                        now_text().map_err(|_| turso::Error::Misuse(
-                            "the clock could not be read".to_string()
-                        ))?
-                    ],
+    /// The order matters and is the whole reason this is not part of
+    /// `migrate`: `reconcile` swaps a rebuilt file into place, so a
+    /// `turso::Database` opened beforehand still refers to the file that is
+    /// now the backup. Reconnecting such a handle reads the old database and
+    /// makes a successful rebuild look like a failed one.
+    async fn repair_if_stale(path: &str) -> Result<()> {
+        if path == ":memory:" || !std::path::Path::new(path).exists() {
+            return Ok(());
+        }
+        let (have, empty) = {
+            let db = Builder::new_local(path).build().await.map_err(backend)?;
+            let conn = db.connect().map_err(backend)?;
+            let mut rows = conn
+                .query(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                    (),
                 )
-                .await?;
-            Ok::<_, turso::Error>(())
-        }
-        .await;
-        match written {
-            Ok(()) => conn
-                .execute("COMMIT", ())
                 .await
-                .map_err(backend)
-                .map(|_| ()),
-            Err(e) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(backend(e))
-            }
+                .map_err(backend)?;
+            let empty = match rows.next().await.map_err(backend)? {
+                Some(row) => row.get::<i64>(0).map_err(backend)? == 0,
+                None => true,
+            };
+            drop(rows);
+            let have = if empty {
+                String::new()
+            } else {
+                schema::fingerprint(&conn).await.map_err(backend)?
+            };
+            (have, empty)
+        };
+        if empty {
+            return Ok(());
         }
-    }
-
-    async fn applied_versions(&self) -> Result<Vec<i64>> {
-        let conn = self.conn.lock().await;
-        let mut rows = conn
-            .query("SELECT version FROM schema_version", ())
-            .await
-            .map_err(backend)?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(backend)? {
-            out.push(row.get::<i64>(0).map_err(backend)?);
+        let want = schema::declared_fingerprint().await.map_err(backend)?;
+        if have == want {
+            return Ok(());
         }
-        Ok(out)
-    }
 
-    /// The schema version the database is actually at.
-    pub async fn schema_version(&self) -> Result<i64> {
-        Ok(self
-            .applied_versions()
-            .await?
-            .into_iter()
-            .max()
-            .unwrap_or(0))
+        eprintln!(
+            "database schema differs from the declared schema; rebuilding automatically\n{}",
+            schema::diff_report(&have, &want)
+        );
+        reconcile(
+            path,
+            ReconcileOptions {
+                dry_run: false,
+                yes: false,
+                auto: true,
+            },
+        )
+        .await?;
+
+        // Check the result once, on a handle opened after the swap. A
+        // normalisation bug that rebuilt forever would otherwise write a
+        // full-size backup on every restart until the disk filled.
+        let db = Builder::new_local(path).build().await.map_err(backend)?;
+        let conn = db.connect().map_err(backend)?;
+        let after = schema::fingerprint(&conn).await.map_err(backend)?;
+        if after != want {
+            return Err(StoreError::Backend(format!(
+                "rebuild did not match the declared schema; the original is backed up beside it \
+                 and this is not retried. diff:\n{}",
+                schema::diff_report(&after, &want)
+            )));
+        }
+        Ok(())
     }
 
     /// A connection of its own, for work that opens a transaction.
@@ -376,8 +425,8 @@ const DECISION_COLUMNS: &str = "id, rule_id, event_id, task_id, outcome, detail,
 
 fn decision_from(row: &Row) -> Result<MailDecision> {
     let raw = text(row, 4)?;
-    let outcome =
-        MailOutcome::parse(&raw).ok_or_else(|| StoreError::Corrupt(format!("mail outcome {raw:?}")))?;
+    let outcome = MailOutcome::parse(&raw)
+        .ok_or_else(|| StoreError::Corrupt(format!("mail outcome {raw:?}")))?;
     Ok(MailDecision {
         id: text(row, 0)?,
         rule_id: text(row, 1)?,
@@ -575,6 +624,7 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         attachment_limit_bytes: row.get::<i64>(3).map_err(backend)?.max(0) as u64,
         allowed_file_types,
         photo_limit_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
+        mail_batch_minutes: row.get::<i64>(19).map_err(backend)?.max(0) as u32,
         smtp_host: opt_text(row, 6)?,
         smtp_port: row.get::<Option<u32>>(7).map_err(backend)?,
         smtp_username: opt_text(row, 8)?,
@@ -609,7 +659,7 @@ const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
      smtp_from_name, smtp_from_address, \
      (smtp_password IS NOT NULL AND smtp_password <> ''), \
      smtp_test_at, smtp_test_ms, smtp_test_error, public_url, \
-     smtp_check_at, smtp_check_ms, smtp_check_error";
+     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -723,7 +773,7 @@ impl Store for TursoStore {
                     board_id.clone(),
                     workspace_id.clone(),
                     DEFAULT_BOARD_NAME,
-                    now
+                    now.clone(),
                 ],
             )
             .await?;
@@ -741,6 +791,15 @@ impl Store for TursoStore {
                 )
                 .await?;
             }
+            // Every task must wear a tag, so the board comes with the one
+            // that catches whatever loses its own — English, like the
+            // columns beside it.
+            tx.execute(
+                "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
+                 VALUES (?1, ?2, 'General', 0, 1, ?3)",
+                params![Ulid::new().to_string(), board_id.clone(), now.clone()],
+            )
+            .await?;
             Ok::<_, turso::Error>(())
         }
         .await;
@@ -803,26 +862,28 @@ impl Store for TursoStore {
         // Sealed here, not by the caller — the `Store` trait keeps passing
         // plaintext so nothing outside this file needs to know a cipher
         // exists. See `crate::store::secret`.
-        let sealed_password = sender.password.as_deref().map(|p| secret::seal(&self.key, p));
-        conn
-            .execute(
-                "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
+        let sealed_password = sender
+            .password
+            .as_deref()
+            .map(|p| secret::seal(&self.key, p));
+        conn.execute(
+            "UPDATE workspace SET smtp_host = ?1, smtp_port = ?2, smtp_username = ?3, \
                  smtp_password = COALESCE(?4, smtp_password), smtp_from_name = ?5, \
                  smtp_from_address = ?6, smtp_test_at = NULL, smtp_test_ms = NULL, \
                  smtp_test_error = NULL, smtp_check_at = NULL, smtp_check_ms = NULL, \
                  smtp_check_error = NULL WHERE id = ?7",
-                params![
-                    sender.host,
-                    sender.port as i64,
-                    sender.username,
-                    sealed_password,
-                    sender.from_name,
-                    sender.from_address,
-                    workspace_id
-                ],
-            )
-            .await
-            .map_err(backend)?;
+            params![
+                sender.host,
+                sender.port as i64,
+                sender.username,
+                sealed_password,
+                sender.from_name,
+                sender.from_address,
+                workspace_id
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Settings]);
         Ok(())
@@ -830,19 +891,18 @@ impl Store for TursoStore {
 
     async fn record_sender_check(&self, workspace_id: &str, check: SenderCheck) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "UPDATE workspace SET smtp_check_at = ?1, smtp_check_ms = ?2, \
+        conn.execute(
+            "UPDATE workspace SET smtp_check_at = ?1, smtp_check_ms = ?2, \
                  smtp_check_error = ?3 WHERE id = ?4",
-                params![
-                    stamp(check.at)?,
-                    check.took_ms as i64,
-                    check.error,
-                    workspace_id
-                ],
-            )
-            .await
-            .map_err(backend)?;
+            params![
+                stamp(check.at)?,
+                check.took_ms as i64,
+                check.error,
+                workspace_id
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Settings]);
         Ok(())
@@ -850,19 +910,18 @@ impl Store for TursoStore {
 
     async fn record_sender_test(&self, workspace_id: &str, test: SenderTest) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "UPDATE workspace SET smtp_test_at = ?1, smtp_test_ms = ?2, \
+        conn.execute(
+            "UPDATE workspace SET smtp_test_at = ?1, smtp_test_ms = ?2, \
                  smtp_test_error = ?3 WHERE id = ?4",
-                params![
-                    stamp(test.at)?,
-                    test.took_ms as i64,
-                    test.error,
-                    workspace_id
-                ],
-            )
-            .await
-            .map_err(backend)?;
+            params![
+                stamp(test.at)?,
+                test.took_ms as i64,
+                test.error,
+                workspace_id
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Settings]);
         Ok(())
@@ -891,13 +950,12 @@ impl Store for TursoStore {
 
     async fn set_public_url(&self, workspace_id: &str, public_url: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "UPDATE workspace SET public_url = ?1 WHERE id = ?2",
-                params![public_url, workspace_id],
-            )
-            .await
-            .map_err(backend)?;
+        conn.execute(
+            "UPDATE workspace SET public_url = ?1 WHERE id = ?2",
+            params![public_url, workspace_id],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Settings]);
         Ok(())
@@ -909,23 +967,24 @@ impl Store for TursoStore {
         attachment_limit_bytes: u64,
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
+        mail_batch_minutes: u32,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
         let types = serde_json::to_string(allowed_file_types)
             .map_err(|e| StoreError::Corrupt(format!("allowed_file_types: {e}")))?;
-        conn
-            .execute(
-                "UPDATE workspace SET attachment_limit_bytes = ?1, photo_limit_bytes = ?2, \
-                 allowed_file_types = ?3 WHERE id = ?4",
-                params![
-                    attachment_limit_bytes as i64,
-                    photo_limit_bytes as i64,
-                    types,
-                    workspace_id
-                ],
-            )
-            .await
-            .map_err(backend)?;
+        conn.execute(
+            "UPDATE workspace SET attachment_limit_bytes = ?1, photo_limit_bytes = ?2, \
+                 allowed_file_types = ?3, mail_batch_minutes = ?5 WHERE id = ?4",
+            params![
+                attachment_limit_bytes as i64,
+                photo_limit_bytes as i64,
+                types,
+                workspace_id,
+                i64::from(mail_batch_minutes)
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Settings]);
         Ok(())
@@ -1016,6 +1075,46 @@ impl Store for TursoStore {
             Some(row) => count_of(&row),
             None => Ok(0),
         }
+    }
+
+    async fn user_stats(&self, user_id: &str) -> Result<UserStats> {
+        // One row of four scalars: a profile reads its whole summary in a
+        // single trip. `deleted_at` is excluded everywhere — a task off the
+        // board is off the person's page as well.
+        let row = self
+            .one_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM task_assignee a \
+                      JOIN task t ON t.id = a.task_id \
+                      JOIN board_column c ON c.id = t.column_id \
+                     WHERE a.user_id = ?1 AND t.deleted_at IS NULL AND c.is_done = 0), \
+                   (SELECT COUNT(*) FROM task_assignee a \
+                      JOIN task t ON t.id = a.task_id \
+                      JOIN board_column c ON c.id = t.column_id \
+                     WHERE a.user_id = ?1 AND t.deleted_at IS NULL AND c.is_done = 1), \
+                   (SELECT COUNT(*) FROM task WHERE created_by = ?1 AND deleted_at IS NULL), \
+                   (SELECT COUNT(*) FROM comment m JOIN task t ON t.id = m.task_id \
+                     WHERE m.author_id = ?1 AND t.deleted_at IS NULL)",
+                params![user_id],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(UserStats {
+                assigned_open: 0,
+                assigned_done: 0,
+                created: 0,
+                comments: 0,
+            });
+        };
+        let at = |i: usize| -> Result<u32> {
+            row.get::<i64>(i).map_err(backend).map(|n| n.max(0) as u32)
+        };
+        Ok(UserStats {
+            assigned_open: at(0)?,
+            assigned_done: at(1)?,
+            created: at(2)?,
+            comments: at(3)?,
+        })
     }
 
     async fn set_password_hash(&self, user_id: &str, hash: &str) -> Result<()> {
@@ -1125,7 +1224,13 @@ impl Store for TursoStore {
                 params![email, user_id],
             )
             .await
-            .map_err(|e| if is_constraint_violation(&e) { StoreError::Conflict("account") } else { backend(e) })?;
+            .map_err(|e| {
+                if is_constraint_violation(&e) {
+                    StoreError::Conflict("account")
+                } else {
+                    backend(e)
+                }
+            })?;
         if n == 0 {
             Err(StoreError::NotFound)
         } else {
@@ -1355,13 +1460,12 @@ impl Store for TursoStore {
     // sign-in — traffic in exchange for a screen that would look identical.
     async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES (?1, ?2, ?3)",
-                params![Ulid::new().to_string(), bucket, stamp(at)?],
-            )
-            .await
-            .map_err(backend)?;
+        conn.execute(
+            "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES (?1, ?2, ?3)",
+            params![Ulid::new().to_string(), bucket, stamp(at)?],
+        )
+        .await
+        .map_err(backend)?;
         Ok(())
     }
 
@@ -1382,25 +1486,23 @@ impl Store for TursoStore {
 
     async fn clear_auth_attempts(&self, bucket: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "DELETE FROM auth_attempt WHERE bucket = ?1",
-                params![bucket],
-            )
-            .await
-            .map_err(backend)?;
+        conn.execute(
+            "DELETE FROM auth_attempt WHERE bucket = ?1",
+            params![bucket],
+        )
+        .await
+        .map_err(backend)?;
         Ok(())
     }
 
     async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "DELETE FROM auth_attempt WHERE attempted_at < ?1",
-                params![stamp(before)?],
-            )
-            .await
-            .map_err(backend)
+        conn.execute(
+            "DELETE FROM auth_attempt WHERE attempted_at < ?1",
+            params![stamp(before)?],
+        )
+        .await
+        .map_err(backend)
     }
 
     // -- board -------------------------------------------------------------
@@ -1414,14 +1516,13 @@ impl Store for TursoStore {
     ) -> Result<Column> {
         let conn = self.conn.lock().await;
         let id = Ulid::new().to_string();
-        conn
-            .execute(
-                "INSERT INTO board_column (id, board_id, name, position, is_done) \
+        conn.execute(
+            "INSERT INTO board_column (id, board_id, name, position, is_done) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id.clone(), board_id, name, position, i64::from(is_done)],
-            )
-            .await
-            .map_err(backend)?;
+            params![id.clone(), board_id, name, position, i64::from(is_done)],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Board]);
         Ok(Column {
@@ -1500,6 +1601,20 @@ impl Store for TursoStore {
             drop(rows);
             let position = last + 1.0;
 
+            // A task always wears a tag, so one is chosen here when nobody
+            // named one: the board's default. The NOT NULL on `task.tag_id`
+            // makes choosing it the write's job, not an afterthought.
+            let mut rows = tx
+                .query(
+                    "SELECT id FROM tag WHERE board_id = ?1 AND is_default = 1",
+                    params![new.board_id],
+                )
+                .await?;
+            let default_tag = match rows.next().await? {
+                Some(row) => row.get::<String>(0)?,
+                None => return Ok(Err(StoreError::NotFound)),
+            };
+            drop(rows);
             // The key's tail is the end of this task's own id (a ULID —
             // Crockford-uppercase already, and the last chars are its random
             // bits) rather than a per-board counter: a counter leaves visible
@@ -1512,8 +1627,8 @@ impl Store for TursoStore {
                 match tx
                     .execute(
                         "INSERT INTO task (id, board_id, parent_id, task_key, title, description, \
-                         column_id, deadline, position, created_by, created_at, updated_at) \
-                         VALUES (?1, ?2, ?11, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                         column_id, tag_id, deadline, position, created_by, created_at, updated_at) \
+                         VALUES (?1, ?2, ?11, ?3, ?4, ?5, ?6, ?12, ?7, ?8, ?9, ?10, ?10)",
                         params![
                             id.clone(),
                             new.board_id,
@@ -1525,7 +1640,8 @@ impl Store for TursoStore {
                             position,
                             new.created_by,
                             now.clone(),
-                            new.parent_id
+                            new.parent_id,
+                            default_tag.clone()
                         ],
                     )
                     .await
@@ -1539,8 +1655,8 @@ impl Store for TursoStore {
                 }
             };
             tx.execute(
-                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, NULL, ?4, '', ?5)",
                 params![
                     activity_id.clone(),
                     id.clone(),
@@ -1593,6 +1709,7 @@ impl Store for TursoStore {
                 position,
                 done_at: None,
                 parent_id: new.parent_id.map(str::to_string),
+                tag: None,
             },
             activity_id,
             transition: Transition {
@@ -1717,6 +1834,7 @@ impl Store for TursoStore {
                 position: row.get::<f64>(5).unwrap_or(0.0),
                 done_at: opt_stamp(&row, 6)?,
                 parent_id: Some(parent_id.to_string()),
+                tag: None,
             });
         }
         Ok(out)
@@ -1924,8 +2042,8 @@ impl Store for TursoStore {
             )
             .await?;
             tx.execute(
-                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, NULL, ?4, '', ?5)",
                 params![
                     activity_id.clone(),
                     task_id,
@@ -1956,25 +2074,24 @@ impl Store for TursoStore {
         let conn = self.conn.lock().await;
         let id = Ulid::new().to_string();
         let size = new.bytes.len() as i64;
-        conn
-            .execute(
-                "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
+        conn.execute(
+            "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
                  size_bytes, bytes, uploaded_by, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    id.clone(),
-                    new.task_id,
-                    new.comment_id,
-                    new.file_name,
-                    new.mime_type,
-                    size,
-                    new.bytes,
-                    new.uploaded_by,
-                    stamp(new.at)?
-                ],
-            )
-            .await
-            .map_err(backend)?;
+            params![
+                id.clone(),
+                new.task_id,
+                new.comment_id,
+                new.file_name,
+                new.mime_type,
+                size,
+                new.bytes,
+                new.uploaded_by,
+                stamp(new.at)?
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Task(new.task_id.to_string())]);
         Ok(id)
@@ -2109,8 +2226,8 @@ impl Store for TursoStore {
             for (kind, detail) in lines {
                 let id = Ulid::new().to_string();
                 tx.execute(
-                    "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                     VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
                     params![id.clone(), task_id, actor_id, kind, detail, stamp.clone()],
                 )
                 .await?;
@@ -2289,8 +2406,8 @@ impl Store for TursoStore {
             .await?;
 
             tx.execute(
-                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
                 params![
                     Ulid::new().to_string(),
                     task_id,
@@ -2413,8 +2530,8 @@ impl Store for TursoStore {
             .await?;
             let deleted_activity_id = Ulid::new().to_string();
             tx.execute(
-                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, '', ?5)",
+                "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, NULL, ?4, '', ?5)",
                 params![
                     deleted_activity_id.clone(),
                     task_id,
@@ -2446,8 +2563,8 @@ impl Store for TursoStore {
                     continue;
                 }
                 tx.execute(
-                    "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                     VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                    "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                     VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5)",
                     params![
                         Ulid::new().to_string(),
                         blocked.clone(),
@@ -2599,27 +2716,28 @@ impl Store for TursoStore {
         &self,
         task_id: &str,
         actor_id: Option<&str>,
+        subject_id: Option<&str>,
         kind: &ActivityKind,
         detail: &str,
         at: OffsetDateTime,
     ) -> Result<String> {
         let conn = self.conn.lock().await;
         let id = Ulid::new().to_string();
-        conn
-            .execute(
-                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    id.clone(),
-                    task_id,
-                    actor_id,
-                    kind.as_str(),
-                    detail,
-                    stamp(at)?
-                ],
-            )
-            .await
-            .map_err(backend)?;
+        conn.execute(
+            "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id.clone(),
+                task_id,
+                actor_id,
+                subject_id,
+                kind.as_str(),
+                detail,
+                stamp(at)?
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         // Task-scoped: the task's own trail and the workspace feed both grew.
         self.announce([Topic::Activity, Topic::Task(task_id.to_string())]);
@@ -2635,14 +2753,13 @@ impl Store for TursoStore {
     ) -> Result<String> {
         let conn = self.conn.lock().await;
         let id = Ulid::new().to_string();
-        conn
-            .execute(
-                "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
-                 VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
-                params![id.clone(), actor_id, kind.as_str(), detail, stamp(at)?],
-            )
-            .await
-            .map_err(backend)?;
+        conn.execute(
+            "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
+                 VALUES (?1, NULL, ?2, NULL, ?3, ?4, ?5)",
+            params![id.clone(), actor_id, kind.as_str(), detail, stamp(at)?],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         // Workspace-wide, belonging to no task — the feed only.
         self.announce([Topic::Activity]);
@@ -2696,10 +2813,7 @@ impl Store for TursoStore {
         let sql = format!(
             "SELECT {RULE_COLUMNS} FROM mail_rule WHERE board_id = ?1 ORDER BY created_at, rowid"
         );
-        let mut rows = conn
-            .query(&sql, params![board_id])
-            .await
-            .map_err(backend)?;
+        let mut rows = conn.query(&sql, params![board_id]).await.map_err(backend)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(backend)? {
             out.push(rule_from(&row)?);
@@ -2799,7 +2913,7 @@ impl Store for TursoStore {
         match self
             .one_row(
                 "SELECT activity.id, activity.task_id, task.board_id, activity.kind, \
-                 activity.actor_id, activity.detail, activity.created_at \
+                 activity.actor_id, activity.subject_id, activity.detail, activity.created_at \
                  FROM activity JOIN task ON task.id = activity.task_id \
                  WHERE activity.id = ?1",
                 params![event_id],
@@ -2812,8 +2926,9 @@ impl Store for TursoStore {
                 board_id: text(&row, 2)?,
                 kind: ActivityKind::parse(&text(&row, 3)?),
                 actor_id: opt_text(&row, 4)?.unwrap_or_default(),
-                detail: text(&row, 5)?,
-                at: parse_stamp(&text(&row, 6)?)?,
+                subject_id: opt_text(&row, 5)?,
+                detail: text(&row, 6)?,
+                at: parse_stamp(&text(&row, 7)?)?,
             }))),
             None => Ok(None),
         }
@@ -3187,14 +3302,13 @@ impl Store for TursoStore {
 
     async fn requeue_send(&self, send_id: &str, at: OffsetDateTime) -> Result<()> {
         let conn = self.conn.lock().await;
-        conn
-            .execute(
-                "UPDATE mail_send SET state = 'pending', next_attempt_at = ?1 \
+        conn.execute(
+            "UPDATE mail_send SET state = 'pending', next_attempt_at = ?1 \
                  WHERE id = ?2 AND state IN ('failed', 'abandoned')",
-                params![stamp(at)?, send_id],
-            )
-            .await
-            .map_err(backend)?;
+            params![stamp(at)?, send_id],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         self.announce([Topic::Queue]);
         Ok(())
@@ -3213,16 +3327,23 @@ impl Store for TursoStore {
     ) -> Result<()> {
         let conn = self.conn.lock().await;
         let id = Ulid::new().to_string();
-        conn
-            .execute(
-                "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
+        conn.execute(
+            "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
                  created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT (rule_id, event_id, task_id) DO NOTHING",
-                params![id, rule_id, event_id, task_id, outcome.as_str(), detail, stamp(at)?],
-            )
-            .await
-            .map_err(backend)?;
+            params![
+                id,
+                rule_id,
+                event_id,
+                task_id,
+                outcome.as_str(),
+                detail,
+                stamp(at)?
+            ],
+        )
+        .await
+        .map_err(backend)?;
         drop(conn);
         // A decision is what the rules page's decisions tab renders.
         self.announce([Topic::Rules]);
@@ -3449,7 +3570,9 @@ impl Store for TursoStore {
             FeedPage::Newest => {
                 vals.extend(filter_vals);
                 vals.push(i64::from(limit).into());
-                format!("{SELECT} WHERE 1=1{filter_sql} ORDER BY a.created_at {base}, a.id {base} LIMIT ?")
+                format!(
+                    "{SELECT} WHERE 1=1{filter_sql} ORDER BY a.created_at {base}, a.id {base} LIMIT ?"
+                )
             }
             FeedPage::Before(cursor) => {
                 // Further along in `dir`'s reading order: older when
@@ -3596,6 +3719,51 @@ impl Store for TursoStore {
         recipients_from(&mut rows).await
     }
 
+    async fn hold_batch(
+        &self,
+        task_id: &str,
+        recipient: &str,
+        until: OffsetDateTime,
+        cap: Duration,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        // Read the rows and their birth moments first: the ceiling is per
+        // row — the oldest mail in the batch is the one whose patience runs
+        // out — and expressing that in SQL over RFC 3339 text would be a
+        // date-format trick rather than a calculation.
+        let mut rows = conn
+            .query(
+                "SELECT id, claimed_at FROM mail_send \
+                 WHERE task_id = ?1 AND recipient = ?2 AND kind = 'rule' \
+                   AND state = 'pending' AND attempts = 0 \
+                   AND next_attempt_at IS NOT NULL",
+                params![task_id, recipient],
+            )
+            .await
+            .map_err(backend)?;
+        let mut held = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let id = text(&row, 0)?;
+            let born = parse_stamp(&text(&row, 1)?)?;
+            held.push((id, born));
+        }
+        drop(rows);
+        for (id, born) in held {
+            let ceiling = born + cap;
+            let when = if until > ceiling { ceiling } else { until };
+            conn.execute(
+                "UPDATE mail_send SET next_attempt_at = ?1 \
+                 WHERE id = ?2 AND state = 'pending' AND attempts = 0",
+                params![stamp(when)?, id],
+            )
+            .await
+            .map_err(backend)?;
+        }
+        drop(conn);
+        self.announce([Topic::Queue]);
+        Ok(())
+    }
+
     async fn recipients_for_task_creator(&self, task_id: &str) -> Result<Vec<Recipient>> {
         let conn = self.conn.lock().await;
         let mut rows = conn
@@ -3609,6 +3777,268 @@ impl Store for TursoStore {
             .map_err(backend)?;
         recipients_from(&mut rows).await
     }
+
+    async fn recipient(&self, user_id: &str) -> Result<Option<Recipient>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT u.id, u.email, u.display_name FROM user u \
+                 WHERE u.id = ?1 AND u.role <> ?2",
+                params![user_id, Role::Viewer.as_str()],
+            )
+            .await
+            .map_err(backend)?;
+        Ok(recipients_from(&mut rows).await?.into_iter().next())
+    }
+
+    // -- tags --------------------------------------------------------------
+
+    async fn tags(&self, board_id: &str) -> Result<Vec<Tag>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT id, board_id, name, position, is_default FROM tag WHERE board_id = ?1 \
+                 ORDER BY position",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(Tag {
+                id: text(&row, 0)?,
+                board_id: text(&row, 1)?,
+                name: text(&row, 2)?,
+                position: row.get::<i64>(3).map_err(backend)?,
+                is_default: row.get::<i64>(4).map_err(backend)? != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn create_tag(&self, board_id: &str, name: &str, at: OffsetDateTime) -> Result<Tag> {
+        let id = Ulid::new().to_string();
+        let now = stamp(at)?;
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+
+        // A new tag lands at the end of the board's order. The name is the
+        // unique index's to police — a pre-read would only widen the race.
+        let written = async {
+            let mut rows = tx
+                .query(
+                    "SELECT COALESCE(MAX(position), 0) FROM tag WHERE board_id = ?1",
+                    params![board_id],
+                )
+                .await?;
+            let position = match rows.next().await? {
+                Some(row) => row.get::<i64>(0).unwrap_or(0) + 1,
+                None => 1,
+            };
+            drop(rows);
+            tx.execute(
+                "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+                params![id.clone(), board_id, name, position, now],
+            )
+            .await?;
+            Ok::<_, turso::Error>(position)
+        }
+        .await;
+
+        let position = match written {
+            Ok(position) => position,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(if is_constraint_violation(&e) {
+                    StoreError::Conflict("tag")
+                } else {
+                    backend(e)
+                });
+            }
+        };
+        tx.commit().await.map_err(backend)?;
+
+        self.announce([Topic::Board, Topic::Tags]);
+        Ok(Tag {
+            id,
+            board_id: board_id.to_string(),
+            name: name.to_string(),
+            position,
+            is_default: false,
+        })
+    }
+
+    async fn rename_tag(&self, tag_id: &str, name: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE tag SET name = ?1 WHERE id = ?2",
+                params![name, tag_id],
+            )
+            .await
+            .map_err(|e| {
+                if is_constraint_violation(&e) {
+                    StoreError::Conflict("tag")
+                } else {
+                    backend(e)
+                }
+            })?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        drop(conn);
+        self.announce([Topic::Board, Topic::Tags]);
+        Ok(())
+    }
+
+    async fn delete_tag(&self, tag_id: &str) -> Result<()> {
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        // The default is the board's fallback, not a project anyone can
+        // retire: deleting it would leave its board's tasks nowhere to go.
+        // Any other tag's tasks move to that default, in the one write set:
+        // no task is ever seen pointing at a project that is not there.
+        let deleted = async {
+            let mut rows = tx
+                .query(
+                    "SELECT board_id, is_default FROM tag WHERE id = ?1",
+                    params![tag_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok::<_, turso::Error>(Err(StoreError::NotFound));
+            };
+            let board_id: String = row.get(0)?;
+            let is_default: i64 = row.get(1)?;
+            drop(rows);
+            if is_default != 0 {
+                return Ok(Err(StoreError::Conflict("default_tag")));
+            }
+            tx.execute(
+                "UPDATE task SET tag_id = \
+                 (SELECT id FROM tag WHERE board_id = ?1 AND is_default = 1) \
+                 WHERE tag_id = ?2",
+                params![board_id, tag_id],
+            )
+            .await?;
+            tx.execute("DELETE FROM tag WHERE id = ?1", params![tag_id])
+                .await?;
+            Ok(Ok(()))
+        }
+        .await;
+        match deleted {
+            Ok(Ok(())) => {}
+            Ok(Err(refused)) => {
+                let _ = tx.rollback().await;
+                return Err(refused);
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(backend(e));
+            }
+        }
+        tx.commit().await.map_err(backend)?;
+        self.announce([Topic::Board, Topic::Tags]);
+        Ok(())
+    }
+
+    async fn move_tag(&self, tag_id: &str, up: bool) -> Result<()> {
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let written = async {
+            let mut rows = tx
+                .query(
+                    "SELECT board_id, position FROM tag WHERE id = ?1",
+                    params![tag_id],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Ok::<_, turso::Error>(Err(StoreError::NotFound));
+            };
+            let board_id: String = row.get(0)?;
+            let position: i64 = row.get(1)?;
+            drop(rows);
+            let other = if up { position - 1 } else { position + 1 };
+            let mut rows = tx
+                .query(
+                    "SELECT id FROM tag WHERE board_id = ?1 AND position = ?2",
+                    params![board_id, other],
+                )
+                .await?;
+            let Some(neighbour) = rows.next().await? else {
+                // Already at that end of the order: nothing to swap, and that
+                // is not an error.
+                return Ok(Ok(()));
+            };
+            let neighbour_id: String = neighbour.get(0)?;
+            drop(rows);
+            tx.execute(
+                "UPDATE tag SET position = ?1 WHERE id = ?2",
+                params![position, neighbour_id],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE tag SET position = ?1 WHERE id = ?2",
+                params![other, tag_id],
+            )
+            .await?;
+            Ok(Ok(()))
+        }
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(refused)) => {
+                let _ = tx.rollback().await;
+                return Err(refused);
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(backend(e));
+            }
+        }
+        tx.commit().await.map_err(backend)?;
+        self.announce([Topic::Board, Topic::Tags]);
+        Ok(())
+    }
+
+    async fn set_task_tag(&self, task_id: &str, tag_id: &str) -> Result<()> {
+        // A tag not of this task's board is NotFound, not refused: the
+        // asker named a thing that is not one of this board's projects.
+        let known = self
+            .one_row(
+                "SELECT g.id FROM tag g JOIN task t ON t.board_id = g.board_id \
+                 WHERE g.id = ?1 AND t.id = ?2 AND t.deleted_at IS NULL",
+                params![tag_id, task_id],
+            )
+            .await?;
+        if known.is_none() {
+            return Err(StoreError::NotFound);
+        }
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE task SET tag_id = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                params![tag_id, task_id],
+            )
+            .await
+            .map_err(backend)?;
+        if n == 0 {
+            return Err(StoreError::NotFound);
+        }
+        drop(conn);
+        self.announce([Topic::Board, Topic::Task(task_id.to_string()), Topic::Tags]);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -3617,8 +4047,10 @@ impl DetailReads for TursoStore {
         let row = self
             .one_row(
                 "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.position, \
-                 t.done_at, t.description, t.board_id, b.workspace_id, t.parent_id \
-                 FROM task t JOIN board b ON b.id = t.board_id \
+                 t.done_at, t.description, t.board_id, b.workspace_id, t.parent_id, \
+                 t.tag_id, g.name \
+                 FROM task t LEFT JOIN tag g ON g.id = t.tag_id \
+                 JOIN board b ON b.id = t.board_id \
                  WHERE t.id = ?1 AND t.deleted_at IS NULL",
                 params![task_id],
             )
@@ -3634,6 +4066,13 @@ impl DetailReads for TursoStore {
                 position: row.get::<f64>(5).map_err(backend)?,
                 done_at: opt_stamp(&row, 6)?,
                 parent_id: opt_text(&row, 10)?,
+                tag: match opt_text(&row, 11)? {
+                    Some(id) => Some(TagChip {
+                        id,
+                        name: text(&row, 12)?,
+                    }),
+                    None => None,
+                },
             },
             description: text(&row, 7)?,
             board_id: text(&row, 8)?,
@@ -3922,8 +4361,10 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT id, task_key, title, column_id, deadline, position, done_at, parent_id \
-                 FROM task WHERE board_id = ?1 AND deleted_at IS NULL",
+                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.position, \
+                 t.done_at, t.parent_id, t.tag_id, g.name \
+                 FROM task t LEFT JOIN tag g ON g.id = t.tag_id \
+                 WHERE t.board_id = ?1 AND t.deleted_at IS NULL",
                 params![board_id],
             )
             .await
@@ -3939,6 +4380,13 @@ impl BoardReads for TursoStore {
                 position: row.get::<f64>(5).map_err(backend)?,
                 done_at: opt_stamp(&row, 6)?,
                 parent_id: opt_text(&row, 7)?,
+                tag: match opt_text(&row, 8)? {
+                    Some(id) => Some(TagChip {
+                        id,
+                        name: text(&row, 9)?,
+                    }),
+                    None => None,
+                },
             });
         }
         Ok(out)
@@ -4206,50 +4654,6 @@ mod probe {
             "the workspace record carried the password: {serialised}"
         );
         assert_eq!(loaded.smtp_host.as_deref(), Some("smtp.fastmail.com"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-mod migration {
-    use super::*;
-
-    /// A migration that dies halfway leaves nothing behind — not a table it
-    /// created, and not a version row saying it ran. 0005 drops `mail_send`
-    /// before it renames the rebuilt table into place, so a migration that can
-    /// only half-apply is a migration that can lose the mail ledger.
-    #[tokio::test]
-    async fn a_migration_that_fails_partway_leaves_nothing_behind() {
-        let dir = std::env::temp_dir().join(format!("izlek-migration-{}", Ulid::new()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
-            .await
-            .unwrap();
-        let before = store.schema_version().await.unwrap();
-
-        let broken = "CREATE TABLE half_applied (id TEXT);\n\
-                      INSERT INTO no_such_table (id) VALUES ('x');";
-        assert!(
-            store.apply(before + 1, broken).await.is_err(),
-            "the second statement cannot succeed"
-        );
-
-        assert_eq!(
-            store.schema_version().await.unwrap(),
-            before,
-            "a failed migration is not recorded as applied"
-        );
-        assert!(
-            store
-                .one_row(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'half_applied'",
-                    (),
-                )
-                .await
-                .unwrap()
-                .is_none(),
-            "and the table its first statement created is rolled back with it"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

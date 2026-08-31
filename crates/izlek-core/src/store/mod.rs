@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::Role;
 use crate::board::{BoardReads, Moved, TaskRow, Transition};
@@ -14,9 +14,15 @@ use crate::detail::{ActivityKind, DeletionCost, DetailReads};
 
 #[cfg(feature = "server")]
 pub mod secret;
+#[cfg(feature = "server")]
+pub mod reconcile;
+#[cfg(feature = "server")]
+pub mod schema;
 pub mod turso_store;
 
 pub use turso_store::TursoStore;
+#[cfg(feature = "server")]
+pub use reconcile::{reconcile, ReconcileOptions};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -75,6 +81,9 @@ pub struct Workspace {
     pub attachment_limit_bytes: u64,
     pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
+    /// The quiet window a notification waits out before it is sent, in
+    /// minutes. `0` sends every trigger the moment it is owed.
+    pub mail_batch_minutes: u32,
     /// The origin mail links point at, when an admin has set one. `None`
     /// means the address the process listens on — a box behind a proxy
     /// answers on localhost and is reached on a public name, and only an
@@ -206,6 +215,20 @@ pub struct NewUser {
     pub invited_by: Option<String>,
 }
 
+/// The profile page's totals for one person: what is on their plate, what
+/// finished under them, what they opened, what they said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserStats {
+    /// Tasks the person is on now, sitting in a column that is not done.
+    pub assigned_open: u32,
+    /// Tasks they are on that reached a done column.
+    pub assigned_done: u32,
+    /// Tasks they opened, whoever carries them now.
+    pub created: u32,
+    /// Comments they wrote.
+    pub comments: u32,
+}
+
 /// A first-sign-in link. Only the hash of the token is ever stored; the
 /// plaintext is shown once, when the link is created or resent.
 #[derive(Debug, Clone, PartialEq)]
@@ -321,6 +344,21 @@ pub struct MailRule {
     /// into the mail body, instead of the body being only the rule's static
     /// sentence.
     pub include_task_details: bool,
+}
+
+/// A tag is the project a task belongs to. A task wears at most one, so the
+/// link is a column on the task, not a join table. Tags belong to a board,
+/// like the mail rules do, and their order is the admin's — set by hand, so
+/// it is stored rather than derived. One tag per board is the default its
+/// tasks fall back to, and it cannot be deleted — only renamed and
+/// reordered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: String,
+    pub board_id: String,
+    pub name: String,
+    pub position: i64,
+    pub is_default: bool,
 }
 
 /// Where one mail got to.
@@ -585,6 +623,9 @@ pub struct ActivityEvent {
     pub board_id: String,
     pub kind: ActivityKind,
     pub actor_id: String,
+    /// The person the line is about — the one just assigned, say — when it
+    /// is about anyone in particular.
+    pub subject_id: Option<String>,
     pub detail: String,
     pub at: OffsetDateTime,
 }
@@ -646,7 +687,6 @@ pub struct Recipient {
 /// trait a test can wrap and count.
 #[async_trait]
 pub trait Store: BoardReads + DetailReads + 'static {
-
     // -- live updates ------------------------------------------------------
 
     /// A receiver of committed-write announcements. One [`Change`] per
@@ -705,6 +745,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         attachment_limit_bytes: u64,
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
+        mail_batch_minutes: u32,
     ) -> Result<()>;
 
     // -- users -------------------------------------------------------------
@@ -721,6 +762,12 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn users(&self, workspace_id: &str) -> Result<Vec<User>>;
 
     async fn count_users(&self, workspace_id: &str) -> Result<u64>;
+
+    /// One person's totals, for their profile. A soft-deleted task counts
+    /// nowhere: it has left the board, so it has left the person.
+    ///
+    /// This is a read, for looking: nothing announces.
+    async fn user_stats(&self, user_id: &str) -> Result<UserStats>;
 
     async fn set_password_hash(&self, user_id: &str, hash: &str) -> Result<()>;
 
@@ -964,10 +1011,13 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Appends one line to a task's activity trail and returns its row id.
     /// `actor_id` is `None` when the system did it rather than a person.
+    /// `subject_id` is the person the line is ABOUT — the one just assigned,
+    /// say — and `None` for a line that is about nobody.
     async fn record_activity(
         &self,
         task_id: &str,
         actor_id: Option<&str>,
+        subject_id: Option<&str>,
         kind: &ActivityKind,
         detail: &str,
         at: OffsetDateTime,
@@ -1033,6 +1083,29 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// When each rule last got a mail accepted, for the "last sent" line.
     async fn mail_rule_last_sent(&self, board_id: &str) -> Result<Vec<(String, OffsetDateTime)>>;
 
+    // -- tags --------------------------------------------------------------
+
+    /// Every tag on the board, in the admin's hand-set order.
+    async fn tags(&self, board_id: &str) -> Result<Vec<Tag>>;
+
+    /// Appends a tag at the end of the board's order. The name is unique per
+    /// board: two tags with one name are one project spelled twice.
+    async fn create_tag(&self, board_id: &str, name: &str, at: OffsetDateTime) -> Result<Tag>;
+
+    async fn rename_tag(&self, tag_id: &str, name: &str) -> Result<()>;
+
+    /// Deletes a tag. Its tasks move to the board's default tag; the default
+    /// itself is refused — it is where they would go.
+    async fn delete_tag(&self, tag_id: &str) -> Result<()>;
+
+    /// Swaps a tag with its neighbour in the order. A tag already at that end
+    /// stays put: nothing to swap is not an error.
+    async fn move_tag(&self, tag_id: &str, up: bool) -> Result<()>;
+
+    /// Sets the tag a task wears. A tag from another board is
+    /// [`StoreError::NotFound`] — it is not one of this board's projects at
+    /// all.
+    async fn set_task_tag(&self, task_id: &str, tag_id: &str) -> Result<()>;
     // -- the send ledger ---------------------------------------------------
 
     /// Takes ownership of one mail by writing its row, and answers `None` if
@@ -1240,6 +1313,27 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// store, so no caller can mail one by forgetting to filter.
     async fn recipients_for_board(&self, board_id: &str) -> Result<Vec<Recipient>>;
 
+    /// Pushes every mail still merely owed about this task, for this person,
+    /// out to `until` — but never past `cap`, the moment the oldest of them
+    /// stops waiting no matter what.
+    ///
+    /// This is the debounce: each new trigger about a card postpones the mail
+    /// the card already owes, so a person is told once, after the work has
+    /// settled. Only rows that are still pending and have never been
+    /// attempted move — a mail already refused is on its own retry clock, and
+    /// a batch must not drag it back.
+    async fn hold_batch(
+        &self,
+        task_id: &str,
+        recipient: &str,
+        until: OffsetDateTime,
+        cap: Duration,
+    ) -> Result<()>;
+
     /// Whoever opened the task, unless they are a Viewer.
     async fn recipients_for_task_creator(&self, task_id: &str) -> Result<Vec<Recipient>>;
+
+    /// One person by id, unless they are a Viewer — the subject of an
+    /// activity line, for a rule that mails the person the line is about.
+    async fn recipient(&self, user_id: &str) -> Result<Option<Recipient>>;
 }

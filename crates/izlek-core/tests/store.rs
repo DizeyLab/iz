@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use izlek_core::Role;
 use izlek_core::auth::{Token, hash_password};
 use izlek_core::store::{
-    Audience, Event, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendKind,
-    SendState, Store, StoreError, Trigger, TursoStore, User,
+    Audience, Event, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendKind, SendState,
+    Store, StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use ulid::Ulid;
@@ -95,24 +95,19 @@ async fn member(store: &TursoStore, workspace_id: &str, email: &str, name: &str)
 }
 
 #[tokio::test]
-async fn migrations_apply_once_and_survive_reopen() {
+async fn the_schema_is_created_once_and_survives_reopen() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
     let first = TursoStore::open(&path).await.unwrap();
-    // Whatever the newest migration is — pinning the number here only means
-    // editing this line every time one is added, which tests the constant
-    // rather than the behaviour.
-    let applied = first.schema_version().await.unwrap();
-    assert!(applied >= 1, "no migration applied at all");
     claim(&first).await;
     drop(first);
 
-    // Re-opening must not re-run a migration (0001's CREATE TABLE would fail)
-    // and must not lose what the first open wrote.
+    // Re-opening a database that already has tables must not re-run the
+    // schema (its CREATE TABLE would fail on the first one) and must not
+    // lose what the first open wrote.
     let second = TursoStore::open(&path).await.unwrap();
-    assert_eq!(second.schema_version().await.unwrap(), applied);
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "İzlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -169,7 +164,15 @@ async fn subtasks_go_one_level_deep() {
     let board = scratch.store.board(&workspace).await.unwrap().unwrap();
     let column_id = column_named(&scratch.store, &workspace, "Backlog").await;
 
-    let parent = add_task(&scratch.store, &workspace, "Backlog", "Parent", None, &admin).await;
+    let parent = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Parent",
+        None,
+        &admin,
+    )
+    .await;
     let child = scratch
         .store
         .create_task(NewTask {
@@ -238,10 +241,22 @@ async fn a_task_cannot_be_its_own_parent() {
 async fn parenting_and_promoting_are_each_one_write() {
     let scratch = Scratch::open().await;
     let (workspace, admin) = claim(&scratch.store).await;
-    let parent = add_task(&scratch.store, &workspace, "Backlog", "Parent", None, &admin).await;
+    let parent = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Parent",
+        None,
+        &admin,
+    )
+    .await;
     let loose = add_task(&scratch.store, &workspace, "Review", "Loose", None, &admin).await;
 
-    scratch.store.set_parent(&loose, Some(&parent)).await.unwrap();
+    scratch
+        .store
+        .set_parent(&loose, Some(&parent))
+        .await
+        .unwrap();
     let children = scratch.store.subtasks(&parent).await.unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].id, loose);
@@ -277,7 +292,15 @@ async fn a_parent_and_one_subtask(
     workspace: &str,
     admin: &str,
 ) -> (String, String) {
-    let parent = add_task(store, workspace, "Backlog", "Ship the exporter", None, admin).await;
+    let parent = add_task(
+        store,
+        workspace,
+        "Backlog",
+        "Ship the exporter",
+        None,
+        admin,
+    )
+    .await;
     let board = store.board(workspace).await.unwrap().unwrap();
     let column_id = column_named(store, workspace, "Backlog").await;
     let child = store
@@ -328,7 +351,15 @@ async fn a_parent_does_not_finish_before_its_subtasks_do() {
     );
 
     // The subtask finishing is what lets the parent through.
-    moved_to(&scratch.store, &workspace, &child, "Backlog", "Done", &admin).await;
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &child,
+        "Backlog",
+        "Done",
+        &admin,
+    )
+    .await;
     let recorded = scratch
         .store
         .move_task(&parent, &backlog, &done, &admin, OffsetDateTime::now_utc())
@@ -379,7 +410,15 @@ async fn a_subtask_finishes_on_its_own_account() {
     let (_parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
 
     // The rule is about a parent's parts, not about being somebody's part.
-    moved_to(&scratch.store, &workspace, &child, "Backlog", "Done", &admin).await;
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &child,
+        "Backlog",
+        "Done",
+        &admin,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -395,7 +434,15 @@ async fn a_deleted_subtask_stops_holding_its_parent() {
         .delete_task(&child, &admin, OffsetDateTime::now_utc())
         .await
         .unwrap();
-    moved_to(&scratch.store, &workspace, &parent, "Backlog", "Done", &admin).await;
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &parent,
+        "Backlog",
+        "Done",
+        &admin,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -405,7 +452,15 @@ async fn a_promoted_subtask_stops_holding_its_parent() {
     let (parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
 
     scratch.store.set_parent(&child, None).await.unwrap();
-    moved_to(&scratch.store, &workspace, &parent, "Backlog", "Done", &admin).await;
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &parent,
+        "Backlog",
+        "Done",
+        &admin,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -424,7 +479,15 @@ async fn the_board_counts_subtasks_instead_of_carding_them() {
     assert_eq!(cards[0].subtask_label().as_deref(), Some("0/1"));
     assert!(cards[0].holds_on_subtasks());
 
-    moved_to(&scratch.store, &workspace, &child, "Backlog", "Done", &admin).await;
+    moved_to(
+        &scratch.store,
+        &workspace,
+        &child,
+        "Backlog",
+        "Done",
+        &admin,
+    )
+    .await;
     let board = load(&scratch.store, &workspace).await.unwrap().unwrap();
     let card = board
         .columns
@@ -453,7 +516,15 @@ async fn a_subtask_blocking_a_card_still_names_itself_on_it() {
     let scratch = Scratch::open().await;
     let (workspace, admin) = claim(&scratch.store).await;
     let (_parent, child) = a_parent_and_one_subtask(&scratch.store, &workspace, &admin).await;
-    let other = add_task(&scratch.store, &workspace, "Backlog", "Waiting", None, &admin).await;
+    let other = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Waiting",
+        None,
+        &admin,
+    )
+    .await;
     scratch
         .store
         .add_dependency(&other, &child, OffsetDateTime::now_utc())
@@ -699,9 +770,9 @@ async fn many_concurrent_callers_never_see_concurrent_use_forbidden() {
     }
 
     for task in tasks {
-        task.await
-            .unwrap()
-            .expect("concurrent store access must never surface Misuse(\"concurrent use forbidden\")");
+        task.await.unwrap().expect(
+            "concurrent store access must never surface Misuse(\"concurrent use forbidden\")",
+        );
     }
 
     drop(store);
@@ -784,7 +855,11 @@ async fn a_save_with_no_password_typed_keeps_the_stored_one() {
         from_name: "İzlek".into(),
         from_address: "izlek@izlek.sh".into(),
     };
-    scratch.store.set_sender(&ws_id, sender.clone()).await.unwrap();
+    scratch
+        .store
+        .set_sender(&ws_id, sender.clone())
+        .await
+        .unwrap();
 
     sender.port = 465;
     sender.password = None;
@@ -794,7 +869,12 @@ async fn a_save_with_no_password_typed_keeps_the_stored_one() {
     assert_eq!(ws.smtp_port, Some(465), "the edit did not land");
     assert!(ws.smtp_password_set, "the password was blanked by an edit");
     assert_eq!(
-        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        scratch
+            .store
+            .smtp_password(&ws_id)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("keep-me")
     );
 }
@@ -812,12 +892,21 @@ async fn a_typed_password_replaces_the_stored_one() {
         from_name: "İzlek".into(),
         from_address: "izlek@izlek.sh".into(),
     };
-    scratch.store.set_sender(&ws_id, sender.clone()).await.unwrap();
+    scratch
+        .store
+        .set_sender(&ws_id, sender.clone())
+        .await
+        .unwrap();
     sender.password = Some("the-new-one".into());
     scratch.store.set_sender(&ws_id, sender).await.unwrap();
 
     assert_eq!(
-        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        scratch
+            .store
+            .smtp_password(&ws_id)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("the-new-one")
     );
 }
@@ -846,7 +935,10 @@ async fn the_stored_password_is_not_the_plaintext_on_disk() {
 
     let conn = raw_conn(&scratch).await;
     let mut rows = conn
-        .query("SELECT smtp_password FROM workspace WHERE id = ?1", turso::params![ws_id.clone()])
+        .query(
+            "SELECT smtp_password FROM workspace WHERE id = ?1",
+            turso::params![ws_id.clone()],
+        )
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
@@ -855,11 +947,19 @@ async fn the_stored_password_is_not_the_plaintext_on_disk() {
         !column.contains("a-very-secret-string"),
         "the plaintext is sitting in the column: {column}"
     );
-    assert!(column.starts_with("v1:"), "expected the sealed envelope, got: {column}");
+    assert!(
+        column.starts_with("v1:"),
+        "expected the sealed envelope, got: {column}"
+    );
 
     // And the read path still gets the real password back.
     assert_eq!(
-        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        scratch
+            .store
+            .smtp_password(&ws_id)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("a-very-secret-string")
     );
 }
@@ -921,7 +1021,12 @@ async fn a_password_that_will_not_decrypt_reads_back_as_none() {
         .await
         .unwrap();
     assert_eq!(
-        scratch.store.smtp_password(&ws_id).await.unwrap().as_deref(),
+        scratch
+            .store
+            .smtp_password(&ws_id)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("a-fresh-password"),
         "retyping the password heals a store that could not decrypt it"
     );
@@ -942,7 +1047,12 @@ async fn the_database_and_key_file_are_owner_only() {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o600, "{} is not owner-only: {mode:o}", path.display());
+        assert_eq!(
+            mode,
+            0o600,
+            "{} is not owner-only: {mode:o}",
+            path.display()
+        );
     }
 }
 
@@ -952,7 +1062,7 @@ async fn limits_round_trip_including_the_file_type_list() {
     let types = vec!["png".to_string(), "pdf".to_string()];
     scratch
         .store
-        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types)
+        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types, 5)
         .await
         .unwrap();
     let ws = scratch.store.workspace().await.unwrap().unwrap();
@@ -1119,11 +1229,26 @@ async fn email_change_persists_and_refuses_a_taken_address() {
             .await
             .unwrap();
         // Case-folded the same way sign-in matches an address.
-        assert!(store.user_by_email(&ws_id, "grace.new@izlek.sh").await.unwrap().is_some());
-        assert!(store.user_by_email(&ws_id, "grace@izlek.sh").await.unwrap().is_none());
+        assert!(
+            store
+                .user_by_email(&ws_id, "grace.new@izlek.sh")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .user_by_email(&ws_id, "grace@izlek.sh")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // Taken by the admin already claimed above.
-        let err = store.set_email(&user_id, &ws_id, "ada@izlek.sh").await.unwrap_err();
+        let err = store
+            .set_email(&user_id, &ws_id, "ada@izlek.sh")
+            .await
+            .unwrap_err();
         assert!(matches!(err, StoreError::Conflict("account")));
         user_id
     };
@@ -1650,7 +1775,11 @@ async fn adding_a_member_queues_the_mail_that_carries_the_link() {
         .await
         .unwrap();
 
-    let queue = accounts.store().mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let queue = accounts
+        .store()
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let queued = queue
         .iter()
         .find(|s| s.recipient == "grace@izlek.sh")
@@ -2356,7 +2485,10 @@ async fn count_and_filtered_keyset_walk_cover_exactly_the_filtered_set() {
             .unwrap();
     }
 
-    let filter = ActivityFilter { actor: Some(admin.clone()), ..Default::default() };
+    let filter = ActivityFilter {
+        actor: Some(admin.clone()),
+        ..Default::default()
+    };
     let total = store.count_activity(&filter).await.unwrap();
     assert_eq!(total, 10);
 
@@ -2371,17 +2503,27 @@ async fn count_and_filtered_keyset_walk_cover_exactly_the_filtered_set() {
             break;
         }
         let last = rows.last().unwrap();
-        page = FeedPage::Before(FeedCursor { at: last.at, id: last.id.clone() });
+        page = FeedPage::Before(FeedCursor {
+            at: last.at,
+            id: last.id.clone(),
+        });
         walked.extend(rows);
     }
     assert_eq!(walked.len(), 10);
-    assert!(walked.iter().all(|r| r.actor_name.as_deref() == Some("Ada")));
+    assert!(
+        walked
+            .iter()
+            .all(|r| r.actor_name.as_deref() == Some("Ada"))
+    );
 
     let preceding = store
         .count_activity_preceding(
             &filter,
             Dir::Newest,
-            Some(&FeedCursor { at: walked[3].at, id: walked[3].id.clone() }),
+            Some(&FeedCursor {
+                at: walked[3].at,
+                id: walked[3].id.clone(),
+            }),
         )
         .await
         .unwrap();
@@ -2413,11 +2555,16 @@ async fn a_claimed_workspace_starts_with_four_named_columns() {
 /// comes off the task's own id now, not a per-board counter, so exact keys
 /// are no longer predictable — only the shape and per-board uniqueness are.
 fn is_task_key_shaped(key: &str, prefix: &str) -> bool {
-    let Some(tail) = key.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('-')) else {
+    let Some(tail) = key
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
         return false;
     };
     (5..=7).contains(&tail.len())
-        && tail.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && tail
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 #[tokio::test]
@@ -2432,7 +2579,10 @@ async fn tasks_get_key_tails_off_their_own_id_not_a_board_counter() {
     let keys: Vec<&str> = board.cards().map(|card| card.task_key.as_str()).collect();
     assert_eq!(keys.len(), 2);
     for key in &keys {
-        assert!(is_task_key_shaped(key, "DZ"), "key {key} is not shaped like DZ-<5..7 chars>");
+        assert!(
+            is_task_key_shaped(key, "DZ"),
+            "key {key} is not shaped like DZ-<5..7 chars>"
+        );
     }
     assert_ne!(keys[0], keys[1], "two tasks never share a key");
 }
@@ -2487,7 +2637,12 @@ async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
     }
 
     let board = board_of(store, &workspace).await;
-    let blocked_key = board.cards().find(|card| card.id == blocked).unwrap().task_key.clone();
+    let blocked_key = board
+        .cards()
+        .find(|card| card.id == blocked)
+        .unwrap()
+        .task_key
+        .clone();
     let card = board.cards().find(|card| card.id == blocking).unwrap();
     assert_eq!(card.assignees.len(), 2);
     assert_eq!(card.comment_count, 3);
@@ -2617,15 +2772,273 @@ async fn a_board_costs_six_queries_whatever_its_size() {
                 .unwrap();
         }
     }
+    // A tag rides the task query as a join: the sweep stays at six.
+    let board_meta = store.board(&workspace).await.unwrap().unwrap();
+    let tag = store
+        .create_tag(&board_meta.id, "shipping", OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let tagged = previous.expect("the loop created tasks");
+    store.set_task_tag(&tagged, &tag.id).await.unwrap();
 
     let big = CountingReads::new(store);
     let board = load(&big, &workspace).await.unwrap().unwrap();
     assert_eq!(board.task_count(), 40);
+    let tagged_card = board
+        .columns
+        .iter()
+        .flat_map(|column| column.cards.iter())
+        .find(|card| card.id == tagged)
+        .unwrap();
+    assert_eq!(
+        tagged_card.tag.as_ref().map(|t| t.name.as_str()),
+        Some("shipping")
+    );
     assert_eq!(
         big.count(),
         6,
         "the round trips a board costs must not follow the number of tasks"
     );
+}
+
+// -- tags -------------------------------------------------------------------
+
+#[tokio::test]
+async fn tags_are_created_in_order_renamed_moved_and_deleted() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let at = OffsetDateTime::now_utc();
+
+    let alpha = store.create_tag(&board.id, "alpha", at).await.unwrap();
+    let beta = store.create_tag(&board.id, "beta", at).await.unwrap();
+    let gamma = store.create_tag(&board.id, "gamma", at).await.unwrap();
+    assert_eq!((alpha.position, beta.position, gamma.position), (1, 2, 3));
+
+    store.rename_tag(&beta.id, "beta2").await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["General", "alpha", "beta2", "gamma"]
+    );
+
+    // Swapping moves one place, never to the far end.
+    store.move_tag(&beta.id, true).await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["General", "beta2", "alpha", "gamma"]
+    );
+    // A tag already at that end stays put: nothing to swap is not an error.
+    store.move_tag(&gamma.id, false).await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["General", "beta2", "alpha", "gamma"]
+    );
+    store.move_tag(&beta.id, true).await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["beta2", "General", "alpha", "gamma"]
+    );
+    store.move_tag(&alpha.id, true).await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["beta2", "alpha", "General", "gamma"]
+    );
+
+    store.delete_tag(&beta.id).await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["alpha", "General", "gamma"]
+    );
+    assert!(matches!(
+        store.delete_tag(&beta.id).await,
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn a_boards_tags_have_unique_names() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let at = OffsetDateTime::now_utc();
+
+    store.create_tag(&board.id, "ops", at).await.unwrap();
+    assert!(
+        matches!(
+            store.create_tag(&board.id, "ops", at).await,
+            Err(StoreError::Conflict("tag"))
+        ),
+        "two tags with one name are one project spelled twice"
+    );
+
+    // The same name on another board is a different project.
+    let other = Scratch::open().await;
+    let (other_ws, _other_admin) = claim(&other.store).await;
+    let other_board = other.store.board(&other_ws).await.unwrap().unwrap();
+    other
+        .store
+        .create_tag(&other_board.id, "ops", at)
+        .await
+        .unwrap();
+
+    // A rename into a clash refuses the same way.
+    let ship = store.create_tag(&board.id, "ship", at).await.unwrap();
+    assert!(matches!(
+        store.rename_tag(&ship.id, "ops").await,
+        Err(StoreError::Conflict("tag"))
+    ));
+}
+
+fn tag_order(tags: &[izlek_core::store::Tag]) -> Vec<&str> {
+    tags.iter().map(|t| t.name.as_str()).collect()
+}
+
+fn card_of<'a>(
+    view: &'a izlek_core::board::BoardView,
+    task: &str,
+) -> &'a izlek_core::board::TaskCard {
+    view.columns
+        .iter()
+        .flat_map(|column| column.cards.iter())
+        .find(|card| card.id == task)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn deleting_a_tag_moves_its_tasks_to_the_default_and_a_foreign_tag_is_not_found() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let tag = store
+        .create_tag(&board.id, "ops", OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let task = add_task(store, &workspace, "Backlog", "tagged", None, &admin).await;
+
+    // The task came wearing the default; moving it to `ops` shows in the
+    // card and the detail alike.
+    let view = board_of(store, &workspace).await;
+    assert_eq!(
+        card_of(&view, &task).tag.as_ref().map(|t| t.name.as_str()),
+        Some("General")
+    );
+    store.set_task_tag(&task, &tag.id).await.unwrap();
+    let view = board_of(store, &workspace).await;
+    assert_eq!(
+        card_of(&view, &task).tag.as_ref().map(|t| t.name.as_str()),
+        Some("ops")
+    );
+    let detail = load_detail(store, &workspace, &task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detail.tag.as_ref().map(|t| t.id.as_str()),
+        Some(tag.id.as_str())
+    );
+
+    // A tag from another board — or one that never existed — is not found,
+    // not refused: it is not one of this board's projects at all.
+    let other = Scratch::open().await;
+    let (other_ws, _other_admin) = claim(&other.store).await;
+    let other_board = other.store.board(&other_ws).await.unwrap().unwrap();
+    let foreign = other
+        .store
+        .create_tag(&other_board.id, "foreign", OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.set_task_tag(&task, &foreign.id).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.set_task_tag(&task, "no-such-tag").await,
+        Err(StoreError::NotFound)
+    ));
+
+    // Deleting a worn tag leaves the task on the board's default, and the
+    // task survives.
+    store.delete_tag(&tag.id).await.unwrap();
+    let view = board_of(store, &workspace).await;
+    assert_eq!(
+        card_of(&view, &task).tag.as_ref().map(|t| t.name.as_str()),
+        Some("General")
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_board_comes_with_a_default_tag_and_new_tasks_wear_it() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+
+    let tags = store.tags(&board.id).await.unwrap();
+    assert_eq!(tags.len(), 1, "a claimed board seeds exactly one tag");
+    assert!(tags[0].is_default, "the seeded tag is the default");
+    assert_eq!((tags[0].name.as_str(), tags[0].position), ("General", 0));
+
+    // Nobody chose a tag; the task wears the board's default all the same.
+    let task = add_task(store, &workspace, "Backlog", "first", None, &admin).await;
+    let view = board_of(store, &workspace).await;
+    assert_eq!(
+        card_of(&view, &task).tag.as_ref().map(|t| t.name.as_str()),
+        Some("General")
+    );
+}
+
+#[tokio::test]
+async fn the_default_tag_cannot_be_deleted_but_renames_and_moves_like_any_other() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let default = &store.tags(&board.id).await.unwrap()[0];
+
+    assert!(matches!(
+        store.delete_tag(&default.id).await,
+        Err(StoreError::Conflict("default_tag"))
+    ));
+
+    store.rename_tag(&default.id, "Projects").await.unwrap();
+    store
+        .create_tag(&board.id, "alpha", OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    store.move_tag(&default.id, false).await.unwrap();
+    assert_eq!(
+        tag_order(&store.tags(&board.id).await.unwrap()),
+        ["alpha", "Projects"]
+    );
+}
+
+#[tokio::test]
+async fn a_board_cannot_hold_two_defaults_and_a_task_cannot_go_tagless() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let board = scratch.store.board(&workspace).await.unwrap().unwrap();
+
+    // Two defaults is a schema rule, so it is the schema that refuses —
+    // exercised raw, because the store's own writes never try it.
+    let conn = raw_conn(&scratch).await;
+    let _ = conn
+        .execute(
+            "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
+             VALUES ('t2', ?1, 'second', 9, 1, '2026-01-01T00:00:00Z')",
+            turso::params![board.id.clone()],
+        )
+        .await
+        .expect_err("a second default tag violates tag_one_default");
+
+    // And a task's tag_id is NOT NULL in the declared schema itself, not a
+    // habit of the write path.
+    let _ = conn
+        .execute(
+            "INSERT INTO task (id, board_id, task_key, title, column_id, tag_id, position, \
+             created_by, created_at, updated_at) \
+             VALUES ('tk', ?1, 'DZ-99', 'raw', (SELECT id FROM board_column LIMIT 1), NULL, 0, \
+             (SELECT id FROM user LIMIT 1), '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            turso::params![board.id.clone()],
+        )
+        .await
+        .expect_err("task.tag_id is NOT NULL");
 }
 
 #[test]
@@ -2830,7 +3243,6 @@ async fn a_dependency_that_would_close_a_circle_is_refused() {
         Err(StoreError::Cycle)
     ));
 
-    // The refusal wrote nothing.
     let detail = load_detail(store, &workspace, &c).await.unwrap().unwrap();
     assert!(detail.blocked_by.is_empty());
 }
@@ -2987,7 +3399,11 @@ async fn saving_a_task_records_only_what_changed() {
         )
         .await
         .unwrap();
-    assert_eq!(ids, Vec::<String>::new(), "a save that changed nothing writes nothing");
+    assert_eq!(
+        ids,
+        Vec::<String>::new(),
+        "a save that changed nothing writes nothing"
+    );
     let detail = load_detail(store, &workspace, &task)
         .await
         .unwrap()
@@ -3078,6 +3494,7 @@ async fn a_task_detail_costs_nine_queries_whatever_it_carries() {
             .record_activity(
                 &heavy,
                 Some(&person.id),
+                None,
                 &ActivityKind::Moved,
                 "to Review",
                 now,
@@ -3104,10 +3521,7 @@ async fn a_task_detail_costs_nine_queries_whatever_it_carries() {
     assert_eq!(detail.subtasks.len(), 20);
     assert!(detail.parent.is_none());
     assert!(
-        detail
-            .subtasks
-            .iter()
-            .all(|part| part.assignees.len() == 1),
+        detail.subtasks.iter().all(|part| part.assignees.len() == 1),
         "a subtask row carries who holds it"
     );
     // Twenty comments (each its own Commented line), twenty moves, plus the
@@ -3561,7 +3975,7 @@ async fn a_rule_is_one_sentence_and_starts_live() {
             "You can start now",
             Audience::Assignees,
             OffsetDateTime::now_utc(),
-        false,
+            false,
         )
         .await
         .expect("an unblocked rule is whole without a column");
@@ -3924,7 +4338,7 @@ async fn deleting_a_rule_takes_its_ledger_with_it() {
 
 // -- the engine ------------------------------------------------------------
 
-use izlek_core::mail::{Engine, MailError, Mailer, Outgoing, backoff};
+use izlek_core::mail::{Engine, MailError, Mailer, Outgoing, Report, backoff};
 use std::sync::Mutex;
 
 /// A mail server that remembers instead of sending, and refuses when told to.
@@ -3965,8 +4379,16 @@ impl Mailer for Remembering {
     }
 }
 
-/// A store shared between the tests and an engine.
+/// A store shared between the tests and an engine, with no quiet window: a
+/// trigger is a mail, sent the moment it is owed. That is what every test
+/// below the batching ones is about, and it is what `mail_batch_minutes = 0`
+/// means. The batching tests open theirs with `waiting`.
 async fn shared() -> (PathBuf, Arc<TursoStore>, String, String) {
+    waiting(0).await
+}
+
+/// The same, with a quiet window of `minutes` on the workspace.
+async fn waiting(minutes: u32) -> (PathBuf, Arc<TursoStore>, String, String) {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = Arc::new(
@@ -3975,6 +4397,17 @@ async fn shared() -> (PathBuf, Arc<TursoStore>, String, String) {
             .unwrap(),
     );
     let (workspace, admin) = claim(&store).await;
+    let limits = store.workspace().await.unwrap().unwrap();
+    store
+        .set_limits(
+            &workspace,
+            limits.attachment_limit_bytes,
+            limits.photo_limit_bytes,
+            &limits.allowed_file_types,
+            minutes,
+        )
+        .await
+        .unwrap();
     (dir, store, workspace, admin)
 }
 
@@ -4293,7 +4726,7 @@ async fn you_can_start_now_waits_for_the_last_blocker() {
             "You can start now",
             Audience::Assignees,
             now,
-        false,
+            false,
         )
         .await
         .unwrap();
@@ -4365,7 +4798,7 @@ async fn a_deleted_blocker_also_says_you_can_start_now() {
             "You can start now",
             Audience::Assignees,
             now,
-        false,
+            false,
         )
         .await
         .unwrap();
@@ -4431,7 +4864,7 @@ async fn a_delete_that_leaves_somebody_still_waiting_mails_nobody() {
             "You can start now",
             Audience::Assignees,
             now,
-        false,
+            false,
         )
         .await
         .unwrap();
@@ -4478,7 +4911,7 @@ async fn a_mail_owed_by_a_delete_is_rebuilt_from_the_delete_on_a_retry() {
             "You can start now",
             Audience::Assignees,
             now,
-        false,
+            false,
         )
         .await
         .unwrap();
@@ -4551,7 +4984,10 @@ async fn a_rule_that_owed_nobody_still_says_so() {
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
     engine.on_transition(&transition).await.unwrap();
 
-    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = store
+        .recent_mail_decisions(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -4573,7 +5009,10 @@ async fn a_rule_that_did_not_match_leaves_a_reason() {
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Review", &admin).await;
     engine.on_transition(&transition).await.unwrap();
 
-    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = store
+        .recent_mail_decisions(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -4603,7 +5042,10 @@ async fn a_deleted_task_still_leaves_a_task_gone_row() {
     assert_eq!(report, Default::default());
     assert!(mailer.sent().is_empty());
 
-    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = store
+        .recent_mail_decisions(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -4670,7 +5112,7 @@ async fn a_rule_round_trips_every_word_the_board_speaks() {
                 "A word the board speaks",
                 Audience::Assignees,
                 OffsetDateTime::now_utc(),
-            false,
+                false,
             )
             .await
             .unwrap();
@@ -4703,20 +5145,19 @@ async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
     let now = OffsetDateTime::now_utc();
     scratch
         .store
-        .record_mail_decision(
-            &rule.id,
-            &transition.id,
-            &task,
-            MailOutcome::Owed,
-            "",
-            now,
-        )
+        .record_mail_decision(&rule.id, &transition.id, &task, MailOutcome::Owed, "", now)
         .await
         .unwrap();
 
     scratch
         .store
-        .update_mail_rule(&rule.id, &Trigger::Unblocked, "New subject", Audience::Board, false)
+        .update_mail_rule(
+            &rule.id,
+            &Trigger::Unblocked,
+            "New subject",
+            Audience::Board,
+            false,
+        )
         .await
         .unwrap();
 
@@ -4728,7 +5169,11 @@ async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
     assert_eq!(updated.enabled, rule.enabled);
     assert_eq!(updated.created_at, rule.created_at);
 
-    let decisions = scratch.store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = scratch
+        .store
+        .recent_mail_decisions(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     assert!(
         decisions.iter().any(|d| d.rule_id == rule.id),
         "the pre-existing decision no longer joins to the rule"
@@ -4778,7 +5223,10 @@ async fn a_rules_creator_audience_names_who_opened_the_card() {
         .await
         .unwrap();
     assert_eq!(
-        creators.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(),
+        creators
+            .iter()
+            .map(|p| p.user_id.as_str())
+            .collect::<Vec<_>>(),
         [admin.as_str()]
     );
 
@@ -4839,7 +5287,9 @@ async fn a_file_goes_into_the_database_file_and_comes_back_byte_for_byte() {
 
     // Bytes that are not text and are not valid UTF-8, because an attachment
     // is not a string and the column it lives in must not treat it as one.
-    let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xfe];
+    let bytes: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xfe,
+    ];
     let id = store
         .add_attachment(NewAttachment {
             task_id: &task,
@@ -5006,7 +5456,14 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     let now = OffsetDateTime::now_utc();
 
     let pending = store
-        .claim_send(&rule.id, &transition.id, &task, "pending@izlek.sh", now, now)
+        .claim_send(
+            &rule.id,
+            &transition.id,
+            &task,
+            "pending@izlek.sh",
+            now,
+            now,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -5029,7 +5486,14 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     store.record_send_accepted(&sent.id, now).await.unwrap();
 
     let abandoned = store
-        .claim_send(&rule.id, &transition.id, &task, "abandoned@izlek.sh", now, now)
+        .claim_send(
+            &rule.id,
+            &transition.id,
+            &task,
+            "abandoned@izlek.sh",
+            now,
+            now,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -5038,7 +5502,10 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
         .await
         .unwrap();
 
-    let queue = store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let queue = store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let ids: Vec<&str> = queue.iter().map(|s| s.id.as_str()).collect();
     assert!(ids.contains(&pending.id.as_str()));
     assert!(ids.contains(&failed.id.as_str()));
@@ -5063,7 +5530,10 @@ async fn an_invite_mail_is_owed_without_a_rule() {
     let found = owed.iter().find(|s| s.id == invite.id).unwrap();
     assert_eq!(found.rule_id, None);
 
-    let queue = store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let queue = store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let found = queue.iter().find(|s| s.id == invite.id).unwrap();
     assert_eq!(found.rule_id, None);
 }
@@ -5083,7 +5553,10 @@ async fn an_invite_mail_with_no_sender_is_held_not_failed() {
     assert_eq!(report.held, 1);
     assert_eq!(report.sent, 0);
 
-    let queue = store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let queue = store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let held = queue
         .iter()
         .find(|s| s.recipient == "newcomer@izlek.sh")
@@ -5128,10 +5601,7 @@ async fn two_passes_over_one_owed_mail_send_it_once() {
     // request's pass and the sweep's.
     let request = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
     let sweep = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
-    let (a, b) = tokio::join!(
-        request.deliver_owed(now, 10),
-        sweep.deliver_owed(now, 10),
-    );
+    let (a, b) = tokio::join!(request.deliver_owed(now, 10), sweep.deliver_owed(now, 10),);
     let (a, b) = (a.unwrap(), b.unwrap());
 
     let sent = mailer.sent.lock().unwrap().len();
@@ -5249,13 +5719,14 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
     let t0 = OffsetDateTime::now_utc();
 
     store
-        .record_activity(&task_a, Some(&admin), &ActivityKind::Created, "", t0)
+        .record_activity(&task_a, Some(&admin), None, &ActivityKind::Created, "", t0)
         .await
         .unwrap();
     store
         .record_activity(
             &task_b,
             Some(&other),
+            None,
             &ActivityKind::Retitled,
             "new title",
             t0 + Duration::seconds(1),
@@ -5263,7 +5734,15 @@ async fn the_activity_feed_is_the_whole_workspace_newest_first() {
         .await
         .unwrap();
 
-    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
+    let feed = store
+        .recent_activity(
+            10,
+            izlek_core::store::FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter::default(),
+        )
+        .await
+        .unwrap();
     // Two "created" lines came free with the two tasks; the two just recorded
     // sit newest first, ahead of both of those.
     assert_eq!(feed.len(), 4);
@@ -5299,13 +5778,29 @@ async fn keyset_paging_covers_every_activity_row_once() {
     }
     let _ = workspace;
 
-    let whole = store.recent_activity(100, FeedPage::Newest, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
+    let whole = store
+        .recent_activity(
+            100,
+            FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter::default(),
+        )
+        .await
+        .unwrap();
     assert_eq!(whole.len(), 23);
 
     let mut walked = Vec::new();
     let mut page = FeedPage::Newest;
     loop {
-        let rows = store.recent_activity(7, page, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
+        let rows = store
+            .recent_activity(
+                7,
+                page,
+                izlek_core::store::Dir::Newest,
+                &izlek_core::store::ActivityFilter::default(),
+            )
+            .await
+            .unwrap();
         if rows.is_empty() {
             break;
         }
@@ -5329,7 +5824,7 @@ async fn an_account_event_rides_the_feed_without_a_task() {
     let t0 = OffsetDateTime::now_utc();
 
     store
-        .record_activity(&task, Some(&admin), &ActivityKind::Created, "", t0)
+        .record_activity(&task, Some(&admin), None, &ActivityKind::Created, "", t0)
         .await
         .unwrap();
     store
@@ -5342,7 +5837,15 @@ async fn an_account_event_rides_the_feed_without_a_task() {
         .await
         .unwrap();
 
-    let feed = store.recent_activity(10, izlek_core::store::FeedPage::Newest, izlek_core::store::Dir::Newest, &izlek_core::store::ActivityFilter::default()).await.unwrap();
+    let feed = store
+        .recent_activity(
+            10,
+            izlek_core::store::FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter::default(),
+        )
+        .await
+        .unwrap();
     // The sign-in sits newest with no task on it; the task's own lines below
     // still name theirs.
     assert_eq!(feed[0].kind, ActivityKind::SignedIn);
@@ -5440,7 +5943,7 @@ async fn an_assignment_mails_the_assignees_minus_the_actor() {
             "You were assigned",
             Audience::Assignees,
             OffsetDateTime::now_utc(),
-        false,
+            false,
         )
         .await
         .unwrap();
@@ -5453,6 +5956,7 @@ async fn an_assignment_mails_the_assignees_minus_the_actor() {
         .record_activity(
             &task,
             Some(&admin),
+            None,
             &ActivityKind::Assigned,
             "Emre",
             OffsetDateTime::now_utc(),
@@ -5477,6 +5981,149 @@ async fn an_assignment_mails_the_assignees_minus_the_actor() {
 }
 
 #[tokio::test]
+async fn assigning_one_person_mails_that_person_not_every_assignee() {
+    let (dir, store, workspace, admin) = shared().await;
+    let first = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let second = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let third = member(&store, &workspace, "linus@izlek.sh", "Linus").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &first).await.unwrap();
+    store.assign_task(&task, &second).await.unwrap();
+    store.assign_task(&task, &third).await.unwrap();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Assigned,
+            "You were assigned",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // Ada assigns Yusuf to a card that already carries three people: the line
+    // is about Yusuf, so Yusuf is the audience — not the three already there.
+    let fourth = member(&store, &workspace, "yusuf@izlek.sh", "Yusuf").await;
+    let activity_id = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            Some(&fourth),
+            &ActivityKind::Assigned,
+            "Yusuf",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &activity_id).await;
+
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 1, "one assignment, one mail");
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "yusuf@izlek.sh");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unassignment_mails_the_person_removed_not_the_rest() {
+    let (dir, store, workspace, admin) = shared().await;
+    let staying = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let leaving = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &staying).await.unwrap();
+    store.assign_task(&task, &leaving).await.unwrap();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Unassigned,
+            "You were unassigned",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    store.unassign_task(&task, &leaving).await.unwrap();
+    let activity_id = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            Some(&leaving),
+            &ActivityKind::Unassigned,
+            "Emre",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &activity_id).await;
+
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 1, "one removal, one mail");
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].to, "emre@izlek.sh",
+        "the mail is for the one removed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rule_whose_line_has_no_subject_still_mails_every_assignee() {
+    let (dir, store, workspace, admin) = shared().await;
+    let first = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let second = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &first).await.unwrap();
+    store.assign_task(&task, &second).await.unwrap();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Commented,
+            "There was movement",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // A comment has no subject: the audience stays the whole assignee list,
+    // minus the actor, exactly as before the subject column existed.
+    let activity_id = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            None,
+            &ActivityKind::Commented,
+            "",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &activity_id).await;
+
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 2, "both assignees, the old breadth");
+    let mut to: Vec<_> = mailer.sent().iter().map(|m| m.to.clone()).collect();
+    to.sort();
+    assert_eq!(to, vec!["emre@izlek.sh", "grace@izlek.sh"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_commented() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
@@ -5489,7 +6136,7 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
             "A comment landed",
             Audience::Creator,
             OffsetDateTime::now_utc(),
-        false,
+            false,
         )
         .await
         .unwrap();
@@ -5502,6 +6149,7 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
         .record_activity(
             &task,
             Some(&mate),
+            None,
             &ActivityKind::Commented,
             "",
             OffsetDateTime::now_utc(),
@@ -5521,6 +6169,7 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
         .record_activity(
             &task,
             Some(&admin),
+            None,
             &ActivityKind::Commented,
             "",
             OffsetDateTime::now_utc(),
@@ -5532,7 +6181,10 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
     assert_eq!(report, Default::default());
     assert_eq!(mailer.sent().len(), 1, "no second mail went out");
 
-    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = store
+        .recent_mail_decisions(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let row = decisions
         .iter()
         .find(|d| d.event_id == commented_by_creator)
@@ -5554,6 +6206,7 @@ async fn a_created_activity_does_not_fire_a_status_rule() {
         .record_activity(
             &task,
             Some(&admin),
+            None,
             &ActivityKind::Created,
             "",
             OffsetDateTime::now_utc(),
@@ -5566,7 +6219,10 @@ async fn a_created_activity_does_not_fire_a_status_rule() {
     assert_eq!(report, Default::default());
     assert!(mailer.sent().is_empty());
 
-    let decisions = store.recent_mail_decisions(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = store
+        .recent_mail_decisions(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let row = decisions
         .iter()
         .find(|d| d.rule_id == rule.id && d.task_id == task)
@@ -5609,7 +6265,14 @@ async fn decisions_and_sends_for_task_read_only_that_tasks_own_rows() {
         .unwrap()
         .unwrap();
     store
-        .claim_send(&rule.id, &other_transition.id, &other_task, "emre@izlek.sh", now, now)
+        .claim_send(
+            &rule.id,
+            &other_transition.id,
+            &other_task,
+            "emre@izlek.sh",
+            now,
+            now,
+        )
         .await
         .unwrap();
 
@@ -5658,10 +6321,17 @@ async fn requeuing_a_send_puts_it_back_in_play_but_leaves_a_sent_one_alone() {
     assert!(reread_failed.next_attempt_at.is_some_and(|at| at <= now));
 
     let reread_sent = sends.iter().find(|s| s.id == sent.id).unwrap();
-    assert_eq!(reread_sent.state, SendState::Sent, "a sent send is untouched");
+    assert_eq!(
+        reread_sent.state,
+        SendState::Sent,
+        "a sent send is untouched"
+    );
 
     let owed = store.sends_owed(now, 10).await.unwrap();
-    assert!(owed.iter().any(|s| s.id == failed.id), "the requeued send is now due");
+    assert!(
+        owed.iter().any(|s| s.id == failed.id),
+        "the requeued send is now due"
+    );
 }
 
 #[tokio::test]
@@ -5723,7 +6393,10 @@ async fn the_engine_delivers_a_notice_that_owes_no_rule() {
         .sends_owed(now + Duration::hours(2), 10)
         .await
         .unwrap();
-    assert!(owed.is_empty(), "a delivered notice is no longer owed: {owed:?}");
+    assert!(
+        owed.is_empty(),
+        "a delivered notice is no longer owed: {owed:?}"
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -5750,8 +6423,16 @@ async fn a_tasks_activity_reads_newest_first() {
     );
     // Creation is the oldest thing that ever happens to a task, so it is last
     // now; a comment — the most recent act here — leads.
-    assert_eq!(activity.first().map(|line| line.kind.clone()), Some(ActivityKind::Commented), "{activity:?}");
-    assert_eq!(activity.last().map(|line| line.kind.clone()), Some(ActivityKind::Created), "{activity:?}");
+    assert_eq!(
+        activity.first().map(|line| line.kind.clone()),
+        Some(ActivityKind::Commented),
+        "{activity:?}"
+    );
+    assert_eq!(
+        activity.last().map(|line| line.kind.clone()),
+        Some(ActivityKind::Created),
+        "{activity:?}"
+    );
 }
 
 /// A status rule with no column watches the whole board: every crossing fires
@@ -5786,7 +6467,9 @@ async fn a_status_rule_with_no_column_fires_on_every_crossing() {
 
     let sent = mailer.sent();
     assert_eq!(
-        sent.iter().filter(|mail| mail.subject == "It moved").count(),
+        sent.iter()
+            .filter(|mail| mail.subject == "It moved")
+            .count(),
         2,
         "both crossings fired the every-column rule: {sent:?}"
     );
@@ -5942,7 +6625,9 @@ async fn every_kind_of_write_announces_its_surface() {
         .unwrap();
 
     let seen = announced(&mut rx);
-    for topic in ["board", "task", "members", "queue", "rules", "settings", "activity"] {
+    for topic in [
+        "board", "task", "members", "queue", "rules", "settings", "activity",
+    ] {
         assert!(
             seen.iter().any(|k| k == topic),
             "no {topic} announcement; heard {seen:?}"
@@ -6056,7 +6741,12 @@ async fn the_next_due_moment_is_the_earliest_one() {
         .await
         .unwrap();
     store
-        .queue_notice("soon@izlek.sh", "Sooner", "body", now + Duration::minutes(5))
+        .queue_notice(
+            "soon@izlek.sh",
+            "Sooner",
+            "body",
+            now + Duration::minutes(5),
+        )
         .await
         .unwrap();
 
@@ -6085,21 +6775,32 @@ async fn a_sender_check_is_recorded_apart_from_a_test_and_cleared_on_edit() {
         from_name: "İzlek".into(),
         from_address: "izlek@izlek.sh".into(),
     };
-    store.set_sender(&workspace, sender("smtp.one.test")).await.unwrap();
+    store
+        .set_sender(&workspace, sender("smtp.one.test"))
+        .await
+        .unwrap();
 
     // A login that worked, and a mail that did not: both true at once, and
     // neither may be rendered as the other.
     store
         .record_sender_check(
             &workspace,
-            izlek_core::store::SenderCheck { at: now, took_ms: 120, error: None },
+            izlek_core::store::SenderCheck {
+                at: now,
+                took_ms: 120,
+                error: None,
+            },
         )
         .await
         .unwrap();
     store
         .record_sender_test(
             &workspace,
-            izlek_core::store::SenderTest { at: now, took_ms: 0, error: Some("550 not allowed".into()) },
+            izlek_core::store::SenderTest {
+                at: now,
+                took_ms: 0,
+                error: Some("550 not allowed".into()),
+            },
         )
         .await
         .unwrap();
@@ -6115,8 +6816,850 @@ async fn a_sender_check_is_recorded_apart_from_a_test_and_cleared_on_edit() {
     );
 
     // Point it at a different server: what was known is now about nothing.
-    store.set_sender(&workspace, sender("smtp.two.test")).await.unwrap();
+    store
+        .set_sender(&workspace, sender("smtp.two.test"))
+        .await
+        .unwrap();
     let ws = store.workspace().await.unwrap().unwrap();
-    assert!(ws.sender_check.is_none(), "a stale handshake survived an edit");
+    assert!(
+        ws.sender_check.is_none(),
+        "a stale handshake survived an edit"
+    );
     assert!(ws.sender_test.is_none(), "a stale test survived an edit");
+}
+
+// ---------------------------------------------------------------------------
+// izlek reconcile — bringing a database of the OLD shape onto the declared
+// schema. These tests carry the user's rule (2026-08-31): a table alteration
+// owes both a proof that the alteration holds and a proof that reconcile
+// carries a live-shaped database across it.
+// ---------------------------------------------------------------------------
+
+/// Builds a database at the PRE-COLLAPSE schema — the shape İzlek was actually
+/// deployed with, kept verbatim in `tests/fixtures/` — and fills it with the
+/// kinds of row a live workspace holds, blobs included.
+async fn live_shaped_database() -> (PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("izlek-reconcile-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("izlek.db").to_str().unwrap().to_string();
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    conn.execute_batch(include_str!("fixtures/pre-collapse/0001_init.sql"))
+        .await
+        .unwrap();
+    conn.execute_batch(include_str!("fixtures/pre-collapse/0002_sender_check.sql"))
+        .await
+        .unwrap();
+
+    let now = "2026-08-30T12:00:00Z";
+    let mut sql = String::new();
+    sql.push_str(&format!(
+        "INSERT INTO workspace (id, name, created_at) VALUES ('W1', 'Dizey', '{now}');"
+    ));
+    for (id, email, name) in [
+        ("U1", "one@example.com", "One"),
+        ("U2", "two@example.com", "Two"),
+    ] {
+        sql.push_str(&format!(
+            "INSERT INTO user (id, workspace_id, email, display_name, role, created_at) \
+             VALUES ('{id}', 'W1', '{email}', '{name}', 'member', '{now}');"
+        ));
+    }
+    sql.push_str(&format!(
+        "INSERT INTO workspace_owner (singleton, user_id, claimed_at) VALUES (1, 'U1', '{now}');"
+    ));
+    // Two boards, so a task landing on the WRONG board's default tag is
+    // visible rather than accidentally correct.
+    for b in ["B1", "B2"] {
+        sql.push_str(&format!(
+            "INSERT INTO board (id, workspace_id, name, created_at) VALUES ('{b}', 'W1', '{b}', '{now}');"
+        ));
+        sql.push_str(&format!(
+            "INSERT INTO board_column (id, board_id, name, position, is_done) \
+             VALUES ('C{b}', '{b}', 'Backlog', 0, 0);"
+        ));
+    }
+    for (t, b) in [("T1", "B1"), ("T2", "B1"), ("T3", "B2")] {
+        sql.push_str(&format!(
+            "INSERT INTO task (id, board_id, task_key, title, column_id, created_by, created_at, updated_at) \
+             VALUES ('{t}', '{b}', '{t}', 'a task', 'C{b}', 'U1', '{now}', '{now}');"
+        ));
+        sql.push_str(&format!(
+            "INSERT INTO task_assignee (task_id, user_id) VALUES ('{t}', 'U2');"
+        ));
+        sql.push_str(&format!(
+            "INSERT INTO activity (id, task_id, actor_id, kind, detail, created_at) \
+             VALUES ('A{t}', '{t}', 'U1', 'created', '', '{now}');"
+        ));
+    }
+    // A soft-deleted task still belongs to a tag afterwards.
+    sql.push_str(&format!(
+        "INSERT INTO task (id, board_id, task_key, title, column_id, created_by, created_at, updated_at, deleted_at) \
+         VALUES ('T4', 'B2', 'T4', 'gone', 'CB2', 'U1', '{now}', '{now}', '{now}');"
+    ));
+    conn.execute_batch(&sql).await.unwrap();
+
+    // A blob, because an attachment that survives as NULL would pass a row
+    // count and lose the user's file.
+    let bytes: Vec<u8> = (0u8..=255).cycle().take(5000).collect();
+    conn.execute(
+        "INSERT INTO attachment (id, task_id, file_name, mime_type, size_bytes, bytes, uploaded_by, created_at) \
+         VALUES ('F1', 'T1', 'a.bin', 'application/octet-stream', ?1, ?2, 'U1', ?3)",
+        turso::params![bytes.len() as i64, bytes.clone(), now],
+    )
+    .await
+    .unwrap();
+
+    (dir, path)
+}
+
+async fn scalar(path: &str, sql: &str) -> i64 {
+    let db = turso::Builder::new_local(path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+fn backups_beside(dir: &PathBuf) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains(".backup-") && !n.ends_with("-wal") && !n.ends_with("-shm"))
+        .collect();
+    found.sort();
+    found
+}
+
+#[tokio::test]
+async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
+    let (dir, path) = live_shaped_database().await;
+
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .expect("reconcile refused a database of the shape we actually deployed");
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+
+    // The schema is now the declared one, exactly.
+    let after = izlek_core::store::schema::fingerprint(&conn).await.unwrap();
+    let declared = izlek_core::store::schema::declared_fingerprint().await.unwrap();
+    assert_eq!(after, declared, "the rebuilt schema is not the declared one");
+
+    // Nothing was dropped on the floor.
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM user").await, 2);
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM board").await, 2);
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM task").await, 4);
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM task_assignee").await, 3);
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM activity").await, 3);
+
+    // Every task wears its OWN board's default tag — the step no schema diff
+    // could have derived.
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM task WHERE tag_id IS NULL").await,
+        0,
+        "a task came out of the rebuild with no tag"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task t JOIN tag g ON g.id = t.tag_id \
+             WHERE g.board_id = t.board_id AND g.is_default = 1",
+        )
+        .await,
+        4,
+        "a task was given another board's tag"
+    );
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM tag").await,
+        2,
+        "each board owes exactly one default tag"
+    );
+
+    // The blob survived byte for byte.
+    assert_eq!(
+        scalar(&path, "SELECT length(bytes) FROM attachment WHERE id = 'F1'").await,
+        5000
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM attachment WHERE id = 'F1' AND hex(substr(bytes, 1, 4)) = '00010203'",
+        )
+        .await,
+        1,
+        "the attachment's bytes changed in the rebuild"
+    );
+
+    // The quiet window is a column the old shape never had: a workspace that
+    // crosses over gets the declared default rather than a NULL the app would
+    // have to read around.
+    assert_eq!(
+        scalar(&path, "SELECT mail_batch_minutes FROM workspace WHERE id = 'W1'").await,
+        5,
+        "the workspace came across without a quiet window"
+    );
+
+    // And the references all still point at something.
+    let mut broken = conn.query("PRAGMA foreign_key_check", ()).await.unwrap();
+    assert!(
+        broken.next().await.unwrap().is_none(),
+        "the rebuilt database has dangling references"
+    );
+
+    // The original is beside it, still holding the old shape.
+    let backups = backups_beside(&dir);
+    assert_eq!(backups.len(), 1, "the rebuild did not keep a backup");
+    let backup = dir.join(&backups[0]).to_str().unwrap().to_string();
+    assert_eq!(
+        scalar(
+            &backup,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tag'",
+        )
+        .await,
+        0,
+        "the backup is not the old-shaped database we started from"
+    );
+    assert_eq!(
+        scalar(&backup, "SELECT COUNT(*) FROM task").await,
+        4,
+        "the backup lost rows"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn reconciling_a_database_that_already_matches_changes_nothing() {
+    let scratch = Scratch::open().await;
+    let path = scratch.dir.join("izlek.db").to_str().unwrap().to_string();
+
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .expect("reconcile refused a current database");
+
+    assert!(
+        backups_beside(&scratch.dir).is_empty(),
+        "a database that needed nothing was backed up anyway"
+    );
+}
+
+#[tokio::test]
+async fn opening_a_stale_database_repairs_it() {
+    let (dir, path) = live_shaped_database().await;
+
+    // The boot path: no flag, no prompt — the store comes up on a database of
+    // the old shape, having repaired it on the way.
+    let store = TursoStore::open(&path)
+        .await
+        .expect("the store would not open a database it was supposed to repair");
+    drop(store);
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        izlek_core::store::schema::fingerprint(&conn).await.unwrap(),
+        izlek_core::store::schema::declared_fingerprint().await.unwrap(),
+    );
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM task").await, 4);
+    assert_eq!(backups_beside(&dir).len(), 1);
+
+    // Opening it again finds it current and leaves it alone.
+    let store = TursoStore::open(&path).await.unwrap();
+    drop(store);
+    assert_eq!(
+        backups_beside(&dir).len(),
+        1,
+        "a second open rebuilt a database that already matched"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn two_repairs_leave_two_backups() {
+    let (dir, path) = live_shaped_database().await;
+    let opts = || izlek_core::store::ReconcileOptions {
+        dry_run: false,
+        yes: true,
+        auto: true,
+    };
+
+    izlek_core::store::reconcile(&path, opts()).await.unwrap();
+    assert_eq!(backups_beside(&dir).len(), 1);
+
+    // Put the database back to the old shape and repair it again: the first
+    // backup must still be there. He keeps every one of them.
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("DROP TABLE tag_stub_check", ()).await.ok();
+    conn.execute("CREATE TABLE stray (id TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    drop(conn);
+    drop(db);
+
+    izlek_core::store::reconcile(&path, opts()).await.unwrap();
+    let backups = backups_beside(&dir);
+    assert_eq!(
+        backups.len(),
+        2,
+        "the second repair overwrote the first backup: {backups:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+/// The other half of the alteration: a database that ALREADY carries the
+/// quiet window keeps the number its admin set, rather than being handed the
+/// default a fresh workspace gets.
+#[tokio::test]
+async fn a_rebuild_keeps_a_window_the_admin_already_set() {
+    let scratch = Scratch::open().await;
+    let path = scratch.dir.join("izlek.db").to_str().unwrap().to_string();
+    let (workspace, _) = claim(&scratch.store).await;
+    let limits = scratch.store.workspace().await.unwrap().unwrap();
+    scratch
+        .store
+        .set_limits(
+            &workspace,
+            limits.attachment_limit_bytes,
+            limits.photo_limit_bytes,
+            &limits.allowed_file_types,
+            17,
+        )
+        .await
+        .unwrap();
+
+    // Something the declared schema does not know about: enough to make the
+    // database stale, so the rebuild actually runs.
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("CREATE TABLE stray (id TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    drop(conn);
+    drop(db);
+
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        scalar(&path, "SELECT mail_batch_minutes FROM workspace").await,
+        17,
+        "the rebuild reset a window the admin had chosen"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'stray'",
+        )
+        .await,
+        0,
+        "the stray table survived a rebuild onto the declared schema"
+    );
+}
+
+// --- user stats (the profile page's counts) ---------------------------------
+
+#[tokio::test]
+async fn user_stats_counts_what_a_person_holds_finished_opened_and_said() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let store = &scratch.store;
+    let mem = member(store, &workspace, "mem@izlek.sh", "Mem Ber").await;
+    let backlog = column_named(store, &workspace, "Backlog").await;
+    let done = column_named(store, &workspace, "Done").await;
+    let now = OffsetDateTime::now_utc();
+
+    let hold = add_task(store, &workspace, "Backlog", "Hold the door", None, &admin).await;
+    store.assign_task(&hold, &mem).await.unwrap();
+    let finished = add_task(store, &workspace, "Backlog", "Paint the frame", None, &admin).await;
+    store.assign_task(&finished, &mem).await.unwrap();
+    store.move_task(&finished, &backlog, &done, &admin, now).await.unwrap();
+    // One of her own that she also holds: created and assigned must each
+    // count it in its own column, not argue about it.
+    let own = add_task(store, &workspace, "Backlog", "Sweep", None, &mem).await;
+    store.assign_task(&own, &mem).await.unwrap();
+    add_task(store, &workspace, "Backlog", "Mop", None, &mem).await;
+    add_task(store, &workspace, "Backlog", "Dust", None, &mem).await;
+    for i in 0..4 {
+        store.add_comment(&hold, &mem, "a note", now + Duration::seconds(i)).await.unwrap();
+    }
+
+    assert_eq!(
+        store.user_stats(&mem).await.unwrap(),
+        izlek_core::store::UserStats { assigned_open: 2, assigned_done: 1, created: 3, comments: 4 },
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_task_counts_nowhere_and_a_person_with_nothing_counts_nothing() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let store = &scratch.store;
+    let mem = member(store, &workspace, "mem@izlek.sh", "Mem Ber").await;
+    let shy = member(store, &workspace, "shy@izlek.sh", "Shy Guy").await;
+    let now = OffsetDateTime::now_utc();
+
+    assert_eq!(
+        store.user_stats(&shy).await.unwrap(),
+        izlek_core::store::UserStats { assigned_open: 0, assigned_done: 0, created: 0, comments: 0 },
+    );
+
+    let doomed = add_task(store, &workspace, "Backlog", "Doomed", None, &mem).await;
+    store.assign_task(&doomed, &mem).await.unwrap();
+    store.add_comment(&doomed, &mem, "a note", now).await.unwrap();
+    assert_eq!(store.user_stats(&mem).await.unwrap().assigned_open, 1);
+    assert_eq!(store.user_stats(&mem).await.unwrap().comments, 1);
+
+    store.delete_task(&doomed, &admin, now).await.unwrap();
+    assert_eq!(
+        store.user_stats(&mem).await.unwrap(),
+        izlek_core::store::UserStats { assigned_open: 0, assigned_done: 0, created: 0, comments: 0 },
+        "a soft-deleted task stays out of every number, its comments included",
+    );
+}
+// -- the quiet window ------------------------------------------------------
+
+/// Every rule on the board, so one workflow trips several of them.
+async fn rules_for_a_workflow(store: &TursoStore, workspace: &str) {
+    let board = store.board(workspace).await.unwrap().unwrap();
+    let now = OffsetDateTime::now_utc();
+    for (trigger, subject, audience) in [
+        (Trigger::Created, "New task", Audience::Board),
+        (Trigger::Assigned, "You were assigned", Audience::Assignees),
+        (Trigger::DeadlineSet, "Deadline set", Audience::Board),
+    ] {
+        store
+            .create_mail_rule(&board.id, &trigger, subject, audience, now, false)
+            .await
+            .unwrap();
+    }
+}
+
+/// Hands every activity row a save wrote to the engine, in order.
+async fn tell_the_engine(store: &TursoStore, engine: &Engine, ids: &[String]) -> Report {
+    let mut total = Report::default();
+    for id in ids {
+        let event = activity_event(store, id).await;
+        let one = engine.on_activity(&event).await.unwrap();
+        total.sent += one.sent;
+        total.batched += one.batched;
+        total.already_owned += one.already_owned;
+    }
+    total
+}
+
+/// His scenario: create a card, assign it, give it a deadline. Three rules,
+/// three triggers, one uninterrupted minute of work — and the person who has
+/// to read it gets one mail saying where the card ended up.
+#[tokio::test]
+async fn a_whole_workflow_inside_the_window_is_one_mail() {
+    use time::macros::date;
+    let (dir, store, workspace, admin) = waiting(5).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    rules_for_a_workflow(&store, &workspace).await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let column_id = column_named(&store, &workspace, "Backlog").await;
+    let created = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            parent_id: None,
+            title: "Ship the exporter",
+            description: "",
+            deadline: None,
+            created_by: &admin,
+        })
+        .await
+        .unwrap();
+    let task = created.row.id.clone();
+    let first = tell_the_engine(&store, &engine, &[created.activity_id]).await;
+
+    store.assign_task(&task, &mate).await.unwrap();
+    let assigned = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            Some(&mate),
+            &ActivityKind::Assigned,
+            "Emre",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let second = tell_the_engine(&store, &engine, &[assigned]).await;
+
+    let ids = store
+        .save_task(
+            &task,
+            "Ship the exporter",
+            "",
+            Some(date!(2026 - 09 - 30)),
+            &admin,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let third = tell_the_engine(&store, &engine, &ids).await;
+
+    assert_eq!(
+        (first.sent, second.sent, third.sent),
+        (0, 0, 0),
+        "nothing leaves the building while the window is open",
+    );
+    assert_eq!(
+        first.batched + second.batched + third.batched,
+        3,
+        "three triggers, three rows waiting on one another",
+    );
+    assert!(mailer.sent().is_empty());
+
+    // The window closes.
+    let report = engine
+        .deliver_owed(OffsetDateTime::now_utc() + Duration::minutes(6), 10)
+        .await
+        .unwrap();
+    assert_eq!(report.sent, 1, "one envelope for the whole workflow");
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@izlek.sh");
+    assert_eq!(
+        sent[0].subject, "Deadline set",
+        "the newest thing that happened names the mail",
+    );
+    assert!(
+        sent[0].body.contains("Column: Backlog"),
+        "the mail states where the card is now: {}",
+        sent[0].body,
+    );
+    assert!(
+        sent[0].body.contains("Deadline: 2026-09-30"),
+        "and the deadline it ended up with: {}",
+        sent[0].body,
+    );
+    assert!(
+        sent[0].body.contains("Assignees: Emre"),
+        "and who is on it: {}",
+        sent[0].body,
+    );
+
+    // Nothing is left owed, and a second pass has nothing to send.
+    let again = engine
+        .deliver_owed(OffsetDateTime::now_utc() + Duration::hours(2), 10)
+        .await
+        .unwrap();
+    assert_eq!(again.sent, 0);
+    assert_eq!(mailer.sent().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The mistake case: a card goes into the wrong column and is put right a
+/// moment later. One mail, naming the column it is actually in.
+#[tokio::test]
+async fn a_column_put_right_inside_the_window_mails_only_where_the_card_ended_up() {
+    let (dir, store, workspace, admin) = waiting(5).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Card is done").await;
+    a_rule(&store, &workspace, "In Progress", "Card is in progress").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let wrong = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    assert_eq!(engine.on_transition(&wrong).await.unwrap().sent, 0);
+    let right = moved_to(&store, &workspace, &task, "Done", "In Progress", &admin).await;
+    assert_eq!(engine.on_transition(&right).await.unwrap().sent, 0);
+
+    let report = engine
+        .deliver_owed(OffsetDateTime::now_utc() + Duration::minutes(6), 10)
+        .await
+        .unwrap();
+    assert_eq!(report.sent, 1);
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].subject, "Card is in progress");
+    assert!(
+        sent[0].body.contains("Column: In Progress"),
+        "the mail says where the card is, not where it was: {}",
+        sent[0].body,
+    );
+    assert!(
+        !sent[0].body.contains("Column: Done"),
+        "the mistake is not mailed to anybody: {}",
+        sent[0].body,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A second event about the same card pushes the first one's mail out again:
+/// the window is quiet time, not a fixed timer from the first trigger.
+#[tokio::test]
+async fn a_second_event_pushes_the_batch_out_again() {
+    let (dir, store, workspace, admin) = waiting(5).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Card is done").await;
+    a_rule(&store, &workspace, "In Progress", "Card is in progress").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let first = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&first).await.unwrap();
+    let due_then = the_one_row(&store).await.next_attempt_at.unwrap();
+
+    let second = moved_to(&store, &workspace, &task, "Done", "In Progress", &admin).await;
+    engine.on_transition(&second).await.unwrap();
+    let rows = store
+        .sends_owed(OffsetDateTime::now_utc() + Duration::hours(2), 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two triggers, two rows");
+    for row in &rows {
+        assert!(
+            row.next_attempt_at.unwrap() > due_then,
+            "the first row waits for the second one's window too",
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reads the single pending row back.
+async fn the_one_row(store: &TursoStore) -> izlek_core::store::MailSend {
+    let mut rows = store
+        .sends_owed(OffsetDateTime::now_utc() + Duration::hours(2), 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "expected exactly one owed row");
+    rows.remove(0)
+}
+
+/// A card somebody edits all afternoon would never settle, so the push has a
+/// ceiling measured from the oldest mail in the batch: after four windows it
+/// goes out with whatever it has.
+#[tokio::test]
+async fn the_hold_has_a_ceiling_measured_from_the_oldest_mail() {
+    let (dir, store, workspace, admin) = waiting(1).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Card is done").await;
+
+    // A row born ten minutes ago: the afternoon-long edit, without the
+    // afternoon.
+    let born = OffsetDateTime::now_utc() - Duration::minutes(10);
+    store
+        .claim_send(&rule.id, "event-1", &task, "emre@izlek.sh", born, born)
+        .await
+        .unwrap()
+        .expect("a fresh row is claimed");
+
+    let far = OffsetDateTime::now_utc() + Duration::minutes(5);
+    store
+        .hold_batch(&task, "emre@izlek.sh", far, Duration::minutes(4))
+        .await
+        .unwrap();
+
+    let row = the_one_row(&store).await;
+    let due = row.next_attempt_at.unwrap();
+    assert!(
+        due < far,
+        "the push is clipped rather than granted: {due} vs {far}",
+    );
+    assert_eq!(
+        due, born + Duration::minutes(4),
+        "the ceiling is the oldest mail's own patience running out",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A workspace with no window is İzlek as it was: a trigger is a mail, sent
+/// the moment it is owed.
+#[tokio::test]
+async fn no_window_sends_each_trigger_as_it_happens() {
+    let (dir, store, workspace, admin) = waiting(0).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Card is done").await;
+    a_rule(&store, &workspace, "In Progress", "Card is in progress").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let first = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    assert_eq!(engine.on_transition(&first).await.unwrap().sent, 1);
+    let second = moved_to(&store, &workspace, &task, "Done", "In Progress", &admin).await;
+    assert_eq!(engine.on_transition(&second).await.unwrap().sent, 1);
+    assert_eq!(mailer.sent().len(), 2, "two crossings, two mails");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The batch is one card and one reader. Two cards are two mails, and two
+/// people are two mails — nobody is told about somebody else's card because
+/// the clock happened to line up.
+#[tokio::test]
+async fn a_batch_is_one_card_and_one_reader() {
+    let (dir, store, workspace, admin) = waiting(5).await;
+    let emre = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let first = add_task(&store, &workspace, "Backlog", "First", None, &admin).await;
+    let second = add_task(&store, &workspace, "Backlog", "Second", None, &admin).await;
+    for task in [&first, &second] {
+        store.assign_task(task, &emre).await.unwrap();
+        store.assign_task(task, &grace).await.unwrap();
+    }
+    a_rule(&store, &workspace, "Done", "Card is done").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    for task in [&first, &second] {
+        let crossing = moved_to(&store, &workspace, task, "Backlog", "Done", &admin).await;
+        engine.on_transition(&crossing).await.unwrap();
+    }
+
+    let report = engine
+        .deliver_owed(OffsetDateTime::now_utc() + Duration::minutes(6), 10)
+        .await
+        .unwrap();
+    assert_eq!(report.sent, 4, "two cards times two readers");
+    let mut addressed: Vec<String> = mailer
+        .sent()
+        .into_iter()
+        .map(|mail| format!("{} {}", mail.to, mail.body.lines().next().unwrap_or_default()))
+        .collect();
+    addressed.sort();
+    assert_eq!(addressed.len(), 4);
+    assert_eq!(
+        addressed.iter().filter(|line| line.contains("First")).count(),
+        2,
+    );
+    assert_eq!(
+        addressed.iter().filter(|line| line.contains("emre@izlek.sh")).count(),
+        2,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An invitation belongs to nobody's card: it carries its own subject and body
+/// and is never folded into a batch, however long the window is.
+#[tokio::test]
+async fn an_invitation_is_never_folded_into_a_batch() {
+    let (dir, store, workspace, admin) = waiting(5).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Card is done").await;
+    store
+        .queue_invite(
+            "emre@izlek.sh",
+            "Join the workspace",
+            "Your link: https://izlek.sh/join",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let crossing = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&crossing).await.unwrap();
+
+    let report = engine
+        .deliver_owed(OffsetDateTime::now_utc() + Duration::minutes(6), 10)
+        .await
+        .unwrap();
+    assert_eq!(report.sent, 2, "the invitation and the card's mail");
+    let subjects: Vec<String> = mailer
+        .sent()
+        .into_iter()
+        .map(|mail| mail.subject)
+        .collect();
+    assert!(subjects.contains(&"Join the workspace".to_string()), "{subjects:?}");
+    assert!(subjects.contains(&"Card is done".to_string()), "{subjects:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A batch that the server refuses is one refusal for every row in it, and
+/// the retry is the same batch again — not one mail per row once the ledger
+/// has been touched.
+#[tokio::test]
+async fn a_refused_batch_is_retried_as_a_batch() {
+    let (dir, store, workspace, admin) = waiting(5).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Card is done").await;
+    a_rule(&store, &workspace, "In Progress", "Card is in progress").await;
+
+    let mailer = Remembering::refusing(vec![MailError::retryable("host is down")]);
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    for (from, to) in [("Backlog", "Done"), ("Done", "In Progress")] {
+        let crossing = moved_to(&store, &workspace, &task, from, to, &admin).await;
+        engine.on_transition(&crossing).await.unwrap();
+    }
+
+    let refused = engine
+        .deliver_owed(OffsetDateTime::now_utc() + Duration::minutes(6), 10)
+        .await
+        .unwrap();
+    assert_eq!(refused.failed, 1, "one envelope, one refusal");
+    assert!(mailer.sent().is_empty());
+    let owed = store
+        .sends_owed(OffsetDateTime::now_utc() + Duration::hours(2), 10)
+        .await
+        .unwrap();
+    assert_eq!(owed.len(), 2, "both rows are still owed");
+    for row in &owed {
+        assert_eq!(row.state, SendState::Failed);
+        assert_eq!(row.attempts, 1, "the batch spent one attempt, not two");
+    }
+
+    let sent = engine
+        .deliver_owed(
+            OffsetDateTime::now_utc() + Duration::minutes(6) + backoff(1),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent.sent, 1, "the retry is one envelope as well");
+    assert_eq!(mailer.sent().len(), 1);
+    assert!(
+        store
+            .sends_owed(OffsetDateTime::now_utc() + Duration::hours(2), 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is left owed",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
