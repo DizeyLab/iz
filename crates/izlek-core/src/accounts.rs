@@ -127,6 +127,16 @@ impl Accounts {
             Err(StoreError::AlreadyClaimed) => return Err(AccountError::AlreadyClaimed),
             Err(e) => return Err(e.into()),
         };
+        // The claim is the admin's first arrival; it counts as their last
+        // seen, or their own page reads "active" under "last seen".
+        self.store
+            .mark_signed_in(&admin.id, OffsetDateTime::now_utc())
+            .await?;
+        let admin = self
+            .store
+            .user(&admin.id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
         let signed_in = self.start_session(admin).await?;
         Ok((workspace, signed_in))
     }
@@ -297,6 +307,9 @@ impl Accounts {
         }
 
         self.store.set_password_hash(&user.id, &hash).await?;
+        // Choosing the password is their first arrival; it counts as their
+        // last seen, or their own page reads "active" under "last seen".
+        self.store.mark_signed_in(&user.id, now).await?;
         self.store.clear_auth_attempts(&client_bucket).await?;
         let user = self
             .store
@@ -395,6 +408,10 @@ impl Accounts {
         auth::check_password(new, &user.email, &user.display_name)?;
         let hash = hash_password(new)?;
         self.store.set_password_hash(&user.id, &hash).await?;
+        // Changing the password is presence; it counts as their last seen.
+        self.store
+            .mark_signed_in(&user.id, OffsetDateTime::now_utc())
+            .await?;
         self.store.clear_auth_attempts(&client_bucket).await?;
         // "Signs out your other devices", as the pane promises.
         self.store

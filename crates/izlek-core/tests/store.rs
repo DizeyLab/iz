@@ -1685,6 +1685,10 @@ async fn claiming_makes_an_admin_and_signs_them_in() {
         .unwrap();
     assert_eq!(workspace.name, "İzlek");
     assert_eq!(signed_in.user.role, Role::Admin);
+    assert!(
+        signed_in.user.last_signed_in_at.is_some(),
+        "the claim is their first arrival"
+    );
 
     // The cookie value works and is not what is stored.
     let who = accounts
@@ -1759,6 +1763,10 @@ async fn an_invited_member_chooses_their_own_password() {
         .unwrap();
     assert_eq!(signed_in.user.id, invitation.user.id);
     assert!(signed_in.user.has_signed_in());
+    assert!(
+        signed_in.user.last_signed_in_at.is_some(),
+        "redeeming the link is their first arrival"
+    );
 
     // And now the password they chose works, and only that one.
     accounts
@@ -2224,6 +2232,16 @@ async fn changing_a_password_signs_out_every_device() {
             .is_some()
     );
 
+    // The baseline is read from the store, not from `second`: sign_in hands
+    // back the user it fetched before marking, one arrival stale.
+    let seen = accounts
+        .store()
+        .user(&admin.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_signed_in_at
+        .unwrap();
     let fresh = accounts
         .change_password(
             &admin.id,
@@ -2233,6 +2251,10 @@ async fn changing_a_password_signs_out_every_device() {
         )
         .await
         .unwrap();
+    assert!(
+        fresh.user.last_signed_in_at.unwrap() > seen,
+        "changing the password is presence"
+    );
 
     for old in [&first, &second] {
         assert!(
