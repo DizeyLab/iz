@@ -44,6 +44,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-all-crates: true
+          # Bump when the target, the profile or any rustflags change: the
+          # key does not otherwise see those, and a run that restores the
+          # old key reports it up-to-date at save time — discarding the
+          # recompiled dependencies and silently recompiling them on every
+          # later run (observed when the musl→gnu move landed on this key).
+          prefix-key: v1-rust-gnu
 
       # Compiling the CLI from source costs minutes and it changes only when
       # the pinned version does, so it is cached on that version alone.
