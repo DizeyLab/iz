@@ -359,6 +359,9 @@ pub enum Refusal {
     EmptySubject,
     /// A tag with no name is not a tag the board can show.
     EmptyTag,
+    /// A tag with cards on it stays. Emptying it is the admin's job, and it
+    /// is one they can see the size of.
+    TagInUse,
     /// A message with no body: there is nothing for the recipient to read.
     EmptyBody,
     /// The date field did not hold a date.
@@ -422,6 +425,7 @@ impl Refusal {
             Refusal::NotAnImage => "That is not an image.".to_string(),
             Refusal::EmptySubject => "Give the rule a subject line.".to_string(),
             Refusal::EmptyTag => "Give the tag a name.".to_string(),
+            Refusal::TagInUse => "This tag still has cards.".to_string(),
             Refusal::EmptyBody => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
@@ -481,6 +485,7 @@ impl Refusal {
             Refusal::BadSender(_) => self.message(),
             Refusal::EmptySubject => "Kurala bir konu ver.".to_string(),
             Refusal::EmptyTag => "Etikete bir ad ver.".to_string(),
+            Refusal::TagInUse => "Bu etikette kartlar var.".to_string(),
             Refusal::EmptyBody => "Önce bir şey yaz.".to_string(),
             Refusal::Rejected => "Bu işe yaramadı.".to_string(),
             Refusal::RateLimited => {
@@ -531,6 +536,7 @@ impl Refusal {
             "not-an-image" => Refusal::NotAnImage,
             "empty-subject" => Refusal::EmptySubject,
             "empty-tag" => Refusal::EmptyTag,
+            "tag-in-use" => Refusal::TagInUse,
             "empty-body" => Refusal::EmptyBody,
             "bad-deadline" => Refusal::BadDeadline,
             "cycle" => Refusal::Cycle,
@@ -587,6 +593,7 @@ impl Refusal {
             Refusal::NotAnImage => "not-an-image",
             Refusal::EmptySubject => "empty-subject",
             Refusal::EmptyTag => "empty-tag",
+            Refusal::TagInUse => "tag-in-use",
             Refusal::EmptyBody => "empty-body",
             Refusal::BadDeadline => "bad-deadline",
             Refusal::Cycle => "cycle",
@@ -874,6 +881,7 @@ mod refusal_message_tests {
             Refusal::NotNestable,
             Refusal::NotFound,
             Refusal::NoSuchMember,
+            Refusal::TagInUse,
             Refusal::Unavailable,
         ];
         for refusal in all {

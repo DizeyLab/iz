@@ -2905,7 +2905,7 @@ fn card_of<'a>(
 }
 
 #[tokio::test]
-async fn deleting_a_tag_moves_its_tasks_to_the_default_and_a_foreign_tag_is_not_found() {
+async fn a_tag_is_worn_a_foreign_one_is_not_found_and_a_worn_one_is_not_deletable() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
     let board = store.board(&workspace).await.unwrap().unwrap();
@@ -2956,14 +2956,88 @@ async fn deleting_a_tag_moves_its_tasks_to_the_default_and_a_foreign_tag_is_not_
         Err(StoreError::NotFound)
     ));
 
-    // Deleting a worn tag leaves the task on the board's default, and the
-    // task survives.
-    store.delete_tag(&tag.id).await.unwrap();
+    // A tag with a card on it is not deletable: the card is the reason the
+    // project exists, and nothing about it moves.
+    assert!(matches!(
+        store.delete_tag(&tag.id).await,
+        Err(StoreError::Conflict("tag_in_use"))
+    ));
     let view = board_of(store, &workspace).await;
     assert_eq!(
         card_of(&view, &task).tag.as_ref().map(|t| t.name.as_str()),
-        Some("General")
+        Some("ops"),
+        "the refused delete moved the card anyway"
     );
+    assert_eq!(store.tags(&board.id).await.unwrap().len(), 2);
+
+    // Emptied, it goes.
+    let default = store
+        .tags(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.is_default)
+        .unwrap();
+    store.set_task_tag(&task, &default.id).await.unwrap();
+    store.delete_tag(&tag.id).await.unwrap();
+    assert_eq!(store.tags(&board.id).await.unwrap().len(), 1);
+}
+
+/// The counts the tags screen draws, and the one card that stops counting.
+#[tokio::test]
+async fn tag_counts_hold_the_live_cards_and_a_thrown_away_card_stops_blocking() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let store = &scratch.store;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let tag = store
+        .create_tag(&board.id, "ops", OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let first = add_task(store, &workspace, "Backlog", "one", None, &admin).await;
+    let second = add_task(store, &workspace, "Backlog", "two", None, &admin).await;
+    store.set_task_tag(&first, &tag.id).await.unwrap();
+    store.set_task_tag(&second, &tag.id).await.unwrap();
+
+    let counts = store.tag_task_counts(&board.id).await.unwrap();
+    assert_eq!(
+        counts.iter().find(|(id, _)| id == &tag.id).map(|(_, n)| *n),
+        Some(2)
+    );
+
+    // A card thrown away is nobody's work any more: it stops counting, and
+    // once the last live one is gone the tag can be retired — the deleted
+    // card's own reference moves to the default rather than dangling.
+    store
+        .delete_task(&first, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.delete_tag(&tag.id).await,
+        Err(StoreError::Conflict("tag_in_use")),
+    ));
+    store
+        .delete_task(&second, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .tag_task_counts(&board.id)
+            .await
+            .unwrap()
+            .iter()
+            .find(|(id, _)| id == &tag.id),
+        None,
+        "a tag nobody wears is absent, not zero"
+    );
+    store.delete_tag(&tag.id).await.unwrap();
+
+    // Nothing points at a tag that is not there.
+    let mut broken = raw_conn(&scratch)
+        .await
+        .query("PRAGMA foreign_key_check", ())
+        .await
+        .unwrap();
+    assert!(broken.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -7499,6 +7573,65 @@ async fn the_hold_has_a_ceiling_measured_from_the_oldest_mail() {
     assert_eq!(
         due, born + Duration::minutes(4),
         "the ceiling is the oldest mail's own patience running out",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A hold only ever postpones. The delivery pass writes its lease into the
+/// same column, so a hold that pulled a leased row back would make the mail
+/// one pass is composing due for another — and the reader would get it twice.
+#[tokio::test]
+async fn a_hold_never_pulls_a_leased_row_back_under_the_pass_that_took_it() {
+    let (dir, store, workspace, admin) = waiting(1).await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Card is done").await;
+
+    let now = OffsetDateTime::now_utc();
+    store
+        .claim_send(&rule.id, "event-1", &task, "emre@izlek.sh", now, now)
+        .await
+        .unwrap()
+        .expect("a fresh row is claimed");
+    // A delivery pass takes it: the lease is five minutes out.
+    let taken = store
+        .claim_sends_owed(now + Duration::seconds(1), now + izlek_core::mail::LEASE, 10)
+        .await
+        .unwrap();
+    assert_eq!(taken.len(), 1, "the pass did not take the row");
+    let leased = the_one_row(&store).await.next_attempt_at.unwrap();
+
+    // A new trigger on the same card, one quiet minute out: earlier than the
+    // lease, so it must change nothing.
+    store
+        .hold_batch(
+            &task,
+            "emre@izlek.sh",
+            now + Duration::minutes(1),
+            Duration::minutes(4),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        the_one_row(&store).await.next_attempt_at.unwrap(),
+        leased,
+        "the hold pulled a row out from under the pass holding it"
+    );
+
+    // A hold past the lease is a postponement, and does apply.
+    store
+        .hold_batch(
+            &task,
+            "emre@izlek.sh",
+            now + Duration::minutes(30),
+            Duration::hours(2),
+        )
+        .await
+        .unwrap();
+    assert!(
+        the_one_row(&store).await.next_attempt_at.unwrap() > leased,
+        "a real postponement was refused too"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

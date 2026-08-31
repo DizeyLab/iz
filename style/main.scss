@@ -3134,7 +3134,11 @@ input[type="radio"] {
 }
 
 // Danger modifier for a `.quiet` button — the "Delete" action in a rule row.
-.quiet-danger {
+// Written `.quiet.quiet-danger` for the same reason the avatar sizes are:
+// the skins style `.quiet` from a `[data-ui]` scope, which outweighs a lone
+// modifier class — on the Ledger skin a delete button lost its red border,
+// and its red text on hover, to a rule about ordinary quiet buttons.
+.quiet.quiet-danger {
   border-color: var(--danger-border);
   color: var(--danger);
 
@@ -3522,6 +3526,20 @@ input[type="radio"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+// How many cards are on the project, in the same chip the board counts its
+// columns with. It is also the reason the delete control beside it is or is
+// not there.
+.tag-count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-soft);
+  background: var(--panel-sunken);
+  border-radius: var(--radius);
+  padding: 1px 6px;
 }
 
 .tag-new {

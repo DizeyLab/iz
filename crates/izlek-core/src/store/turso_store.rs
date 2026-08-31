@@ -3733,7 +3733,7 @@ impl Store for TursoStore {
         // date-format trick rather than a calculation.
         let mut rows = conn
             .query(
-                "SELECT id, claimed_at FROM mail_send \
+                "SELECT id, claimed_at, next_attempt_at FROM mail_send \
                  WHERE task_id = ?1 AND recipient = ?2 AND kind = 'rule' \
                    AND state = 'pending' AND attempts = 0 \
                    AND next_attempt_at IS NOT NULL",
@@ -3745,15 +3745,25 @@ impl Store for TursoStore {
         while let Some(row) = rows.next().await.map_err(backend)? {
             let id = text(&row, 0)?;
             let born = parse_stamp(&text(&row, 1)?)?;
-            held.push((id, born));
+            let due = parse_stamp(&text(&row, 2)?)?;
+            held.push((id, born, due));
         }
         drop(rows);
-        for (id, born) in held {
+        for (id, born, due) in held {
             let ceiling = born + cap;
             let when = if until > ceiling { ceiling } else { until };
+            // Only ever later. A row a delivery pass is holding — its lease is
+            // written in this same column — must not be pulled back under the
+            // pass that took it, or the mail it is composing right now becomes
+            // due for a second pass and goes out twice. The `<` in the update
+            // is the guard, not the read above it: the two are one statement.
+            if when <= due {
+                continue;
+            }
             conn.execute(
                 "UPDATE mail_send SET next_attempt_at = ?1 \
-                 WHERE id = ?2 AND state = 'pending' AND attempts = 0",
+                 WHERE id = ?2 AND state = 'pending' AND attempts = 0 \
+                   AND next_attempt_at < ?1",
                 params![stamp(when)?, id],
             )
             .await
@@ -3812,6 +3822,23 @@ impl Store for TursoStore {
                 position: row.get::<i64>(3).map_err(backend)?,
                 is_default: row.get::<i64>(4).map_err(backend)? != 0,
             });
+        }
+        Ok(out)
+    }
+
+    async fn tag_task_counts(&self, board_id: &str) -> Result<Vec<(String, u32)>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT tag_id, COUNT(*) FROM task \
+                 WHERE board_id = ?1 AND deleted_at IS NULL GROUP BY tag_id",
+                params![board_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push((text(&row, 0)?, row.get::<i64>(1).map_err(backend)? as u32));
         }
         Ok(out)
     }
@@ -3903,8 +3930,12 @@ impl Store for TursoStore {
             .map_err(backend)?;
         // The default is the board's fallback, not a project anyone can
         // retire: deleting it would leave its board's tasks nowhere to go.
-        // Any other tag's tasks move to that default, in the one write set:
-        // no task is ever seen pointing at a project that is not there.
+        // Any other tag is deletable only while it is empty — a tag with
+        // cards on it is a project somebody is working in, and a delete that
+        // quietly re-files that work is not a delete they asked for. Cards
+        // already thrown away are the exception: they are nobody's work any
+        // more, and they move to the default so the reference they still hold
+        // points at something.
         let deleted = async {
             let mut rows = tx
                 .query(
@@ -3920,6 +3951,20 @@ impl Store for TursoStore {
             drop(rows);
             if is_default != 0 {
                 return Ok(Err(StoreError::Conflict("default_tag")));
+            }
+            let mut rows = tx
+                .query(
+                    "SELECT COUNT(*) FROM task WHERE tag_id = ?1 AND deleted_at IS NULL",
+                    params![tag_id],
+                )
+                .await?;
+            let live: i64 = match rows.next().await? {
+                Some(row) => row.get(0)?,
+                None => 0,
+            };
+            drop(rows);
+            if live > 0 {
+                return Ok(Err(StoreError::Conflict("tag_in_use")));
             }
             tx.execute(
                 "UPDATE task SET tag_id = \

@@ -1088,6 +1088,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Every tag on the board, in the admin's hand-set order.
     async fn tags(&self, board_id: &str) -> Result<Vec<Tag>>;
 
+    /// How many live cards wear each of the board's tags, keyed by tag id. A
+    /// tag nobody uses is absent rather than zero — the caller reads a
+    /// missing key as none, which is what a fresh tag is.
+    async fn tag_task_counts(&self, board_id: &str) -> Result<Vec<(String, u32)>>;
+
     /// Appends a tag at the end of the board's order. The name is unique per
     /// board: two tags with one name are one project spelled twice.
     async fn create_tag(&self, board_id: &str, name: &str, at: OffsetDateTime) -> Result<Tag>;
@@ -1096,6 +1101,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Deletes a tag. Its tasks move to the board's default tag; the default
     /// itself is refused — it is where they would go.
+    /// Retires a tag. A tag with cards on it is refused with
+    /// [`StoreError::Conflict`] — the cards are the reason it exists, and
+    /// moving somebody's whole project onto the default because one menu item
+    /// was clicked is not a deletion the admin asked for. The default tag is
+    /// refused as well: it is where a card with no project of its own lives.
     async fn delete_tag(&self, tag_id: &str) -> Result<()>;
 
     /// Swaps a tag with its neighbour in the order. A tag already at that end
@@ -1322,6 +1332,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// settled. Only rows that are still pending and have never been
     /// attempted move — a mail already refused is on its own retry clock, and
     /// a batch must not drag it back.
+    ///
+    /// It only ever postpones. A delivery pass writes its lease into the same
+    /// column, so a hold that moved a row *earlier* would hand the mail a
+    /// second pass is composing to a third one, and the reader would get it
+    /// twice.
     async fn hold_batch(
         &self,
         task_id: &str,

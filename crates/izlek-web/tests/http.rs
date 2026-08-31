@@ -7525,6 +7525,74 @@ async fn the_default_tag_cannot_be_deleted_and_ships_no_delete_button() {
     assert!(page.contains("Aurora"), "the created tag is not listed: {page}");
 }
 
+/// A tag with cards on it stays: no delete control on its row, and the call
+/// itself refused by name if somebody posts it anyway. Emptying it is what
+/// makes it deletable.
+#[tokio::test]
+async fn a_tag_with_cards_on_it_cannot_be_deleted() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
+    let workspace_id = app.workspace_id().await;
+    let board = app.store.board(&workspace_id).await.unwrap().expect("no board");
+    let open = app.store.columns(&board.id).await.unwrap()[0].id.clone();
+    let admin_id = app
+        .store
+        .users(&workspace_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|user| user.role == Role::Admin)
+        .unwrap()
+        .id;
+    let task = a_task_by(&app, &board.id, &open, "Hold the door", &admin_id).await;
+    app.store.set_task_tag(&task, &aurora.id).await.unwrap();
+
+    let page = String::from_utf8(app.get("/tags", Some(&admin_cookie)).await.bytes).unwrap();
+    assert_eq!(
+        page.matches(r#"action="/api/delete_tag""#).count(),
+        0,
+        "a tag with a card on it still offers a delete: {page}"
+    );
+    assert!(
+        page.contains(r#"<span class="tag-count">1</span>"#),
+        "the row does not say how many cards are on it: {page}"
+    );
+
+    let refused = app
+        .post("/api/delete_tag", Some(&admin_cookie), &[("tag_id", &aurora.id)])
+        .await;
+    assert!(
+        refused.body.contains("TagInUse"),
+        "the refusal does not name itself: {}",
+        refused.body
+    );
+    assert_eq!(
+        app.store.tags(&board.id).await.unwrap().len(),
+        2,
+        "the tag went anyway"
+    );
+
+    // Moved off it, the tag is deletable again — control and call both.
+    let default_id = app
+        .store
+        .tags(&board.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|tag| tag.is_default)
+        .unwrap()
+        .id;
+    app.store.set_task_tag(&task, &default_id).await.unwrap();
+    let page = String::from_utf8(app.get("/tags", Some(&admin_cookie)).await.bytes).unwrap();
+    assert_eq!(page.matches(r#"action="/api/delete_tag""#).count(), 1);
+    let gone = app
+        .post("/api/delete_tag", Some(&admin_cookie), &[("tag_id", &aurora.id)])
+        .await;
+    assert!(!gone.body.contains("TagInUse"), "{}", gone.body);
+    assert_eq!(app.store.tags(&board.id).await.unwrap().len(), 1);
+}
+
 /// An open live stream must not be something the shutdown has to wait out.
 ///
 /// The server stops accepting connections and then gives in-flight requests

@@ -39,6 +39,9 @@ struct TagLine {
     name: String,
     position: i64,
     is_default: bool,
+    /// Cards wearing this tag. A tag with any is not deletable, and the row
+    /// says how many rather than leaving the admin to guess why.
+    tasks: u32,
 }
 
 /// Every tag on the workspace's own board, in the admin's hand-set order.
@@ -53,12 +56,21 @@ async fn tags_of(
     else {
         return Err(Refusal::Unavailable);
     };
+    let counts = store
+        .tag_task_counts(&board.id)
+        .await
+        .map_err(|_| Refusal::Unavailable)?;
     Ok(store
         .tags(&board.id)
         .await
         .map_err(|_| Refusal::Unavailable)?
         .into_iter()
         .map(|tag| TagLine {
+            tasks: counts
+                .iter()
+                .find(|(id, _)| id == &tag.id)
+                .map(|(_, count)| *count)
+                .unwrap_or(0),
             id: tag.id,
             name: tag.name,
             position: tag.position,
@@ -179,19 +191,24 @@ struct DeleteTagForm {
     tag_id: String,
 }
 
-/// Removes a tag. The store refuses to delete the default — every task
-/// without a tag wears it — and that refusal lands here as "unavailable";
-/// the row itself ships no delete control in the first place.
+/// Removes a tag. The store refuses two of them: the default — every task
+/// without a project of its own wears it — and any tag that still has cards,
+/// which comes back named so the admin reads why rather than "something went
+/// wrong". Neither row ships a delete control in the first place; this is
+/// the same rule where it is actually enforced.
 #[route(POST "/api/delete_tag")]
 async fn delete_tag(cx: &Cx, Form(input): Form<DeleteTagForm>) -> Redirect {
     let (store, _, _) = match tag_of_this_workspace(cx, &input.tag_id).await {
         Ok(triple) => triple,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    if store.delete_tag(&input.tag_id).await.is_err() {
-        return redirect(cx, Some(Refusal::Unavailable));
+    match store.delete_tag(&input.tag_id).await {
+        Ok(()) => redirect(cx, None),
+        Err(izlek_core::store::StoreError::Conflict("tag_in_use")) => {
+            redirect(cx, Some(Refusal::TagInUse))
+        }
+        Err(_) => redirect(cx, Some(Refusal::Unavailable)),
     }
-    redirect(cx, None)
 }
 
 #[derive(Deserialize)]
@@ -251,8 +268,10 @@ async fn composer(cx: &Cx, refusal: Option<&Refusal>, lang: Lang) -> Result {
 }
 
 /// One tag's row: the rename form in place of it when `editing`, its display
-/// otherwise. The default tag draws no delete form — the store would refuse
-/// it, and a control that cannot act is not drawn.
+/// otherwise. The default tag draws no delete form, and neither does a tag
+/// with cards on it — the store would refuse both, and a control that cannot
+/// act is not drawn. The card count sits on the row, so a missing delete is
+/// a number the admin can already see rather than a control that vanished.
 async fn tag_row(cx: &Cx, tag: &TagLine, editing: bool, refusal: Option<&Refusal>, lang: Lang) -> Result {
     if editing {
         return view! {
@@ -280,6 +299,7 @@ async fn tag_row(cx: &Cx, tag: &TagLine, editing: bool, refusal: Option<&Refusal
         cx =>
         <div class="tag-row">
             <span class="tag-name">(tag.name.clone())</span>
+            <span class="tag-count">(tag.tasks)</span>
 
             <a class="quiet" href=(format!("/tags?edit={}", tag.id)) title=(t(lang, Key::EditThisTag))>(t(lang, Key::EditLabel))</a>
 
@@ -294,7 +314,7 @@ async fn tag_row(cx: &Cx, tag: &TagLine, editing: bool, refusal: Option<&Refusal
                 <button class="quiet" type="submit" title=(t(lang, Key::MoveTagDown)) aria-label=(t(lang, Key::MoveTagDown))>("\u{2193}")</button>
             </form>
 
-            if !tag.is_default {
+            if !tag.is_default && tag.tasks == 0 {
                 <form method="post" action="/api/delete_tag">
                     <input type="hidden" name="tag_id" value=(tag.id.clone())>
                     <button class="quiet quiet-danger" type="submit" title=(t(lang, Key::DeleteThisTag))>(t(lang, Key::Delete))</button>
