@@ -10,9 +10,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # A static binary: it runs on the server whatever its glibc is, and the
-  # server needs nothing installed to keep it running.
-  TARGET: x86_64-unknown-linux-musl
+  # A gnu binary links against the runner's glibc, so the runner is pinned
+  # (see runs-on below) to the same 24.04 the server runs; the day either
+  # side moves, the pin is what forces a conscious decision rather than a
+  # broken deploy. In exchange: no cross-toolchain, and the linker is
+  # rustc's default bundled lld.
+  TARGET: x86_64-unknown-linux-gnu
   # The systemd user unit that owns the process. See izlek.service.
   SERVICE: izlek
   # `release` keeps fat LTO in one codegen unit for when the last few percent
@@ -26,18 +29,16 @@ env:
 jobs:
   deploy:
     name: Deploy
-    runs-on: ubuntu-latest
+    # Pinned, not `latest`: ubuntu-latest floating to the next LTS would
+    # one day ship a glibc newer than the server's, and the gnu binary
+    # would stop running there. See the TARGET comment above.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout private repository
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add "$TARGET"
-
-      - name: Install the musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: rustup toolchain install stable --profile minimal
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -54,34 +55,26 @@ jobs:
           key: topcoat-cli-${{ env.TOPCOAT }}-${{ runner.os }}
 
       - name: Install the topcoat CLI
-        # Installed before the cargo config below exists, so the CLI itself is
-        # built for the host and not for musl.
+        # Installed before the cargo config below exists, so the CLI itself
+        # is built for the host and not for the deploy target.
         if: steps.topcoat-cache.outputs.cache-hit != 'true'
         run: cargo install topcoat-cli@${{ env.TOPCOAT }} --locked
 
-      - name: Point cargo at musl
+      - name: Point cargo at the deploy target
         run: |
           set -euo pipefail
           # `topcoat asset bundle` runs its own `cargo build` and strips every
-          # CARGO_* variable from it, so neither the target nor its link flags
-          # can be passed by environment; they go into the cargo config that
-          # inner build reads. This file is written in CI only; it is not
-          # committed.
+          # CARGO_* variable from it, so the target cannot be passed by
+          # environment; it goes into the cargo config that inner build
+          # reads. This file is written in CI only; it is not committed.
+          #
+          # With the gnu target the linker is rustc's default — the bundled
+          # rust-lld — and it matters: a warm relink of this binary measured
+          # 142s under the BFD that an explicit `linker = "gcc"` would pick,
+          # against 23s under lld. That link is the largest single chunk of
+          # the deploy build, so the default is deliberately left alone.
           mkdir -p .cargo
-          {
-            printf '[build]\ntarget = "%s"\n\n' "$TARGET"
-            printf '[target.x86_64-unknown-linux-musl]\n'
-            # Link with the toolchain's bundled rust-lld, not the BFD that cc
-            # would pick: a warm relink of this binary measured 142s under
-            # BFD against 23s under lld, and that link is the largest single
-            # chunk of the deploy build. `link-self-contained=+linker` would
-            # say this directly, but its values are unstable — so the cc
-            # driver is pointed at rustc's own gcc-ld/ld.lld wrapper, the
-            # same mechanism the gnu target's default linker uses.
-            printf 'rustflags = ["-C", "link-arg=-B%s/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld", "-C", "link-arg=-fuse-ld=lld"]\n' "$(rustc --print sysroot)"
-          } >> .cargo/config.toml
-          # C dependencies (ring, under lettre's TLS) compile against musl too.
-          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+          printf '[build]\ntarget = "%s"\n' "$TARGET" >> .cargo/config.toml
 
       - name: Build the binary and bundle its assets
         run: |
