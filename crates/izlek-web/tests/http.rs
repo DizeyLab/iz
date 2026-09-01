@@ -8289,7 +8289,7 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(r#"inputmode="numeric" value="11:00""#),
+        html.contains(r#"<option value="11:00" selected="">11:00</option>"#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 11:00<"), "{html}");
@@ -8318,7 +8318,7 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .await;
     let html = String::from_utf8_lossy(&shifted.bytes);
     assert!(
-        html.contains(r#"inputmode="numeric" value="14:00""#),
+        html.contains(r#"<option value="14:00" selected="">14:00</option>"#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 14:00<"), "{html}");
@@ -8409,8 +8409,9 @@ async fn an_empty_time_clears_the_clock_and_a_clear_clears_both() {
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains(">Sep 02<"), "{html}");
-    // An empty value renders as no value attribute at all — an empty box.
-    assert!(html.contains(r#"inputmode="numeric"></form>"#), "{html}");
+    // An empty time renders as no selected step at all — the bare "--".
+    assert!(html.contains(r#"name="clock_time""#), "{html}");
+    assert!(!html.contains(">Sep 02 11:00<"), "{html}");
     let saved = app
         .post(
             "/api/save_task",
@@ -8989,6 +8990,45 @@ async fn the_datepicker_script_guards_a_panel_with_no_day_input() {
     );
     // The moment field's panel: the grid's hidden day input and the time
     // box ride the same form.
-    assert!(html.contains(r#"name="clock_time""#), "{html}");
+    assert!(
+        html.contains(r#"name="clock_time" aria-label="Time" data-autosubmit="" data-search="""#),
+        "the moment select lost its searchable chrome: {html}"
+    );
     assert!(html.contains("datepick-input"), "{html}");
+}
+
+#[tokio::test]
+async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
+    // A clock that never sat on a five-minute line — one that arrived
+    // before the menu did — is shown exactly as stored: its own option is
+    // appended, nothing is rounded onto a step.
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("deadline", "2026-09-02"), ("clock_time", "11:23")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"<option value="11:23" selected="">11:23</option>"#),
+        "{html}"
+    );
+    assert!(html.contains(">Sep 02 11:23<"), "{html}");
 }
