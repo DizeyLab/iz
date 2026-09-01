@@ -367,7 +367,7 @@ async fn render_card(
     default_tag_id: Option<&str>,
     lang: Lang,
 ) -> Result {
-    let blocks = card.blocks.len();
+    let blocks = card.blocks.join(", ");
     let blocked_by = card.blocked_by.join(", ");
     let overdue = card.is_overdue(today);
     let deadline_parts = card.deadline_parts(today);
@@ -423,7 +423,7 @@ async fn render_card(
         >
             <div class="card-keys">
                 <span class="card-key">(card.task_key.clone())</span>
-                if blocks > 0 { <span class="card-blocks">(format!("{} {blocks}", t(lang, Key::Blocks)))</span> }
+                if !blocks.is_empty() { <span class="card-blocks">(format!("{} {blocks}", t(lang, Key::Blocks)))</span> }
                 if !blocked_by.is_empty() {
                     <span class="card-blocked-by">(format!("{} {blocked_by}", t(lang, Key::BlockedBy)))</span>
                 }

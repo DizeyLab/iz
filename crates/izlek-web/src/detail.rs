@@ -1755,15 +1755,21 @@ async fn dep_row(
         Direction::Blocks => t(lang, Key::Blocks).to_uppercase(),
     };
     let remove_title = t(lang, Key::RemoveThisLink);
+    let href = format!("/?task={}", edge.task_id);
     view! {
         cx =>
         <div class=(class!("dep-row", "dep-row-waiting" if waiting))>
-            <span class="dep-tag">(tag)</span>
-            if cleared { (glyph::tick(cx).await?) } else { (glyph::lock(cx).await?) }
-            <span class="dep-key">(edge.task_key.clone())</span>
-            <span class="dep-title">(edge.title.clone())</span>
-            <div class="spacer"></div>
-            <span class="dep-note">(note)</span>
+            // One link, not two, the subtask row's own shape: tag, key,
+            // title and note are the same target, so the whole stretch
+            // between the row's edges and the X is the way in.
+            <a class="dep-link" href=(href)>
+                <span class="dep-tag">(tag)</span>
+                if cleared { (glyph::tick(cx).await?) } else { (glyph::lock(cx).await?) }
+                <span class="dep-key">(edge.task_key.clone())</span>
+                <span class="dep-title">(edge.title.clone())</span>
+                <div class="spacer"></div>
+                <span class="dep-note">(note)</span>
+            </a>
             if may_write {
                 <form class="dep-unlink-form" method="post" action="/api/unlink_tasks">
                     <input type="hidden" name="task_id" value=(task_id.to_string())>

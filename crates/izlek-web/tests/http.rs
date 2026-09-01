@@ -9520,3 +9520,57 @@ async fn the_password_pane_names_each_failure() {
     let tr_html = String::from_utf8_lossy(&tr.bytes);
     assert!(tr_html.contains("Bu zaten mevcut parolan."), "{tr_html}");
 }
+
+/// A card's dependency summary names both directions with keys: what the card
+/// blocks and what blocks it, the same list shape either way.
+#[tokio::test]
+async fn a_card_lists_both_dependency_directions_as_keys() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+    let first = a_task(&app, &admin, &column, "Lay the cable").await;
+    let second = a_task(&app, &admin, &column, "Light the cable").await;
+    let first_key = app
+        .store
+        .task(&first)
+        .await
+        .unwrap()
+        .expect("first task gone")
+        .row
+        .task_key;
+    let second_key = app
+        .store
+        .task(&second)
+        .await
+        .unwrap()
+        .expect("second task gone")
+        .row
+        .task_key;
+
+    // `second` is blocked by `first`, so `first` blocks `second`.
+    let answer = app
+        .post(
+            "/api/link_tasks",
+            Some(&admin),
+            &[
+                ("task_id", &second),
+                ("other_id", &first),
+                ("direction", "blocked_by"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "the link was refused: {}", answer.body);
+
+    let page = app.get("/", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(&format!(r#"class="card-blocks">blocks {second_key}</span>"#)),
+        "the blocker's card did not name what it blocks: {html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"class="card-blocked-by">blocked by {first_key}</span>"#
+        )),
+        "the blocked card did not name its blocker: {html}"
+    );
+}

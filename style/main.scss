@@ -2392,6 +2392,22 @@ img.avatar {
   color: var(--muted-soft);
 }
 
+// The dependency row's way in, the subtask row's own shape (`subtask-open`):
+// tag, key, title and note are one target, so the whole stretch between the
+// row's edges and the X is one anchor — `flex: 1` keeps the note at the row's
+// right edge where it stood before the row learned to open its task.
+.dep-link {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+
+  &:hover .dep-title { text-decoration: underline; }
+}
+
 .dep-unlink-form { display: inline-flex; }
 
 .dep-unlink {
