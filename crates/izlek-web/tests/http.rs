@@ -8268,7 +8268,8 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
             &[
                 ("task_id", &task),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "11:00"),
+                ("clock_hour", "11"),
+                ("clock_minute", "00"),
             ],
         )
         .await;
@@ -8289,7 +8290,8 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(r#"<option value="11:00" selected="">11:00</option>"#),
+        html.contains(r#"aria-label="Hour" value="11""#)
+            && html.contains(r#"aria-label="Minute" value="00""#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 11:00<"), "{html}");
@@ -8318,7 +8320,8 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .await;
     let html = String::from_utf8_lossy(&shifted.bytes);
     assert!(
-        html.contains(r#"<option value="14:00" selected="">14:00</option>"#),
+        html.contains(r#"aria-label="Hour" value="14""#)
+            && html.contains(r#"aria-label="Minute" value="00""#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 14:00<"), "{html}");
@@ -8337,7 +8340,8 @@ async fn an_empty_time_clears_the_clock_and_a_clear_clears_both() {
             &[
                 ("task_id", &task),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "11:00"),
+                ("clock_hour", "11"),
+                ("clock_minute", "00"),
             ],
         )
         .await;
@@ -8385,7 +8389,7 @@ async fn an_empty_time_clears_the_clock_and_a_clear_clears_both() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_time", "")],
+            &[("task_id", &task), ("clock_hour", ""), ("clock_minute", "")],
         )
         .await;
     assert!(
@@ -8410,13 +8414,16 @@ async fn an_empty_time_clears_the_clock_and_a_clear_clears_both() {
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains(">Sep 02<"), "{html}");
     // An empty time renders as no selected step at all — the bare "--".
-    assert!(html.contains(r#"name="clock_time""#), "{html}");
+    assert!(
+        html.contains(r#"name="clock_hour""#) && html.contains(r#"name="clock_minute""#),
+        "{html}"
+    );
     assert!(!html.contains(">Sep 02 11:00<"), "{html}");
     let saved = app
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("deadline", ""), ("clock_time", "")],
+            &[("task_id", &task), ("deadline", ""), ("clock_hour", ""), ("clock_minute", "")],
         )
         .await;
     assert!(
@@ -8454,7 +8461,8 @@ async fn a_title_edit_keeps_the_clock() {
             &[
                 ("task_id", &task),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "11:00"),
+                ("clock_hour", "11"),
+                ("clock_minute", "00"),
             ],
         )
         .await;
@@ -8511,7 +8519,8 @@ async fn a_description_edit_keeps_the_clock() {
             &[
                 ("task_id", &task),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "11:00"),
+                ("clock_hour", "11"),
+                ("clock_minute", "00"),
             ],
         )
         .await;
@@ -8570,7 +8579,7 @@ async fn a_time_that_cannot_be_used_is_refused_and_saves_nothing() {
                 ("task_id", task.as_str()),
                 ("title", "Renamed"),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "not-a-time"),
+                ("clock_hour", "not-a-time"),
             ],
         )
         .await;
@@ -8602,7 +8611,11 @@ async fn a_time_that_cannot_be_used_is_refused_and_saves_nothing() {
             "/api/save_task",
             Some(&admin_cookie),
             &format!("/?task={orphan}"),
-            &[("task_id", orphan.as_str()), ("clock_time", "16:20")],
+            &[
+                ("task_id", orphan.as_str()),
+                ("clock_hour", "16"),
+                ("clock_minute", "20"),
+            ],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
@@ -8612,7 +8625,26 @@ async fn a_time_that_cannot_be_used_is_refused_and_saves_nothing() {
     );
     let facts = app.store.task(&orphan).await.unwrap().expect("task gone");
     assert!(facts.row.clock_at.is_none(), "a dayless time was stored");
+    // And the mirror mistake: a minute with no hour is the same half of
+    // nothing.
+    let orphan2 = a_task(&app, &admin_cookie, &column, "Orphan Too").await;
+    let answer = app
+        .post_without_script(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &format!("/?task={orphan2}"),
+            &[("task_id", orphan2.as_str()), ("clock_minute", "45")],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(
+        location.contains("refusal=bad-clock&on=save_task"),
+        "{location}"
+    );
+    let facts = app.store.task(&orphan2).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_none(), "a lone minute was stored");
 }
+
 
 #[tokio::test]
 async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline() {
@@ -8647,7 +8679,8 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
                 ("title", "Kickoff"),
                 ("column_id", &column),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "14:00"),
+                ("clock_hour", "14"),
+                ("clock_minute", "00"),
             ],
         )
         .await;
@@ -8704,7 +8737,7 @@ async fn a_time_set_on_an_existing_day_writes_both_columns() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_time", "16:20")],
+            &[("task_id", &task), ("clock_hour", "16"), ("clock_minute", "20")],
         )
         .await;
     assert!(
@@ -8733,7 +8766,8 @@ async fn a_time_set_on_an_existing_day_writes_both_columns() {
                 ("title", "Kickoff"),
                 ("column_id", &column),
                 ("deadline", "2026-09-10"),
-                ("clock_time", "09:30"),
+                ("clock_hour", "9"),
+                ("clock_minute", "30"),
             ],
         )
         .await;
@@ -8941,7 +8975,8 @@ async fn the_logs_feed_says_the_clock_in_its_own_words() {
             &[
                 ("task_id", &task),
                 ("deadline", "2026-09-02"),
-                ("clock_time", "11:00"),
+                ("clock_hour", "11"),
+                ("clock_minute", "00"),
             ],
         )
         .await;
@@ -8991,8 +9026,8 @@ async fn the_datepicker_script_guards_a_panel_with_no_day_input() {
     // The moment field's panel: the grid's hidden day input and the time
     // box ride the same form.
     assert!(
-        html.contains(r#"name="clock_time" aria-label="Time" data-autosubmit="" data-search="""#),
-        "the moment select lost its searchable chrome: {html}"
+        html.contains(r#"name="clock_hour""#) && html.contains(r#"name="clock_minute""#),
+        "the moment boxes lost their names: {html}"
     );
     assert!(html.contains("datepick-input"), "{html}");
 }
@@ -9011,7 +9046,7 @@ async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("deadline", "2026-09-02"), ("clock_time", "11:23")],
+            &[("task_id", &task), ("deadline", "2026-09-02"), ("clock_hour", "11"), ("clock_minute", "23")],
         )
         .await;
     assert!(
@@ -9027,7 +9062,8 @@ async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
     let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(r#"<option value="11:23" selected="">11:23</option>"#),
+        html.contains(r#"aria-label="Hour" value="11""#)
+            && html.contains(r#"aria-label="Minute" value="23""#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 11:23<"), "{html}");

@@ -39,7 +39,11 @@ if [[ ! -f $IZLEK_PLAYWRIGHT ]]; then
     (cd "$home" && npx playwright install --only-shell chromium)
 fi
 
-cargo build --manifest-path "$repo/Cargo.toml" -p izlek-web
+# The bundler runs the build itself and rewrites the content-hash files in
+# target/<profile>/assets. A plain `cargo build` leaves the previous bundle
+# in place, and the server would serve the old css from it — a css change
+# would pass every check here while the page shows the last build.
+(cd "$repo" && topcoat asset bundle -p izlek-web)
 
 mkdir -p "$work/config"
 printf 'database = "izlek.db"\nlisten = "127.0.0.1:%s"\n' "$port" > "$work/config/izlek.toml"

@@ -1920,9 +1920,26 @@ img.avatar {
 
 .datepick-panel { width: 190px; }
 
-// The time menu rides the same panel as the day grid; a select's intrinsic
-// width is wider than the panel, so it is told to fill, not to size itself.
-.datepick-panel .field-input { width: 100%; }
+// The time row rides the same panel as the day grid: two two-digit boxes
+// and a colon between them, one line. An input's intrinsic width is wider
+// than its half, so each box fills its half and centers what is typed.
+.datepick-time {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.datepick-time .field-input {
+  width: 100%;
+  min-width: 0;
+  text-align: center;
+}
+
+.datepick-colon {
+  font-family: var(--font-mono);
+  color: var(--ink-soft);
+}
 
 .datepick-head {
   display: flex;

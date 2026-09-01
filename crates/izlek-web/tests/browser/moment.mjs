@@ -99,34 +99,11 @@ const chipLabel = `${MONTHS[picked.month - 1]} ${pad(picked.day)} · 16:20`;
 const fieldLabel = `${MONTHS[picked.month - 1]} ${pad(picked.day)} 16:20`;
 
 
-// The time rides the same panel as a house dropdown: the select is
-// enhanced into a trigger and a panel, so a hand on it clicks the trigger,
-// types to filter, and presses the row — which also exercises the search
-// box the data-search attribute buys. The dd pick writes the select's
-// value; the modal select carries no data-autosubmit, so nothing posts
-// until the form's own button.
-await page.click(
-    '.modal-new-task select[name="clock_time"] >> xpath=preceding-sibling::button[1]',
-);
-const menu = page.locator('.dd-panel.dd-open');
-await menu.locator('.dd-search').fill('16:');
-const filtered = await menu.locator('.dd-search').evaluate((el) => {
-    const panel = el.closest('.dd-panel');
-    const row = panel.querySelector('.dd-option[data-value="16:20"]');
-    return {
-        search: el.value,
-        rows: panel.querySelectorAll('.dd-option').length,
-        hidden: panel.querySelectorAll('.dd-option-hidden').length,
-        rowOn: !!row && !row.classList.contains('dd-option-hidden'),
-    };
-});
-if (filtered.search !== '16:') failures.push(`the search box read '${filtered.search}'`);
-if (filtered.rows !== 289) failures.push(`the menu holds ${filtered.rows} rows, not 289`);
-if (!filtered.rowOn) failures.push("typing '16:' did not leave the 16:20 row on the menu");
-// Press the row through its own handler. The panel's scroll-close race can
-// make a point-and-click flake here; the handler is the house code either
-// way, and the value it writes is asserted below.
-await menu.locator('.dd-option[data-value="16:20"]').evaluate((el) => el.click());
+// The time rides the same panel as two two-digit boxes — hour, colon,
+// minute — typed before the day press, so the one form post carries both.
+// Neither box autosubmits: a lone box is half a value.
+await page.fill('.modal-new-task input[name="clock_hour"]', '16');
+await page.fill('.modal-new-task input[name="clock_minute"]', '20');
 
 // Then the day press, whose pick() writes the hidden input in place — in
 // the modal nothing autosubmits, so the value is read in the same tick as
@@ -145,7 +122,7 @@ if (!/^\d{4}-\d{2}-\d{2}$/.test(written.after)) {
     failures.push(`the day pick never wrote the hidden input: '${written.after}'`);
 }
 const atSubmit = await page.evaluate(() => ({
-    time: document.querySelector('.modal-new-task select[name="clock_time"]')?.value,
+    time: `${document.querySelector('.modal-new-task input[name="clock_hour"]')?.value}:${document.querySelector('.modal-new-task input[name="clock_minute"]')?.value}`,
     day: document.querySelector('.modal-new-task .datepick-input')?.value,
 }));
 if (atSubmit.time !== '16:20') failures.push(`the time box read '${atSubmit.time}' at submit`);

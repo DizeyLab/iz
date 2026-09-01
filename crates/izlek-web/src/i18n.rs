@@ -358,7 +358,8 @@ pub enum Key {
     InvitedByLabel,
     MailBatchLabel,
     ReminderMinutesLabel,
-    ClockTime,
+    ClockHour,
+    ClockMinute,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -1019,8 +1020,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (MailBatchLabel, Tr) => "Posta gecikmesi (dakika)",
         (ReminderMinutesLabel, En) => "Reminder (minutes)",
         (ReminderMinutesLabel, Tr) => "Hatırlatma (dakika)",
-        (ClockTime, En) => "Time",
-        (ClockTime, Tr) => "Saat",
+        (ClockHour, En) => "Hour",
+        (ClockHour, Tr) => "Saat",
+        (ClockMinute, En) => "Minute",
+        (ClockMinute, Tr) => "Dakika",
     }
 }
 

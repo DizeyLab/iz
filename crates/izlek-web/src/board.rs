@@ -81,7 +81,8 @@ async fn create_task_shared(
     column_id: &str,
     description: &str,
     deadline_raw: &str,
-    time_raw: &str,
+    clock_hour: Option<&str>,
+    clock_minute: Option<&str>,
 ) -> Result<Option<Refusal>> {
 
     let user = match require_writer(cx).await {
@@ -93,10 +94,14 @@ async fn create_task_shared(
         return Ok(Some(Refusal::EmptyTitle));
     }
     let zone = izlek_core::detail::parse_zone(&user.timezone);
+    let time = match crate::detail::combine_clock(clock_hour, clock_minute) {
+        Ok(time) => time,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
     let (deadline, clock_at) = match crate::detail::moment_field(
         Some(deadline_raw),
         (None, None),
-        Some(time_raw),
+        time.as_deref(),
         zone,
     ) {
         Ok(pair) => pair,
@@ -161,7 +166,9 @@ struct CreateTaskForm {
     #[serde(default)]
     deadline: String,
     #[serde(default)]
-    clock_time: String,
+    clock_hour: Option<String>,
+    #[serde(default)]
+    clock_minute: Option<String>,
 }
 
 /// A browser without script's way onto the board: a real form post, same
@@ -174,7 +181,8 @@ async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
         &input.column_id,
         &input.description,
         &input.deadline,
-        &input.clock_time,
+        input.clock_hour.as_deref(),
+        input.clock_minute.as_deref(),
     )
     .await?
     {

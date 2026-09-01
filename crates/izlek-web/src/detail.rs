@@ -236,7 +236,9 @@ struct SaveTaskForm {
     #[serde(default)]
     deadline: Option<String>,
     #[serde(default)]
-    clock_time: Option<String>,
+    clock_hour: Option<String>,
+    #[serde(default)]
+    clock_minute: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -542,11 +544,23 @@ fn parse_hhmm(raw: &str) -> Option<(u8, u8)> {
     (hour <= 23 && minute <= 59).then_some((hour, minute))
 }
 
-/// The moment field's menu words: every five minutes of the day,
-/// zero-padded, the value and the label the same word — the logs filters'
-/// shape, at 288 options a `data-search` box is what makes it usable.
-fn clock_steps() -> impl Iterator<Item = String> {
-    (0..24 * 12).map(|step| format!("{:02}:{:02}", step / 12, (step % 12) * 5))
+/// The posted hour and minute words as one `HH:MM` for [`moment_field`],
+/// which stays the one validator of the shape. Both absent: the form said
+/// nothing about the time. Both empty: the popover's Clear, clearing the
+/// clock. Both set: the moment, however the hands typed it. One without
+/// the other is a form gone wrong, not something to guess past.
+pub(crate) fn combine_clock(
+    hour: Option<&str>,
+    minute: Option<&str>,
+) -> std::result::Result<Option<String>, Refusal> {
+    match (hour, minute) {
+        (None, None) => Ok(None),
+        (Some(""), Some("")) => Ok(Some(String::new())),
+        (Some(hour), Some(minute)) => {
+            Ok(Some(format!("{}:{}", hour.trim(), minute.trim())))
+        }
+        _ => Err(Refusal::BadClock),
+    }
 }
 
 /// Saves the title, the description and the moment field — the deadline day
@@ -576,10 +590,14 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
         None => facts.description.clone(),
     };
     let zone = parse_zone(&user.timezone);
+    let time = match combine_clock(input.clock_hour.as_deref(), input.clock_minute.as_deref()) {
+        Ok(time) => time,
+        Err(refusal) => return redirect(cx, Some(refusal)),
+    };
     let (deadline, clock_at) = match moment_field(
         input.deadline.as_deref(),
         (facts.row.deadline, facts.row.clock_at),
-        input.clock_time.as_deref(),
+        time.as_deref(),
         zone,
     ) {
         Ok(pair) => pair,
@@ -1274,7 +1292,7 @@ async fn deadline_control(
     may_write: bool,
     lang: Lang,
 ) -> Result {
-    use time::macros::format_description;
+
 
     let overdue = task.is_overdue(today);
     let local = task.clock_at.map(|at| at.to_offset(zone));
@@ -1312,17 +1330,12 @@ async fn deadline_control(
     }
     let toggle = format!("deadline-{}", task.id);
     let input_value = task.deadline_input();
-    let time_selected = local
-        .map(|at| at.format(&format_description!("[hour]:[minute]")))
-        .transpose()
+    let hour_value = local
+        .map(|at| format!("{:02}", at.hour()))
         .unwrap_or_default();
-    let steps: Vec<String> = clock_steps().collect();
-    // A clock off the five-minute grid is still the truth that is stored:
-    // its exact option is appended, never rounded onto a step.
-    let time_exact = time_selected
-        .as_ref()
-        .filter(|value| !steps.iter().any(|step| step == *value))
-        .cloned();
+    let minute_value = local
+        .map(|at| format!("{:02}", at.minute()))
+        .unwrap_or_default();
     let change_aria = t(lang, Key::ChangeTheDeadline);
     let no_deadline = t(lang, Key::NoDeadline);
     view! {
@@ -1338,15 +1351,11 @@ async fn deadline_control(
                 <form class="pop-form" method="post" action="/api/save_task">
                     <input type="hidden" name="task_id" value=(task.id.clone())>
                     (datepicker_grid(cx, "deadline", &input_value, true, lang).await?)
-                    <select class="field-input" name="clock_time" aria-label=(t(lang, Key::ClockTime)) data-autosubmit="" data-search="">
-                        <option value="">("--")</option>
-                        for time in &steps {
-                            <option value=(time) selected=(time_selected.as_deref() == Some(time.as_str()))>(time)</option>
-                        }
-                        if let Some(value) = &time_exact {
-                            <option value=(value) selected=(true)>(value)</option>
-                        }
-                    </select>
+                    <div class="datepick-time">
+                        <input class="field-input" name="clock_hour" type="text" inputmode="numeric" maxlength="2" placeholder="HH" aria-label=(t(lang, Key::ClockHour)) value=(hour_value)>
+                        <span class="datepick-colon">(":")</span>
+                        <input class="field-input" name="clock_minute" type="text" inputmode="numeric" maxlength="2" placeholder="MM" aria-label=(t(lang, Key::ClockMinute)) value=(minute_value)>
+                    </div>
                 </form>
                 (refused(cx, "save_task", lang).await?)
             </div>
@@ -1432,7 +1441,7 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 var input = panel.querySelector('.datepick-input');\
                 if (!input) {{ return; }}\
                 input.value = ymd ? (ymd.y + '-' + pad(ymd.m) + '-' + pad(ymd.d)) : '';\
-                if (!ymd) {{ var clock = panel.querySelector('[name=clock_time]'); if (clock) {{ clock.value = ''; }} }}\
+                if (!ymd) {{ var hh = panel.querySelector('[name=clock_hour]'); if (hh) {{ hh.value = ''; }} var mm = panel.querySelector('[name=clock_minute]'); if (mm) {{ mm.value = ''; }} }}\
                 var pop = panel.closest('.datepick-pop');\
                 var label = pop.querySelector('.datepick-label');\
                 if (label) {{ label.textContent = ymd ? (MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d)) : label.dataset.empty; }}\
@@ -2570,7 +2579,6 @@ async fn sheet_view(
 /// as [`task_modal`], with a form posting straight to `/api/create_task`.
 /// Wired off the board top bar's "New task" button as `/?new=1`.
 pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -> Result {
-    let steps: Vec<String> = clock_steps().collect();
     view! {
         cx =>
         <div class="modal-scrim">
@@ -2607,12 +2615,11 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
                                     (datepicker_grid(cx, "deadline", "", false, lang).await?)
-                                    <select class="field-input" name="clock_time" aria-label=(t(lang, Key::ClockTime)) data-search="">
-                                        <option value="">("--")</option>
-                                        for time in &steps {
-                                            <option value=(time)>(time)</option>
-                                        }
-                                    </select>
+                                    <div class="datepick-time">
+                                        <input class="field-input" name="clock_hour" type="text" inputmode="numeric" maxlength="2" placeholder="HH" aria-label=(t(lang, Key::ClockHour))>
+                                        <span class="datepick-colon">(":")</span>
+                                        <input class="field-input" name="clock_minute" type="text" inputmode="numeric" maxlength="2" placeholder="MM" aria-label=(t(lang, Key::ClockMinute))>
+                                    </div>
                                 </div>
                             </div>
                         </div>
