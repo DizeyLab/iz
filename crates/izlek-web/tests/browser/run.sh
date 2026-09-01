@@ -62,3 +62,8 @@ if ! curl -sf "http://127.0.0.1:$port/healthz" > /dev/null; then
 fi
 
 SHOT_DIR="$shots" node "$repo/crates/izlek-web/tests/browser/soft-nav.mjs" "http://127.0.0.1:$port"
+
+# The moment field's own pass. soft-nav ran first and claimed the
+# workspace, so this one signs the same admin in; it claims too when it
+# runs standalone. Either script failing fails the run.
+SHOT_DIR="$shots" node "$repo/crates/izlek-web/tests/browser/moment.mjs" "http://127.0.0.1:$port"

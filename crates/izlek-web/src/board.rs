@@ -81,9 +81,8 @@ async fn create_task_shared(
     column_id: &str,
     description: &str,
     deadline_raw: &str,
-    clock_raw: &str,
+    time_raw: &str,
 ) -> Result<Option<Refusal>> {
-    use time::macros::format_description;
 
     let user = match require_writer(cx).await {
         Ok(user) => user,
@@ -93,16 +92,14 @@ async fn create_task_shared(
     if title.is_empty() {
         return Ok(Some(Refusal::EmptyTitle));
     }
-    let deadline = match deadline_raw.trim() {
-        "" => None,
-        day => match Date::parse(day, format_description!("[year]-[month]-[day]")) {
-            Ok(day) => Some(day),
-            Err(_) => return Ok(Some(Refusal::BadDeadline)),
-        },
-    };
     let zone = izlek_core::detail::parse_zone(&user.timezone);
-    let clock_at = match crate::detail::parse_clock(clock_raw, zone) {
-        Ok(clock_at) => clock_at,
+    let (deadline, clock_at) = match crate::detail::moment_field(
+        Some(deadline_raw),
+        (None, None),
+        Some(time_raw),
+        zone,
+    ) {
+        Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
     let store = accounts(cx).store().clone();
@@ -164,7 +161,7 @@ struct CreateTaskForm {
     #[serde(default)]
     deadline: String,
     #[serde(default)]
-    clock_at: String,
+    clock_time: String,
 }
 
 /// A browser without script's way onto the board: a real form post, same
@@ -177,7 +174,7 @@ async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
         &input.column_id,
         &input.description,
         &input.deadline,
-        &input.clock_at,
+        &input.clock_time,
     )
     .await?
     {

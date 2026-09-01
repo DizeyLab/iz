@@ -90,7 +90,12 @@ impl App {
             .app_context(izlek_web::live::Shutdown(stop.subscribe()))
             .app_context(mail)
             .build();
-        Self { dir, router, store, stop }
+        Self {
+            dir,
+            router,
+            store,
+            stop,
+        }
     }
 
     async fn open() -> Self {
@@ -132,16 +137,18 @@ impl App {
             .app_context(izlek_web::live::Shutdown(stop.subscribe()))
             .app_context(Mail::sending(engine))
             .build();
-        Self { dir, router, store, stop }
+        Self {
+            dir,
+            router,
+            store,
+            stop,
+        }
     }
 
     /// Opens `/api/live`. The response is returned as soon as the handler has
     /// subscribed, so a caller writes AFTER this returns and the announcement
     /// still lands in the feed.
-    async fn live_open(
-        &self,
-        cookie: Option<&str>,
-    ) -> topcoat::router::response::Response<Body> {
+    async fn live_open(&self, cookie: Option<&str>) -> topcoat::router::response::Response<Body> {
         let mut request = Request::builder().method("GET").uri("/api/live");
         if let Some(cookie) = cookie {
             request = request.header(
@@ -149,7 +156,9 @@ impl App {
                 HeaderValue::from_str(&format!("{SESSION_COOKIE}={cookie}")).unwrap(),
             );
         }
-        self.router.handle(request.body(Body::empty()).unwrap()).await
+        self.router
+            .handle(request.body(Body::empty()).unwrap())
+            .await
     }
 
     /// The single workspace's id, read straight off the store: `TursoStore` is
@@ -520,7 +529,11 @@ async fn admin(app: &App) -> String {
 /// invitee's address does. It rides the invite mail this function digs out of
 /// the outbox instead: the newest pending invite queued for that address.
 async fn queued_join_token(app: &App, email: &str) -> String {
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let body = sends
         .into_iter()
         .rev()
@@ -548,7 +561,9 @@ async fn an_admin_can_send_a_signin_link_to_somebody_who_already_has_a_password(
     // `invited` redeems the link, so this member has a password.
     let _member = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
 
-    let page = app.get("/settings?section=members", Some(&admin_cookie)).await;
+    let page = app
+        .get("/settings?section=members", Some(&admin_cookie))
+        .await;
     let page = String::from_utf8_lossy(&page.bytes);
     assert!(
         page.contains("Send a sign-in link"),
@@ -579,7 +594,10 @@ async fn an_admin_can_send_a_signin_link_to_somebody_who_already_has_a_password(
         .post(
             "/api/redeem_link",
             None,
-            &[("token", &token), ("password", "second thoughts about oats")],
+            &[
+                ("token", &token),
+                ("password", "second thoughts about oats"),
+            ],
         )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
@@ -595,7 +613,11 @@ async fn an_admin_can_send_a_signin_link_to_somebody_who_already_has_a_password(
             ],
         )
         .await;
-    assert!(back.session.is_some(), "the new password does not sign in: {}", back.body);
+    assert!(
+        back.session.is_some(),
+        "the new password does not sign in: {}",
+        back.body
+    );
 }
 
 #[tokio::test]
@@ -612,7 +634,11 @@ async fn a_password_may_be_made_of_punctuation() {
         .post(
             "/api/invite_member",
             Some(&admin_cookie),
-            &[("email", email), ("display_name", "Pat"), ("role", "member")],
+            &[
+                ("email", email),
+                ("display_name", "Pat"),
+                ("role", "member"),
+            ],
         )
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
@@ -757,7 +783,11 @@ async fn adding_a_member_mails_them_the_link() {
     assert!(answer.body.contains("nour@izlek.sh"), "{}", answer.body);
     assert!(!answer.body.contains("/join/"), "{}", answer.body);
 
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     let invites: Vec<_> = sends
         .iter()
         .filter(|send| {
@@ -819,7 +849,12 @@ async fn a_resend_queues_another_mail() {
             })
             .count()
     };
-    let before = count(&app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap());
+    let before = count(
+        &app.store
+            .mail_queue(10, izlek_core::store::FeedPage::Newest)
+            .await
+            .unwrap(),
+    );
     assert_eq!(before, 1);
 
     // `resend_link` has no hydrated action to answer with a value here: the
@@ -835,7 +870,12 @@ async fn a_resend_queues_another_mail() {
     let location = resent.location.expect("resend did not redirect");
     assert!(location.contains("mailed=sena%40izlek.sh"), "{location}");
 
-    let after = count(&app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap());
+    let after = count(
+        &app.store
+            .mail_queue(10, izlek_core::store::FeedPage::Newest)
+            .await
+            .unwrap(),
+    );
     assert_eq!(after, 2);
 }
 
@@ -1655,7 +1695,11 @@ async fn taking_a_task_in_and_letting_it_out_are_the_same_form() {
             &[("task_id", &loose), ("parent_id", &parent)],
         )
         .await;
-    assert_eq!(taken.body, "null", "taking it in was refused: {}", taken.body);
+    assert_eq!(
+        taken.body, "null",
+        "taking it in was refused: {}",
+        taken.body
+    );
     let workspace_id = app.workspace_id().await;
     let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
         .await
@@ -1683,7 +1727,11 @@ async fn taking_a_task_in_and_letting_it_out_are_the_same_form() {
             &[("task_id", &loose), ("parent_id", "")],
         )
         .await;
-    assert_eq!(released.body, "null", "letting it out was refused: {}", released.body);
+    assert_eq!(
+        released.body, "null",
+        "letting it out was refused: {}",
+        released.body
+    );
     let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
         .await
         .unwrap()
@@ -1822,7 +1870,10 @@ async fn a_card_wears_its_conditional_classes() {
     .await;
     let page = app.get("/", Some(&admin)).await;
     let page = String::from_utf8_lossy(&page.bytes);
-    assert!(page.contains("card card-done"), "a finished card is not marked");
+    assert!(
+        page.contains("card card-done"),
+        "a finished card is not marked"
+    );
 }
 
 #[tokio::test]
@@ -1956,7 +2007,8 @@ async fn the_morph_keeps_what_the_client_owns_and_names_none_of_it() {
         "the select's hidden state is no longer declared as the client's"
     );
     assert!(
-        page.contains("window.__izlekAdded(trigger)") && page.contains("window.__izlekAdded(panel)"),
+        page.contains("window.__izlekAdded(trigger)")
+            && page.contains("window.__izlekAdded(panel)"),
         "the trigger and panel no longer say they are the client's"
     );
 }
@@ -3287,7 +3339,9 @@ async fn an_admin_sees_who_has_a_password_and_never_a_hash() {
         .await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
 
-    let page = app.get("/settings?section=members", Some(&admin_cookie)).await;
+    let page = app
+        .get("/settings?section=members", Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("mert@izlek.sh"), "{html}");
     assert!(
@@ -3800,7 +3854,9 @@ async fn a_member_uploads_a_file_and_the_chip_comes_back() {
         .await;
     let file_id = attachment_id_named(&snapshot.body, "spec.png");
 
-    let page = app.get(&format!("/?task={task}&tab=files"), Some(&member)).await;
+    let page = app
+        .get(&format!("/?task={task}&tab=files"), Some(&member))
+        .await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
@@ -4932,15 +4988,22 @@ async fn the_topbar_nav_marks_the_active_page() {
     let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
     let page = app.get("/settings", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(r#"href="/settings?section=profile""#), "{html}");
-    assert!(!html.contains("href=\"/settings?section=limits\""), "{html}");
-    assert!(!html.contains("href=\"/settings?section=members\""), "{html}");
+    assert!(
+        html.contains(r#"href="/settings?section=profile""#),
+        "{html}"
+    );
+    assert!(
+        !html.contains("href=\"/settings?section=limits\""),
+        "{html}"
+    );
+    assert!(
+        !html.contains("href=\"/settings?section=members\""),
+        "{html}"
+    );
     assert!(html.contains(r#"id="profile""#), "{html}");
     assert!(!html.contains(r#"id="limits""#), "{html}");
 
-    let page = app
-        .get("/settings?section=limits", Some(&member))
-        .await;
+    let page = app.get("/settings?section=limits", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains(r#"id="profile""#), "{html}");
     assert!(!html.contains(r#"id="limits""#), "{html}");
@@ -5070,14 +5133,23 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
     let send = until_rule_send_to(&app, &rule, "ada@izlek.sh", 0).await;
     assert_eq!(send.recipient, "ada@izlek.sh");
     assert!(
-        app.store.mail_queue(50, izlek_core::store::FeedPage::Newest).await.unwrap().iter().all(|send| {
-            !(send.kind == SendKind::Rule
-                && send.rule_id.as_deref() == Some(rule.as_str())
-                && send.recipient == "deniz@izlek.sh")
-        }),
+        app.store
+            .mail_queue(50, izlek_core::store::FeedPage::Newest)
+            .await
+            .unwrap()
+            .iter()
+            .all(|send| {
+                !(send.kind == SendKind::Rule
+                    && send.rule_id.as_deref() == Some(rule.as_str())
+                    && send.recipient == "deniz@izlek.sh")
+            }),
         "the commenter was mailed instead of the creator"
     );
-    let decisions = app.store.recent_mail_decisions(50, izlek_core::store::FeedPage::Newest).await.unwrap();
+    let decisions = app
+        .store
+        .recent_mail_decisions(50, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
     assert!(
         decisions.iter().any(|decision| decision.rule_id == rule
             && matches!(decision.outcome, izlek_core::store::MailOutcome::Owed)),
@@ -5167,11 +5239,16 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
 
     until_rule_send_to(&app, &rule, "ada@izlek.sh", already).await;
     assert!(
-        app.store.mail_queue(50, izlek_core::store::FeedPage::Newest).await.unwrap().iter().all(|send| {
-            !(send.kind == SendKind::Rule
-                && send.rule_id.as_deref() == Some(rule.as_str())
-                && send.recipient == "deniz@izlek.sh")
-        }),
+        app.store
+            .mail_queue(50, izlek_core::store::FeedPage::Newest)
+            .await
+            .unwrap()
+            .iter()
+            .all(|send| {
+                !(send.kind == SendKind::Rule
+                    && send.rule_id.as_deref() == Some(rule.as_str())
+                    && send.recipient == "deniz@izlek.sh")
+            }),
         "the renamer was mailed instead of being excluded as the actor"
     );
 
@@ -5648,7 +5725,11 @@ async fn the_activity_filter_narrows_and_the_position_note_counts_the_match() {
 
     let t0 = time::OffsetDateTime::now_utc();
     for i in 0..60 {
-        let actor = if i % 2 == 0 { Some(admin_id.as_str()) } else { Some(member_id.as_str()) };
+        let actor = if i % 2 == 0 {
+            Some(admin_id.as_str())
+        } else {
+            Some(member_id.as_str())
+        };
         app.store
             .record_event(
                 actor,
@@ -5660,27 +5741,42 @@ async fn the_activity_filter_narrows_and_the_position_note_counts_the_match() {
             .unwrap();
     }
 
-    let all = app.get("/logs?section=activity&kind=row", Some(&admin_cookie)).await;
+    let all = app
+        .get("/logs?section=activity&kind=row", Some(&admin_cookie))
+        .await;
     let all_html = String::from_utf8_lossy(&all.bytes).into_owned();
     assert!(all_html.contains("1\u{2013}"), "{all_html}");
     assert!(all_html.contains("/ 60</span>"), "{all_html}");
 
     let by_actor = app
-        .get(&format!("/logs?section=activity&kind=row&actor={member_id}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&kind=row&actor={member_id}"),
+            Some(&admin_cookie),
+        )
         .await;
     let by_actor_html = String::from_utf8_lossy(&by_actor.bytes).into_owned();
     assert!(by_actor_html.contains("/ 30</span>"), "{by_actor_html}");
 
-    let oldest = app.get("/logs?section=activity&kind=row&dir=oldest", Some(&admin_cookie)).await;
+    let oldest = app
+        .get(
+            "/logs?section=activity&kind=row&dir=oldest",
+            Some(&admin_cookie),
+        )
+        .await;
     let oldest_html = String::from_utf8_lossy(&oldest.bytes).into_owned();
     assert!(oldest_html.contains("row 0<"), "{oldest_html}");
 
     let garbage = app
-        .get("/logs?section=activity&actor=zz&kind=zz&on=zz", Some(&admin_cookie))
+        .get(
+            "/logs?section=activity&actor=zz&kind=zz&on=zz",
+            Some(&admin_cookie),
+        )
         .await;
     assert_eq!(garbage.status, 200);
 
-    let refused = app.get("/logs?section=activity&actor=x", Some(&member)).await;
+    let refused = app
+        .get("/logs?section=activity&actor=x", Some(&member))
+        .await;
     let refused_html = String::from_utf8_lossy(&refused.bytes);
     assert!(refused_html.contains("Not permitted."), "{refused_html}");
 }
@@ -5695,7 +5791,12 @@ async fn the_kind_filter_shows_only_that_kinds_rows() {
     let t0 = time::OffsetDateTime::now_utc();
     for i in 0..5 {
         app.store
-            .record_event(None, &izlek_core::detail::ActivityKind::Created, "", t0 + time::Duration::seconds(i))
+            .record_event(
+                None,
+                &izlek_core::detail::ActivityKind::Created,
+                "",
+                t0 + time::Duration::seconds(i),
+            )
             .await
             .unwrap();
     }
@@ -5739,7 +5840,10 @@ async fn the_task_filter_shows_only_that_tasks_rows() {
         .task_key;
 
     let narrowed = app
-        .get(&format!("/logs?section=activity&task={alpha_key}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&task={alpha_key}"),
+            Some(&admin_cookie),
+        )
         .await;
     let html = String::from_utf8_lossy(&narrowed.bytes).into_owned();
     assert!(html.contains("log-title\">Task Alpha<"), "{html}");
@@ -5827,10 +5931,18 @@ async fn the_day_filter_keeps_only_that_days_rows() {
             .await
             .unwrap();
     }
-    let on = format!("{:04}-{:02}-{:02}", today.year(), today.month() as u8, today.day());
+    let on = format!(
+        "{:04}-{:02}-{:02}",
+        today.year(),
+        today.month() as u8,
+        today.day()
+    );
 
     let narrowed = app
-        .get(&format!("/logs?section=activity&on={on}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&on={on}"),
+            Some(&admin_cookie),
+        )
         .await;
     let html = String::from_utf8_lossy(&narrowed.bytes).into_owned();
     assert!(html.contains("today-row"), "{html}");
@@ -5845,8 +5957,8 @@ async fn the_range_filter_keeps_the_inclusive_span() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    let base = time::OffsetDateTime::now_utc()
-        .replace_time(time::Time::from_hms(12, 0, 0).unwrap());
+    let base =
+        time::OffsetDateTime::now_utc().replace_time(time::Time::from_hms(12, 0, 0).unwrap());
     for i in 0..5i64 {
         let day = base + time::Duration::days(i);
         app.store
@@ -5859,12 +5971,17 @@ async fn the_range_filter_keeps_the_inclusive_span() {
             .await
             .unwrap();
     }
-    let ymd = |dt: time::OffsetDateTime| format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day());
+    let ymd = |dt: time::OffsetDateTime| {
+        format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day())
+    };
     let from = ymd(base + time::Duration::days(1));
     let to = ymd(base + time::Duration::days(3));
 
     let ranged = app
-        .get(&format!("/logs?section=activity&from={from}&to={to}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&from={from}&to={to}"),
+            Some(&admin_cookie),
+        )
         .await;
     let html = String::from_utf8_lossy(&ranged.bytes).into_owned();
     assert!(!html.contains("day0-row"), "{html}");
@@ -5875,7 +5992,10 @@ async fn the_range_filter_keeps_the_inclusive_span() {
     assert!(!html.contains("day4-row"), "{html}");
 
     let from_only = app
-        .get(&format!("/logs?section=activity&from={from}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&from={from}"),
+            Some(&admin_cookie),
+        )
         .await;
     let from_only_html = String::from_utf8_lossy(&from_only.bytes).into_owned();
     assert!(!from_only_html.contains("day0-row"), "{from_only_html}");
@@ -5883,7 +6003,10 @@ async fn the_range_filter_keeps_the_inclusive_span() {
     assert!(from_only_html.contains("day4-row"), "{from_only_html}");
 
     let to_only = app
-        .get(&format!("/logs?section=activity&to={to}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&to={to}"),
+            Some(&admin_cookie),
+        )
         .await;
     let to_only_html = String::from_utf8_lossy(&to_only.bytes).into_owned();
     assert!(to_only_html.contains("day0-row"), "{to_only_html}");
@@ -5895,21 +6018,32 @@ async fn the_range_filter_keeps_the_inclusive_span() {
     // the raw (reversed) query values so it does not overrule what the user
     // typed.
     let reversed = app
-        .get(&format!("/logs?section=activity&from={to}&to={from}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&from={to}&to={from}"),
+            Some(&admin_cookie),
+        )
         .await;
     let reversed_html = String::from_utf8_lossy(&reversed.bytes).into_owned();
     for i in 1..=3 {
-        assert!(reversed_html.contains(&format!("day{i}-row")), "{reversed_html}");
+        assert!(
+            reversed_html.contains(&format!("day{i}-row")),
+            "{reversed_html}"
+        );
     }
     assert!(!reversed_html.contains("day0-row"), "{reversed_html}");
     assert!(!reversed_html.contains("day4-row"), "{reversed_html}");
 
     // Garbage bounds narrow nothing rather than 500ing.
-    let garbage = app.get("/logs?section=activity&from=zz&to=zz", Some(&admin_cookie)).await;
+    let garbage = app
+        .get("/logs?section=activity&from=zz&to=zz", Some(&admin_cookie))
+        .await;
     assert_eq!(garbage.status, StatusCode::OK);
     let garbage_html = String::from_utf8_lossy(&garbage.bytes).into_owned();
     for i in 0..5 {
-        assert!(garbage_html.contains(&format!("day{i}-row")), "{garbage_html}");
+        assert!(
+            garbage_html.contains(&format!("day{i}-row")),
+            "{garbage_html}"
+        );
     }
 }
 
@@ -5936,10 +6070,14 @@ async fn the_older_href_round_trips_the_range_filter() {
     let to = from.clone();
 
     let first = app
-        .get(&format!("/logs?section=activity&from={from}&to={to}"), Some(&admin_cookie))
+        .get(
+            &format!("/logs?section=activity&from={from}&to={to}"),
+            Some(&admin_cookie),
+        )
         .await;
     let first_html = String::from_utf8_lossy(&first.bytes).into_owned();
-    let older_href = extract_href(&first_html, "/logs?section=activity&amp;before=").replace("&amp;", "&");
+    let older_href =
+        extract_href(&first_html, "/logs?section=activity&amp;before=").replace("&amp;", "&");
     assert!(older_href.contains(&format!("from={from}")), "{older_href}");
     assert!(older_href.contains(&format!("to={to}")), "{older_href}");
 }
@@ -6008,11 +6146,15 @@ async fn the_older_href_round_trips_the_active_filter() {
     }
 
     let first = app
-        .get("/logs?section=activity&kind=target&dir=oldest", Some(&admin_cookie))
+        .get(
+            "/logs?section=activity&kind=target&dir=oldest",
+            Some(&admin_cookie),
+        )
         .await;
     let first_html = String::from_utf8_lossy(&first.bytes).into_owned();
     assert!(!first_html.contains("foreign"), "{first_html}");
-    let older_href = extract_href(&first_html, "/logs?section=activity&amp;before=").replace("&amp;", "&");
+    let older_href =
+        extract_href(&first_html, "/logs?section=activity&amp;before=").replace("&amp;", "&");
     assert!(older_href.contains("kind=target"), "{older_href}");
     assert!(older_href.contains("dir=oldest"), "{older_href}");
 
@@ -6054,7 +6196,12 @@ async fn current_logs_json_ignores_the_rows_cookie() {
     assert!(answer.body.contains("\"decisions\""), "{}", answer.body);
     assert!(answer.body.contains("\"activity\""), "{}", answer.body);
     let activity_rows = answer.body.matches("\"sentence\":").count();
-    assert!(activity_rows <= 50, "{} rows: {}", activity_rows, answer.body);
+    assert!(
+        activity_rows <= 50,
+        "{} rows: {}",
+        activity_rows,
+        answer.body
+    );
 }
 
 /// A photo needs a session: signed out gets the same 404 an unknown id
@@ -6117,7 +6264,11 @@ async fn an_invite_refusal_lands_on_the_members_section() {
 /// Seeds one decision and one accepted send directly on the store — the
 /// engine's own timing is not what these notification tests are about — and
 /// hands back the task and the send's id.
-async fn a_task_with_a_notification(app: &App, admin_cookie: &str, subject: &str) -> (String, String) {
+async fn a_task_with_a_notification(
+    app: &App,
+    admin_cookie: &str,
+    subject: &str,
+) -> (String, String) {
     let columns = columns_of(app).await;
     let task = a_task(app, admin_cookie, &columns[0], "Ship it").await;
     let admin_id = person_id(app, admin_cookie, &task, "Ada Lovelace").await;
@@ -6176,7 +6327,9 @@ async fn a_tasks_notifications_show_the_recipient_and_the_rule_name_is_admin_onl
     let (task, _send_id) =
         a_task_with_a_notification(&app, &admin_cookie, "Wraps up the sprint").await;
 
-    let member_page = app.get(&format!("/?task={task}&tab=mail"), Some(&member)).await;
+    let member_page = app
+        .get(&format!("/?task={task}&tab=mail"), Some(&member))
+        .await;
     let member_html = String::from_utf8_lossy(&member_page.bytes);
     assert!(member_html.contains("ada@izlek.sh"), "{member_html}");
     assert!(
@@ -6188,7 +6341,9 @@ async fn a_tasks_notifications_show_the_recipient_and_the_rule_name_is_admin_onl
         "a member was shown the rule's name: {member_html}"
     );
 
-    let admin_page = app.get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie)).await;
+    let admin_page = app
+        .get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie))
+        .await;
     let admin_html = String::from_utf8_lossy(&admin_page.bytes);
     assert!(admin_html.contains("ada@izlek.sh"), "{admin_html}");
     assert!(admin_html.contains("Wraps up the sprint"), "{admin_html}");
@@ -6250,7 +6405,9 @@ async fn a_task_with_no_mail_shows_the_quiet_notifications_line() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Nobody mails me").await;
 
-    let page = app.get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("NOTIFICATIONS"), "{html}");
     assert!(html.contains("Nothing yet."), "{html}");
@@ -6262,8 +6419,7 @@ async fn a_task_with_no_mail_shows_the_quiet_notifications_line() {
 async fn an_admin_retries_a_failed_send_and_it_rejoins_the_queue() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let (task, send_id) =
-        a_task_with_a_notification(&app, &admin_cookie, "Never got there").await;
+    let (task, send_id) = a_task_with_a_notification(&app, &admin_cookie, "Never got there").await;
     let now = time::OffsetDateTime::now_utc();
     app.store
         .record_send_refused(&send_id, "timeout", Some(now), now)
@@ -6271,7 +6427,11 @@ async fn an_admin_retries_a_failed_send_and_it_rejoins_the_queue() {
         .unwrap();
 
     let answer = app
-        .post("/api/retry_send", Some(&admin_cookie), &[("send_id", &send_id)])
+        .post(
+            "/api/retry_send",
+            Some(&admin_cookie),
+            &[("send_id", &send_id)],
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert_eq!(answer.body, "null", "{}", answer.body);
@@ -6286,7 +6446,9 @@ async fn an_admin_retries_a_failed_send_and_it_rejoins_the_queue() {
         "the retry is not due right away: {reread:?}"
     );
 
-    let logs = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    let logs = app
+        .post("/api/current_logs", Some(&admin_cookie), &[])
+        .await;
     assert!(
         logs.body.contains("\"recipient\":\"ada@izlek.sh\""),
         "the retried send did not rejoin the queue: {}",
@@ -6316,7 +6478,11 @@ async fn a_member_may_not_retry_a_send() {
 
     let sends = app.store.sends_for_task(&task, 10).await.unwrap();
     let reread = sends.iter().find(|s| s.id == send_id).unwrap();
-    assert_eq!(reread.state, SendState::Failed, "the refused retry moved it anyway");
+    assert_eq!(
+        reread.state,
+        SendState::Failed,
+        "the refused retry moved it anyway"
+    );
 
     let member_page = app.get(&format!("/?task={task}"), Some(&member)).await;
     let member_html = String::from_utf8_lossy(&member_page.bytes);
@@ -6332,14 +6498,22 @@ async fn retrying_an_already_sent_send_changes_nothing() {
         a_task_with_a_notification(&app, &admin_cookie, "Already on its way").await;
 
     let answer = app
-        .post("/api/retry_send", Some(&admin_cookie), &[("send_id", &send_id)])
+        .post(
+            "/api/retry_send",
+            Some(&admin_cookie),
+            &[("send_id", &send_id)],
+        )
         .await;
     assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
     assert_eq!(answer.body, "null", "{}", answer.body);
 
     let sends = app.store.sends_for_task(&task, 10).await.unwrap();
     let reread = sends.iter().find(|s| s.id == send_id).unwrap();
-    assert_eq!(reread.state, SendState::Sent, "a sent send was touched by a retry");
+    assert_eq!(
+        reread.state,
+        SendState::Sent,
+        "a sent send was touched by a retry"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -6351,23 +6525,44 @@ async fn an_admin_sends_a_message_to_one_member() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let _ = invited(&app, &admin_cookie, "emre@izlek.sh", "Emre", Role::Member).await;
-    let mert_id = app.store.user_by_email(&app.workspace_id().await, "emre@izlek.sh").await.unwrap().unwrap().id;
+    let mert_id = app
+        .store
+        .user_by_email(&app.workspace_id().await, "emre@izlek.sh")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
 
     let answer = app
         .post(
             "/api/send_message",
             Some(&admin_cookie),
-            &[("to", &mert_id), ("subject", "Heads up"), ("body", "Standup moved to 10.")],
+            &[
+                ("to", &mert_id),
+                ("subject", "Heads up"),
+                ("body", "Standup moved to 10."),
+            ],
         )
         .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("saved=send_message"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=send_message"),
         "{:?}",
         answer.location
     );
 
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
-    let notices: Vec<_> = sends.iter().filter(|send| send.kind == SendKind::Notice).collect();
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    let notices: Vec<_> = sends
+        .iter()
+        .filter(|send| send.kind == SendKind::Notice)
+        .collect();
     assert_eq!(notices.len(), 1, "{sends:?}");
     let notice = notices[0];
     assert_eq!(notice.recipient, "emre@izlek.sh");
@@ -6390,19 +6585,37 @@ async fn an_admin_sends_a_message_to_everyone_and_not_to_themself() {
         .post(
             "/api/send_message",
             Some(&admin_cookie),
-            &[("to", "everyone"), ("subject", "All hands"), ("body", "Board meeting Friday.")],
+            &[
+                ("to", "everyone"),
+                ("subject", "All hands"),
+                ("body", "Board meeting Friday."),
+            ],
         )
         .await;
     assert!(
-        answer.location.as_deref().unwrap_or_default().contains("saved=send_message"),
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=send_message"),
         "{:?}",
         answer.location
     );
 
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
-    let notices: Vec<_> = sends.iter().filter(|send| send.kind == SendKind::Notice).collect();
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    let notices: Vec<_> = sends
+        .iter()
+        .filter(|send| send.kind == SendKind::Notice)
+        .collect();
     assert_eq!(notices.len(), 2, "{sends:?}");
-    assert!(notices.iter().all(|send| send.recipient != "ada@izlek.sh"), "{sends:?}");
+    assert!(
+        notices.iter().all(|send| send.recipient != "ada@izlek.sh"),
+        "{sends:?}"
+    );
 }
 
 #[tokio::test]
@@ -6415,7 +6628,11 @@ async fn a_blank_subject_or_body_refuses_and_queues_nothing() {
         .post(
             "/api/send_message",
             Some(&admin_cookie),
-            &[("to", "everyone"), ("subject", "   "), ("body", "Something")],
+            &[
+                ("to", "everyone"),
+                ("subject", "   "),
+                ("body", "Something"),
+            ],
         )
         .await;
     assert!(
@@ -6445,8 +6662,15 @@ async fn a_blank_subject_or_body_refuses_and_queues_nothing() {
         answer.location
     );
 
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
-    assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    assert!(
+        sends.iter().all(|send| send.kind != SendKind::Notice),
+        "{sends:?}"
+    );
 
     let location = answer.location.expect("no redirect");
     let page = app.get(&location, Some(&admin_cookie)).await;
@@ -6464,7 +6688,11 @@ async fn a_member_may_not_send_a_message_and_never_sees_the_panel() {
         .post(
             "/api/send_message",
             Some(&member),
-            &[("to", "everyone"), ("subject", "Sneaky"), ("body", "Should not send")],
+            &[
+                ("to", "everyone"),
+                ("subject", "Sneaky"),
+                ("body", "Should not send"),
+            ],
         )
         .await;
     assert!(
@@ -6477,8 +6705,15 @@ async fn a_member_may_not_send_a_message_and_never_sees_the_panel() {
         answer.location
     );
 
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
-    assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    assert!(
+        sends.iter().all(|send| send.kind != SendKind::Notice),
+        "{sends:?}"
+    );
 
     let page = app.get("/settings", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
@@ -6496,10 +6731,19 @@ async fn an_unknown_recipient_refuses_and_never_broadcasts() {
         .post(
             "/api/send_message",
             Some(&admin_cookie),
-            &[("to", "not-a-real-id"), ("subject", "Subject"), ("body", "Body")],
+            &[
+                ("to", "not-a-real-id"),
+                ("subject", "Subject"),
+                ("body", "Body"),
+            ],
         )
         .await;
-    assert_ne!(answer.status, StatusCode::INTERNAL_SERVER_ERROR, "{}", answer.body);
+    assert_ne!(
+        answer.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        answer.body
+    );
     assert!(
         answer
             .location
@@ -6510,10 +6754,16 @@ async fn an_unknown_recipient_refuses_and_never_broadcasts() {
         answer.location
     );
 
-    let sends = app.store.mail_queue(10, izlek_core::store::FeedPage::Newest).await.unwrap();
-    assert!(sends.iter().all(|send| send.kind != SendKind::Notice), "{sends:?}");
+    let sends = app
+        .store
+        .mail_queue(10, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    assert!(
+        sends.iter().all(|send| send.kind != SendKind::Notice),
+        "{sends:?}"
+    );
 }
-
 
 /// The markup inside a single tab anchor: found by its `tab=<slug>` href, up
 /// to that anchor's own closing tag — for asserting a `detail-tab-count`
@@ -6537,7 +6787,9 @@ async fn opening_the_task_with_no_tab_shows_the_task_region_and_the_strip() {
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Land on the task tab").await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
@@ -6627,7 +6879,9 @@ async fn the_tab_strip_counts_files_and_comments_and_is_silent_when_there_are_no
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Nothing attached yet").await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
         !tab_anchor(&html, "files").contains("detail-tab-count"),
@@ -6653,7 +6907,9 @@ async fn the_tab_strip_counts_files_and_comments_and_is_silent_when_there_are_no
     )
     .await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
         tab_anchor(&html, "files").contains(r#"class="detail-tab-count">1<"#),
@@ -6834,8 +7090,7 @@ async fn a_status_rule_may_watch_every_column() {
 async fn the_queue_says_when_the_next_try_fires() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let (_task, send_id) =
-        a_task_with_a_notification(&app, &admin_cookie, "Never got there").await;
+    let (_task, send_id) = a_task_with_a_notification(&app, &admin_cookie, "Never got there").await;
     let now = time::OffsetDateTime::now_utc();
 
     let later = now + time::Duration::hours(2);
@@ -6843,7 +7098,9 @@ async fn the_queue_says_when_the_next_try_fires() {
         .record_send_refused(&send_id, "timeout", Some(later), now)
         .await
         .unwrap();
-    let logs = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    let logs = app
+        .post("/api/current_logs", Some(&admin_cookie), &[])
+        .await;
     assert!(
         logs.body.contains("next try"),
         "the queue does not say when the retry fires: {}",
@@ -6852,10 +7109,17 @@ async fn the_queue_says_when_the_next_try_fires() {
 
     // Once the moment has passed the row is waiting on the next sweep.
     app.store
-        .record_send_refused(&send_id, "timeout", Some(now - time::Duration::hours(1)), now)
+        .record_send_refused(
+            &send_id,
+            "timeout",
+            Some(now - time::Duration::hours(1)),
+            now,
+        )
         .await
         .unwrap();
-    let logs = app.post("/api/current_logs", Some(&admin_cookie), &[]).await;
+    let logs = app
+        .post("/api/current_logs", Some(&admin_cookie), &[])
+        .await;
     assert!(
         logs.body.contains("\"next_attempt\":\"due\""),
         "a retry already owed does not say so: {}",
@@ -6973,7 +7237,10 @@ async fn a_big_sheet_pages_down_its_rows_and_across_its_columns() {
         )
         .await;
     let html = String::from_utf8_lossy(&first.bytes);
-    assert!(html.contains("Col A"), "the first column is missing: {html}");
+    assert!(
+        html.contains("Col A"),
+        "the first column is missing: {html}"
+    );
     assert!(!html.contains("Col M"), "the window is not 12 wide: {html}");
     assert!(html.contains("A–L / 40"), "no column count: {html}");
     assert!(html.contains("1–8 / 8"), "no row count: {html}");
@@ -7010,7 +7277,6 @@ async fn a_big_sheet_pages_down_its_rows_and_across_its_columns() {
     assert!(html.contains("sheet-table"), "the grid is gone: {html}");
     assert!(!html.contains("Col A"), "row 4951 is not row 1: {html}");
 }
-
 
 // -- the live channel -------------------------------------------------------
 
@@ -7132,7 +7398,10 @@ async fn the_live_script_is_emitted_once_and_guarded() {
         2,
         "the live script should appear once, as a guard read and a guard set"
     );
-    assert!(html.contains("EventSource('/api/live')"), "no live connection");
+    assert!(
+        html.contains("EventSource('/api/live')"),
+        "no live connection"
+    );
 }
 
 /// A signed-out page opens no stream: `/api/live` refuses it, and a tab on the
@@ -7183,7 +7452,10 @@ async fn a_live_update_morphs_rather_than_replacing_the_page() {
     let boss = admin(&app).await;
     let html = String::from_utf8(app.get("/", Some(&boss)).await.bytes).unwrap();
 
-    assert!(html.contains("function morph("), "no morph: the live path replaces the page");
+    assert!(
+        html.contains("function morph("),
+        "no morph: the live path replaces the page"
+    );
     assert!(
         html.contains("swap(t, r.url, false, false, true)"),
         "the live refresh does not ask for a morphing swap"
@@ -7200,8 +7472,14 @@ async fn a_live_update_morphs_rather_than_replacing_the_page() {
         html.contains("document.body.replaceChildren()"),
         "the full-replace path is gone, so form posts would carry stale state"
     );
-    assert!(html.contains("captureFields"), "the swap captures no field state");
-    assert!(html.contains("restoreFields"), "the swap restores no field state");
+    assert!(
+        html.contains("captureFields"),
+        "the swap captures no field state"
+    );
+    assert!(
+        html.contains("restoreFields"),
+        "the swap restores no field state"
+    );
 }
 
 /// A promise about the future is shown to the second. A retry that says 16:42
@@ -7222,7 +7500,9 @@ async fn the_queues_next_try_is_shown_to_the_second() {
         .unwrap();
 
     let html = String::from_utf8(app.get("/logs?section=queue", Some(&boss)).await.bytes).unwrap();
-    let (_, after) = html.split_once("rule-stamp").expect("no next-try stamp on the queue");
+    let (_, after) = html
+        .split_once("rule-stamp")
+        .expect("no next-try stamp on the queue");
     let stamp: String = after.chars().take(60).collect();
     // hh:mm:ss — three groups, not two.
     let seconds = stamp
@@ -7267,7 +7547,10 @@ async fn a_refused_handshake_is_shown_with_what_the_server_said() {
         html.contains("535 authentication failed"),
         "the server's words are not on the page: {html}"
     );
-    assert!(!html.contains("chip-connected"), "a refusal rendered as connected");
+    assert!(
+        !html.contains("chip-connected"),
+        "a refusal rendered as connected"
+    );
 }
 
 /// A handshake that worked says when, because the claim is about a moment: a
@@ -7308,7 +7591,10 @@ async fn a_member_may_not_check_the_sender() {
     let boss = admin(&app).await;
     let member = invited(&app, &boss, "bo@izlek.sh", "Bo", Role::Member).await;
     let answer = app.post("/api/check_sender", Some(&member), &[]).await;
-    assert_ne!(answer.body, "null", "a member was allowed to dial the server");
+    assert_ne!(
+        answer.body, "null",
+        "a member was allowed to dial the server"
+    );
 }
 
 // --- tags -------------------------------------------------------------------
@@ -7316,7 +7602,9 @@ async fn a_member_may_not_check_the_sender() {
 /// Makes a tag over HTTP and hands the store row back — the tests need the
 /// id, and the mutation itself is still a real post.
 async fn a_tag(app: &App, cookie: &str, name: &str) -> izlek_core::store::Tag {
-    let answer = app.post("/api/create_tag", Some(cookie), &[("name", name)]).await;
+    let answer = app
+        .post("/api/create_tag", Some(cookie), &[("name", name)])
+        .await;
     assert_eq!(answer.body, "null", "the tag was refused: {}", answer.body);
     let workspace_id = app.workspace_id().await;
     let board = app
@@ -7340,7 +7628,9 @@ async fn a_non_admin_cannot_create_rename_delete_or_move_a_tag() {
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
 
-    let create = app.post("/api/create_tag", Some(&member), &[("name", "Sneak")]).await;
+    let create = app
+        .post("/api/create_tag", Some(&member), &[("name", "Sneak")])
+        .await;
     assert!(create.body.contains("Forbidden"), "{}", create.body);
     let rename = app
         .post(
@@ -7350,7 +7640,9 @@ async fn a_non_admin_cannot_create_rename_delete_or_move_a_tag() {
         )
         .await;
     assert!(rename.body.contains("Forbidden"), "{}", rename.body);
-    let delete = app.post("/api/delete_tag", Some(&member), &[("tag_id", "t1")]).await;
+    let delete = app
+        .post("/api/delete_tag", Some(&member), &[("tag_id", "t1")])
+        .await;
     assert!(delete.body.contains("Forbidden"), "{}", delete.body);
     let move_it = app
         .post(
@@ -7366,7 +7658,14 @@ async fn a_non_admin_cannot_create_rename_delete_or_move_a_tag() {
 async fn a_viewer_cannot_set_a_task_tag() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let viewer = invited(&app, &admin_cookie, "hush@izlek.sh", "Hush Rao", Role::Viewer).await;
+    let viewer = invited(
+        &app,
+        &admin_cookie,
+        "hush@izlek.sh",
+        "Hush Rao",
+        Role::Viewer,
+    )
+    .await;
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Label me not").await;
     let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
@@ -7408,14 +7707,31 @@ async fn the_task_modal_lists_every_tag_and_names_the_current_one() {
     let selected = |html: &str, id: &str| html.contains(&format!(r#"value="{id}" selected"#));
 
     let page = String::from_utf8(
-        app.get(&format!("/?task={task}"), Some(&admin_cookie)).await.bytes,
+        app.get(&format!("/?task={task}"), Some(&admin_cookie))
+            .await
+            .bytes,
     )
     .unwrap();
-    assert!(page.contains(r#"name="tag_id""#), "no tag field in the modal: {page}");
-    assert!(page.contains("General"), "the default tag is not offered: {page}");
-    assert!(page.contains("Aurora"), "the new tag is not offered: {page}");
-    assert!(selected(&page, &default_id), "the current tag is not named: {page}");
-    assert!(!selected(&page, &aurora.id), "an unchosen tag reads as current: {page}");
+    assert!(
+        page.contains(r#"name="tag_id""#),
+        "no tag field in the modal: {page}"
+    );
+    assert!(
+        page.contains("General"),
+        "the default tag is not offered: {page}"
+    );
+    assert!(
+        page.contains("Aurora"),
+        "the new tag is not offered: {page}"
+    );
+    assert!(
+        selected(&page, &default_id),
+        "the current tag is not named: {page}"
+    );
+    assert!(
+        !selected(&page, &aurora.id),
+        "an unchosen tag reads as current: {page}"
+    );
 
     let switched = app
         .post(
@@ -7424,14 +7740,26 @@ async fn the_task_modal_lists_every_tag_and_names_the_current_one() {
             &[("task_id", &task), ("tag_id", &aurora.id)],
         )
         .await;
-    assert_eq!(switched.body, "null", "the switch was refused: {}", switched.body);
+    assert_eq!(
+        switched.body, "null",
+        "the switch was refused: {}",
+        switched.body
+    );
 
     let page = String::from_utf8(
-        app.get(&format!("/?task={task}"), Some(&admin_cookie)).await.bytes,
+        app.get(&format!("/?task={task}"), Some(&admin_cookie))
+            .await
+            .bytes,
     )
     .unwrap();
-    assert!(selected(&page, &aurora.id), "the switch did not name Aurora: {page}");
-    assert!(!selected(&page, &default_id), "the old tag still reads current: {page}");
+    assert!(
+        selected(&page, &aurora.id),
+        "the switch did not name Aurora: {page}"
+    );
+    assert!(
+        !selected(&page, &default_id),
+        "the old tag still reads current: {page}"
+    );
 }
 
 #[tokio::test]
@@ -7451,7 +7779,11 @@ async fn the_board_tag_filter_narrows_cards_and_an_unknown_tag_falls_back_to_all
             &[("task_id", &second), ("tag_id", &boreal.id)],
         )
         .await;
-    assert_eq!(switched.body, "null", "the switch was refused: {}", switched.body);
+    assert_eq!(
+        switched.body, "null",
+        "the switch was refused: {}",
+        switched.body
+    );
 
     let tagged = app
         .post(
@@ -7460,7 +7792,11 @@ async fn the_board_tag_filter_narrows_cards_and_an_unknown_tag_falls_back_to_all
             &[("task_id", &first), ("tag_id", &aurora.id)],
         )
         .await;
-    assert_eq!(tagged.body, "null", "the first switch was refused: {}", tagged.body);
+    assert_eq!(
+        tagged.body, "null",
+        "the first switch was refused: {}",
+        tagged.body
+    );
 
     let filtered = String::from_utf8(
         app.get(&format!("/?tag={}", aurora.id), Some(&admin_cookie))
@@ -7468,16 +7804,17 @@ async fn the_board_tag_filter_narrows_cards_and_an_unknown_tag_falls_back_to_all
             .bytes,
     )
     .unwrap();
-    assert!(filtered.contains("Aurora work"), "the tagged card is gone: {filtered}");
+    assert!(
+        filtered.contains("Aurora work"),
+        "the tagged card is gone: {filtered}"
+    );
     assert!(
         !filtered.contains("Boreal work"),
         "the other card did not filter out: {filtered}"
     );
 
-    let everything = String::from_utf8(
-        app.get("/?tag=bogus", Some(&admin_cookie)).await.bytes,
-    )
-    .unwrap();
+    let everything =
+        String::from_utf8(app.get("/?tag=bogus", Some(&admin_cookie)).await.bytes).unwrap();
     assert!(
         everything.contains("Aurora work") && everything.contains("Boreal work"),
         "an unknown tag did not fall back to all: {everything}"
@@ -7512,7 +7849,11 @@ async fn the_default_tag_cannot_be_deleted_and_ships_no_delete_button() {
         .id;
 
     let refused = app
-        .post("/api/delete_tag", Some(&admin_cookie), &[("tag_id", &default_id)])
+        .post(
+            "/api/delete_tag",
+            Some(&admin_cookie),
+            &[("tag_id", &default_id)],
+        )
         .await;
     assert!(refused.body.contains("Unavailable"), "{}", refused.body);
 
@@ -7522,7 +7863,10 @@ async fn the_default_tag_cannot_be_deleted_and_ships_no_delete_button() {
         1,
         "the default tag's row ships a delete control: {page}"
     );
-    assert!(page.contains("Aurora"), "the created tag is not listed: {page}");
+    assert!(
+        page.contains("Aurora"),
+        "the created tag is not listed: {page}"
+    );
 }
 
 /// A tag with cards on it stays: no delete control on its row, and the call
@@ -7534,7 +7878,12 @@ async fn a_tag_with_cards_on_it_cannot_be_deleted() {
     let admin_cookie = admin(&app).await;
     let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
     let workspace_id = app.workspace_id().await;
-    let board = app.store.board(&workspace_id).await.unwrap().expect("no board");
+    let board = app
+        .store
+        .board(&workspace_id)
+        .await
+        .unwrap()
+        .expect("no board");
     let open = app.store.columns(&board.id).await.unwrap()[0].id.clone();
     let admin_id = app
         .store
@@ -7560,7 +7909,11 @@ async fn a_tag_with_cards_on_it_cannot_be_deleted() {
     );
 
     let refused = app
-        .post("/api/delete_tag", Some(&admin_cookie), &[("tag_id", &aurora.id)])
+        .post(
+            "/api/delete_tag",
+            Some(&admin_cookie),
+            &[("tag_id", &aurora.id)],
+        )
         .await;
     assert!(
         refused.body.contains("TagInUse"),
@@ -7587,7 +7940,11 @@ async fn a_tag_with_cards_on_it_cannot_be_deleted() {
     let page = String::from_utf8(app.get("/tags", Some(&admin_cookie)).await.bytes).unwrap();
     assert_eq!(page.matches(r#"action="/api/delete_tag""#).count(), 1);
     let gone = app
-        .post("/api/delete_tag", Some(&admin_cookie), &[("tag_id", &aurora.id)])
+        .post(
+            "/api/delete_tag",
+            Some(&admin_cookie),
+            &[("tag_id", &aurora.id)],
+        )
         .await;
     assert!(!gone.body.contains("TagInUse"), "{}", gone.body);
     assert_eq!(app.store.tags(&board.id).await.unwrap().len(), 1);
@@ -7631,7 +7988,13 @@ async fn a_live_stream_ends_when_the_server_is_told_to_stop() {
 
 /// One task row id, for the profile fixture. Fixture setup goes through the
 /// store directly, the way `record_sender_check`'s test does.
-async fn a_task_by(app: &App, board_id: &str, column_id: &str, title: &str, creator: &str) -> String {
+async fn a_task_by(
+    app: &App,
+    board_id: &str,
+    column_id: &str,
+    title: &str,
+    creator: &str,
+) -> String {
     app.store
         .create_task(izlek_core::store::NewTask {
             board_id,
@@ -7653,7 +8016,12 @@ async fn a_task_by(app: &App, board_id: &str, column_id: &str, title: &str, crea
 /// comments — the numbers the profile page has to show: 2 / 1 / 3 / 4.
 async fn profile_counts_fixture(app: &App, member: &str, admin: &str) {
     let workspace = app.workspace_id().await;
-    let board = app.store.board(&workspace).await.unwrap().expect("no board");
+    let board = app
+        .store
+        .board(&workspace)
+        .await
+        .unwrap()
+        .expect("no board");
     let columns = app.store.columns(&board.id).await.unwrap();
     let open = columns
         .iter()
@@ -7675,12 +8043,18 @@ async fn profile_counts_fixture(app: &App, member: &str, admin: &str) {
     app.store.assign_task(&other, member).await.unwrap();
     let finished = a_task_by(app, &board.id, &open, "Paint the frame", admin).await;
     app.store.assign_task(&finished, member).await.unwrap();
-    app.store.move_task(&finished, &open, &done, admin, now).await.unwrap();
+    app.store
+        .move_task(&finished, &open, &done, admin, now)
+        .await
+        .unwrap();
     for title in ["Sweep", "Mop", "Dust"] {
         a_task_by(app, &board.id, &open, title, member).await;
     }
     for _ in 0..4 {
-        app.store.add_comment(&hold, member, "a note", now).await.unwrap();
+        app.store
+            .add_comment(&hold, member, "a note", now)
+            .await
+            .unwrap();
     }
 }
 
@@ -7689,7 +8063,14 @@ async fn a_member_may_read_another_members_profile_name_address_and_counts() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
-    let reader = invited(&app, &admin_cookie, "ivy@izlek.sh", "Ivy Lear", Role::Member).await;
+    let reader = invited(
+        &app,
+        &admin_cookie,
+        "ivy@izlek.sh",
+        "Ivy Lear",
+        Role::Member,
+    )
+    .await;
     let mem_id = user_id(&app, "mem@izlek.sh").await;
     let admin_id = app
         .store
@@ -7734,10 +8115,15 @@ async fn a_profile_names_its_fields_and_links_the_person_who_invited_them() {
         .unwrap()
         .id;
 
-    let page = app.get(&format!("/people/{mem_id}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/people/{mem_id}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8(page.bytes).unwrap();
     for label in ["EMAIL", "JOINED", "LAST SEEN", "INVITED BY"] {
-        assert!(html.contains(label), "the {label} field is not on the page: {html}");
+        assert!(
+            html.contains(label),
+            "the {label} field is not on the page: {html}"
+        );
     }
     assert!(
         html.contains(&format!(r#"href="/people/{admin_id}""#)),
@@ -7749,7 +8135,9 @@ async fn a_profile_names_its_fields_and_links_the_person_who_invited_them() {
     );
 
     // The first account was invited by nobody, so it carries no such cell.
-    let owner = app.get(&format!("/people/{admin_id}"), Some(&admin_cookie)).await;
+    let owner = app
+        .get(&format!("/people/{admin_id}"), Some(&admin_cookie))
+        .await;
     let owner_html = String::from_utf8(owner.bytes).unwrap();
     assert!(
         !owner_html.contains("INVITED BY"),
@@ -7817,10 +8205,16 @@ async fn a_profile_is_not_found_signed_out_or_outside_the_workspace() {
     let other = App::open().await;
     // A workspace has to be claimed before it holds anybody to be a stranger.
     let _ = admin(&other).await;
-    let stranger = other.store.users(&other.workspace_id().await).await.unwrap()[0]
+    let stranger = other
+        .store
+        .users(&other.workspace_id().await)
+        .await
+        .unwrap()[0]
         .id
         .clone();
-    let foreign = app.get(&format!("/people/{stranger}"), Some(&admin_cookie)).await;
+    let foreign = app
+        .get(&format!("/people/{stranger}"), Some(&admin_cookie))
+        .await;
     assert_eq!(foreign.status.as_u16(), 404);
 
     let missing = app.get("/people/nobody", Some(&admin_cookie)).await;
@@ -7833,7 +8227,14 @@ async fn only_your_own_profile_offers_the_edit_link() {
     let admin_cookie = admin(&app).await;
     invited(&app, &admin_cookie, "mem@izlek.sh", "Mem Ber", Role::Member).await;
     let mem_id = user_id(&app, "mem@izlek.sh").await;
-    let ivy = invited(&app, &admin_cookie, "ivy@izlek.sh", "Ivy Lear", Role::Member).await;
+    let ivy = invited(
+        &app,
+        &admin_cookie,
+        "ivy@izlek.sh",
+        "Ivy Lear",
+        Role::Member,
+    )
+    .await;
     let ivy_id = user_id(&app, "ivy@izlek.sh").await;
 
     let own = app.get(&format!("/people/{ivy_id}"), Some(&ivy)).await;
@@ -7864,7 +8265,11 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_at", "2026-09-02T11:00")],
+            &[
+                ("task_id", &task),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "11:00"),
+            ],
         )
         .await;
     assert!(
@@ -7879,9 +8284,14 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
     let facts = app.store.task(&task).await.unwrap().expect("task gone");
     assert!(facts.row.clock_at.is_some(), "the clock did not persist");
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(r#"value="2026-09-02T11:00""#), "{html}");
+    assert!(
+        html.contains(r#"inputmode="numeric" value="11:00""#),
+        "{html}"
+    );
     assert!(html.contains(">Sep 02 11:00<"), "{html}");
 
     // The same instant, read back by a viewer who stored UTC+03:00: the field
@@ -7903,14 +8313,19 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         saved.location
     );
 
-    let shifted = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let shifted = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&shifted.bytes);
-    assert!(html.contains(r#"value="2026-09-02T14:00""#), "{html}");
+    assert!(
+        html.contains(r#"inputmode="numeric" value="14:00""#),
+        "{html}"
+    );
     assert!(html.contains(">Sep 02 14:00<"), "{html}");
 }
 
 #[tokio::test]
-async fn an_empty_clock_clears_and_an_absent_one_leaves_what_is_there() {
+async fn an_empty_time_clears_the_clock_and_a_clear_clears_both() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let column = first_column(&app).await;
@@ -7919,7 +8334,11 @@ async fn an_empty_clock_clears_and_an_absent_one_leaves_what_is_there() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_at", "2026-09-02T11:00")],
+            &[
+                ("task_id", &task),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "11:00"),
+            ],
         )
         .await;
     assert!(
@@ -7932,8 +8351,8 @@ async fn an_empty_clock_clears_and_an_absent_one_leaves_what_is_there() {
         saved.location
     );
 
-    // A save that carries no clock field at all — an older caller's shape —
-    // leaves the stored instant alone.
+    // A save that carries neither field — a title edit, a description
+    // edit — says nothing about the moment at all: clock and day both stay.
     let saved = app
         .post(
             "/api/save_task",
@@ -7951,15 +8370,22 @@ async fn an_empty_clock_clears_and_an_absent_one_leaves_what_is_there() {
         saved.location
     );
     let facts = app.store.task(&task).await.unwrap().expect("task gone");
-    assert!(facts.row.clock_at.is_some(), "an absent clock cleared it");
+    assert!(
+        facts.row.clock_at.is_some(),
+        "an unrelated edit cleared the clock"
+    );
+    assert!(
+        facts.row.deadline.is_some(),
+        "an unrelated edit cleared the day"
+    );
     assert_eq!(facts.row.title, "Renamed");
 
-    // An empty value is the clear choice, the same word the deadline uses.
+    // An empty time clears the clock and keeps the day.
     let saved = app
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_at", "")],
+            &[("task_id", &task), ("clock_time", "")],
         )
         .await;
     assert!(
@@ -7972,15 +8398,163 @@ async fn an_empty_clock_clears_and_an_absent_one_leaves_what_is_there() {
         saved.location
     );
     let facts = app.store.task(&task).await.unwrap().expect("task gone");
-    assert!(facts.row.clock_at.is_none(), "an empty clock did not clear");
+    assert!(facts.row.clock_at.is_none(), "an empty time did not clear");
+    assert!(
+        facts.row.deadline.is_some(),
+        "an empty time took the day with it"
+    );
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(">no time</span>"), "{html}");
+    assert!(html.contains(">Sep 02<"), "{html}");
+    // An empty value renders as no value attribute at all — an empty box.
+    assert!(html.contains(r#"inputmode="numeric"></form>"#), "{html}");
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("deadline", ""), ("clock_time", "")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert!(facts.row.deadline.is_none() && facts.row.clock_at.is_none());
+
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(">no deadline</span>"), "{html}");
 }
 
 #[tokio::test]
-async fn a_clock_that_cannot_be_parsed_is_refused_and_saves_nothing() {
+async fn a_title_edit_keeps_the_clock() {
+    // The title form posts neither moment field; its save must not be a
+    // clock clear wearing a rename's clothes.
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[
+                ("task_id", &task),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "11:00"),
+            ],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("title", "Renamed")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert_eq!(facts.row.title, "Renamed");
+    assert!(
+        facts.row.clock_at.is_some(),
+        "the title edit cleared the clock"
+    );
+    assert!(
+        facts.row.deadline.is_some(),
+        "the title edit cleared the day"
+    );
+}
+
+#[tokio::test]
+async fn a_description_edit_keeps_the_clock() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[
+                ("task_id", &task),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "11:00"),
+            ],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("description", "Now with words")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert_eq!(facts.description, "Now with words");
+    assert!(
+        facts.row.clock_at.is_some(),
+        "the description edit cleared the clock"
+    );
+    assert!(
+        facts.row.deadline.is_some(),
+        "the description edit cleared the day"
+    );
+}
+
+#[tokio::test]
+async fn a_time_that_cannot_be_used_is_refused_and_saves_nothing() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let column = first_column(&app).await;
@@ -7994,7 +8568,8 @@ async fn a_clock_that_cannot_be_parsed_is_refused_and_saves_nothing() {
             &[
                 ("task_id", task.as_str()),
                 ("title", "Renamed"),
-                ("clock_at", "not-a-time"),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "not-a-time"),
             ],
         )
         .await;
@@ -8004,15 +8579,38 @@ async fn a_clock_that_cannot_be_parsed_is_refused_and_saves_nothing() {
         "{location}"
     );
 
-    // The refused save is the whole save: the title in the same form did not
-    // go through either.
+    // The refused save is the whole save: the title and the day in the same
+    // form did not go through either.
     let facts = app.store.task(&task).await.unwrap().expect("task gone");
-    assert!(facts.row.clock_at.is_none(), "a bad clock was stored");
+    assert!(facts.row.clock_at.is_none(), "a bad time was stored");
+    assert!(
+        facts.row.deadline.is_none(),
+        "the refused save kept the day"
+    );
     assert_eq!(facts.row.title, "Ship it", "the refused save half-applied");
 
     let page = app.get(location, Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains("That is not a time."), "{html}");
+
+    // A time with no day anywhere — none posted, none on the task — has
+    // nothing to sit on.
+    let orphan = a_task(&app, &admin_cookie, &column, "Orphan").await;
+    let answer = app
+        .post_without_script(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &format!("/?task={orphan}"),
+            &[("task_id", orphan.as_str()), ("clock_time", "16:20")],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(
+        location.contains("refusal=bad-clock&on=save_task"),
+        "{location}"
+    );
+    let facts = app.store.task(&orphan).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_none(), "a dayless time was stored");
 }
 
 #[tokio::test]
@@ -8047,7 +8645,8 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
             &[
                 ("title", "Kickoff"),
                 ("column_id", &column),
-                ("clock_at", "2026-09-02T14:00"),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "14:00"),
             ],
         )
         .await;
@@ -8072,6 +8671,96 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
         html.contains("card-deadline card-deadline-none"),
         "the deadline-less card lost its own chip: {html}"
     );
+}
+
+#[tokio::test]
+async fn a_time_set_on_an_existing_day_writes_both_columns() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    // A day first, then a time on its own: the day field was absent on the
+    // second save, so the task's own day is what the moment sits on — and
+    // the deadline column says the same day the clock does.
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("deadline", "2026-09-02")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("clock_time", "16:20")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_some(), "the time did not persist");
+    assert_eq!(
+        facts.row.deadline.map(|day| day.to_string()),
+        Some("2026-09-02".to_string()),
+        "the time lost its day"
+    );
+
+    // Created with day and time in one form, the two columns agree too.
+    let answer = app
+        .post(
+            "/api/create_task",
+            Some(&admin_cookie),
+            &[
+                ("title", "Kickoff"),
+                ("column_id", &column),
+                ("deadline", "2026-09-10"),
+                ("clock_time", "09:30"),
+            ],
+        )
+        .await;
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+    let board = app
+        .store
+        .board(&app.workspace_id().await)
+        .await
+        .unwrap()
+        .expect("no board");
+    let rows = app.store.tasks_for_board(&board.id).await.unwrap();
+    let kickoff = rows
+        .iter()
+        .find(|row| row.title == "Kickoff")
+        .expect("created task not on the board");
+    assert_eq!(
+        kickoff.deadline.map(|day| day.to_string()),
+        Some("2026-09-10".to_string())
+    );
+    assert!(kickoff.clock_at.is_some());
 }
 
 #[tokio::test]
@@ -8248,7 +8937,11 @@ async fn the_logs_feed_says_the_clock_in_its_own_words() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_at", "2026-09-02T11:00")],
+            &[
+                ("task_id", &task),
+                ("deadline", "2026-09-02"),
+                ("clock_time", "11:00"),
+            ],
         )
         .await;
     assert!(
@@ -8269,23 +8962,33 @@ async fn the_logs_feed_says_the_clock_in_its_own_words() {
 
 #[tokio::test]
 async fn the_datepicker_script_guards_a_panel_with_no_day_input() {
-    // The clock popover wears the datepick classes but carries a
-    // datetime-local input where the day grid sits, so the shared open
-    // handler's render has no `.datepick-input` to read — the guard is what
-    // keeps opening it from throwing.
+    // Every panel the server draws today carries a `.datepick-input`, but
+    // the shared open handler renders whatever wears the datepick classes —
+    // the guard is what keeps a future input-less panel from throwing
+    // instead of drawing nothing.
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
         html.contains("if (!input) { return; }"),
         "the datepicker script lost its no-day-input guard: {html}"
     );
-    // Both kinds of panel ride the same script on this page: the grid
-    // deadline and the bare clock.
-    assert!(html.contains(r#"type="datetime-local""#), "{html}");
+    // The whole point of a day pick is the hidden input's new value: the
+    // form posts nothing without it, and only a real browser runs this
+    // script — so the write itself is asserted here, wire-level. A merge
+    // once dropped exactly this line and every pick silently saved no day.
+    assert!(
+        html.contains("input.value = ymd ?"),
+        "the datepicker script lost the day write: {html}"
+    );
+    // The moment field's panel: the grid's hidden day input and the time
+    // box ride the same form.
+    assert!(html.contains(r#"name="clock_time""#), "{html}");
     assert!(html.contains("datepick-input"), "{html}");
 }

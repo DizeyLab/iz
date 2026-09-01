@@ -366,7 +366,8 @@ pub enum Refusal {
     EmptyBody,
     /// The date field did not hold a date.
     BadDeadline,
-    /// The time field did not hold a `datetime-local` value.
+    /// The moment field's time box did not hold a 24h `HH:MM`, or a time
+    /// arrived with no day to sit on.
     BadClock,
     /// The link asked for would put a task behind itself.
     Cycle,

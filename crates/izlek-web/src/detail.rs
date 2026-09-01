@@ -236,7 +236,7 @@ struct SaveTaskForm {
     #[serde(default)]
     deadline: Option<String>,
     #[serde(default)]
-    clock_at: Option<String>,
+    clock_time: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -480,37 +480,74 @@ async fn fetch_task(
     Ok(Json(load_snapshot(cx, &input.task_id).await?))
 }
 
-/// A posted `clock_at` value as the stored UTC instant. The value is a
-/// `datetime-local` stamp typed against the viewer's own zone — the field
-/// shows the viewer's zone's reading of the stored instant, so the same zone
-/// is what turns a choice back into one. `""` is the empty choice, not
-/// garbage: the same word the deadline input uses to clear.
-pub(crate) fn parse_clock(
-    raw: &str,
+/// One moment field, two posted words: the day the grid carries and an
+/// optional 24h `HH:MM`. Each word keeps its own contract. The day: absent
+/// keeps what the task already says, `""` clears it, a date sets it. The
+/// time: absent says nothing at all (the clock stays, whoever posted the
+/// form without it — a title edit), `""` clears the clock, a value makes
+/// the clock on the resolvable day (the posted one, or the task's own) and
+/// writes that day back so the two columns agree. A time with no day
+/// anywhere, or one that does not parse, is refused.
+pub(crate) fn moment_field(
+    day_raw: Option<&str>,
+    existing: (Option<Date>, Option<time::OffsetDateTime>),
+    time_raw: Option<&str>,
     zone: UtcOffset,
-) -> std::result::Result<Option<time::OffsetDateTime>, Refusal> {
+) -> std::result::Result<(Option<Date>, Option<time::OffsetDateTime>), Refusal> {
     use time::macros::format_description;
 
-    match raw.trim() {
-        "" => Ok(None),
-        value => {
-            let local = time::PrimitiveDateTime::parse(
-                value,
-                format_description!("[year]-[month]-[day]T[hour]:[minute]"),
-            )
-            .map_err(|_| Refusal::BadClock)?;
-            Ok(Some(local.assume_offset(zone).to_offset(UtcOffset::UTC)))
-        }
+    let (existing_day, existing_clock) = existing;
+    let day = match day_raw {
+        None => existing_day,
+        Some(raw) => match raw.trim() {
+            "" => None,
+            value => Some(
+                Date::parse(value, format_description!("[year]-[month]-[day]"))
+                    .map_err(|_| Refusal::BadDeadline)?,
+            ),
+        },
+    };
+    let Some(time) = time_raw else {
+        return Ok((day, existing_clock));
+    };
+    let time = time.trim();
+    if time.is_empty() {
+        return Ok((day, None));
     }
+    let Some(day) = day else {
+        return Err(Refusal::BadClock);
+    };
+    let Some((hour, minute)) = parse_hhmm(time) else {
+        return Err(Refusal::BadClock);
+    };
+    let local = day
+        .with_hms(hour, minute, 0)
+        .map_err(|_| Refusal::BadClock)?
+        .assume_offset(zone)
+        .to_offset(UtcOffset::UTC);
+    // The clock speaks for the day it sits on: the deadline day and the
+    // moment's day are one fact, whatever the grid last showed.
+    Ok((Some(day), Some(local)))
 }
 
-/// Saves the title, the description, the deadline and the clock. Status is
-/// not here: the column a task sits in is changed by moving it, a call
-/// `board.rs` owns.
+/// `H:MM` or `HH:MM`, 24h, real minutes — the only shape the moment field's
+/// time box accepts.
+fn parse_hhmm(raw: &str) -> Option<(u8, u8)> {
+    let (hour, minute) = raw.split_once(':')?;
+    if minute.len() != 2 {
+        return None;
+    }
+    let hour: u8 = hour.parse().ok()?;
+    let minute: u8 = minute.parse().ok()?;
+    (hour <= 23 && minute <= 59).then_some((hour, minute))
+}
+
+/// Saves the title, the description and the moment field — the deadline day
+/// with its optional time. Status is not here: the column a task sits in is
+/// changed by moving it, a call `board.rs` owns.
 #[route(POST "/api/save_task")]
 async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
     use time::OffsetDateTime;
-    use time::macros::format_description;
 
     let (user, facts) = match writer_and_task(cx, &input.task_id).await {
         Ok(pair) => pair,
@@ -531,25 +568,15 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
         Some(given) => given.trim().to_string(),
         None => facts.description.clone(),
     };
-    let deadline = match input.deadline.as_deref() {
-        None => facts.row.deadline,
-        Some(raw) => match raw.trim() {
-            "" => None,
-            day => match Date::parse(day, format_description!("[year]-[month]-[day]")) {
-                Ok(day) => Some(day),
-                Err(_) => return redirect(cx, Some(Refusal::BadDeadline)),
-            },
-        },
-    };
     let zone = parse_zone(&user.timezone);
-    let clock_at = match input.clock_at.as_deref() {
-        // Absent: the form never carried the field, so what the task already
-        // says stays — the same word every pre-existing field reads.
-        None => facts.row.clock_at,
-        Some(raw) => match parse_clock(raw, zone) {
-            Ok(clock_at) => clock_at,
-            Err(refusal) => return redirect(cx, Some(refusal)),
-        },
+    let (deadline, clock_at) = match moment_field(
+        input.deadline.as_deref(),
+        (facts.row.deadline, facts.row.clock_at),
+        input.clock_time.as_deref(),
+        zone,
+    ) {
+        Ok(pair) => pair,
+        Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
     let store = accounts(cx).store().clone();
@@ -1219,28 +1246,53 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
     }
 }
 
-/// The deadline field: a calendar popover that commits on the day you press.
+/// The moment field: the deadline's calendar popover, with one optional
+/// time box under the grid. It used to carry Save and Cancel under the
+/// grid, which put the commit two gestures away from the choice — and
+/// picking a day closes the popover, so the Save it was waiting for was no
+/// longer on screen. Every date chosen this way was silently discarded.
+/// The grid now autosubmits, the way the log filters already did, and
+/// closing is what Escape and a click outside are for. The time rides the
+/// same commit: a posted form carries whatever is typed, so `16:20` plus a
+/// pressed day is one exact moment, and Clear empties both.
 ///
-/// It used to carry Save and Cancel under the grid, which put the commit two
-/// gestures away from the choice — and picking a day closes the popover, so
-/// the Save it was waiting for was no longer on screen. Every date chosen
-/// this way was silently discarded. The grid now autosubmits, the way the
-/// log filters already did, and closing is what Escape and a click outside
-/// are for.
+/// The box speaks the moment when there is one, the day when there is only
+/// a day — the clock's day is always the deadline's, and the label reads in
+/// the viewer's own zone.
 async fn deadline_control(
     cx: &Cx,
     task: &TaskDetail,
     today: Date,
+    zone: UtcOffset,
     may_write: bool,
     lang: Lang,
 ) -> Result {
+    use time::macros::format_description;
+
     let overdue = task.is_overdue(today);
-    let label = match task.deadline_parts(today) {
-        Some(parts) if parts.state == DeadlineState::Overdue => {
+    let local = task.clock_at.map(|at| at.to_offset(zone));
+    let label = match (&local, task.deadline_parts(today)) {
+        (Some(at), Some(parts)) if parts.state == DeadlineState::Overdue => {
+            format!(
+                "{} {:02}:{:02} · {}",
+                parts.date,
+                at.hour(),
+                at.minute(),
+                t(lang, Key::Overdue)
+            )
+        }
+        (Some(at), Some(parts)) => format!("{} {:02}:{:02}", parts.date, at.hour(), at.minute()),
+        (Some(at), None) => format!(
+            "{} {:02}:{:02}",
+            izlek_core::board::day_label(at.date()),
+            at.hour(),
+            at.minute()
+        ),
+        (None, Some(parts)) if parts.state == DeadlineState::Overdue => {
             format!("{} · {}", parts.date, t(lang, Key::Overdue))
         }
-        Some(parts) => parts.date,
-        None => t(lang, Key::NoDeadline).to_string(),
+        (None, Some(parts)) => parts.date,
+        (None, None) => t(lang, Key::NoDeadline).to_string(),
     };
     if !may_write {
         return view! {
@@ -1253,6 +1305,10 @@ async fn deadline_control(
     }
     let toggle = format!("deadline-{}", task.id);
     let input_value = task.deadline_input();
+    let time_value = local
+        .map(|at| at.format(&format_description!("[hour]:[minute]")))
+        .transpose()
+        .unwrap_or_default();
     let change_aria = t(lang, Key::ChangeTheDeadline);
     let no_deadline = t(lang, Key::NoDeadline);
     view! {
@@ -1268,64 +1324,7 @@ async fn deadline_control(
                 <form class="pop-form" method="post" action="/api/save_task">
                     <input type="hidden" name="task_id" value=(task.id.clone())>
                     (datepicker_grid(cx, "deadline", &input_value, true, lang).await?)
-                </form>
-                (refused(cx, "save_task", lang).await?)
-            </div>
-        </div>
-    }
-}
-
-/// The clock field: the deadline's popover wearing a `datetime-local` input
-/// where the calendar grid sits. One exact instant, not a day, so the grid
-/// has nothing to draw — the native picker commits on change through the
-/// same `data-autosubmit` the grid's hidden input rides. The label and the
-/// input's value both render in the viewer's own zone, so what a viewer
-/// sees is what saving hands back to them.
-async fn clock_control(
-    cx: &Cx,
-    task: &TaskDetail,
-    zone: UtcOffset,
-    may_write: bool,
-    lang: Lang,
-) -> Result {
-    let label = task
-        .clock_at
-        .map(|at| moment_label_in(at, zone))
-        .unwrap_or_else(|| t(lang, Key::NoClock).to_string());
-    if !may_write {
-        return view! {
-            cx =>
-            <span class="field-box">
-                (glyph::calendar(cx).await?)
-                <span class="field-text">(label)</span>
-            </span>
-        };
-    }
-    let toggle = format!("clock-{}", task.id);
-    let input_value = task
-        .clock_at
-        .map(|at| {
-            at.to_offset(zone).format(&time::macros::format_description!(
-                "[year]-[month]-[day]T[hour]:[minute]"
-            ))
-        })
-        .transpose()
-        .unwrap_or_default();
-    let change_aria = t(lang, Key::ChangeTheClock);
-    let no_clock = t(lang, Key::NoClock);
-    view! {
-        cx =>
-        <div class="edit edit-pop datepick-pop">
-            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(change_aria)>
-            <label class="field-box edit-view edit-hit" for=(toggle.clone())>
-                (glyph::calendar(cx).await?)
-                <span class="field-text datepick-label" data-empty=(no_clock)>(label)</span>
-                (glyph::chevron(cx).await?)
-            </label>
-            <div class="edit-form pop-panel datepick-panel">
-                <form class="pop-form" method="post" action="/api/save_task">
-                    <input type="hidden" name="task_id" value=(task.id.clone())>
-                    <input class="field-input" type="datetime-local" name="clock_at" value=(input_value) data-autosubmit="">
+                    <input class="field-input" type="text" name="clock_time" maxlength="5" placeholder="16:20" inputmode="numeric" value=(time_value)>
                 </form>
                 (refused(cx, "save_task", lang).await?)
             </div>
@@ -1411,6 +1410,7 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 var input = panel.querySelector('.datepick-input');\
                 if (!input) {{ return; }}\
                 input.value = ymd ? (ymd.y + '-' + pad(ymd.m) + '-' + pad(ymd.d)) : '';\
+                if (!ymd) {{ var clock = panel.querySelector('[name=clock_time]'); if (clock) {{ clock.value = ''; }} }}\
                 var pop = panel.closest('.datepick-pop');\
                 var label = pop.querySelector('.datepick-label');\
                 if (label) {{ label.textContent = ymd ? (MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d)) : label.dataset.empty; }}\
@@ -1716,7 +1716,11 @@ async fn file_chip(
     let on_comment = file.comment_id.is_some();
     let remove_title = t(lang, Key::RemoveThisFile);
     let href = if crate::files::viewer_kind(&file.mime_type).is_some() {
-        format!("/?task={task_id}&tab={}&file={}", Tab::Files.slug(), file.id)
+        format!(
+            "/?task={task_id}&tab={}&file={}",
+            Tab::Files.slug(),
+            file.id
+        )
     } else {
         // The stamp rides on the row, which the chip's `FileLine` does not
         // carry: one lookup per plain-download chip buys the same versioned
@@ -2004,11 +2008,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             </div>
                             <div class="detail-field">
                                 <span class="detail-label">(t(lang, Key::Deadline))</span>
-                                (deadline_control(cx, &detail, today, may_write, lang).await?)
-                            </div>
-                            <div class="detail-field">
-                                <span class="detail-label">(t(lang, Key::ClockLabel))</span>
-                                (clock_control(cx, &detail, zone, may_write, lang).await?)
+                                (deadline_control(cx, &detail, today, zone, may_write, lang).await?)
                             </div>
                             <div class="detail-field detail-field-people">
                                 <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
@@ -2361,14 +2361,12 @@ pub async fn file_viewer_modal(
     // second, and a second of a worker thread is every other request waiting.
     let sheet = if kind == crate::files::ViewerKind::Sheet {
         match store.attachment_bytes(file_id).await {
-            Ok(Some(bytes)) => {
-                tokio::task::spawn_blocking(move || {
-                    crate::sheet::read(bytes, sheet_index, row_page, column_page)
-                })
-                    .await
-                    .ok()
-                    .flatten()
-            }
+            Ok(Some(bytes)) => tokio::task::spawn_blocking(move || {
+                crate::sheet::read(bytes, sheet_index, row_page, column_page)
+            })
+            .await
+            .ok()
+            .flatten(),
             _ => None,
         }
     } else {
@@ -2586,23 +2584,11 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
                                     (datepicker_grid(cx, "deadline", "", false, lang).await?)
+                                    <input class="field-input" type="text" name="clock_time" maxlength="5" placeholder="16:20" inputmode="numeric">
                                 </div>
                             </div>
                         </div>
                     </div>
-                        <div class="field">
-                            <span class="field-label">(t(lang, Key::ClockLabel))</span>
-                            <div class="edit edit-pop datepick-pop">
-                                <input class="edit-toggle" type="checkbox" id="new-task-clock">
-                                <label class="field-box edit-view edit-hit" for="new-task-clock">
-                                    (glyph::calendar(cx).await?)
-                                    <span class="field-text datepick-label" data-empty=(t(lang, Key::NoClock))>(t(lang, Key::NoClock))</span>
-                                </label>
-                                <div class="edit-form pop-panel datepick-panel">
-                                    <input class="field-input" type="datetime-local" name="clock_at">
-                                </div>
-                            </div>
-                        </div>
                     <label class="field">
                         <span class="field-label">(t(lang, Key::Description))</span>
                         <textarea class="detail-textarea" name="description" rows="4"></textarea>
