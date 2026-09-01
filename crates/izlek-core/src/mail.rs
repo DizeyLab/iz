@@ -650,8 +650,14 @@ impl Engine {
         let mut batches: Vec<(String, String, Vec<ClaimedSend>)> = Vec::new();
         for send in self.store.claim_sends_owed(now, now + LEASE, limit).await? {
             // Without this arm a notice falls through to the rule path, finds
-            // no rule_id, and is skipped every run — queued forever.
-            if matches!(send.kind, SendKind::Invite | SendKind::Notice) {
+            // no rule_id, and is skipped every run — queued forever. A
+            // reminder rides the same path: its subject and body were
+            // composed once, at mint time, per recipient, and no rule may
+            // rewrite them.
+            if matches!(
+                send.kind,
+                SendKind::Invite | SendKind::Notice | SendKind::Reminder
+            ) {
                 let mail = Outgoing {
                     to: send.recipient.clone(),
                     subject: send.subject.clone().unwrap_or_default(),
@@ -847,6 +853,10 @@ impl Engine {
                     format!("{} set the deadline to {}.", actor, activity.detail)
                 }
                 ActivityKind::DeadlineCleared => format!("{} removed the deadline.", actor),
+                ActivityKind::ClockSet => {
+                    format!("{} set the time to {}.", actor, activity.detail)
+                }
+                ActivityKind::ClockCleared => format!("{} removed the time.", actor),
                 ActivityKind::Retitled => format!("{} renamed it.", actor),
                 ActivityKind::Linked => format!("{} linked {}.", actor, activity.detail),
                 ActivityKind::Unlinked => format!("{} unlinked {}.", actor, activity.detail),
@@ -1018,6 +1028,8 @@ fn activity_kind_for(trigger: &Trigger) -> Option<ActivityKind> {
         Trigger::Commented => Some(ActivityKind::Commented),
         Trigger::DeadlineSet => Some(ActivityKind::DeadlineSet),
         Trigger::DeadlineCleared => Some(ActivityKind::DeadlineCleared),
+        Trigger::ClockSet => Some(ActivityKind::ClockSet),
+        Trigger::ClockCleared => Some(ActivityKind::ClockCleared),
         Trigger::Retitled => Some(ActivityKind::Retitled),
         Trigger::Linked => Some(ActivityKind::Linked),
         Trigger::Unlinked => Some(ActivityKind::Unlinked),

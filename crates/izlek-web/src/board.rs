@@ -6,7 +6,7 @@
 //! the server — a drag's only client-side memory is the browser's own drag
 //! session (`dataTransfer`), read back by the column that catches the drop.
 
-use izlek_core::board::{DeadlineState, Moved, TaskCard};
+use izlek_core::board::{DeadlineState, Moved, TaskCard, day_label};
 use izlek_core::store::{NewTask, User};
 use time::{Date, OffsetDateTime};
 use topcoat::Result;
@@ -81,6 +81,7 @@ async fn create_task_shared(
     column_id: &str,
     description: &str,
     deadline_raw: &str,
+    clock_raw: &str,
 ) -> Result<Option<Refusal>> {
     use time::macros::format_description;
 
@@ -99,6 +100,11 @@ async fn create_task_shared(
             Err(_) => return Ok(Some(Refusal::BadDeadline)),
         },
     };
+    let zone = izlek_core::detail::parse_zone(&user.timezone);
+    let clock_at = match crate::detail::parse_clock(clock_raw, zone) {
+        Ok(clock_at) => clock_at,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
     let store = accounts(cx).store().clone();
     let Some(board) = store.board(&user.workspace_id).await? else {
         return Ok(Some(Refusal::Unavailable));
@@ -115,6 +121,7 @@ async fn create_task_shared(
             title,
             description: description.trim(),
             deadline,
+            clock_at,
             created_by: &user.id,
         })
         .await?;
@@ -156,6 +163,8 @@ struct CreateTaskForm {
     description: String,
     #[serde(default)]
     deadline: String,
+    #[serde(default)]
+    clock_at: String,
 }
 
 /// A browser without script's way onto the board: a real form post, same
@@ -168,6 +177,7 @@ async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
         &input.column_id,
         &input.description,
         &input.deadline,
+        &input.clock_at,
     )
     .await?
     {
@@ -270,6 +280,7 @@ async fn board_columns(
     }
     let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
+    let zone = izlek_core::detail::parse_zone(&user.timezone);
 
     let all_columns: Vec<(String, String)> = view_data
         .columns
@@ -278,7 +289,7 @@ async fn board_columns(
         .collect();
     let mut columns = Vec::new();
     for column in view_data.columns {
-        columns.push(render_column(cx, column, today, may_write, &all_columns, default_tag_id, lang).await?);
+        columns.push(render_column(cx, column, today, zone, may_write, &all_columns, default_tag_id, lang).await?);
     }
 
     view! {
@@ -291,6 +302,7 @@ async fn render_column(
     cx: &Cx,
     column: izlek_core::board::ColumnView,
     today: Date,
+    zone: time::UtcOffset,
     may_write: bool,
     all_columns: &[(String, String)],
     default_tag_id: Option<&str>,
@@ -309,6 +321,7 @@ async fn render_column(
                 card,
                 today,
                 is_done_column,
+                zone,
                 &column_id,
                 may_write,
                 all_columns,
@@ -342,6 +355,7 @@ async fn render_card(
     card: TaskCard,
     today: Date,
     done_column: bool,
+    zone: time::UtcOffset,
     column_id: &str,
     may_write: bool,
     all_columns: &[(String, String)],
@@ -352,14 +366,30 @@ async fn render_card(
     let blocked_by = card.blocked_by.join(", ");
     let overdue = card.is_overdue(today);
     let deadline_parts = card.deadline_parts(today);
-    let dated = deadline_parts.is_some();
-    let deadline = match deadline_parts {
-        Some(parts) => match parts.state {
-            DeadlineState::Overdue => format!("{} · {}", parts.date, t(lang, Key::Overdue)),
-            DeadlineState::Done => format!("{}{}", t(lang, Key::DonePrefix), parts.date),
-            DeadlineState::OnTime => parts.date,
+    // A clock is the meeting's exact instant, read in the viewer's own zone;
+    // when it exists it is the whole chip — the day-grain deadline keeps its
+    // own state machinery out of the way rather than standing next to it.
+    let clock = card.clock_at.map(|at| {
+        let at = at.to_offset(zone);
+        format!(
+            "{} · {:02}:{:02}",
+            day_label(at.date()),
+            at.hour(),
+            at.minute()
+        )
+    });
+    let has_clock = clock.is_some();
+    let dated = deadline_parts.is_some() || has_clock;
+    let deadline = match clock {
+        Some(label) => label,
+        None => match deadline_parts {
+            Some(parts) => match parts.state {
+                DeadlineState::Overdue => format!("{} · {}", parts.date, t(lang, Key::Overdue)),
+                DeadlineState::Done => format!("{}{}", t(lang, Key::DonePrefix), parts.date),
+                DeadlineState::OnTime => parts.date,
+            },
+            None => t(lang, Key::NoDeadline).to_string(),
         },
-        None => t(lang, Key::NoDeadline).to_string(),
     };
     let comments = card.comment_count;
     let subtasks = card.subtask_label();
@@ -397,7 +427,7 @@ async fn render_card(
             <div class="card-foot">
                 // Overdue is a comparison against today, so a tab left open
                 // over midnight is wrong until something re-renders it.
-                <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue, "card-deadline-none" if !dated))>
+                <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue && !has_clock, "card-deadline-none" if !dated))>
                     (deadline)
                 </span>
                 if let Some(tag) = &card.tag {
@@ -687,6 +717,7 @@ mod sort_tests {
             title: title.to_string(),
             column_id: "col".to_string(),
             deadline: None,
+            clock_at: None,
             done_at: None,
             position: 0.0,
             assignees: Vec::new(),

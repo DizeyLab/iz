@@ -132,6 +132,7 @@ async fn a_subtask_is_a_task_with_a_parent() {
     let child = scratch
         .store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: Some(&parent),
@@ -176,6 +177,7 @@ async fn subtasks_go_one_level_deep() {
     let child = scratch
         .store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: Some(&parent),
@@ -193,6 +195,7 @@ async fn subtasks_go_one_level_deep() {
     let grandchild = scratch
         .store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: Some(&child),
@@ -305,6 +308,7 @@ async fn a_parent_and_one_subtask(
     let column_id = column_named(store, workspace, "Backlog").await;
     let child = store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: Some(&parent),
@@ -798,6 +802,8 @@ async fn workspace_defaults_match_the_settings_screen() {
         ws.allowed_file_types.is_empty(),
         "every type until narrowed"
     );
+    assert_eq!(ws.mail_batch_minutes, 5);
+    assert_eq!(ws.reminder_minutes, 15, "a workspace starts with reminders on");
 }
 
 /// An admin edits the sender from Settings, so the record carries host, port,
@@ -1062,13 +1068,15 @@ async fn limits_round_trip_including_the_file_type_list() {
     let types = vec!["png".to_string(), "pdf".to_string()];
     scratch
         .store
-        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types, 5)
+        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types, 5, 15)
         .await
         .unwrap();
     let ws = scratch.store.workspace().await.unwrap().unwrap();
     assert_eq!(ws.attachment_limit_bytes, 10 * 1024 * 1024);
     assert_eq!(ws.photo_limit_bytes, 512 * 1024);
     assert_eq!(ws.allowed_file_types, types);
+    assert_eq!(ws.mail_batch_minutes, 5);
+    assert_eq!(ws.reminder_minutes, 15, "the reminder lead rides the same save");
 }
 
 #[tokio::test]
@@ -2470,6 +2478,7 @@ async fn add_task(
     let column_id = column_named(store, workspace_id, column).await;
     store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: None,
@@ -3490,6 +3499,7 @@ async fn saving_a_task_records_only_what_changed() {
             "first title",
             "",
             None,
+            None,
             &admin,
             OffsetDateTime::now_utc(),
         )
@@ -3517,6 +3527,7 @@ async fn saving_a_task_records_only_what_changed() {
             "second title",
             "some prose",
             Some(date!(2026 - 09 - 12)),
+            None,
             &admin,
             OffsetDateTime::now_utc(),
         )
@@ -4501,6 +4512,7 @@ async fn waiting(minutes: u32) -> (PathBuf, Arc<TursoStore>, String, String) {
             limits.photo_limit_bytes,
             &limits.allowed_file_types,
             minutes,
+            15,
         )
         .await
         .unwrap();
@@ -4559,6 +4571,7 @@ async fn a_task_created_straight_into_a_watched_column_mails_too() {
     let column_id = column_named(&store, &workspace, "In Progress").await;
     let created = store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: None,
@@ -5994,6 +6007,7 @@ async fn a_created_task_s_activity_id_resolves_as_an_event() {
 
     let created = store
         .create_task(NewTask {
+            clock_at: None,
             parent_id: None,
             board_id: &board.id,
             column_id: &column_id,
@@ -6675,6 +6689,7 @@ async fn every_kind_of_write_announces_its_surface() {
     // Board + Task + Activity.
     store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: None,
@@ -7105,6 +7120,19 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
         5,
         "the workspace came across without a quiet window"
     );
+    // The reminder lead and the clock are columns the pre-collapse shape never
+    // had either: the workspace crosses onto the declared default, and tasks
+    // that never carried a meeting instant arrive without one.
+    assert_eq!(
+        scalar(&path, "SELECT reminder_minutes FROM workspace WHERE id = 'W1'").await,
+        15,
+        "the workspace came across without a reminder lead"
+    );
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM task WHERE clock_at IS NOT NULL").await,
+        0,
+        "a task came out of the rebuild with a clock it never had"
+    );
 
     // And the references all still point at something.
     let mut broken = conn.query("PRAGMA foreign_key_check", ()).await.unwrap();
@@ -7239,6 +7267,7 @@ async fn a_rebuild_keeps_a_window_the_admin_already_set() {
             limits.photo_limit_bytes,
             &limits.allowed_file_types,
             17,
+            15,
         )
         .await
         .unwrap();
@@ -7387,6 +7416,7 @@ async fn a_whole_workflow_inside_the_window_is_one_mail() {
     let column_id = column_named(&store, &workspace, "Backlog").await;
     let created = store
         .create_task(NewTask {
+            clock_at: None,
             board_id: &board.id,
             column_id: &column_id,
             parent_id: None,
@@ -7420,6 +7450,7 @@ async fn a_whole_workflow_inside_the_window_is_one_mail() {
             "Ship the exporter",
             "",
             Some(date!(2026 - 09 - 30)),
+            None,
             &admin,
             OffsetDateTime::now_utc(),
         )
@@ -7816,5 +7847,455 @@ async fn a_refused_batch_is_retried_as_a_batch() {
             .is_empty(),
         "nothing is left owed",
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The task clock and its reminders: a task can carry an exact meeting instant,
+// and the queue owes every assignee one reminder mail, reminder_minutes before
+// the clock. Every task write that can move the grounds re-derives what is
+// owed, inside the same transaction as the write itself.
+// ---------------------------------------------------------------------------
+
+use izlek_core::store::MailSend;
+
+/// A task carrying a meeting instant `clock` from now (or none), as the
+/// reminder tests keep needing.
+async fn clocked_task(
+    store: &TursoStore,
+    workspace_id: &str,
+    author: &str,
+    clock: Option<OffsetDateTime>,
+) -> String {
+    let board = store.board(workspace_id).await.unwrap().unwrap();
+    let column_id = column_named(store, workspace_id, "Backlog").await;
+    store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            parent_id: None,
+            title: "The quarterly review",
+            description: "",
+            deadline: None,
+            clock_at: clock,
+            created_by: author,
+        })
+        .await
+        .unwrap()
+        .row
+        .id
+}
+
+/// Every reminder row the task ever owed, one per row, recipient-ordered.
+/// `sends_for_task` reads the ledger whatever the rows' state, which is the
+/// point: abandonment is as much a fact as a send.
+async fn reminders(store: &TursoStore, task: &str) -> Vec<MailSend> {
+    let mut rows: Vec<MailSend> = store
+        .sends_for_task(task, 50)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|send| send.kind == SendKind::Reminder)
+        .collect();
+    rows.sort_by(|a, b| a.recipient.cmp(&b.recipient));
+    rows
+}
+
+/// Just the reminders still owed: the re-derive leaves abandoned history
+/// behind it, and what the queue will deliver is the pending set.
+async fn pending_reminders(store: &TursoStore, task: &str) -> Vec<MailSend> {
+    let mut rows: Vec<MailSend> = reminders(store, task)
+        .await
+        .into_iter()
+        .filter(|send| send.state == SendState::Pending)
+        .collect();
+    rows.sort_by(|a, b| a.recipient.cmp(&b.recipient));
+    rows
+}
+
+async fn set_reminder_lead(store: &TursoStore, workspace_id: &str, minutes: u32) {
+    let limits = store.workspace().await.unwrap().unwrap();
+    store
+        .set_limits(
+            workspace_id,
+            limits.attachment_limit_bytes,
+            limits.photo_limit_bytes,
+            &limits.allowed_file_types,
+            limits.mail_batch_minutes,
+            minutes,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_clocked_task_owes_each_assignee_one_reminder_before_the_meeting() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let emre = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let now = OffsetDateTime::now_utc();
+    let clock = now + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &grace).await.unwrap();
+    store.assign_task(&task, &emre).await.unwrap();
+
+    let rows = pending_reminders(&store, &task).await;
+    assert_eq!(rows.len(), 2, "one reminder per assignee: {rows:?}");
+    for row in &rows {
+        assert_eq!(row.state, SendState::Pending);
+        assert_eq!(
+            row.next_attempt_at.unwrap(),
+            clock - Duration::minutes(15),
+            "the workspace's default lead of fifteen minutes"
+        );
+        assert!(
+            row.subject.as_deref().unwrap().starts_with("Reminder: The quarterly review ("),
+            "the subject names the meeting: {}",
+            row.subject.as_deref().unwrap()
+        );
+        let body = row.body.as_deref().unwrap();
+        assert!(body.contains("The quarterly review"), "body was: {body}");
+        assert!(body.contains("Meets at"), "body was: {body}");
+        // The countdown is whole minutes at mint time, and a few ticks pass
+        // between picking the clock and creating the task.
+        let minutes: u32 = body
+            .split("in ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        assert!(
+            (117..=120).contains(&minutes),
+            "the countdown names the meeting two hours out: {body}"
+        );
+    }
+    assert_eq!(rows[0].recipient, "emre@izlek.sh");
+    assert_eq!(rows[1].recipient, "grace@izlek.sh");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn reminders_switched_off_owe_nobody() {
+    let (dir, store, workspace, admin) = shared().await;
+    set_reminder_lead(&store, &workspace, 0).await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    assert!(
+        reminders(&store, &task).await.is_empty(),
+        "a lead of zero is the off switch"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_reminder_falls_due_at_the_workspaces_own_lead() {
+    let (dir, store, workspace, admin) = shared().await;
+    set_reminder_lead(&store, &workspace, 60).await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(4);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].next_attempt_at.unwrap(),
+        clock - Duration::minutes(60),
+        "an hour before the meeting, not the default quarter"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn moving_the_clock_re_makes_the_reminders() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let task = clocked_task(
+        &store,
+        &workspace,
+        &admin,
+        Some(OffsetDateTime::now_utc() + Duration::hours(2)),
+    )
+    .await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let first = reminders(&store, &task).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].state, SendState::Pending);
+
+    let new_clock = OffsetDateTime::now_utc() + Duration::hours(10);
+    store
+        .save_task(
+            &task,
+            "The quarterly review",
+            "",
+            None,
+            Some(new_clock),
+            &admin,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 2, "the old promise and the new one: {rows:?}");
+    let pending: Vec<_> = rows
+        .iter()
+        .filter(|r| r.state == SendState::Pending)
+        .collect();
+    let abandoned: Vec<_> = rows
+        .iter()
+        .filter(|r| r.state == SendState::Abandoned)
+        .collect();
+    assert_eq!(pending.len(), 1, "exactly one reminder is still owed");
+    assert_eq!(abandoned.len(), 1, "the promise the old clock stood on died");
+    assert_eq!(
+        pending[0].next_attempt_at.unwrap(),
+        new_clock - Duration::minutes(15),
+        "the new reminder follows the new clock"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn clearing_the_clock_abandons_the_reminders() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let task = clocked_task(
+        &store,
+        &workspace,
+        &admin,
+        Some(OffsetDateTime::now_utc() + Duration::hours(2)),
+    )
+    .await;
+    store.assign_task(&task, &mate).await.unwrap();
+
+    store
+        .save_task(
+            &task,
+            "The quarterly review",
+            "",
+            None,
+            None,
+            &admin,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].state,
+        SendState::Abandoned,
+        "no meeting, no warning"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_assignee_added_after_the_clock_gets_a_reminder() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let task = clocked_task(
+        &store,
+        &workspace,
+        &admin,
+        Some(OffsetDateTime::now_utc() + Duration::hours(2)),
+    )
+    .await;
+    assert!(reminders(&store, &task).await.is_empty());
+
+    store.assign_task(&task, &mate).await.unwrap();
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1, "the person who joined is warned too");
+    assert_eq!(rows[0].state, SendState::Pending);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_assignee_removed_takes_their_reminder_with_them() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let emre = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = clocked_task(
+        &store,
+        &workspace,
+        &admin,
+        Some(OffsetDateTime::now_utc() + Duration::hours(2)),
+    )
+    .await;
+    store.assign_task(&task, &grace).await.unwrap();
+    store.assign_task(&task, &emre).await.unwrap();
+
+    store.unassign_task(&task, &grace).await.unwrap();
+    // Grace's warning is gone from what is owed; Emre's stands.
+    let rows = reminders(&store, &task).await;
+    assert!(
+        rows.iter().any(|r| r.recipient == "grace@izlek.sh"
+            && r.state == SendState::Abandoned),
+        "the removed person's reminder was abandoned: {rows:?}"
+    );
+    let still_owed = pending_reminders(&store, &task).await;
+    assert_eq!(still_owed.len(), 1);
+    assert_eq!(still_owed[0].recipient, "emre@izlek.sh");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn finishing_a_task_abandons_its_reminders() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let task = clocked_task(
+        &store,
+        &workspace,
+        &admin,
+        Some(OffsetDateTime::now_utc() + Duration::hours(2)),
+    )
+    .await;
+    store.assign_task(&task, &mate).await.unwrap();
+
+    moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].state,
+        SendState::Abandoned,
+        "a finished meeting warns nobody"
+    );
+
+    // Reopening re-derives: the meeting has not happened, so the warning is
+    // owed again.
+    moved_to(&store, &workspace, &task, "Done", "Backlog", &admin).await;
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter().any(|r| r.state == SendState::Pending),
+        "a reopened task owes its people a warning again"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn deleting_a_task_abandons_its_reminders() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let task = clocked_task(
+        &store,
+        &workspace,
+        &admin,
+        Some(OffsetDateTime::now_utc() + Duration::hours(2)),
+    )
+    .await;
+    store.assign_task(&task, &mate).await.unwrap();
+
+    store
+        .delete_task(&task, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, SendState::Abandoned);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_clock_in_the_past_owes_nobody_a_warning() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let clock = OffsetDateTime::now_utc() - Duration::hours(1);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    assert!(
+        reminders(&store, &task).await.is_empty(),
+        "a meeting that already happened is not warned about"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_clocked_task_without_assignees_owes_nobody() {
+    let (dir, store, workspace, admin) = shared().await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    assert!(reminders(&store, &task).await.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_meeting_already_inside_the_window_warns_the_moment_it_is_owed() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    // Five minutes out, against a fifteen-minute lead: the due instant is
+    // already past, so the row is born due now rather than in the past.
+    let now = OffsetDateTime::now_utc();
+    let clock = now + Duration::minutes(5);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    let due = rows[0].next_attempt_at.unwrap();
+    assert!(
+        due >= now && due <= OffsetDateTime::now_utc() + Duration::seconds(5),
+        "the reminder is due immediately, not before now: {due}"
+    );
+    let body = rows[0].body.as_deref().unwrap();
+    // Whole minutes at mint time, and the clock was picked a moment before
+    // the write: anything from four up is the same five-minute meeting.
+    assert!(
+        body.contains("in 4 minutes") || body.contains("in 5 minutes"),
+        "body was: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn each_reminder_tells_the_meeting_in_its_own_recipients_clock() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let emre = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    // Emre reads the world three hours ahead of the stored UTC.
+    store
+        .set_preferences(&emre, "UTC+03:00", "dark", "en", "default")
+        .await
+        .unwrap();
+    let clock = OffsetDateTime::parse("2026-09-15T12:00:00Z", &time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &grace).await.unwrap();
+    store.assign_task(&task, &emre).await.unwrap();
+
+    let rows = pending_reminders(&store, &task).await;
+    assert_eq!(rows.len(), 2);
+    let grace_body = rows.iter().find(|r| r.recipient == "grace@izlek.sh").unwrap().body.as_deref().unwrap();
+    let emre_body = rows.iter().find(|r| r.recipient == "emre@izlek.sh").unwrap().body.as_deref().unwrap();
+    assert!(grace_body.contains("Meets at Sep 15 12:00"), "grace: {grace_body}");
+    assert!(emre_body.contains("Meets at Sep 15 15:00"), "emre: {emre_body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn reminder_rows_survive_a_reopen() {
+    let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("izlek.db").to_string_lossy().into_owned();
+    let store = TursoStore::open(&path).await.unwrap();
+    let (workspace, admin) = claim(&store).await;
+    let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let before = reminders(&store, &task).await;
+    assert_eq!(before.len(), 1);
+    let before = before;
+    drop(store);
+
+    let reopened = TursoStore::open(&path).await.unwrap();
+    let after = reminders(&reopened, &task).await;
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after[0].id, before[0].id, "the same row, not a re-minted one");
+    assert_eq!(after[0].state, SendState::Pending);
+    assert_eq!(after[0].next_attempt_at, before[0].next_attempt_at);
     let _ = std::fs::remove_dir_all(&dir);
 }

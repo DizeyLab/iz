@@ -84,6 +84,9 @@ pub struct Workspace {
     /// The quiet window a notification waits out before it is sent, in
     /// minutes. `0` sends every trigger the moment it is owed.
     pub mail_batch_minutes: u32,
+    /// How long before a task's clock its reminder mail is queued, in
+    /// minutes. `0` turns reminders off.
+    pub reminder_minutes: u32,
     /// The origin mail links point at, when an admin has set one. `None`
     /// means the address the process listens on — a box behind a proxy
     /// answers on localhost and is reached on a public name, and only an
@@ -274,6 +277,9 @@ pub struct NewTask<'a> {
     pub title: &'a str,
     pub description: &'a str,
     pub deadline: Option<time::Date>,
+    /// The meeting instant, an exact time — `None` for a task without one.
+    /// A clock set at birth queues its reminders with the task itself.
+    pub clock_at: Option<OffsetDateTime>,
     pub created_by: &'a str,
 }
 
@@ -313,6 +319,11 @@ pub enum Trigger {
     Commented,
     DeadlineSet,
     DeadlineCleared,
+    /// The meeting instant was set, or the exact time changed. `None` never
+    /// watches a column, so the variant carries nothing.
+    ClockSet,
+    /// The meeting instant was removed.
+    ClockCleared,
     Retitled,
     Linked,
     Unlinked,
@@ -375,8 +386,9 @@ pub enum SendState {
     Abandoned,
 }
 
-/// Which shape a [`MailSend`] row is: a rule's mail about a task, or an
-/// invite that owes no rule, no event and no task.
+/// Which shape a [`MailSend`] row is: a rule's mail about a task, an invite
+/// that owes no rule, no event and no task, or a reminder minted straight
+/// onto the clock it serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SendKind {
     Rule,
@@ -384,6 +396,11 @@ pub enum SendKind {
     /// An admin's own mail to one or more members — no rule, no event, no
     /// task, same as an invite.
     Notice,
+    /// The "your meeting starts soon" mail a task's clock owes each assignee.
+    /// Like an invite it carries its own subject and body, but it hangs off a
+    /// task and falls due in the future, so the queue delivers it when the
+    /// reminder window opens, not when it is written.
+    Reminder,
 }
 
 impl SendKind {
@@ -392,6 +409,7 @@ impl SendKind {
             SendKind::Rule => "rule",
             SendKind::Invite => "invite",
             SendKind::Notice => "notice",
+            SendKind::Reminder => "reminder",
         }
     }
 
@@ -400,6 +418,7 @@ impl SendKind {
             "rule" => Some(SendKind::Rule),
             "invite" => Some(SendKind::Invite),
             "notice" => Some(SendKind::Notice),
+            "reminder" => Some(SendKind::Reminder),
             _ => None,
         }
     }
@@ -739,6 +758,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// address the process listens on is what a cleared one falls back to.
     async fn set_public_url(&self, workspace_id: &str, public_url: Option<&str>) -> Result<()>;
 
+    /// Writes every workspace knob the settings page saves in one form: the
+    /// two attachment ceilings, the allowed file types, the notification
+    /// quiet window and the reminder lead. One write, because they are one
+    /// save — a second way to write the same row would let the knobs
+    /// disagree about what the admin last chose.
     async fn set_limits(
         &self,
         workspace_id: &str,
@@ -746,6 +770,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
         mail_batch_minutes: u32,
+        reminder_minutes: u32,
     ) -> Result<()>;
 
     // -- users -------------------------------------------------------------
@@ -953,16 +978,17 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Takes a file away for good. `false` when there was no such row.
     async fn delete_attachment(&self, id: &str) -> Result<bool>;
 
-    /// Writes the title, description and deadline the detail screen saved, and
-    /// records one activity line per field that actually changed. Returns the
-    /// ids of the activity rows it wrote, in write order — empty when nothing
-    /// changed — so the caller can hand each to the mail engine.
+    /// Writes the title, description, deadline and clock the detail screen
+    /// saved, and records one activity line per field that actually changed.
+    /// Returns the ids of the activity rows it wrote, in write order — empty
+    /// when nothing changed — so the caller can hand each to the mail engine.
     async fn save_task(
         &self,
         task_id: &str,
         title: &str,
         description: &str,
         deadline: Option<time::Date>,
+        clock_at: Option<OffsetDateTime>,
         actor_id: &str,
         at: OffsetDateTime,
     ) -> Result<Vec<String>>;

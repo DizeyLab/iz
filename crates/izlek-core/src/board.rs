@@ -35,6 +35,8 @@ pub struct TaskRow {
     pub title: String,
     pub column_id: String,
     pub deadline: Option<Date>,
+    /// The meeting instant — an exact time, unlike the day-grain deadline.
+    pub clock_at: Option<OffsetDateTime>,
     pub position: f64,
     pub done_at: Option<OffsetDateTime>,
     /// The task this one is a subtask of. A row with a parent gets no card of
@@ -131,6 +133,9 @@ pub struct TaskCard {
     pub title: String,
     pub column_id: String,
     pub deadline: Option<Date>,
+    /// The meeting instant the card owes its people a reminder about, when
+    /// it has one.
+    pub clock_at: Option<OffsetDateTime>,
     pub done_at: Option<OffsetDateTime>,
     pub position: f64,
     pub assignees: Vec<Person>,
@@ -386,6 +391,7 @@ pub fn assemble(
             task_key: task.task_key,
             title: task.title,
             deadline: task.deadline,
+            clock_at: task.clock_at,
             done_at: task.done_at,
             position: task.position,
             column_id: task.column_id,

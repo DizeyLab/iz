@@ -214,7 +214,12 @@ struct TableMap {
 
 /// Builds the explicit column map. Unchanged tables map every column to
 /// `old.<col>`; the changed tables carry the migration-specific expressions.
-fn build_maps(old_has_smtp_check: bool, old_has_batch_window: bool) -> Vec<TableMap> {
+fn build_maps(
+    old_has_smtp_check: bool,
+    old_has_batch_window: bool,
+    old_has_clock: bool,
+    old_has_reminder: bool,
+) -> Vec<TableMap> {
     let mut maps = Vec::new();
 
     maps.push(TableMap {
@@ -236,6 +241,18 @@ fn build_maps(old_has_smtp_check: bool, old_has_batch_window: bool) -> Vec<Table
                     "old.mail_batch_minutes".into()
                 } else {
                     "5".to_string()
+                },
+            ),
+            (
+                // Same reasoning as the batch window: a database written
+                // before reminders existed starts on the schema's own default
+                // rather than on zero, which would read as "reminders off"
+                // and silence the feature by accident.
+                "reminder_minutes",
+                if old_has_reminder {
+                    "old.reminder_minutes".into()
+                } else {
+                    "15".to_string()
                 },
             ),
             ("smtp_host", "old.smtp_host".into()),
@@ -335,6 +352,17 @@ fn build_maps(old_has_smtp_check: bool, old_has_batch_window: bool) -> Vec<Table
                 "(SELECT id FROM main.tag WHERE board_id = old.board_id AND is_default = 1)".into(),
             ),
             ("deadline", "old.deadline".into()),
+            (
+                // A clock set before this column existed never existed: the
+                // task carried no meeting instant, so the old rows arrive
+                // with none rather than with a made-up one.
+                "clock_at",
+                if old_has_clock {
+                    "old.clock_at".into()
+                } else {
+                    "NULL".into()
+                },
+            ),
             ("position", "old.position".into()),
             ("created_by", "old.created_by".into()),
             ("created_at", "old.created_at".into()),
@@ -531,7 +559,9 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
     let has_smtp_check = old_has_column(old_conn, "workspace", "smtp_check_at").await?;
     let has_batch_window =
         old_has_column(old_conn, "workspace", "mail_batch_minutes").await?;
-    let maps = build_maps(has_smtp_check, has_batch_window);
+    let has_clock = old_has_column(old_conn, "task", "clock_at").await?;
+    let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
+    let maps = build_maps(has_smtp_check, has_batch_window, has_clock, has_reminder);
     validate_maps(new_conn, &maps).await?;
 
     for map in maps {

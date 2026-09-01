@@ -29,6 +29,9 @@ CREATE TABLE workspace (
     -- mail saying where the card ended up. Zero sends each one the moment it
     -- is owed, which is what this did before the column existed.
     mail_batch_minutes     INTEGER NOT NULL DEFAULT 5,
+    -- How long before a task's clock its reminder mail is queued. Zero turns
+    -- reminders off.
+    reminder_minutes       INTEGER NOT NULL DEFAULT 15,
     -- The single sender every mail in the workspace goes through, written by
     -- the admin in Settings rather than by whoever has a shell on the box: a
     -- three-person team has those be different people, and the second one is
@@ -217,6 +220,10 @@ CREATE TABLE task (
     -- tag, and the board's default one catches whatever loses its own.
     tag_id      TEXT NOT NULL REFERENCES tag(id),
     deadline    TEXT,
+    -- The meeting instant: an exact date and time, unlike the day-granularity
+    -- deadline beside it. Full RFC 3339 UTC stamp, like the other stamps, so
+    -- it sorts and compares as text; NULL is a task with no clock.
+    clock_at    TEXT,
     position    REAL NOT NULL DEFAULT 0,
     created_by  TEXT NOT NULL REFERENCES user(id),
     created_at  TEXT NOT NULL,
@@ -377,15 +384,12 @@ CREATE TABLE mail_rule (
     -- it could not act on cannot be stored at all.
     CHECK (trigger_column IS NULL OR trigger_kind = 'status')
 );
-CREATE INDEX mail_rule_by_board ON mail_rule(board_id);
 
--- One row per mail owed, from the moment it is claimed until it is sent or
--- abandoned.
---
--- Three shapes share the table. A 'rule' send is owed to somebody because a
--- rule matched an event on a task, and carries all three. An 'invite' or a
--- 'notice' has none of them — a person is invited before they have a task, a
--- transition, or a rule to owe them anything — and carries its own subject
+-- Four shapes share the table. A 'rule' send is owed to somebody because a
+-- rule matched an event on a task, and carries all three. An 'invite', a
+-- 'notice' or a 'reminder' has none of them — a person is invited before they
+-- have a task, a transition, or a rule to owe them anything, and a reminder
+-- is minted straight onto the clock it serves — and carries its own subject
 -- and body instead of getting them from `mail_rule`. The two CHECKs make the
 -- shapes exclusive, so a half-built row cannot be stored.
 --
@@ -403,11 +407,11 @@ CREATE TABLE mail_send (
     claimed_at      TEXT NOT NULL,
     next_attempt_at TEXT,
     sent_at         TEXT,
-    kind            TEXT NOT NULL DEFAULT 'rule' CHECK (kind IN ('rule', 'invite', 'notice')),
+    kind            TEXT NOT NULL DEFAULT 'rule' CHECK (kind IN ('rule', 'invite', 'notice', 'reminder')),
     subject         TEXT,
     body            TEXT,
     CHECK ((kind = 'rule') = (rule_id IS NOT NULL AND event_id IS NOT NULL AND task_id IS NOT NULL)),
-    CHECK ((kind IN ('invite', 'notice')) = (subject IS NOT NULL AND body IS NOT NULL))
+    CHECK ((kind IN ('invite', 'notice', 'reminder')) = (subject IS NOT NULL AND body IS NOT NULL))
 );
 CREATE UNIQUE INDEX mail_send_once ON mail_send(rule_id, event_id, task_id, recipient);
 CREATE INDEX mail_send_owed ON mail_send(next_attempt_at);

@@ -235,6 +235,8 @@ struct SaveTaskForm {
     description: Option<String>,
     #[serde(default)]
     deadline: Option<String>,
+    #[serde(default)]
+    clock_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -478,8 +480,33 @@ async fn fetch_task(
     Ok(Json(load_snapshot(cx, &input.task_id).await?))
 }
 
-/// Saves the title, the description and the deadline. Status is not here: the
-/// column a task sits in is changed by moving it, a call `board.rs` owns.
+/// A posted `clock_at` value as the stored UTC instant. The value is a
+/// `datetime-local` stamp typed against the viewer's own zone — the field
+/// shows the viewer's zone's reading of the stored instant, so the same zone
+/// is what turns a choice back into one. `""` is the empty choice, not
+/// garbage: the same word the deadline input uses to clear.
+pub(crate) fn parse_clock(
+    raw: &str,
+    zone: UtcOffset,
+) -> std::result::Result<Option<time::OffsetDateTime>, Refusal> {
+    use time::macros::format_description;
+
+    match raw.trim() {
+        "" => Ok(None),
+        value => {
+            let local = time::PrimitiveDateTime::parse(
+                value,
+                format_description!("[year]-[month]-[day]T[hour]:[minute]"),
+            )
+            .map_err(|_| Refusal::BadClock)?;
+            Ok(Some(local.assume_offset(zone).to_offset(UtcOffset::UTC)))
+        }
+    }
+}
+
+/// Saves the title, the description, the deadline and the clock. Status is
+/// not here: the column a task sits in is changed by moving it, a call
+/// `board.rs` owns.
 #[route(POST "/api/save_task")]
 async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
     use time::OffsetDateTime;
@@ -514,6 +541,16 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
             },
         },
     };
+    let zone = parse_zone(&user.timezone);
+    let clock_at = match input.clock_at.as_deref() {
+        // Absent: the form never carried the field, so what the task already
+        // says stays — the same word every pre-existing field reads.
+        None => facts.row.clock_at,
+        Some(raw) => match parse_clock(raw, zone) {
+            Ok(clock_at) => clock_at,
+            Err(refusal) => return redirect(cx, Some(refusal)),
+        },
+    };
 
     let store = accounts(cx).store().clone();
     let activity_ids = store
@@ -522,6 +559,7 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
             &title,
             &description,
             deadline,
+            clock_at,
             &user.id,
             OffsetDateTime::now_utc(),
         )
@@ -729,6 +767,7 @@ async fn create_subtask(cx: &Cx, Form(input): Form<NewSubtaskForm>) -> Redirect 
             title,
             description: "",
             deadline: None,
+            clock_at: None,
             created_by: &actor.id,
         })
         .await
@@ -1236,6 +1275,64 @@ async fn deadline_control(
     }
 }
 
+/// The clock field: the deadline's popover wearing a `datetime-local` input
+/// where the calendar grid sits. One exact instant, not a day, so the grid
+/// has nothing to draw — the native picker commits on change through the
+/// same `data-autosubmit` the grid's hidden input rides. The label and the
+/// input's value both render in the viewer's own zone, so what a viewer
+/// sees is what saving hands back to them.
+async fn clock_control(
+    cx: &Cx,
+    task: &TaskDetail,
+    zone: UtcOffset,
+    may_write: bool,
+    lang: Lang,
+) -> Result {
+    let label = task
+        .clock_at
+        .map(|at| moment_label_in(at, zone))
+        .unwrap_or_else(|| t(lang, Key::NoClock).to_string());
+    if !may_write {
+        return view! {
+            cx =>
+            <span class="field-box">
+                (glyph::calendar(cx).await?)
+                <span class="field-text">(label)</span>
+            </span>
+        };
+    }
+    let toggle = format!("clock-{}", task.id);
+    let input_value = task
+        .clock_at
+        .map(|at| {
+            at.to_offset(zone).format(&time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]"
+            ))
+        })
+        .transpose()
+        .unwrap_or_default();
+    let change_aria = t(lang, Key::ChangeTheClock);
+    let no_clock = t(lang, Key::NoClock);
+    view! {
+        cx =>
+        <div class="edit edit-pop datepick-pop">
+            <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(change_aria)>
+            <label class="field-box edit-view edit-hit" for=(toggle.clone())>
+                (glyph::calendar(cx).await?)
+                <span class="field-text datepick-label" data-empty=(no_clock)>(label)</span>
+                (glyph::chevron(cx).await?)
+            </label>
+            <div class="edit-form pop-panel datepick-panel">
+                <form class="pop-form" method="post" action="/api/save_task">
+                    <input type="hidden" name="task_id" value=(task.id.clone())>
+                    <input class="field-input" type="datetime-local" name="clock_at" value=(input_value) data-autosubmit="">
+                </form>
+                (refused(cx, "save_task", lang).await?)
+            </div>
+        </div>
+    }
+}
+
 /// The calendar grid's static shell inside a `.datepick-panel`: a hidden
 /// `<input>` carrying the real `yyyy-mm-dd` value, month nav, and the day
 /// grid — the grid cells and month title are blank until `datepicker_script`
@@ -1291,6 +1388,7 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
             function todayYmd() {{ var t = new Date(); return {{ y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() }}; }}\
             function render(panel) {{\
                 var input = panel.querySelector('.datepick-input');\
+                if (!input) {{ return; }}\
                 var sel = parseYmd(input.value);\
                 var t = todayYmd();\
                 if (!panel.dataset.year) {{ var base = sel || t; panel.dataset.year = base.y; panel.dataset.month = base.m; }}\
@@ -1311,6 +1409,7 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
             }}\
             function pick(panel, ymd) {{\
                 var input = panel.querySelector('.datepick-input');\
+                if (!input) {{ return; }}\
                 input.value = ymd ? (ymd.y + '-' + pad(ymd.m) + '-' + pad(ymd.d)) : '';\
                 var pop = panel.closest('.datepick-pop');\
                 var label = pop.querySelector('.datepick-label');\
@@ -1907,6 +2006,10 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                 <span class="detail-label">(t(lang, Key::Deadline))</span>
                                 (deadline_control(cx, &detail, today, may_write, lang).await?)
                             </div>
+                            <div class="detail-field">
+                                <span class="detail-label">(t(lang, Key::ClockLabel))</span>
+                                (clock_control(cx, &detail, zone, may_write, lang).await?)
+                            </div>
                             <div class="detail-field detail-field-people">
                                 <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
                                 <div class="detail-assignees">
@@ -2487,6 +2590,19 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                             </div>
                         </div>
                     </div>
+                        <div class="field">
+                            <span class="field-label">(t(lang, Key::ClockLabel))</span>
+                            <div class="edit edit-pop datepick-pop">
+                                <input class="edit-toggle" type="checkbox" id="new-task-clock">
+                                <label class="field-box edit-view edit-hit" for="new-task-clock">
+                                    (glyph::calendar(cx).await?)
+                                    <span class="field-text datepick-label" data-empty=(t(lang, Key::NoClock))>(t(lang, Key::NoClock))</span>
+                                </label>
+                                <div class="edit-form pop-panel datepick-panel">
+                                    <input class="field-input" type="datetime-local" name="clock_at">
+                                </div>
+                            </div>
+                        </div>
                     <label class="field">
                         <span class="field-label">(t(lang, Key::Description))</span>
                         <textarea class="detail-textarea" name="description" rows="4"></textarea>

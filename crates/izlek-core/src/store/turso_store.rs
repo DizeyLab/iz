@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use rand::Rng;
 use time::{Duration, OffsetDateTime};
 use time::format_description::well_known::Rfc3339;
-use turso::transaction::TransactionBehavior;
+use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Row, Value, params};
 use ulid::Ulid;
 
@@ -26,7 +26,7 @@ use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TagChip, TaskRow, Transition};
 use crate::detail::{
     ActivityEntry, ActivityKind, Comment, DeletionCost, DependencyEdge, DetailReads, FileLine,
-    SubtaskLine, TaskFacts,
+    SubtaskLine, TaskFacts, moment_label_in, parse_zone,
 };
 use crate::live::{Change, Topic};
 use time::Date;
@@ -319,6 +319,143 @@ impl TursoStore {
         let mut rows = conn.query(sql, args).await.map_err(backend)?;
         rows.next().await.map_err(backend)
     }
+
+    /// Brings this task's reminder sends back in line with the task as it
+    /// now stands, inside the caller's transaction. Every task write that
+    /// can move a clock, finish a card or change who is on it calls this, so
+    /// correctness never depends on the caller remembering which of the two
+    /// facts moved.
+    ///
+    /// The rule is abandon first, then re-derive: every pending reminder the
+    /// task still owes is abandoned unconditionally, and the task's current
+    /// facts decide what is owed from scratch. A diff would be cleverer and
+    /// wrong more often — a reminder row is a promise the queue is holding,
+    /// and a promise whose grounds moved is re-made, not patched. Rows that
+    /// already went out (or failed on their own retry clock) are history and
+    /// stay untouched.
+    ///
+    /// Answers whether anything was written or abandoned, so the caller can
+    /// announce the queue only when this did something — the task-write
+    /// paths already announce their own topics.
+    async fn sync_task_reminders(
+        &self,
+        tx: &Transaction<'_>,
+        task_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool> {
+        // Nothing the re-derivation below can say changes a row that is no
+        // longer pending.
+        let abandoned = tx
+            .execute(
+                "UPDATE mail_send SET state = 'abandoned' \
+                 WHERE task_id = ?1 AND kind = 'reminder' AND state = 'pending'",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+
+        let mut rows = tx
+            .query(
+                "SELECT clock_at, done_at, deleted_at, task_key, title FROM task WHERE id = ?1",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let Some(row) = rows.next().await.map_err(backend)? else {
+            return Ok(abandoned > 0);
+        };
+        let clock_at = opt_stamp(&row, 0)?;
+        let done_at = opt_stamp(&row, 1)?;
+        let deleted_at = opt_stamp(&row, 2)?;
+        let task_key = text(&row, 3)?;
+        let title = text(&row, 4)?;
+        drop(rows);
+
+        // A finished or discarded task owes nobody a warning, and a task
+        // without a clock has nothing to warn about.
+        let Some(clock_at) = clock_at else {
+            return Ok(abandoned > 0);
+        };
+        if done_at.is_some() || deleted_at.is_some() || clock_at <= now {
+            return Ok(abandoned > 0);
+        }
+
+        let mut rows = tx
+            .query(
+                "SELECT reminder_minutes, public_url FROM workspace LIMIT 1",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        let Some(row) = rows.next().await.map_err(backend)? else {
+            return Ok(abandoned > 0);
+        };
+        let reminder_minutes = row.get::<i64>(0).map_err(backend)?.max(0) as u32;
+        let public_url = opt_text(&row, 1)?;
+        drop(rows);
+        if reminder_minutes == 0 {
+            return Ok(abandoned > 0);
+        }
+
+        // The mail falls due this many minutes before the clock; a meeting
+        // already inside the window warns the moment the write commits.
+        let due = (clock_at - Duration::minutes(i64::from(reminder_minutes))).max(now);
+        let minutes_left = (clock_at - now).whole_minutes();
+
+        let mut rows = tx
+            .query(
+                "SELECT u.email, u.timezone FROM task_assignee a \
+                 JOIN user u ON u.id = a.user_id WHERE a.task_id = ?1 \
+                 ORDER BY u.email",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut people = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            people.push((text(&row, 0)?, text(&row, 1)?));
+        }
+        drop(rows);
+
+        for (email, timezone) in people {
+            // Each recipient reads the moment in their own stored timezone:
+            // the meeting is one fact, and what it says on the clock where
+            // they sit is not.
+            let moment = moment_label_in(clock_at, parse_zone(&timezone));
+            let mut body = format!(
+                "{key} — {title}\n\nMeets at {moment} — in {minutes_left} minutes.\n",
+                key = task_key,
+                title = title,
+            );
+            // Only the workspace's own address is used here. The config
+            // fallback the mail engine applies lives outside the store, and
+            // reading config from inside a transaction is not a trade worth
+            // making: a workspace that never set its URL simply sends a
+            // reminder without a link.
+            if let Some(base) = &public_url {
+                body.push_str(&format!("\n{base}/?task={task_id}\n"));
+            }
+            tx.execute(
+                "INSERT INTO mail_send \
+                 (id, task_id, recipient, state, attempts, claimed_at, next_attempt_at, kind, \
+                  subject, body) \
+                 VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?5, 'reminder', ?6, ?7)",
+                params![
+                    Ulid::new().to_string(),
+                    task_id,
+                    email,
+                    stamp(now)?,
+                    stamp(due)?,
+                    format!("Reminder: {title} ({task_key})"),
+                    body,
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        }
+
+        Ok(true)
+    }
 }
 
 const RULE_COLUMNS: &str = "id, board_id, trigger_kind, trigger_column, subject, audience, \
@@ -345,6 +482,8 @@ fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
         Trigger::Retitled => ("retitled", None),
         Trigger::Linked => ("linked", None),
         Trigger::Unlinked => ("unlinked", None),
+        Trigger::ClockSet => ("clock_set", None),
+        Trigger::ClockCleared => ("clock_cleared", None),
         Trigger::Deleted => ("deleted", None),
     }
 }
@@ -369,6 +508,8 @@ fn rule_from(row: &Row) -> Result<MailRule> {
         ("commented", None) => Trigger::Commented,
         ("deadline_set", None) => Trigger::DeadlineSet,
         ("deadline_cleared", None) => Trigger::DeadlineCleared,
+        ("clock_set", None) => Trigger::ClockSet,
+        ("clock_cleared", None) => Trigger::ClockCleared,
         ("retitled", None) => Trigger::Retitled,
         ("linked", None) => Trigger::Linked,
         ("unlinked", None) => Trigger::Unlinked,
@@ -625,6 +766,7 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         allowed_file_types,
         photo_limit_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
         mail_batch_minutes: row.get::<i64>(19).map_err(backend)?.max(0) as u32,
+        reminder_minutes: row.get::<i64>(20).map_err(backend)?.max(0) as u32,
         smtp_host: opt_text(row, 6)?,
         smtp_port: row.get::<Option<u32>>(7).map_err(backend)?,
         smtp_username: opt_text(row, 8)?,
@@ -659,7 +801,7 @@ const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
      smtp_from_name, smtp_from_address, \
      (smtp_password IS NOT NULL AND smtp_password <> ''), \
      smtp_test_at, smtp_test_ms, smtp_test_error, public_url, \
-     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes";
+     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes, reminder_minutes";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -968,19 +1110,22 @@ impl Store for TursoStore {
         photo_limit_bytes: u64,
         allowed_file_types: &[String],
         mail_batch_minutes: u32,
+        reminder_minutes: u32,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
         let types = serde_json::to_string(allowed_file_types)
             .map_err(|e| StoreError::Corrupt(format!("allowed_file_types: {e}")))?;
         conn.execute(
             "UPDATE workspace SET attachment_limit_bytes = ?1, photo_limit_bytes = ?2, \
-                 allowed_file_types = ?3, mail_batch_minutes = ?5 WHERE id = ?4",
+                 allowed_file_types = ?3, mail_batch_minutes = ?5, reminder_minutes = ?6 \
+                 WHERE id = ?4",
             params![
                 attachment_limit_bytes as i64,
                 photo_limit_bytes as i64,
                 types,
                 workspace_id,
-                i64::from(mail_batch_minutes)
+                i64::from(mail_batch_minutes),
+                i64::from(reminder_minutes)
             ],
         )
         .await
@@ -1540,7 +1685,7 @@ impl Store for TursoStore {
         let at = OffsetDateTime::now_utc();
         let now = stamp(at)?;
         let deadline = new.deadline.map(day_text).transpose()?;
-
+        let clock = new.clock_at.map(stamp).transpose()?;
         let mut conn = self.tx_conn().await?;
         // IMMEDIATE: the task row, its activity and its transition land as one
         // write set; taking the write lock up front avoids a deferred-upgrade
@@ -1627,8 +1772,9 @@ impl Store for TursoStore {
                 match tx
                     .execute(
                         "INSERT INTO task (id, board_id, parent_id, task_key, title, description, \
-                         column_id, tag_id, deadline, position, created_by, created_at, updated_at) \
-                         VALUES (?1, ?2, ?11, ?3, ?4, ?5, ?6, ?12, ?7, ?8, ?9, ?10, ?10)",
+                         column_id, tag_id, deadline, clock_at, position, created_by, created_at, \
+                         updated_at) \
+                         VALUES (?1, ?2, ?11, ?3, ?4, ?5, ?6, ?12, ?7, ?13, ?8, ?9, ?10, ?10)",
                         params![
                             id.clone(),
                             new.board_id,
@@ -1641,7 +1787,8 @@ impl Store for TursoStore {
                             new.created_by,
                             now.clone(),
                             new.parent_id,
-                            default_tag.clone()
+                            default_tag.clone(),
+                            clock.clone()
                         ],
                     )
                     .await
@@ -1682,7 +1829,6 @@ impl Store for TursoStore {
             Ok::<_, turso::Error>(Ok((task_key, position)))
         }
         .await;
-
         let written = match written {
             Ok(Ok(written)) => written,
             Ok(Err(refused)) => {
@@ -1694,10 +1840,28 @@ impl Store for TursoStore {
                 return Err(backend(e));
             }
         };
+        // The reminder rows are part of the same fact as the task itself: a
+        // crash between the two would leave a clock nobody is reminded of.
+        // Anything short of success rolls the whole write back.
+        let reminded = match self.sync_task_reminders(&tx, &id, at).await {
+            Ok(reminded) => reminded,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(e);
+            }
+        };
         tx.commit().await.map_err(backend)?;
 
         // Task birth touches the board, the task page and the feed at once.
-        self.announce([Topic::Board, Topic::Task(id.clone()), Topic::Activity]);
+        let mut topics = vec![
+            Topic::Board,
+            Topic::Task(id.clone()),
+            Topic::Activity,
+        ];
+        if reminded {
+            topics.push(Topic::Queue);
+        }
+        self.announce(topics);
         let (task_key, position) = written;
         Ok(TaskCreated {
             row: TaskRow {
@@ -1706,6 +1870,7 @@ impl Store for TursoStore {
                 title: new.title.to_string(),
                 column_id: new.column_id.to_string(),
                 deadline: new.deadline,
+                clock_at: new.clock_at,
                 position,
                 done_at: None,
                 parent_id: new.parent_id.map(str::to_string),
@@ -1816,7 +1981,7 @@ impl Store for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT id, task_key, title, column_id, deadline, position, done_at \
+                "SELECT id, task_key, title, column_id, deadline, clock_at, position, done_at \
                  FROM task WHERE parent_id = ?1 AND deleted_at IS NULL \
                  ORDER BY created_at",
                 params![parent_id],
@@ -1831,8 +1996,9 @@ impl Store for TursoStore {
                 title: text(&row, 2)?,
                 column_id: text(&row, 3)?,
                 deadline: opt_day(&row, 4)?,
-                position: row.get::<f64>(5).unwrap_or(0.0),
-                done_at: opt_stamp(&row, 6)?,
+                clock_at: opt_stamp(&row, 5)?,
+                position: row.get::<f64>(6).unwrap_or(0.0),
+                done_at: opt_stamp(&row, 7)?,
                 parent_id: Some(parent_id.to_string()),
                 tag: None,
             });
@@ -1841,33 +2007,77 @@ impl Store for TursoStore {
     }
 
     async fn assign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let n = conn
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the reminder sync reads the assignee list this insert is
+        // changing, so the read and the write are one write set.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let n = tx
             .execute(
                 "INSERT OR IGNORE INTO task_assignee (task_id, user_id) VALUES (?1, ?2)",
                 params![task_id, user_id],
             )
             .await
             .map_err(backend)?;
-        drop(conn);
+        // A no-change assign changes no facts, so the reminders stand as
+        // they are.
+        let reminded = if n > 0 {
+            match self.sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc()).await {
+                Ok(reminded) => reminded,
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            }
+        } else {
+            false
+        };
+        tx.commit().await.map_err(backend)?;
         if n > 0 {
-            self.announce([Topic::Task(task_id.to_string())]);
+            let mut topics = vec![Topic::Task(task_id.to_string())];
+            if reminded {
+                topics.push(Topic::Queue);
+            }
+            self.announce(topics);
         }
         Ok(())
     }
 
     async fn unassign_task(&self, task_id: &str, user_id: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let n = conn
+        let mut conn = self.tx_conn().await?;
+        // IMMEDIATE: the same shape as the assign — the person leaves and the
+        // reminder that named them goes with them, as one write.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let n = tx
             .execute(
                 "DELETE FROM task_assignee WHERE task_id = ?1 AND user_id = ?2",
                 params![task_id, user_id],
             )
             .await
             .map_err(backend)?;
-        drop(conn);
+        let reminded = if n > 0 {
+            match self.sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc()).await {
+                Ok(reminded) => reminded,
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            }
+        } else {
+            false
+        };
+        tx.commit().await.map_err(backend)?;
         if n > 0 {
-            self.announce([Topic::Task(task_id.to_string())]);
+            let mut topics = vec![Topic::Task(task_id.to_string())];
+            if reminded {
+                topics.push(Topic::Queue);
+            }
+            self.announce(topics);
         }
         Ok(())
     }
@@ -2172,10 +2382,12 @@ impl Store for TursoStore {
         title: &str,
         description: &str,
         deadline: Option<Date>,
+        clock_at: Option<OffsetDateTime>,
         actor_id: &str,
         at: OffsetDateTime,
     ) -> Result<Vec<String>> {
         let deadline = deadline.map(day_text).transpose()?;
+        let clock_at = clock_at.map(stamp).transpose()?;
         let stamp = stamp(at)?;
 
         let mut conn = self.tx_conn().await?;
@@ -2189,7 +2401,7 @@ impl Store for TursoStore {
         let written = async {
             let mut rows = tx
                 .query(
-                    "SELECT title, description, deadline FROM task \
+                    "SELECT title, description, deadline, clock_at FROM task \
                      WHERE id = ?1 AND deleted_at IS NULL",
                     params![task_id],
                 )
@@ -2200,15 +2412,23 @@ impl Store for TursoStore {
             let was_title = row.get::<String>(0)?;
             let was_description = row.get::<String>(1)?;
             let was_deadline = row.get::<Option<String>>(2)?;
+            let was_clock = row.get::<Option<String>>(3)?;
             drop(rows);
 
             tx.execute(
-                "UPDATE task SET title = ?2, description = ?3, deadline = ?4, updated_at = ?5 \
+                "UPDATE task SET title = ?2, description = ?3, deadline = ?4, clock_at = ?5, \
+                 updated_at = ?6 \
                  WHERE id = ?1",
-                params![task_id, title, description, deadline.clone(), stamp.clone()],
+                params![
+                    task_id,
+                    title,
+                    description,
+                    deadline.clone(),
+                    clock_at.clone(),
+                    stamp.clone()
+                ],
             )
             .await?;
-
             let mut lines: Vec<(&'static str, String)> = Vec::new();
             if was_title != title {
                 lines.push((ActivityKind::Retitled.as_str(), title.to_string()));
@@ -2220,6 +2440,15 @@ impl Store for TursoStore {
                 match &deadline {
                     Some(day) => lines.push((ActivityKind::DeadlineSet.as_str(), day.clone())),
                     None => lines.push((ActivityKind::DeadlineCleared.as_str(), String::new())),
+                }
+            }
+            // The clock's detail is the stored stamp, as the deadline's is
+            // the stored day: the activity row keeps the machine fact, and
+            // each reader says it in its own words.
+            if was_clock != clock_at {
+                match &clock_at {
+                    Some(when) => lines.push((ActivityKind::ClockSet.as_str(), when.clone())),
+                    None => lines.push((ActivityKind::ClockCleared.as_str(), String::new())),
                 }
             }
             let mut ids = Vec::with_capacity(lines.len());
@@ -2239,13 +2468,27 @@ impl Store for TursoStore {
 
         match written {
             Ok(Some(ids)) => {
+                // The clock may just have moved, so the reminders are
+                // re-derived inside the same write and the queue hears about
+                // it only if rows actually changed hands.
+                let reminded = match self.sync_task_reminders(&tx, task_id, at).await {
+                    Ok(reminded) => reminded,
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Err(e);
+                    }
+                };
                 tx.commit().await.map_err(backend)?;
                 // An edit shows on the card face as well as in the panel.
-                self.announce([
+                let mut topics = vec![
                     Topic::Board,
                     Topic::Task(task_id.to_string()),
                     Topic::Activity,
-                ]);
+                ];
+                if reminded {
+                    topics.push(Topic::Queue);
+                }
+                self.announce(topics);
                 Ok(ids)
             }
             Ok(None) => {
@@ -2425,15 +2668,30 @@ impl Store for TursoStore {
 
         match written {
             Ok(Outcome::Wrote) => {
+                // The move is what stamps and clears `done_at` — finishing
+                // and reopening a card are moves — so the reminders follow
+                // the same write: finishing abandons them, reopening
+                // re-derives them.
+                let reminded = match self.sync_task_reminders(&tx, task_id, at).await {
+                    Ok(reminded) => reminded,
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Err(e);
+                    }
+                };
                 tx.commit().await.map_err(backend)?;
                 // Past the commit, so a woken client re-reads the move rather
                 // than the state before it. The rolled-back arms below say
                 // nothing on purpose: nothing changed to re-read.
-                self.announce([
+                let mut topics = vec![
                     Topic::Board,
                     Topic::Task(task_id.to_string()),
                     Topic::Activity,
-                ]);
+                ];
+                if reminded {
+                    topics.push(Topic::Queue);
+                }
+                self.announce(topics);
                 Ok(Moved::Recorded(Transition {
                     id: transition_id,
                     task_id: task_id.to_string(),
@@ -2617,14 +2875,27 @@ impl Store for TursoStore {
 
         match written {
             Ok(Some(deletion)) => {
+                // A deleted task's reminders die with it, in the same write
+                // that deletes the task.
+                let reminded = match self.sync_task_reminders(&tx, task_id, at).await {
+                    Ok(reminded) => reminded,
+                    Err(e) => {
+                        let _ = tx.rollback().await;
+                        return Err(e);
+                    }
+                };
                 tx.commit().await.map_err(backend)?;
                 // The card left the board and its detail panel is now a page
                 // about nothing — both need to hear, and only after commit.
-                self.announce([
+                let mut topics = vec![
                     Topic::Board,
                     Topic::Task(task_id.to_string()),
                     Topic::Activity,
-                ]);
+                ];
+                if reminded {
+                    topics.push(Topic::Queue);
+                }
+                self.announce(topics);
                 Ok(deletion)
             }
             Ok(None) => {
@@ -4091,9 +4362,9 @@ impl DetailReads for TursoStore {
     async fn task(&self, task_id: &str) -> Result<Option<TaskFacts>> {
         let row = self
             .one_row(
-                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.position, \
-                 t.done_at, t.description, t.board_id, b.workspace_id, t.parent_id, \
-                 t.tag_id, g.name \
+                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.clock_at, \
+                 t.position, t.done_at, t.description, t.board_id, b.workspace_id, \
+                 t.parent_id, t.tag_id, g.name \
                  FROM task t LEFT JOIN tag g ON g.id = t.tag_id \
                  JOIN board b ON b.id = t.board_id \
                  WHERE t.id = ?1 AND t.deleted_at IS NULL",
@@ -4108,20 +4379,21 @@ impl DetailReads for TursoStore {
                 title: text(&row, 2)?,
                 column_id: text(&row, 3)?,
                 deadline: opt_day(&row, 4)?,
-                position: row.get::<f64>(5).map_err(backend)?,
-                done_at: opt_stamp(&row, 6)?,
-                parent_id: opt_text(&row, 10)?,
-                tag: match opt_text(&row, 11)? {
+                clock_at: opt_stamp(&row, 5)?,
+                position: row.get::<f64>(6).map_err(backend)?,
+                done_at: opt_stamp(&row, 7)?,
+                parent_id: opt_text(&row, 11)?,
+                tag: match opt_text(&row, 12)? {
                     Some(id) => Some(TagChip {
                         id,
-                        name: text(&row, 12)?,
+                        name: text(&row, 13)?,
                     }),
                     None => None,
                 },
             },
-            description: text(&row, 7)?,
-            board_id: text(&row, 8)?,
-            workspace_id: text(&row, 9)?,
+            description: text(&row, 8)?,
+            board_id: text(&row, 9)?,
+            workspace_id: text(&row, 10)?,
         }))
     }
 
@@ -4406,8 +4678,8 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.position, \
-                 t.done_at, t.parent_id, t.tag_id, g.name \
+                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.clock_at, \
+                 t.position, t.done_at, t.parent_id, t.tag_id, g.name \
                  FROM task t LEFT JOIN tag g ON g.id = t.tag_id \
                  WHERE t.board_id = ?1 AND t.deleted_at IS NULL",
                 params![board_id],
@@ -4422,13 +4694,14 @@ impl BoardReads for TursoStore {
                 title: text(&row, 2)?,
                 column_id: text(&row, 3)?,
                 deadline: opt_day(&row, 4)?,
-                position: row.get::<f64>(5).map_err(backend)?,
-                done_at: opt_stamp(&row, 6)?,
-                parent_id: opt_text(&row, 7)?,
-                tag: match opt_text(&row, 8)? {
+                clock_at: opt_stamp(&row, 5)?,
+                position: row.get::<f64>(6).map_err(backend)?,
+                done_at: opt_stamp(&row, 7)?,
+                parent_id: opt_text(&row, 8)?,
+                tag: match opt_text(&row, 9)? {
                     Some(id) => Some(TagChip {
                         id,
-                        name: text(&row, 9)?,
+                        name: text(&row, 10)?,
                     }),
                     None => None,
                 },

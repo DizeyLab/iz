@@ -281,6 +281,8 @@ struct SaveLimitsForm {
     photo_limit_mb: u64,
     allowed_file_types: String,
     mail_batch_minutes: u32,
+    #[serde(default)]
+    reminder_minutes: Option<String>,
 }
 
 /// Changes the workspace's limits. Admin-only, checked here.
@@ -305,6 +307,23 @@ async fn save_limits(
     {
         return Ok(saved_or_refused("save_limits", Some(Refusal::BadLimit)));
     }
+    let reminder_minutes = match input.reminder_minutes.as_deref().map(str::trim) {
+        // Absent or empty keeps what the workspace already had: the field
+        // rides an older form's post, and switching reminders off is a
+        // choice made with a zero, not a blank.
+        None | Some("") => match accounts(cx).store().workspace().await {
+            Ok(Some(workspace)) => workspace.reminder_minutes,
+            Ok(None) => 0,
+            Err(problem) => {
+                eprintln!("store error: {problem}");
+                return Ok(saved_or_refused("save_limits", Some(Refusal::Unavailable)));
+            }
+        },
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(minutes) => minutes,
+            Err(_) => return Ok(saved_or_refused("save_limits", Some(Refusal::BadLimit))),
+        },
+    };
     let Some(types) = parse_types(&input.allowed_file_types) else {
         return Ok(saved_or_refused("save_limits", Some(Refusal::BadFileType)));
     };
@@ -316,6 +335,7 @@ async fn save_limits(
             input.photo_limit_mb * MB,
             &types,
             input.mail_batch_minutes,
+            reminder_minutes,
         )
         .await;
     let refusal = match outcome {
@@ -932,7 +952,7 @@ async fn members_now(cx: &Cx, asking: &User) -> Result<Vec<Member>> {
         .collect())
 }
 
-async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String>, u32)> {
+async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String>, u32, u32)> {
     let workspace = accounts(cx)
         .store()
         .workspace()
@@ -944,6 +964,7 @@ async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String
         workspace.photo_limit_bytes / MB,
         workspace.allowed_file_types,
         workspace.mail_batch_minutes,
+        workspace.reminder_minutes,
     ))
 }
 
@@ -1178,8 +1199,8 @@ async fn settings_page(cx: &Cx) -> Result {
         None
     };
     let (limits, allowed_types) = if administers {
-        let (attachment, photo, types, batch) = limits_now(cx, &user.workspace_id).await?;
-        (Some((attachment, photo, batch)), types)
+        let (attachment, photo, types, batch, reminder) = limits_now(cx, &user.workspace_id).await?;
+        (Some((attachment, photo, batch, reminder)), types)
     } else {
         (None, Vec::new())
     };
@@ -1474,7 +1495,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 }
 
                 if section == Section::Limits
-                    && let Some((attachment_limit_mb, photo_limit_mb, mail_batch_minutes)) = limits
+                    && let Some((attachment_limit_mb, photo_limit_mb, mail_batch_minutes, reminder_minutes)) = limits
                 {
                     <section class="panel" id="limits">
                         <div class="panel-head">
@@ -1508,18 +1529,30 @@ async fn settings_page(cx: &Cx) -> Result {
                                     >
                                 </label>
                             </div>
-                            <label class="field">
-                                <span class="field-label">(t(lang, Key::MailBatchLabel))</span>
-                                <input
-                                    class="field-input"
-                                    type="number"
-                                    name="mail_batch_minutes"
-                                    min="0"
-                                    max=(LONGEST_BATCH_MINUTES.to_string())
-                                    value=(mail_batch_minutes.to_string())
-                                    required=""
-                                >
-                            </label>
+                            <div class="field-row">
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::MailBatchLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="number"
+                                        name="mail_batch_minutes"
+                                        min="0"
+                                        max=(LONGEST_BATCH_MINUTES.to_string())
+                                        value=(mail_batch_minutes.to_string())
+                                        required=""
+                                    >
+                                </label>
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::ReminderMinutesLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="number"
+                                        name="reminder_minutes"
+                                        min="0"
+                                        value=(reminder_minutes.to_string())
+                                    >
+                                </label>
+                            </div>
                             <label class="field">
                                 <span class="field-label">(t(lang, Key::AllowedFileTypesLabel))</span>
                                 <input

@@ -151,6 +151,10 @@ pub enum ActivityKind {
     Described,
     DeadlineSet,
     DeadlineCleared,
+    /// The meeting instant was set, or moved to a new exact time.
+    ClockSet,
+    /// The meeting instant was removed.
+    ClockCleared,
     Assigned,
     Unassigned,
     Linked,
@@ -222,6 +226,8 @@ impl ActivityKind {
             ActivityKind::Described => "described",
             ActivityKind::DeadlineSet => "deadline_set",
             ActivityKind::DeadlineCleared => "deadline_cleared",
+            ActivityKind::ClockSet => "clock_set",
+            ActivityKind::ClockCleared => "clock_cleared",
             ActivityKind::Assigned => "assigned",
             ActivityKind::Unassigned => "unassigned",
             ActivityKind::Linked => "linked",
@@ -240,6 +246,8 @@ impl ActivityKind {
             "described" => ActivityKind::Described,
             "deadline_set" => ActivityKind::DeadlineSet,
             "deadline_cleared" => ActivityKind::DeadlineCleared,
+            "clock_set" => ActivityKind::ClockSet,
+            "clock_cleared" => ActivityKind::ClockCleared,
             "assigned" => ActivityKind::Assigned,
             "unassigned" => ActivityKind::Unassigned,
             "linked" => ActivityKind::Linked,
@@ -298,6 +306,8 @@ impl ActivityEntry {
             ActivityKind::Described => "edited the description".to_string(),
             ActivityKind::DeadlineSet => format!("set deadline {detail}"),
             ActivityKind::DeadlineCleared => "removed the deadline".to_string(),
+            ActivityKind::ClockSet => format!("set the time to {detail}"),
+            ActivityKind::ClockCleared => "removed the time".to_string(),
             ActivityKind::Assigned => format!("assigned {detail}"),
             ActivityKind::Unassigned => format!("unassigned {detail}"),
             ActivityKind::Linked => format!("linked {detail}"),
@@ -446,6 +456,8 @@ pub struct TaskDetail {
     /// The tag the task wears — its project — when it wears one.
     pub tag: Option<TagChip>,
     pub deadline: Option<Date>,
+    /// The meeting instant — an exact time, unlike the day-grain deadline.
+    pub clock_at: Option<OffsetDateTime>,
     pub done_at: Option<OffsetDateTime>,
     pub assignees: Vec<Person>,
     /// Who may be assigned: the workspace's writers. Viewers are never here —
@@ -646,6 +658,7 @@ mod reads {
             columns,
             tag: task.tag,
             deadline: task.deadline,
+            clock_at: task.clock_at,
             done_at: task.done_at,
             assignees,
             assignable,

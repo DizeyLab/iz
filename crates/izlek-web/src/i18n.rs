@@ -52,6 +52,7 @@ pub enum Key {
     Save,
     EditTheDescription,
     ChangeTheDeadline,
+    ChangeTheClock,
     PutSomeoneOnThisTask,
     LinkAnotherTask,
     LinkATask,
@@ -74,6 +75,7 @@ pub enum Key {
     Status,
     Assignees,
     Deadline,
+    ClockLabel,
     Description,
     Dependencies,
     TabTask,
@@ -227,6 +229,8 @@ pub enum Key {
     TriggerCommented,
     TriggerDeadlineSet,
     TriggerDeadlineCleared,
+    TriggerClockSet,
+    TriggerClockCleared,
     TriggerRetitled,
     TriggerLinked,
     TriggerUnlinked,
@@ -244,6 +248,8 @@ pub enum Key {
     WhenCommentWritten,
     WhenDeadlineSet,
     WhenDeadlineRemoved,
+    WhenClockSet,
+    WhenClockCleared,
     WhenTaskRenamed,
     WhenTaskLinked,
     WhenTaskUnlinked,
@@ -286,6 +292,7 @@ pub enum Key {
     ActRetitled,
     ActDescribed,
     ActDeadlineCleared,
+    ActClockCleared,
     ActDeleted,
     ActCommented,
     ActWorkspaceClaimed,
@@ -306,6 +313,7 @@ pub enum Key {
     NotAnUnblockedEvent,
     TheSystem,
     NoDeadline,
+    NoClock,
     NoTasks,
     NoDescription,
     NoDependencies,
@@ -352,6 +360,7 @@ pub enum Key {
     LastSeenLabel,
     InvitedByLabel,
     MailBatchLabel,
+    ReminderMinutesLabel,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -416,6 +425,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (EditTheDescription, Tr) => "Açıklamayı düzenle",
         (ChangeTheDeadline, En) => "Change the deadline",
         (ChangeTheDeadline, Tr) => "Son tarihi değiştir",
+        (ChangeTheClock, En) => "Change the time",
+        (ChangeTheClock, Tr) => "Saati değiştir",
         (PutSomeoneOnThisTask, En) => "Put someone on this task",
         (PutSomeoneOnThisTask, Tr) => "Bu göreve birini ata",
         (LinkAnotherTask, En) => "Link another task",
@@ -460,6 +471,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Assignees, Tr) => "ATANANLAR",
         (Deadline, En) => "DEADLINE",
         (Deadline, Tr) => "SON TARİH",
+        (ClockLabel, En) => "TIME",
+        (ClockLabel, Tr) => "SAAT",
         (Description, En) => "DESCRIPTION",
         (Description, Tr) => "AÇIKLAMA",
         (Dependencies, En) => "DEPENDENCIES",
@@ -755,6 +768,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (TriggerDeadlineSet, Tr) => "bir son tarih belirlenir",
         (TriggerDeadlineCleared, En) => "a deadline is removed",
         (TriggerDeadlineCleared, Tr) => "bir son tarih kaldırılır",
+        (TriggerClockSet, En) => "a time is set",
+        (TriggerClockSet, Tr) => "bir saat belirlenir",
+        (TriggerClockCleared, En) => "a time is removed",
+        (TriggerClockCleared, Tr) => "bir saat kaldırılır",
         (TriggerRetitled, En) => "a task is renamed",
         (TriggerRetitled, Tr) => "bir görev yeniden adlandırılır",
         (TriggerLinked, En) => "a task is linked",
@@ -789,6 +806,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (WhenDeadlineSet, Tr) => "Bir son tarih belirlendiğinde",
         (WhenDeadlineRemoved, En) => "When a deadline is removed",
         (WhenDeadlineRemoved, Tr) => "Bir son tarih kaldırıldığında",
+        (WhenClockSet, En) => "When a time is set",
+        (WhenClockSet, Tr) => "Bir saat belirlendiğinde",
+        (WhenClockCleared, En) => "When a time is removed",
+        (WhenClockCleared, Tr) => "Bir saat kaldırıldığında",
         (WhenTaskRenamed, En) => "When a task is renamed",
         (WhenTaskRenamed, Tr) => "Bir görev yeniden adlandırıldığında",
         (WhenTaskLinked, En) => "When a task is linked",
@@ -870,6 +891,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActDescribed, Tr) => "açıklamayı düzenledi",
         (ActDeadlineCleared, En) => "removed the deadline",
         (ActDeadlineCleared, Tr) => "son tarihi kaldırdı",
+        (ActClockCleared, En) => "removed the time",
+        (ActClockCleared, Tr) => "saati kaldırdı",
         (ActDeleted, En) => "deleted this task",
         (ActDeleted, Tr) => "bu görevi sildi",
         (ActCommented, En) => "commented",
@@ -910,6 +933,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (TheSystem, Tr) => "Sistem",
         (NoDeadline, En) => "no deadline",
         (NoDeadline, Tr) => "tarih yok",
+        (NoClock, En) => "no time",
+        (NoClock, Tr) => "saat yok",
         (NoTasks, En) => "No tasks",
         (NoTasks, Tr) => "Görev yok",
         (NoDescription, En) => "no description",
@@ -1000,6 +1025,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (InvitedByLabel, Tr) => "DAVET EDEN",
         (MailBatchLabel, En) => "Mail delay (minutes)",
         (MailBatchLabel, Tr) => "Posta gecikmesi (dakika)",
+        (ReminderMinutesLabel, En) => "Reminder (minutes)",
+        (ReminderMinutesLabel, Tr) => "Hatırlatma (dakika)",
     }
 }
 
@@ -1102,6 +1129,15 @@ pub fn deadline_set_label(lang: Lang, detail: &str) -> String {
     match lang {
         Lang::En => format!("set deadline {detail}"),
         Lang::Tr => format!("son tarihi {detail} olarak belirledi"),
+    }
+}
+
+/// The clock's own sentence, mirroring `deadline_set_label` — the stored
+/// RFC 3339 stamp rides in `detail` raw, exactly as the deadline's day does.
+pub fn clock_set_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("set the time to {detail}"),
+        Lang::Tr => format!("saati {detail} olarak belirledi"),
     }
 }
 
@@ -1272,6 +1308,10 @@ pub fn activity_kind_word(lang: Lang, kind: &str) -> String {
         ("deadline_set", Lang::Tr) => "son tarih belirlendi".to_string(),
         ("deadline_cleared", Lang::En) => "deadline cleared".to_string(),
         ("deadline_cleared", Lang::Tr) => "son tarih kaldırıldı".to_string(),
+        ("clock_set", Lang::En) => "time set".to_string(),
+        ("clock_set", Lang::Tr) => "saat belirlendi".to_string(),
+        ("clock_cleared", Lang::En) => "time cleared".to_string(),
+        ("clock_cleared", Lang::Tr) => "saat kaldırıldı".to_string(),
         ("assigned", Lang::En) => "assigned".to_string(),
         ("assigned", Lang::Tr) => "atandı".to_string(),
         ("unassigned", Lang::En) => "unassigned".to_string(),

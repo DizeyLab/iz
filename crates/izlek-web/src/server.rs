@@ -366,6 +366,8 @@ pub enum Refusal {
     EmptyBody,
     /// The date field did not hold a date.
     BadDeadline,
+    /// The time field did not hold a `datetime-local` value.
+    BadClock,
     /// The link asked for would put a task behind itself.
     Cycle,
     /// The card was already moved out of the column this request thought it
@@ -428,6 +430,7 @@ impl Refusal {
             Refusal::TagInUse => "This tag still has cards.".to_string(),
             Refusal::EmptyBody => "Write something first.".to_string(),
             Refusal::BadDeadline => "That is not a date.".to_string(),
+            Refusal::BadClock => "That is not a time.".to_string(),
             Refusal::Cycle => "That link would put this task behind itself.".to_string(),
             Refusal::MovedAlready => "Somebody moved this card first.".to_string(),
             Refusal::SubtasksOpen => "Subtasks are still open.".to_string(),
@@ -459,6 +462,7 @@ impl Refusal {
             }
             Refusal::NotAnImage => "Bu bir resim değil.".to_string(),
             Refusal::BadDeadline => "Bu bir tarih değil.".to_string(),
+            Refusal::BadClock => "Bu bir saat değil.".to_string(),
             Refusal::Cycle => "Bu bağlantı görevi kendi arkasına koyar.".to_string(),
             Refusal::MovedAlready => "Bu kartı başka biri zaten taşıdı.".to_string(),
             Refusal::SubtasksOpen => "Alt görevler hâlâ açık.".to_string(),
@@ -539,6 +543,7 @@ impl Refusal {
             "tag-in-use" => Refusal::TagInUse,
             "empty-body" => Refusal::EmptyBody,
             "bad-deadline" => Refusal::BadDeadline,
+            "bad-clock" => Refusal::BadClock,
             "cycle" => Refusal::Cycle,
             "moved-already" => Refusal::MovedAlready,
             "subtasks-open" => Refusal::SubtasksOpen,
@@ -596,6 +601,7 @@ impl Refusal {
             Refusal::TagInUse => "tag-in-use",
             Refusal::EmptyBody => "empty-body",
             Refusal::BadDeadline => "bad-deadline",
+            Refusal::BadClock => "bad-clock",
             Refusal::Cycle => "cycle",
             Refusal::MovedAlready => "moved-already",
             Refusal::SubtasksOpen => "subtasks-open",
@@ -871,6 +877,7 @@ mod refusal_message_tests {
             Refusal::FileTooBig,
             Refusal::FileTypeNotAllowed,
             Refusal::BadDeadline,
+            Refusal::BadClock,
             Refusal::BadZone,
             Refusal::BadTheme,
             Refusal::BadLanguage,

@@ -7640,6 +7640,7 @@ async fn a_task_by(app: &App, board_id: &str, column_id: &str, title: &str, crea
             title,
             description: "",
             deadline: None,
+            clock_at: None,
             created_by: creator,
         })
         .await
@@ -7848,4 +7849,443 @@ async fn only_your_own_profile_offers_the_edit_link() {
         !theirs_html.contains("settings?section=profile"),
         "someone else's profile grew an editor: {theirs_html}"
     );
+}
+// --- task clock -------------------------------------------------------------
+
+#[tokio::test]
+async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    // The viewer is still on UTC, so the value typed is the instant stored.
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("clock_at", "2026-09-02T11:00")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_some(), "the clock did not persist");
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"value="2026-09-02T11:00""#), "{html}");
+    assert!(html.contains(">Sep 02 11:00<"), "{html}");
+
+    // The same instant, read back by a viewer who stored UTC+03:00: the field
+    // and its label both shift, the stored value does not.
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let shifted = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&shifted.bytes);
+    assert!(html.contains(r#"value="2026-09-02T14:00""#), "{html}");
+    assert!(html.contains(">Sep 02 14:00<"), "{html}");
+}
+
+#[tokio::test]
+async fn an_empty_clock_clears_and_an_absent_one_leaves_what_is_there() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("clock_at", "2026-09-02T11:00")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    // A save that carries no clock field at all — an older caller's shape —
+    // leaves the stored instant alone.
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("title", "Renamed")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_some(), "an absent clock cleared it");
+    assert_eq!(facts.row.title, "Renamed");
+
+    // An empty value is the clear choice, the same word the deadline uses.
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("clock_at", "")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_none(), "an empty clock did not clear");
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(">no time</span>"), "{html}");
+}
+
+#[tokio::test]
+async fn a_clock_that_cannot_be_parsed_is_refused_and_saves_nothing() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let answer = app
+        .post_without_script(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &format!("/?task={task}"),
+            &[
+                ("task_id", task.as_str()),
+                ("title", "Renamed"),
+                ("clock_at", "not-a-time"),
+            ],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(
+        location.contains("refusal=bad-clock&on=save_task"),
+        "{location}"
+    );
+
+    // The refused save is the whole save: the title in the same form did not
+    // go through either.
+    let facts = app.store.task(&task).await.unwrap().expect("task gone");
+    assert!(facts.row.clock_at.is_none(), "a bad clock was stored");
+    assert_eq!(facts.row.title, "Ship it", "the refused save half-applied");
+
+    let page = app.get(location, Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("That is not a time."), "{html}");
+}
+
+#[tokio::test]
+async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    // The viewer reads in UTC+03:00, so the typed 14:00 is 11:00 stored and
+    // 14:00 on the card again — the chip goes through the same zone both ways.
+    let saved = app
+        .post(
+            "/api/save_profile",
+            Some(&admin_cookie),
+            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let column = first_column(&app).await;
+    let answer = app
+        .post(
+            "/api/create_task",
+            Some(&admin_cookie),
+            &[
+                ("title", "Kickoff"),
+                ("column_id", &column),
+                ("clock_at", "2026-09-02T14:00"),
+            ],
+        )
+        .await;
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+    a_task(&app, &admin_cookie, &column, "No meeting").await;
+
+    let page = app.get("/", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"data-tick="" class="card-deadline">Sep 02 · 14:00<"#),
+        "{html}"
+    );
+    assert!(
+        html.contains("card-deadline card-deadline-none"),
+        "the deadline-less card lost its own chip: {html}"
+    );
+}
+
+#[tokio::test]
+async fn the_reminder_knob_saves_renders_and_keeps_when_absent() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/save_limits",
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "10"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", "png, pdf"),
+                ("mail_batch_minutes", "5"),
+                ("reminder_minutes", "30"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_limits"),
+        "{:?}",
+        answer.location
+    );
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    assert_eq!(workspace.reminder_minutes, 30);
+
+    let page = app
+        .get("/settings?section=limits", Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"name="reminder_minutes""#)
+            && html.contains(r#"value="30""#)
+            && html.contains("Reminder (minutes)"),
+        "{html}"
+    );
+
+    // An older form's post, with no knob in it, leaves the stored choice.
+    let answer = app
+        .post(
+            "/api/save_limits",
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "10"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", "png, pdf"),
+                ("mail_batch_minutes", "5"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_limits"),
+        "{:?}",
+        answer.location
+    );
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    assert_eq!(workspace.reminder_minutes, 30, "an absent knob reset it");
+
+    // Words are not minutes.
+    let answer = app
+        .post(
+            "/api/save_limits",
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "10"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", "png, pdf"),
+                ("mail_batch_minutes", "5"),
+                ("reminder_minutes", "later"),
+            ],
+        )
+        .await;
+    let location = answer.location.as_deref().unwrap_or_default();
+    assert!(
+        location.contains("refusal=bad-limit&on=save_limits"),
+        "{location}"
+    );
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    assert_eq!(workspace.reminder_minutes, 30, "a bad knob half-applied");
+
+    // Zero is the off switch, and it saves.
+    let answer = app
+        .post(
+            "/api/save_limits",
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "10"),
+                ("photo_limit_mb", "1"),
+                ("allowed_file_types", "png, pdf"),
+                ("mail_batch_minutes", "5"),
+                ("reminder_minutes", "0"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_limits"),
+        "{:?}",
+        answer.location
+    );
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    assert_eq!(workspace.reminder_minutes, 0);
+}
+
+#[tokio::test]
+async fn a_clock_rule_round_trips_and_renders_on_the_rules_page() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/create_rule",
+            Some(&admin_cookie),
+            &[
+                ("trigger", "clock_set"),
+                ("column_id", ""),
+                ("subject", "Meeting soon"),
+                ("audience", "board"),
+            ],
+        )
+        .await;
+    assert!(
+        answer.status == StatusCode::SEE_OTHER
+            && !answer
+                .location
+                .as_deref()
+                .unwrap_or_default()
+                .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+
+    let rules = app
+        .post("/api/current_rules", Some(&admin_cookie), &[])
+        .await;
+    assert!(
+        rules.body.contains(r#""when":"When a time is set""#),
+        "{}",
+        rules.body
+    );
+    assert!(
+        rules.body.contains(r#""subject":"Meeting soon""#),
+        "{}",
+        rules.body
+    );
+
+    let page = app.get("/rules", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("When a time is set"), "{html}");
+    assert!(html.contains(r#"<option value="clock_set""#), "{html}");
+}
+
+#[tokio::test]
+async fn the_logs_feed_says_the_clock_in_its_own_words() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let saved = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("clock_at", "2026-09-02T11:00")],
+        )
+        .await;
+    assert!(
+        !saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        saved.location
+    );
+
+    let page = app.get("/logs?section=activity", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("set the time to"), "{html}");
+    assert!(html.contains(r#"<option value="clock_set""#), "{html}");
+}
+
+#[tokio::test]
+async fn the_datepicker_script_guards_a_panel_with_no_day_input() {
+    // The clock popover wears the datepick classes but carries a
+    // datetime-local input where the day grid sits, so the shared open
+    // handler's render has no `.datepick-input` to read — the guard is what
+    // keeps opening it from throwing.
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
+
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains("if (!input) { return; }"),
+        "the datepicker script lost its no-day-input guard: {html}"
+    );
+    // Both kinds of panel ride the same script on this page: the grid
+    // deadline and the bare clock.
+    assert!(html.contains(r#"type="datetime-local""#), "{html}");
+    assert!(html.contains("datepick-input"), "{html}");
 }
