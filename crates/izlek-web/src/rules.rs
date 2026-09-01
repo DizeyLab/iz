@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
-use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, page, query_params, route};
 use topcoat::view::view;
 
@@ -28,7 +27,7 @@ use izlek_core::board::Column;
 use izlek_core::store::{Audience, Store, Trigger, User, Workspace};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, refusal_of, require_admin};
+use crate::server::{Refusal, accounts, back_to, refusal_of, require_admin};
 
 /// One rule as the screen reads it: a sentence, a switch and a stamp.
 ///
@@ -384,16 +383,6 @@ async fn current_rules(cx: &Cx) -> Result<Json<std::result::Result<RulesSnapshot
     Ok(Json(snapshot_of(&store, &user).await))
 }
 
-/// The page a browser without script is sent back to on a 303: the page the
-/// form was posted from, or home when there is no `Referer` to read.
-fn back_to(cx: &Cx) -> String {
-    headers(cx)
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("/")
-        .to_string()
-}
-
 /// A 303 to [`back_to`], carrying `refusal` as the body for
 /// `crate::server::carry_refusal_on_redirect` to read and copy onto the query.
 type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
@@ -401,7 +390,7 @@ type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refus
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
     Ok((
         StatusCode::SEE_OTHER,
-        [(header::LOCATION, back_to(cx))],
+        [(header::LOCATION, back_to(cx, "/"))],
         Json(refusal),
     ))
 }

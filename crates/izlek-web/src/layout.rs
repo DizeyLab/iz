@@ -118,7 +118,7 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
         <div class="user-menu">
             <button type="button" class="user-menu-trigger">
                 (avatar(cx, &person, "").await?)
-                (me.display_name.clone())
+                <span class="user-menu-trigger-name">(me.display_name.clone())</span>
             </button>
             <div class="user-menu-panel">
                 <div class="user-menu-name">(me.display_name.clone())</div>
@@ -200,6 +200,14 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
 /// navigation would have shown, no reload. Refusal banners and saved chips
 /// arrive with the swap because the redirect URL's query params rendered
 /// them server-side; `history.replaceState` keeps the address bar honest.
+///
+/// The replay declares `Accept: text/html`, because a replayed form post is a
+/// form post asking for the page back: `carry_refusal_on_redirect`
+/// (`server.rs`) copies a refusing 303's answer onto the `Location` only for a
+/// caller that wants the page, and a bare `fetch` asks for `*/*` — under which
+/// the refusal stayed in a body nobody reads and the click looked like nothing
+/// happening. The password pane was where this was first felt: a wrong
+/// current password and a right one landed on the same silent page.
 ///
 /// Every fetch that ends in a swap carries the navigation counter it started
 /// under (`window.__izlekNav`), and its answer is thrown away if that counter
@@ -338,6 +346,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 for (i = to.attributes.length - 1; i >= 0; i--) { \
                     at = to.attributes[i]; \
                     if (at.name === 'class') { continue; } \
+                    if (own && own.a.indexOf(at.name) !== -1) { continue; } \
                     if (from.getAttribute(at.name) !== at.value) { from.setAttribute(at.name, at.value); } \
                 } \
                 for (i = from.attributes.length - 1; i >= 0; i--) { \
@@ -432,7 +441,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
             }; \
             window.__izlekPost = function (action, fields) { \
                 var n = navStep(); \
-                fetch(action, { method: 'POST', body: new URLSearchParams(fields) }).then( \
+                fetch(action, { method: 'POST', headers: { accept: 'text/html' }, body: new URLSearchParams(fields) }).then( \
                     function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url); } }); }, \
                     function () {} \
                 ); \
@@ -475,7 +484,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 var data = e.submitter ? new FormData(form, e.submitter) : new FormData(form); \
                 var multipart = (form.getAttribute('enctype') || '').indexOf('multipart') !== -1; \
                 var n = navStep(); \
-                fetch(form.getAttribute('action'), { method: 'POST', body: multipart ? data : new URLSearchParams(data) }).then( \
+                fetch(form.getAttribute('action'), { method: 'POST', headers: { accept: 'text/html' }, body: multipart ? data : new URLSearchParams(data) }).then( \
                     function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url); } }); }, \
                     function () { form.submit(); } \
                 ); \
@@ -624,7 +633,10 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
 /// defined here — before any script that could enhance anything runs.
 /// `syncAttrs` then merges `class` (the server's list plus whatever owned
 /// classes are still on the node) instead of overwriting it, and skips owned
-/// attributes when it sweeps. Nothing in this file mentions a dropdown.
+/// attributes both when it copies the server's over and when it sweeps the
+/// ones the server no longer has — an owned attribute is the client's fact,
+/// stale server bytes say nothing against it. Nothing in this file mentions
+/// a dropdown.
 ///
 /// The other half of the contract is `izlek:wire`: an enhancement re-derives
 /// whatever it draws from server data rather than assuming it is still true.

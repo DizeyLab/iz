@@ -26,12 +26,11 @@ use time::{Date, UtcOffset};
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
-use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, route};
 use topcoat::view::{class, view};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, mail, refusal_of, require_user, require_writer};
+use crate::server::{Refusal, accounts, back_to, mail, refusal_of, require_user, require_writer};
 
 /// A task this board could be linked to: enough to name it in the picker and
 /// nothing more.
@@ -203,18 +202,10 @@ async fn writer_and_task(
 /// uses for every one of its mutating calls.
 type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
 
-fn back_to(cx: &Cx) -> String {
-    headers(cx)
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("/")
-        .to_string()
-}
-
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
     Ok((
         StatusCode::SEE_OTHER,
-        [(header::LOCATION, back_to(cx))],
+        [(header::LOCATION, back_to(cx, "/"))],
         Json(refusal),
     ))
 }
@@ -1408,6 +1399,19 @@ pub(crate) async fn datepicker_grid(
 /// `Escape` closes the panel through the datepick resolver `board.rs`'s
 /// `card_menu_script` registers (priority 100 — see the table on
 /// `layout.rs`'s `escape_manager_script`).
+///
+/// The popover is the surface the live refresh used to reset. A picked day
+/// lives in the hidden input's `value` — and on a hidden input the property
+/// *is* the attribute, so the morph's attribute sync read it as server-stale
+/// bytes and wrote the old date back over the pick; the label it reverted,
+/// the client-built grid it emptied, the month nav's `data-year`/`data-month`
+/// it swept. So the pick declares itself the client's the moment it happens
+/// (`__izlekOwn(input, [], ['value'])`, and the panel's month attrs when
+/// `render` first sets them), and an `izlek:wire` repair pass re-derives the
+/// rest from that value: the label of a popover holding an unsaved pick, and
+/// the grid of one standing open. The pass runs on every wire — a repair,
+/// not an install; closed popovers with no unsaved pick are left to the
+/// server's own voice.
 pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
     use crate::i18n::datepicker_js_literals;
     use topcoat::view::Unescaped;
@@ -1421,12 +1425,13 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
             function pad(n) {{ return String(n).padStart(2, '0'); }}\
             function parseYmd(v) {{ if (!v) return null; var p = v.split('-'); if (p.length !== 3) return null; return {{ y: +p[0], m: +p[1], d: +p[2] }}; }}\
             function todayYmd() {{ var t = new Date(); return {{ y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() }}; }}\
+            function speak(label, ymd) {{ label.textContent = ymd ? MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d) : (label.dataset.empty || ''); }}\
             function render(panel) {{\
                 var input = panel.querySelector('.datepick-input');\
                 if (!input) {{ return; }}\
                 var sel = parseYmd(input.value);\
                 var t = todayYmd();\
-                if (!panel.dataset.year) {{ var base = sel || t; panel.dataset.year = base.y; panel.dataset.month = base.m; }}\
+                if (!panel.dataset.year) {{ var base = sel || t; panel.dataset.year = base.y; panel.dataset.month = base.m; window.__izlekOwn(panel, [], ['data-year', 'data-month']); }}\
                 var y = +panel.dataset.year, m = +panel.dataset.month;\
                 panel.querySelector('.datepick-title').textContent = MONTHS[m - 1] + ' ' + y;\
                 panel.querySelector('.datepick-weekdays').innerHTML = WEEKDAYS.map(function(w) {{ return '<span>' + w + '</span>'; }}).join('');\
@@ -1446,10 +1451,11 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 var input = panel.querySelector('.datepick-input');\
                 if (!input) {{ return; }}\
                 input.value = ymd ? (ymd.y + '-' + pad(ymd.m) + '-' + pad(ymd.d)) : '';\
+                window.__izlekOwn(input, [], ['value']);\
                 if (!ymd) {{ ['clock_hour', 'clock_minute'].forEach(function (name) {{ var box = panel.querySelector('[name=' + name + ']'); if (!box) {{ return; }} box.value = ''; var trig = box.__ddTrigger; if (trig) {{ trig.textContent = box.options[0].textContent; trig.setAttribute('aria-expanded', 'false'); }} var drop = box.__ddPanel; if (drop) {{ drop.classList.remove('dd-open'); drop.querySelectorAll('.dd-option-selected').forEach(function (r) {{ r.classList.remove('dd-option-selected'); r.setAttribute('aria-selected', 'false'); }}); }} }}); }} \
                 var pop = panel.closest('.datepick-pop');\
                 var label = pop.querySelector('.datepick-label');\
-                if (label) {{ label.textContent = ymd ? (MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d)) : label.dataset.empty; }}\
+                if (label) {{ speak(label, ymd); }}\
                 var toggle = pop.querySelector('.edit-toggle');\
                 if (toggle) {{ toggle.checked = false; }}\
                 if (input.hasAttribute('data-autosubmit') && input.form) {{ input.form.requestSubmit(); }}\
@@ -1459,6 +1465,18 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 if (!toggle || !toggle.checked) {{ return; }}\
                 var panel = toggle.closest('.datepick-pop').querySelector('.datepick-panel');\
                 if (panel) {{ render(panel); }}\
+            }});\
+            document.addEventListener('izlek:wire', function () {{\
+                document.querySelectorAll('.datepick-pop').forEach(function (pop) {{\
+                    var panel = pop.querySelector('.datepick-panel');\
+                    if (!panel) {{ return; }}\
+                    var toggle = pop.querySelector('.edit-toggle');\
+                    if (toggle && toggle.checked) {{ render(panel); }}\
+                    var input = panel.querySelector('.datepick-input');\
+                    if (!input || !input.__izlekMine || input.__izlekMine.a.indexOf('value') === -1) {{ return; }}\
+                    var label = pop.querySelector('.datepick-label');\
+                    if (label) {{ speak(label, parseYmd(input.value)); }}\
+                }});\
             }});\
             document.addEventListener('click', function(e) {{\
                 var prev = e.target.closest('.datepick-prev');\

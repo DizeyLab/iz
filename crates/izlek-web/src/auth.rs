@@ -18,8 +18,8 @@ use topcoat::router::response::{IntoResponse, Response};
 use topcoat::router::{HeaderName, StatusCode, header, route};
 
 use crate::server::{
-    Refusal, accounts, clear_session_cookie, client_label, mail, presented_session, require_admin,
-    require_user, set_session_cookie,
+    Refusal, accounts, back_to, clear_session_cookie, client_label, mail, presented_session,
+    require_admin, require_user, set_session_cookie,
 };
 use crate::settings::encode_q;
 
@@ -68,16 +68,6 @@ pub async fn invited_by_token(cx: &Cx, token: &str) -> Result<Option<Invited>> {
     }))
 }
 
-/// The page a browser without script is sent back to on a 303: the page the
-/// form was posted from, or home when there is no `Referer` to read.
-fn back_to(cx: &Cx) -> String {
-    headers(cx)
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("/")
-        .to_string()
-}
-
 /// A 303 to [`back_to`], carrying `refusal` as the body for
 /// `carry_refusal_on_redirect` to read and copy onto the query.
 type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
@@ -85,7 +75,7 @@ type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refus
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
     Ok((
         StatusCode::SEE_OTHER,
-        [(header::LOCATION, back_to(cx))],
+        [(header::LOCATION, back_to(cx, "/"))],
         Json(refusal),
     ))
 }

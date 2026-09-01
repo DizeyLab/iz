@@ -262,3 +262,22 @@
   padding: 14px 20px;
   border-top: 1px solid var(--border);
 }
+// -- mobile (narrow viewports) -----------------------------------------------
+// Geometry that the skin sets with [data-ui]-prefixed rules and that the
+// shared mobile layer in main.scss cannot out-specify.
+@media (max-width: 620px) {
+  // The rail is a strip; its width is a desktop's and its active rule runs
+  // under the section, not beside it.
+  [data-ui="instrument"] .settings-sections { width: auto; }
+
+  [data-ui="instrument"] .settings-section-link.active {
+    background: none;
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  // The filterbar wraps at this width; the skin's fixed 40px would clip it.
+  [data-ui="instrument"] .filterbar { height: auto; }
+
+  // A phone carries no Escape key; the hint is chrome for a keyboard.
+  [data-ui="instrument"] .modal-task .detail-esc { display: none; }
+}

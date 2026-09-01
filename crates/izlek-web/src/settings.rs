@@ -1583,6 +1583,10 @@ async fn settings_page(cx: &Cx) -> Result {
                             <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                         </div>
                         <div class="panel-body">
+                            // The register keeps its named columns at every width; on a
+                            // narrow screen this box pans it sideways, silently, instead
+                            // of letting the columns crush the role select out.
+                            <div class="table-pan">
                             <table class="member-table">
                                 <thead>
                                     <tr>
@@ -1667,6 +1671,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                     }
                                 </tbody>
                             </table>
+                            </div>
 
                             <form method="post" action="/api/invite_member" class="member-invite">
                                 <label class="field">

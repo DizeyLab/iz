@@ -329,7 +329,10 @@ body {
 // keep their natural height, the stage absorbs the rest, the document never
 // scrolls.
 body:has(.board-stage) {
+  // dvh follows the browser chrome phones raise and lower; vh is the fallback
+  // for engines without it.
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -340,6 +343,7 @@ body:has(.board-stage) {
 
 body:has(.settings-shell) {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -352,12 +356,33 @@ body:has(.settings-shell) {
 // page here, and the document never grows a scrollbar.
 body:has(.people-shell) {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 
   > * { flex: none; }
   > .people-shell { flex: 1; min-height: 0; }
+}
+// The account screens take the same lock: the card centers in what is left
+// of the viewport, and a card taller than it (a landscape phone) pans inside
+// the stage instead of growing the document.
+body:has(.auth-stage) {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  > * { flex: none; }
+  > .auth-stage {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+  }
 }
 
 a {
@@ -441,6 +466,9 @@ a {
   text-transform: uppercase;
   color: var(--muted);
   text-decoration: none;
+  // A two-word label ("Mail rules") folds under pressure and reads as two
+  // stacked links; the nav gives up room some other way.
+  white-space: nowrap;
   padding-bottom: 2px;
 
   &:hover { color: var(--ink); }
@@ -3722,6 +3750,16 @@ input[type="radio"] {
 
   @media (max-width: 620px) {
     grid-template-columns: repeat(2, 1fr);
+
+    // Two by two: the rule runs between the columns and under the first
+    // row, not off the right edge of every cell.
+    .person-stat {
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+
+      &:nth-child(odd) { border-right: 1px solid var(--border); }
+      &:nth-child(n + 3) { border-bottom: none; }
+    }
   }
 }
 
@@ -3807,4 +3845,170 @@ input[type="radio"] {
   white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
+}
+// --- Mobile (narrow viewports) ----------------------------------------------
+//
+// One breakpoint, at the same 620px the person stats already fold at. The
+// document stays viewport-locked on every page (the body:has(...) rules
+// above); what a narrow screen changes is geometry: chrome tightens, the
+// settings rail becomes a strip, the board's columns pan sideways, and the
+// regions that already pan keep panning. Nothing here may open a document
+// scrollbar, and nothing here may grow explainer text.
+@media (max-width: 620px) {
+  // -- chrome ----------------------------------------------------------------
+
+  .topbar {
+    gap: 10px;
+    padding: 0 12px;
+  }
+
+  .topbar-nav-links {
+    gap: 12px;
+    // Five admin links outrun the narrowest phones; the strip pans under the
+    // finger the way every other overflow region here does, and the wordmark
+    // and avatar stay pinned at the edges.
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+  }
+
+  // The avatar says who is signed in at this width; the name is the menu's.
+  .user-menu-trigger-name { display: none; }
+
+  // The last squeeze, below the smallest common phone: the chrome gives up
+  // its air before the nav gives up legibility.
+  @media (max-width: 360px) {
+    .topbar {
+      gap: 8px;
+      padding: 0 8px;
+    }
+
+    .topbar-nav-links { gap: 10px; }
+  }
+
+  // -- board -----------------------------------------------------------------
+
+  .filterbar {
+    height: auto;
+    min-height: 44px;
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 8px 12px;
+  }
+
+  // A rule floating alone at the head of a wrapped row says nothing.
+  .filterbar .topbar-divider { display: none; }
+
+  .filterbar .primary,
+  .filterbar .chip { flex: none; }
+
+  .board-stage { padding: 12px; }
+
+  // The columns stop sharing one row and become a rail: each as wide as a
+  // card needs, the row panning sideways under the finger, silently.
+  .board-columns {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: min(72vw, 280px);
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+  }
+
+  .column { scroll-snap-align: start; }
+
+  // -- modals ----------------------------------------------------------------
+
+  .modal-scrim { padding: 16px; }
+
+  .modal { max-height: calc(100dvh - 32px); }
+
+  .new-task-row { flex-wrap: wrap; }
+
+  .detail-head { padding: 16px 16px 0; }
+
+  // Six tabs outrun a phone; the strip pans, the way a column of cards does.
+  .detail-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+  }
+
+  .detail-tab { white-space: nowrap; }
+
+  .detail-crumb-title { max-width: 16ch; }
+
+  .detail-fields {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 14px 16px 0;
+  }
+
+  .detail-block { padding: 16px 16px 0; }
+
+  .detail-foot { padding: 14px 16px 16px; }
+
+  // -- the settings shell: rail becomes a strip -------------------------------
+
+  .settings-shell { flex-direction: column; }
+
+  .settings-sections {
+    width: auto;
+    flex-direction: row;
+    padding: 0 8px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+  }
+
+  .settings-section-link {
+    flex: none;
+    padding: 12px 10px;
+    white-space: nowrap;
+  }
+
+  .settings-stage { padding: 16px 16px 32px; }
+
+  // The members register keeps its named columns and pans inside the panel
+  // rather than squeezing the role select out of the screen.
+  .table-pan {
+    overflow-x: auto;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+
+    .member-table { min-width: 560px; }
+  }
+
+  .field-row { flex-wrap: wrap; }
+
+  // -- people -----------------------------------------------------------------
+
+  .people-shell { padding: 16px 16px 32px; }
+
+  .person-head { flex-wrap: wrap; }
+
+  .person-fields { grid-template-columns: minmax(0, 1fr); }
+
+  // Stacked cells rule underneath each other, not off their right edge.
+  .person-field {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+
+    &:last-child {
+      border-right: none;
+      border-bottom: none;
+    }
+  }
+
+  // -- account screens ---------------------------------------------------------
+
+  .auth-stage { padding: 0 16px 24px; }
 }

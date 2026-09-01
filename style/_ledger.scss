@@ -476,3 +476,28 @@
 [data-ui="ledger"] .settings-section-link.active {
   border-bottom: 2px solid var(--ink);
 }
+// -- mobile (narrow viewports) -----------------------------------------------
+// Geometry that the skin sets with [data-ui]-prefixed rules and that the
+// shared mobile layer in main.scss cannot out-specify.
+@media (max-width: 620px) {
+  // The paper page keeps its mast and foot flush; only the side margins give.
+  [data-ui="ledger"] .modal-scrim:has(> .modal-task) { padding: 0 12px; }
+
+  [data-ui="ledger"] .detail-mast { padding: 20px 0 6px; }
+
+  [data-ui="ledger"] .detail-title,
+  [data-ui="ledger"] .title-input { font-size: 24px; }
+
+  // The labeled rows stack: no third of a phone holds label and value side
+  // by side.
+  [data-ui="ledger"] .detail-field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  [data-ui="ledger"] .detail-field > .detail-label { width: auto; }
+
+  // The rail is a strip; the 170px column is a desktop's.
+  [data-ui="ledger"] .settings-sections { width: auto; }
+}

@@ -655,6 +655,40 @@ pub fn refusal_of(cx: &Cx, call: &str) -> Option<Refusal> {
     Refusal::from_code(code?)
 }
 
+/// The page a form was posted from: the `Referer`, with the answer any
+/// earlier post left on its query dropped, or `nowhere` when no `Referer`
+/// came with the request.
+///
+/// The feedback pairs — `refusal=`, `on=`, `why=`, `saved=` — are how a page
+/// renders what the last post did. Sending the browser back with them still
+/// on the query re-renders that old answer under the new post's own: a change
+/// that succeeded right after one that was refused announces the refusal
+/// again, and reads as having failed. The answer this redirect carries — the
+/// pairs it was built with, or the body [`carry_refusal_on_redirect`] copies
+/// onto the query — is the one that shows; an earlier one never survives the
+/// trip.
+pub fn back_to(cx: &Cx, nowhere: &str) -> String {
+    let referer = headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(nowhere);
+    let (path, query) = referer.split_once('?').unwrap_or((referer, ""));
+    let pairs: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            !pair.is_empty()
+                && !["refusal", "on", "why", "saved"].iter().any(|key| {
+                    pair.strip_prefix(*key)
+                        .is_some_and(|rest| rest.starts_with('='))
+                })
+        })
+        .collect();
+    if pairs.is_empty() {
+        return path.to_string();
+    }
+    format!("{path}?{}", pairs.join("&"))
+}
+
 /// Puts a refusal on the redirect a browser without script follows.
 ///
 /// A hydrated page reads the call's return value straight off the action. A

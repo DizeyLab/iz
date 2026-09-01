@@ -15,13 +15,12 @@ use time::format_description::well_known::Rfc3339;
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
-use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, page, route};
 use topcoat::view::view;
 
 use crate::detail::{Me, datepicker_grid};
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, require_admin};
+use crate::server::{Refusal, accounts, back_to, require_admin};
 use crate::settings::{decode_q, encode_q};
 
 /// One send still owed or refused, as the queue panel reads it.
@@ -748,16 +747,6 @@ async fn current_logs(cx: &Cx) -> Result<Json<std::result::Result<LogsSnapshot, 
     ))
 }
 
-/// The page a retry form was posted from, or the queue tab when there is no
-/// `Referer` to read.
-fn back_to(cx: &Cx) -> String {
-    headers(cx)
-        .get(header::REFERER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("/logs?section=queue")
-        .to_string()
-}
-
 /// A 303 to [`back_to`], carrying `refusal` as the body for
 /// `crate::server::carry_refusal_on_redirect` to read and copy onto the query.
 type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
@@ -765,7 +754,7 @@ type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refus
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
     Ok((
         StatusCode::SEE_OTHER,
-        [(header::LOCATION, back_to(cx))],
+        [(header::LOCATION, back_to(cx, "/logs?section=queue"))],
         Json(refusal),
     ))
 }
