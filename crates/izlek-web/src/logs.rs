@@ -124,6 +124,15 @@ const ACTIVITY_KINDS: &[&str] = &[
     "rule_deleted",
     "file_added",
     "file_removed",
+    "tagged",
+    "tag_created",
+    "tag_renamed",
+    "tag_deleted",
+    "tag_moved",
+    "send_retried",
+    "photo_saved",
+    "photo_removed",
+    "sender_checked",
 ];
 
 /// The word the decisions panel prints for an outcome. Terse: the panel is
@@ -184,7 +193,18 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang
         ActivityKind::RuleEdited => crate::i18n::rule_edited_label(lang, detail),
         ActivityKind::RuleToggled => crate::i18n::rule_toggled_label(lang, detail),
         ActivityKind::RuleDeleted => crate::i18n::rule_deleted_label(lang, detail),
-        ActivityKind::Other(_) => detail.to_string(),
+        ActivityKind::Other(raw) => match raw.as_str() {
+            "tagged" => crate::i18n::tagged_label(lang, detail),
+            "tag_created" => crate::i18n::tag_created_label(lang, detail),
+            "tag_renamed" => crate::i18n::tag_renamed_label(lang, detail),
+            "tag_deleted" => crate::i18n::tag_deleted_label(lang, detail),
+            "tag_moved" => crate::i18n::tag_moved_label(lang, detail),
+            "send_retried" => t(lang, Key::ActSendRetried).to_string(),
+            "photo_saved" => t(lang, Key::ActPhotoSaved).to_string(),
+            "photo_removed" => t(lang, Key::ActPhotoRemoved).to_string(),
+            "sender_checked" => t(lang, Key::ActSenderChecked).to_string(),
+            _ => detail.to_string(),
+        },
     }
 }
 
@@ -764,17 +784,25 @@ struct RetrySendForm {
     send_id: String,
 }
 
-/// Puts a failed or abandoned send back in play, admin only. No trail event:
-/// no `ActivityKind` fits a retry, so none is written rather than one being
-/// invented.
+/// Puts a failed or abandoned send back in play, admin only. The retry lands
+/// on the workspace trail, so the queue's history reads whole.
 #[route(POST "/api/retry_send")]
 async fn retry_send(cx: &Cx, Form(input): Form<RetrySendForm>) -> Redirect {
-    if let Err(refusal) = require_admin(cx).await {
-        return redirect(cx, Some(refusal));
-    }
+    let admin = match require_admin(cx).await {
+        Ok(admin) => admin,
+        Err(refusal) => return redirect(cx, Some(refusal)),
+    };
     let store = accounts(cx).store().clone();
     let _ = store
         .requeue_send(&input.send_id, OffsetDateTime::now_utc())
+        .await;
+    let _ = store
+        .record_event(
+            Some(&admin.id),
+            &izlek_core::detail::ActivityKind::Other("send_retried".to_string()),
+            "",
+            OffsetDateTime::now_utc(),
+        )
         .await;
     redirect(cx, None)
 }

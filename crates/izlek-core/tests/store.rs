@@ -2310,6 +2310,30 @@ async fn changing_a_password_needs_the_current_one_and_obeys_the_rules() {
 }
 
 #[tokio::test]
+async fn the_old_password_stops_working_after_a_change() {
+    let (_scratch, accounts, admin) = claimed().await;
+    accounts
+        .change_password(
+            &admin.id,
+            "tide-tables-1892",
+            "chronometer-1761",
+            "198.51.100.7",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .sign_in("ada@izlek.sh", "tide-tables-1892", "198.51.100.7")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+    accounts
+        .sign_in("ada@izlek.sh", "chronometer-1761", "198.51.100.7")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn signing_out_ends_that_browser_only() {
     let (_scratch, accounts, _admin) = claimed().await;
     let laptop = accounts
@@ -8347,4 +8371,175 @@ async fn reminder_rows_survive_a_reopen() {
     assert_eq!(after[0].state, SendState::Pending);
     assert_eq!(after[0].next_attempt_at, before[0].next_attempt_at);
     let _ = std::fs::remove_dir_all(&dir);
+}
+#[tokio::test]
+async fn a_reminder_already_sent_is_never_queued_again() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let emre = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &grace).await.unwrap();
+    store.assign_task(&task, &emre).await.unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // The meeting is 15 minutes out from due, so a pass anywhere after that
+    // delivers both reminders.
+    let later = clock - Duration::minutes(14);
+    assert_eq!(engine.deliver_owed(later, 10).await.unwrap().sent, 2);
+
+    // Any later write about the card re-derives the reminders. The two who
+    // were reminded keep the rows that went out; nobody is minted a second.
+    let yusuf = member(&store, &workspace, "yusuf@izlek.sh", "Yusuf").await;
+    store.assign_task(&task, &yusuf).await.unwrap();
+    let rows = reminders(&store, &task).await;
+    let yusuf_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.recipient == "yusuf@izlek.sh")
+        .collect();
+    assert_eq!(yusuf_rows.len(), 1, "the newcomer has one row: {rows:?}");
+    let served: Vec<_> = rows
+        .iter()
+        .filter(|r| r.recipient != "yusuf@izlek.sh")
+        .collect();
+    assert!(
+        served.iter().all(|r| r.state != SendState::Pending),
+        "nobody served is owed again: {served:?}"
+    );
+    for person in ["grace@izlek.sh", "emre@izlek.sh"] {
+        assert_eq!(
+            served
+                .iter()
+                .filter(|r| r.recipient == person && r.state == SendState::Sent)
+                .count(),
+            1,
+            "{person} was delivered exactly once: {served:?}"
+        );
+    }
+    let pending = pending_reminders(&store, &task).await;
+    assert_eq!(pending.len(), 1, "only the newcomer is owed: {pending:?}");
+    assert_eq!(pending[0].recipient, "yusuf@izlek.sh");
+
+    // And the queue itself repeats nothing: sweep after sweep re-delivers
+    // nobody, whatever the writes in between did. Taking Yusuf off the card
+    // and putting him back is a write pair every round — the sync his
+    // reminder rides abandons and re-derives each time.
+    for _ in 0..3 {
+        engine
+            .deliver_owed(later + Duration::minutes(1), 10)
+            .await
+            .unwrap();
+        store.unassign_task(&task, &yusuf).await.unwrap();
+        store.assign_task(&task, &yusuf).await.unwrap();
+    }
+    assert_eq!(mailer.sent().len(), 3, "{:?}", mailer.sent());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_reminder_failing_on_retries_is_not_minted_twice() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &grace).await.unwrap();
+
+    let mailer = Remembering::refusing(vec![MailError::retryable("host is down")]);
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    let later = clock - Duration::minutes(14);
+    assert_eq!(engine.deliver_owed(later, 10).await.unwrap().failed, 1);
+
+    // The write between the sweeps finds Grace's reminder riding its own
+    // retry clock, and leaves it exactly one row.
+    let emre = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    store.assign_task(&task, &emre).await.unwrap();
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 2, "one row per person: {rows:?}");
+    let grace_row = rows.iter().find(|r| r.recipient == "grace@izlek.sh").unwrap();
+    assert_eq!(grace_row.state, SendState::Failed);
+    assert_eq!(grace_row.attempts, 1);
+
+    // When the host comes back the retry lands once — not once per row.
+    engine
+        .deliver_owed(later + backoff(1) + Duration::minutes(1), 10)
+        .await
+        .unwrap();
+    let grace_mail = mailer
+        .sent()
+        .iter()
+        .filter(|m| m.to == "grace@izlek.sh")
+        .count();
+    assert_eq!(grace_mail, 1, "{:?}", mailer.sent());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_reminder_never_lands_at_or_after_the_deadline() {
+    let (dir, store, workspace, admin) = shared().await;
+    // A meeting comfortably ahead: the lead decides the moment.
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store
+        .assign_task(&task, &member(&store, &workspace, "grace@izlek.sh", "Grace").await)
+        .await
+        .unwrap();
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    let due = rows[0].next_attempt_at.unwrap();
+    assert!(
+        due < clock,
+        "the reminder fires {:#?} before the clock",
+        clock - due
+    );
+    assert_eq!(due, clock - Duration::minutes(15));
+
+    // A meeting already inside the window: the warning commits now, which is
+    // still before the clock.
+    let soon = OffsetDateTime::now_utc() + Duration::minutes(10);
+    let task = clocked_task(&store, &workspace, &admin, Some(soon)).await;
+    store
+        .assign_task(&task, &member(&store, &workspace, "emre@izlek.sh", "Emre").await)
+        .await
+        .unwrap();
+    let rows = reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    let due = rows[0].next_attempt_at.unwrap();
+    assert!(due < soon, "due {due} at or after the clock {soon}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Setting the password back to what it already is is refused by name, and a
+/// refused change leaves every session — and the old password — standing.
+#[tokio::test]
+async fn a_change_back_to_the_same_password_is_refused_and_signs_nobody_out() {
+    let (_scratch, accounts, admin) = claimed().await;
+    // A second browser holds a session the refused change must not touch.
+    let other = accounts
+        .sign_in("ada@izlek.sh", "tide-tables-1892", "198.51.100.8")
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .change_password(
+                &admin.id,
+                "tide-tables-1892",
+                "tide-tables-1892",
+                "198.51.100.7"
+            )
+            .await,
+        Err(AccountError::Password(PasswordProblem::IsCurrent))
+    ));
+    // The other browser is still signed in, and the old password still works.
+    assert!(
+        accounts
+            .authenticate(other.session_token.expose())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    accounts
+        .sign_in("ada@izlek.sh", "tide-tables-1892", "198.51.100.7")
+        .await
+        .unwrap();
 }

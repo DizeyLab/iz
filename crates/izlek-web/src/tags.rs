@@ -122,6 +122,20 @@ struct CreateTagForm {
     name: String,
 }
 
+/// One line on the workspace trail: who did what to which tag. A trail
+/// write that fails is swallowed, like every other trail write behind a
+/// handler — a lost log line never fails the write that caused it.
+async fn tag_event(store: &Arc<dyn Store>, actor: &User, kind: &str, detail: &str) {
+    let _ = store
+        .record_event(
+            Some(&actor.id),
+            &izlek_core::detail::ActivityKind::Other(kind.to_string()),
+            detail,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await;
+}
+
 /// Writes one tag. A duplicate name is the store's `Conflict`, which lands
 /// here like every other store error: the admin sees "something went wrong"
 /// and the list still shows the tag they collide with.
@@ -147,6 +161,7 @@ async fn create_tag(cx: &Cx, Form(input): Form<CreateTagForm>) -> Redirect {
     {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    tag_event(&store, &user, "tag_created", &name).await;
     redirect(cx, None)
 }
 
@@ -161,7 +176,7 @@ struct RenameTagForm {
 /// renamed by an admin who never owned it.
 #[route(POST "/api/rename_tag")]
 async fn rename_tag(cx: &Cx, Form(input): Form<RenameTagForm>) -> Redirect {
-    let (store, _, _) = match tag_of_this_workspace(cx, &input.tag_id).await {
+    let (store, user, tag) = match tag_of_this_workspace(cx, &input.tag_id).await {
         Ok(triple) => triple,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
@@ -172,6 +187,13 @@ async fn rename_tag(cx: &Cx, Form(input): Form<RenameTagForm>) -> Redirect {
     if store.rename_tag(&input.tag_id, &name).await.is_err() {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    tag_event(
+        &store,
+        &user,
+        "tag_renamed",
+        &format!("{} -> {name}", tag.name),
+    )
+    .await;
     redirect(cx, None)
 }
 
@@ -187,12 +209,15 @@ struct DeleteTagForm {
 /// the same rule where it is actually enforced.
 #[route(POST "/api/delete_tag")]
 async fn delete_tag(cx: &Cx, Form(input): Form<DeleteTagForm>) -> Redirect {
-    let (store, _, _) = match tag_of_this_workspace(cx, &input.tag_id).await {
+    let (store, user, tag) = match tag_of_this_workspace(cx, &input.tag_id).await {
         Ok(triple) => triple,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
     match store.delete_tag(&input.tag_id).await {
-        Ok(()) => redirect(cx, None),
+        Ok(()) => {
+            tag_event(&store, &user, "tag_deleted", &tag.name).await;
+            redirect(cx, None)
+        }
         Err(izlek_core::store::StoreError::Conflict("tag_in_use")) => {
             redirect(cx, Some(Refusal::TagInUse))
         }
@@ -211,7 +236,7 @@ struct MoveTagForm {
 /// form gone wrong, and does nothing.
 #[route(POST "/api/move_tag")]
 async fn move_tag(cx: &Cx, Form(input): Form<MoveTagForm>) -> Redirect {
-    let (store, _, _) = match tag_of_this_workspace(cx, &input.tag_id).await {
+    let (store, user, tag) = match tag_of_this_workspace(cx, &input.tag_id).await {
         Ok(triple) => triple,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
@@ -223,6 +248,7 @@ async fn move_tag(cx: &Cx, Form(input): Form<MoveTagForm>) -> Redirect {
     if store.move_tag(&input.tag_id, up).await.is_err() {
         return redirect(cx, Some(Refusal::Unavailable));
     }
+    tag_event(&store, &user, "tag_moved", &tag.name).await;
     redirect(cx, None)
 }
 

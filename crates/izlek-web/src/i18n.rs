@@ -299,6 +299,15 @@ pub enum Key {
     ActLimitsSaved,
     ActTestMailSent,
     ActMessageSent,
+    ActSendRetried,
+    ActPhotoSaved,
+    ActPhotoRemoved,
+    ActSenderChecked,
+    PWCurrentWrong,
+    PWIsCurrent,
+    PWTooShort,
+    PWLooksLikeYou,
+    PasswordSaved,
     UnblockedWord,
     AColumn,
     AudienceEmpty,
@@ -900,6 +909,24 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActTestMailSent, Tr) => "test postası gönderdi",
         (ActMessageSent, En) => "sent a message",
         (ActMessageSent, Tr) => "mesaj gönderdi",
+        (ActSendRetried, En) => "retried a send",
+        (ActSendRetried, Tr) => "bir gönderimi yeniden denedi",
+        (ActPhotoSaved, En) => "saved the profile photo",
+        (ActPhotoSaved, Tr) => "profil fotoğrafını kaydetti",
+        (ActPhotoRemoved, En) => "removed the profile photo",
+        (ActPhotoRemoved, Tr) => "profil fotoğrafını kaldırdı",
+        (ActSenderChecked, En) => "checked the mail server",
+        (ActSenderChecked, Tr) => "posta sunucusunu denetledi",
+        (PWCurrentWrong, En) => "The current password is wrong.",
+        (PWCurrentWrong, Tr) => "Mevcut parola yanlış.",
+        (PWIsCurrent, En) => "That's your current password.",
+        (PWIsCurrent, Tr) => "Bu zaten mevcut parolan.",
+        (PWTooShort, En) => "At least 10 characters.",
+        (PWTooShort, Tr) => "En az 10 karakter.",
+        (PWLooksLikeYou, En) => "Not your address or your name.",
+        (PWLooksLikeYou, Tr) => "Adresin ya da adın değil.",
+        (PasswordSaved, En) => "Password changed. Your other devices were signed out.",
+        (PasswordSaved, Tr) => "Parola değişti. Diğer cihazlarının oturumu kapatıldı.",
         (UnblockedWord, En) => "unblocked",
         (UnblockedWord, Tr) => "engeli kaldırıldı",
         (AColumn, En) => "a column",
@@ -1238,6 +1265,41 @@ pub fn rule_deleted_label(lang: Lang, detail: &str) -> String {
     }
 }
 
+pub fn tagged_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("tagged it {detail}"),
+        Lang::Tr => format!("{detail} ile etiketledi"),
+    }
+}
+
+pub fn tag_created_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("created the tag {detail}"),
+        Lang::Tr => format!("{detail} etiketini oluşturdu"),
+    }
+}
+
+pub fn tag_renamed_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("renamed the tag {detail}"),
+        Lang::Tr => format!("{detail} etiketini yeniden adlandırdı"),
+    }
+}
+
+pub fn tag_deleted_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("deleted the tag {detail}"),
+        Lang::Tr => format!("{detail} etiketini sildi"),
+    }
+}
+
+pub fn tag_moved_label(lang: Lang, detail: &str) -> String {
+    match lang {
+        Lang::En => format!("moved the tag {detail}"),
+        Lang::Tr => format!("{detail} etiketini taşıdı"),
+    }
+}
+
 pub fn file_added_label(lang: Lang, detail: &str) -> String {
     match lang {
         Lang::En => format!("added {detail}"),
@@ -1313,6 +1375,24 @@ pub fn activity_kind_word(lang: Lang, kind: &str) -> String {
         ("deleted", Lang::Tr) => "silindi".to_string(),
         ("commented", Lang::En) => "commented".to_string(),
         ("commented", Lang::Tr) => "yorum yapıldı".to_string(),
+        ("tagged", Lang::En) => "tagged".to_string(),
+        ("tagged", Lang::Tr) => "etiketlendi".to_string(),
+        ("tag_created", Lang::En) => "tag created".to_string(),
+        ("tag_created", Lang::Tr) => "etiket oluşturuldu".to_string(),
+        ("tag_renamed", Lang::En) => "tag renamed".to_string(),
+        ("tag_renamed", Lang::Tr) => "etiket yeniden adlandırıldı".to_string(),
+        ("tag_deleted", Lang::En) => "tag deleted".to_string(),
+        ("tag_deleted", Lang::Tr) => "etiket silindi".to_string(),
+        ("tag_moved", Lang::En) => "tag moved".to_string(),
+        ("tag_moved", Lang::Tr) => "etiket taşındı".to_string(),
+        ("send_retried", Lang::En) => "send retried".to_string(),
+        ("send_retried", Lang::Tr) => "gönderim yeniden denendi".to_string(),
+        ("photo_saved", Lang::En) => "photo saved".to_string(),
+        ("photo_saved", Lang::Tr) => "fotoğraf kaydedildi".to_string(),
+        ("photo_removed", Lang::En) => "photo removed".to_string(),
+        ("photo_removed", Lang::Tr) => "fotoğraf kaldırıldı".to_string(),
+        ("sender_checked", Lang::En) => "mail server checked".to_string(),
+        ("sender_checked", Lang::Tr) => "posta sunucusu denetlendi".to_string(),
         (other, _) => other.to_string(),
     }
 }

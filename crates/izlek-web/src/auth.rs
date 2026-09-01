@@ -250,7 +250,15 @@ async fn change_password(cx: &Cx, Form(input): Form<ChangePasswordForm>) -> Redi
                     time::OffsetDateTime::now_utc(),
                 )
                 .await;
-            redirect(cx, None)
+            // The pane says so itself: `saved=change_password` asks for the
+            // note, with the other-devices fact in it.
+            let back = back_to(cx, "/");
+            let sep = if back.contains('?') { "&" } else { "?" };
+            Ok((
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, format!("{back}{sep}saved=change_password"))],
+                Json(None),
+            ))
         }
         Err(error) => redirect(cx, Some(error.into())),
     }

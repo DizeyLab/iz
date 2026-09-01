@@ -405,6 +405,13 @@ impl Accounts {
         if !ok {
             return Err(AccountError::Rejected);
         }
+        // Setting the password back to itself is the walk-away mistake, not
+        // a change: refused by name, and nothing here signs anybody out.
+        if let Some(stored) = user.password_hash.as_deref() {
+            if verify_password(new, stored) {
+                return Err(AccountError::Password(auth::PasswordProblem::IsCurrent));
+            }
+        }
         auth::check_password(new, &user.email, &user.display_name)?;
         let hash = hash_password(new)?;
         self.store.set_password_hash(&user.id, &hash).await?;

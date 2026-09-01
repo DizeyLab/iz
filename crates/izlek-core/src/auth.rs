@@ -13,6 +13,7 @@ use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -34,12 +35,16 @@ pub const MIN_PASSWORD_CHARS: usize = 10;
 
 /// A password rule the person's choice broke. The wording is the wording on the
 /// first-sign-in screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum PasswordProblem {
     #[error("at least 10 characters")]
     TooShort,
     #[error("not your address or your name")]
     LooksLikeYou,
+    /// The "new" password is the one already in force — the walk-away
+    /// mistake, refused by name rather than silently succeeding.
+    #[error("that's your current password")]
+    IsCurrent,
 }
 
 #[derive(Debug, thiserror::Error)]

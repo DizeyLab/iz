@@ -8,6 +8,7 @@
 //! `izlek-web/src/auth.rs`, onto topcoat's context/cookie/layer primitives.
 
 use izlek_core::accounts::{AccountError, Accounts};
+use izlek_core::auth::PasswordProblem;
 use izlek_core::board::Transition;
 use izlek_core::mail::Engine;
 use izlek_core::store::{Freeing, User};
@@ -282,7 +283,7 @@ fn refusal_for(error: &AccountError) -> Refusal {
     match error {
         AccountError::Rejected => Refusal::Rejected,
         AccountError::RateLimited => Refusal::RateLimited,
-        AccountError::Password(problem) => Refusal::Password(problem.to_string()),
+        AccountError::Password(problem) => Refusal::Password(*problem),
         AccountError::Forbidden => Refusal::Forbidden,
         AccountError::AlreadyClaimed => Refusal::AlreadyClaimed,
         AccountError::AddressTaken => Refusal::AddressTaken,
@@ -315,8 +316,10 @@ pub enum Refusal {
     Rejected,
     RateLimited,
     /// A password broke a stated rule. Only reachable once we know who the
-    /// person is, so it gives nothing away.
-    Password(String),
+    /// person is, so it gives nothing away. The problem itself rides in the
+    /// variant — the wording is built at the edge, in the reader's language,
+    /// never reflected out of the address bar.
+    Password(PasswordProblem),
     Forbidden,
     SignInFirst,
     AlreadyClaimed,
@@ -400,7 +403,7 @@ impl Refusal {
             Refusal::RateLimited => {
                 "Too many attempts — wait a few minutes and try again.".to_string()
             }
-            Refusal::Password(problem) => problem.clone(),
+            Refusal::Password(problem) => problem.to_string(),
             Refusal::Forbidden => "Not permitted.".to_string(),
             Refusal::SignInFirst => "Sign in first.".to_string(),
             Refusal::AlreadyClaimed => "This workspace already has an owner.".to_string(),
@@ -502,10 +505,12 @@ impl Refusal {
             Refusal::AddressTaken => "Bu adresin zaten bir hesabı var.".to_string(),
             Refusal::LinkNotUsable => "Bu bağlantı artık çalışmıyor.".to_string(),
             Refusal::EmptyName => "Kendine bir isim ver.".to_string(),
-            // Built by `izlek-core`'s password validator, out of this
-            // slice's reach — stays English until that crate carries `Lang`
-            // too.
-            Refusal::Password(_) => self.message(),
+            // The validator's own words, in the reader's language.
+            Refusal::Password(problem) => match problem {
+                PasswordProblem::TooShort => "En az 10 karakter.".to_string(),
+                PasswordProblem::LooksLikeYou => "Adresin ya da adın değil.".to_string(),
+                PasswordProblem::IsCurrent => "Bu zaten mevcut parolan.".to_string(),
+            },
         }
     }
 
@@ -516,8 +521,9 @@ impl Refusal {
         Some(match code {
             "rejected" => Refusal::Rejected,
             "rate-limited" => Refusal::RateLimited,
-            "password-short" => Refusal::Password("at least 10 characters".to_string()),
-            "password-you" => Refusal::Password("not your address or your name".to_string()),
+            "password-short" => Refusal::Password(PasswordProblem::TooShort),
+            "password-you" => Refusal::Password(PasswordProblem::LooksLikeYou),
+            "password-current" => Refusal::Password(PasswordProblem::IsCurrent),
             "forbidden" => Refusal::Forbidden,
             "sign-in-first" => Refusal::SignInFirst,
             "already-claimed" => Refusal::AlreadyClaimed,
@@ -570,15 +576,11 @@ impl Refusal {
             Refusal::RateLimited => "rate-limited",
             // The problem itself, not the wording, so the sentence is built
             // here on the way back rather than reflected out of the address.
-            Refusal::Password(problem) => {
-                if problem == "at least 10 characters" {
-                    "password-short"
-                } else if problem == "not your address or your name" {
-                    "password-you"
-                } else {
-                    "rejected"
-                }
-            }
+            Refusal::Password(problem) => match problem {
+                PasswordProblem::TooShort => "password-short",
+                PasswordProblem::LooksLikeYou => "password-you",
+                PasswordProblem::IsCurrent => "password-current",
+            },
             Refusal::Forbidden => "forbidden",
             Refusal::SignInFirst => "sign-in-first",
             Refusal::AlreadyClaimed => "already-claimed",
@@ -813,6 +815,37 @@ fn same_origin(location: &str) -> &str {
     }
 }
 
+/// The cache directives a response cannot choose for itself.
+///
+/// HTML is revalidated on every load: a page the browser kept from before a
+/// deploy is the old app answering under the new one's address, which is how a
+/// fixed bug once came back after shipping. So every response whose body is a
+/// document gets `no-cache`. Responses that already carry a directive keep it —
+/// topcoat stamps the fingerprinted assets under `/_topcoat/assets` with a year
+/// of `immutable` and the live stream with `no-cache`, and the photo and
+/// attachment handlers stamp their own — and everything else (redirects, JSON
+/// answers) ships none, the idiom they already ride on: no directive, nothing
+/// cached. One layer at `/`, because the decision is about what the bytes are,
+/// not which route built them.
+#[topcoat::router::layer("/")]
+async fn cache_directives(cx: &Cx, body: Body, next: Next<'_>) -> topcoat::Result<Response> {
+    let response = next.run(cx, body).await?;
+    let (mut parts, body) = response.into_parts();
+    let is_html = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+    if !is_html || parts.headers.contains_key(header::CACHE_CONTROL) {
+        return Ok(Response::from_parts(parts, body));
+    }
+    parts.headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    Ok(Response::from_parts(parts, body))
+}
+
 #[cfg(test)]
 mod refusal_redirect_tests {
     use super::carrying;
@@ -895,14 +928,16 @@ mod refusal_redirect_tests {
 #[cfg(test)]
 mod refusal_message_tests {
     use super::Refusal;
+    use izlek_core::auth::PasswordProblem;
 
     #[test]
     fn every_refusal_survives_the_address_bar() {
         let all = [
             Refusal::Rejected,
             Refusal::RateLimited,
-            Refusal::Password("at least 10 characters".to_string()),
-            Refusal::Password("not your address or your name".to_string()),
+            Refusal::Password(PasswordProblem::TooShort),
+            Refusal::Password(PasswordProblem::LooksLikeYou),
+            Refusal::Password(PasswordProblem::IsCurrent),
             Refusal::Forbidden,
             Refusal::SignInFirst,
             Refusal::AlreadyClaimed,

@@ -5010,11 +5010,10 @@ async fn the_topbar_nav_marks_the_active_page() {
 }
 
 /// A wrong current password lands back on the rail section it was posted
-/// from with a refusal; a right one changes nothing about the query but the
-/// refusal — `carry_refusal_on_redirect` never writes a `saved=` for a call
-/// nobody asked to see a note about.
+/// from with a refusal; a right one lands with the pane's own `saved=` note —
+/// the user asked the pane to say what happened, other devices included.
 #[tokio::test]
-async fn a_password_change_carries_its_own_refusal_and_never_a_saved_note() {
+async fn a_password_change_carries_its_own_refusal_and_a_saved_note() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
@@ -5055,7 +5054,7 @@ async fn a_password_change_carries_its_own_refusal_and_never_a_saved_note() {
         right
             .location
             .as_deref()
-            .is_some_and(|location| !location.contains("saved=")),
+            .is_some_and(|location| location.contains("saved=change_password")),
         "{:?}",
         right.location
     );
@@ -9109,4 +9108,415 @@ async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
         "{html}"
     );
     assert!(html.contains(">Sep 02 11:23<"), "{html}");
+}
+
+#[tokio::test]
+async fn a_page_revalidates_and_an_asset_caches_forever() {
+    let app = App::open().await;
+
+    // A page the browser kept from before a deploy is the old app answering
+    // under the new one's address, so HTML is revalidated on every load.
+    let page = Request::builder()
+        .method("GET")
+        .uri("/")
+        .body(Body::empty())
+        .unwrap();
+    let page = app.router.handle(page).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let directive = page
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok());
+    assert_eq!(directive, Some("no-cache"));
+
+    // The asset's name carries its content hash, so the year of `immutable`
+    // topcoat stamps it with survives the layer untouched.
+    let stylesheet = std::fs::read_dir(asset_dir())
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()?.to_str()? == "css").then_some(path)
+        })
+        .next()
+        .expect("no compiled stylesheet in the asset bundle");
+    let asset_path = format!(
+        "/_topcoat/assets/{}",
+        stylesheet.file_name().unwrap().to_str().unwrap()
+    );
+    let asset = Request::builder()
+        .method("GET")
+        .uri(&asset_path)
+        .body(Body::empty())
+        .unwrap();
+    let asset = app.router.handle(asset).await;
+    assert_eq!(asset.status(), StatusCode::OK);
+    let directive = asset
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok());
+    assert_eq!(directive, Some("public, max-age=31536000, immutable"));
+
+    // A redirect carries no directive at all: nothing cached, nothing stale.
+    let redirected = Request::builder()
+        .method("POST")
+        .uri("/api/sign_out")
+        .header(header::ACCEPT, "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let redirected = app.router.handle(redirected).await;
+    assert_eq!(redirected.status(), StatusCode::SEE_OTHER);
+    assert!(redirected.headers().get(header::CACHE_CONTROL).is_none());
+}
+
+/// Every tag write lands on the workspace trail with the acting admin as the
+/// actor: created, moved, renamed (old -> new) and deleted each name the tag
+/// itself in the detail.
+#[tokio::test]
+async fn tag_writes_record_their_events() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    app
+        .post(
+            "/api/create_tag",
+            Some(&admin_cookie),
+            &[("name", "Urgent")],
+        )
+        .await;
+    let workspace_id = app.workspace_id().await;
+    let tag = {
+        let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        app.store
+            .tags(&board.board.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "Urgent")
+            .expect("the tag was created")
+    };
+    app
+        .post(
+            "/api/move_tag",
+            Some(&admin_cookie),
+            &[("tag_id", &tag.id), ("direction", "up")],
+        )
+        .await;
+    app
+        .post(
+            "/api/rename_tag",
+            Some(&admin_cookie),
+            &[("tag_id", &tag.id), ("name", "High")],
+        )
+        .await;
+    app
+        .post(
+            "/api/delete_tag",
+            Some(&admin_cookie),
+            &[("tag_id", &tag.id)],
+        )
+        .await;
+
+    let lines = app
+        .store
+        .recent_activity(
+            20,
+            izlek_core::store::FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter::default(),
+        )
+        .await
+        .unwrap();
+    let line_of = |raw: &str| {
+        lines
+            .iter()
+            .find(|line| line.kind.as_str() == raw)
+            .unwrap_or_else(|| panic!("no {raw} line: {lines:?}"))
+    };
+    assert_eq!(line_of("tag_created").detail, "Urgent");
+    assert_eq!(line_of("tag_renamed").detail, "Urgent -> High");
+    assert_eq!(line_of("tag_moved").detail, "Urgent");
+    assert_eq!(line_of("tag_deleted").detail, "High");
+    for raw in ["tag_created", "tag_renamed", "tag_moved", "tag_deleted"] {
+        assert_eq!(
+            line_of(raw).actor_name.as_deref(),
+            Some("Ada Lovelace"),
+            "{raw}"
+        );
+    }
+}
+
+/// Filing a task under a tag writes one line on the task's own trail, naming
+/// the tag, with the person who filed it as the actor.
+#[tokio::test]
+async fn tagging_a_task_records_a_trail_line() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let workspace_id = app.workspace_id().await;
+    let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let column = board.columns[0].column.id.clone();
+    let task = a_task(&app, &admin_cookie, &column, "Audit me").await;
+    app
+        .post(
+            "/api/create_tag",
+            Some(&admin_cookie),
+            &[("name", "Shipped")],
+        )
+        .await;
+    let tag = {
+        let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        app.store
+            .tags(&board.board.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "Shipped")
+            .expect("the tag was created")
+    };
+
+    app
+        .post(
+            "/api/set_task_tag",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("tag_id", &tag.id)],
+        )
+        .await;
+
+    let lines = app
+        .store
+        .recent_activity(
+            20,
+            izlek_core::store::FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter {
+                kind: Some("tagged".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].detail, "Shipped");
+    assert_eq!(lines[0].actor_name.as_deref(), Some("Ada Lovelace"));
+}
+
+/// A profile photo set and cleared both land on the workspace trail, and the
+/// person whose photo it is is the actor on both lines.
+#[tokio::test]
+async fn profile_photo_changes_record_their_events() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    app
+        .post_multipart(
+            "/api/profile_photo",
+            Some(&admin_cookie),
+            &[],
+            Some(("me.png", "image/png", &PNG)),
+        )
+        .await;
+    app
+        .post("/api/delete_profile_photo", Some(&admin_cookie), &[])
+        .await;
+
+    let lines = app
+        .store
+        .recent_activity(
+            20,
+            izlek_core::store::FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter::default(),
+        )
+        .await
+        .unwrap();
+    let saved = lines
+        .iter()
+        .find(|line| line.kind.as_str() == "photo_saved")
+        .expect("no photo_saved line");
+    assert_eq!(saved.actor_name.as_deref(), Some("Ada Lovelace"));
+    let removed = lines
+        .iter()
+        .find(|line| line.kind.as_str() == "photo_removed")
+        .expect("no photo_removed line");
+    assert_eq!(removed.actor_name.as_deref(), Some("Ada Lovelace"));
+}
+
+/// Asking for a mail-server check rides the trail too — it writes a check
+/// row, so the trail says who asked.
+#[tokio::test]
+async fn checking_the_sender_records_an_event() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post("/api/check_sender", Some(&admin_cookie), &[])
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+
+    let lines = app
+        .store
+        .recent_activity(
+            20,
+            izlek_core::store::FeedPage::Newest,
+            izlek_core::store::Dir::Newest,
+            &izlek_core::store::ActivityFilter {
+                kind: Some("sender_checked".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].actor_name.as_deref(), Some("Ada Lovelace"));
+}
+
+/// The settings pane for a given feedback query, as HTML — every assertion
+/// below reads the words the pane itself would show.
+async fn password_pane(app: &App, cookie: &str, query: &str) -> String {
+    let page = app
+        .get(
+            &format!("/settings?section=profile&{query}"),
+            Some(cookie),
+        )
+        .await;
+    String::from_utf8_lossy(&page.bytes).into_owned()
+}
+
+/// The password pane names each failure — wrong current, same as current,
+/// too short, looks-like-you — each with its own refusal code and its own
+/// one-line message in either language; a successful change lands with the
+/// pane's saved note about the other devices.
+#[tokio::test]
+async fn the_password_pane_names_each_failure() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let referer = "http://izlek.test/settings?section=profile";
+
+    // The current password is wrong.
+    let wrong = app
+        .post_without_script(
+            "/api/change_password",
+            Some(&admin_cookie),
+            referer,
+            &[("current", "not the password"), ("new", "a whole new passphrase")],
+        )
+        .await;
+    let location = wrong.location.expect("a redirect location");
+    assert!(
+        location.contains("refusal=rejected") && location.contains("on=change_password"),
+        "{location}"
+    );
+    assert!(
+        password_pane(&app, &admin_cookie, "refusal=rejected&on=change_password")
+            .await
+            .contains("The current password is wrong.")
+    );
+
+    // The new password is the one already in force.
+    let same = app
+        .post_without_script(
+            "/api/change_password",
+            Some(&admin_cookie),
+            referer,
+            &[
+                ("current", "correct horse battery staple"),
+                ("new", "correct horse battery staple"),
+            ],
+        )
+        .await;
+    let location = same.location.expect("a redirect location");
+    assert!(
+        location.contains("refusal=password-current"),
+        "{location}"
+    );
+    assert!(
+        password_pane(&app, &admin_cookie, "refusal=password-current&on=change_password")
+            .await
+            .contains("That's your current password.")
+    );
+
+    // Too short.
+    let short = app
+        .post_without_script(
+            "/api/change_password",
+            Some(&admin_cookie),
+            referer,
+            &[("current", "correct horse battery staple"), ("new", "short")],
+        )
+        .await;
+    let location = short.location.expect("a redirect location");
+    assert!(location.contains("refusal=password-short"), "{location}");
+    assert!(
+        password_pane(&app, &admin_cookie, "refusal=password-short&on=change_password")
+            .await
+            .contains("At least 10 characters.")
+    );
+
+    // Looks like the address the account wears.
+    let you = app
+        .post_without_script(
+            "/api/change_password",
+            Some(&admin_cookie),
+            referer,
+            &[("current", "correct horse battery staple"), ("new", "ada@izlek.sh!!")],
+        )
+        .await;
+    let location = you.location.expect("a redirect location");
+    assert!(location.contains("refusal=password-you"), "{location}");
+    assert!(
+        password_pane(&app, &admin_cookie, "refusal=password-you&on=change_password")
+            .await
+            .contains("Not your address or your name.")
+    );
+
+    // A change that works lands with the pane's own note, and the fresh
+    // cookie the answer carries is the session that reads it. (`post`
+    // keeps the answer's cookie; `post_without_script` models a browser
+    // that only follows the redirect and hands none back.)
+    let right = app
+        .post(
+            "/api/change_password",
+            Some(&admin_cookie),
+            &[
+                ("current", "correct horse battery staple"),
+                ("new", "brand-new-pass-99"),
+            ],
+        )
+        .await;
+    let location = right.location.clone().expect("a redirect location");
+    assert!(location.contains("saved=change_password"), "{location}");
+    let fresh = right.session.clone().expect("a fresh session cookie");
+    let page = app
+        .get("/settings?section=profile&saved=change_password", Some(&fresh))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains("Password changed. Your other devices were signed out."),
+        "{html}"
+    );
+
+    // The same pane in Turkish names the same failures in Turkish.
+    app
+        .post(
+            "/api/save_profile",
+            Some(&fresh),
+            &[("display_name", "Ada Lovelace"), ("language", "tr")],
+        )
+        .await;
+    let tr = app
+        .get(
+            "/settings?section=profile&refusal=password-current&on=change_password",
+            Some(&fresh),
+        )
+        .await;
+    let tr_html = String::from_utf8_lossy(&tr.bytes);
+    assert!(tr_html.contains("Bu zaten mevcut parolan."), "{tr_html}");
 }

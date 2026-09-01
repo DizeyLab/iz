@@ -620,9 +620,9 @@ struct SetTaskTagForm {
 }
 
 /// Files a task under a tag. A Viewer can read tags but not set them; the
-/// tag has to be this workspace board's own. No activity is recorded and no
-/// mail follows — re-labeling a card is not a thing anybody needs told
-/// about.
+/// tag has to be this workspace board's own. The relabeling lands on the
+/// task's own trail and the workspace feed; no rule mails about it, since no
+/// trigger matches a tag.
 #[route(POST "/api/set_task_tag")]
 async fn set_task_tag(cx: &Cx, Form(input): Form<SetTaskTagForm>) -> Redirect {
     let (actor, _) = match writer_and_task(cx, &input.task_id).await {
@@ -634,10 +634,20 @@ async fn set_task_tag(cx: &Cx, Form(input): Form<SetTaskTagForm>) -> Redirect {
         return redirect(cx, Some(Refusal::Unavailable));
     };
     let tags = store.tags(&board.id).await?;
-    if !tags.iter().any(|tag| tag.id == input.tag_id) {
+    let Some(tag) = tags.iter().find(|tag| tag.id == input.tag_id) else {
         return redirect(cx, Some(Refusal::NotFound));
-    }
+    };
     store.set_task_tag(&input.task_id, &input.tag_id).await?;
+    let _ = store
+        .record_activity(
+            &input.task_id,
+            Some(&actor.id),
+            None,
+            &izlek_core::detail::ActivityKind::Other("tagged".to_string()),
+            &tag.name,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await;
     redirect(cx, None)
 }
 
@@ -1270,7 +1280,12 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
 /// The grid now autosubmits, the way the log filters already did, and
 /// closing is what Escape and a click outside are for. The time rides the
 /// same commit: a posted form carries whatever is typed, so `16:20` plus a
-/// pressed day is one exact moment, and Clear empties both.
+/// pressed day is one exact moment, and Clear empties both. A time the day
+/// can already carry commits by itself — the two boxes submit when they
+/// agree (both set or both emptied) and the input holds a day, because a
+/// lone box is a half-written value, not a moment, and a time with no day
+/// anywhere is not one either. On a dayless task the picks wait for the
+/// pressed day and ride its commit.
 ///
 /// The box speaks the moment when there is one, the day when there is only
 /// a day — the clock's day is always the deadline's, and the label reads in
@@ -1465,6 +1480,18 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 if (!toggle || !toggle.checked) {{ return; }}\
                 var panel = toggle.closest('.datepick-pop').querySelector('.datepick-panel');\
                 if (panel) {{ render(panel); }}\
+            }});\
+            document.addEventListener('change', function(e) {{\
+                var box = e.target;\
+                if (!box.matches || !box.matches('.datepick-time select')) {{ return; }}\
+                var panel = box.closest('.datepick-panel');\
+                var input = panel && panel.querySelector('.datepick-input');\
+                if (!input || !input.hasAttribute('data-autosubmit') || !input.value) {{ return; }}\
+                var hour = panel.querySelector('[name=clock_hour]');\
+                var minute = panel.querySelector('[name=clock_minute]');\
+                if (!hour || !minute) {{ return; }}\
+                if (!!hour.value !== !!minute.value) {{ return; }}\
+                if (input.form) {{ input.form.requestSubmit(); }}\
             }});\
             document.addEventListener('izlek:wire', function () {{\
                 document.querySelectorAll('.datepick-pop').forEach(function (pop) {{\

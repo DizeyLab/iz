@@ -25,6 +25,7 @@ use topcoat::router::content::Form;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
 use topcoat::view::view;
 
+use izlek_core::auth::PasswordProblem;
 use izlek_core::detail::ActivityKind;
 use izlek_core::store::{NewSender, SenderCheck, SenderTest, Store, User};
 
@@ -564,11 +565,16 @@ async fn check_sender(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
         Ok(admin) => admin,
         Err(refusal) => return Ok(saved_or_refused("check_sender", Some(refusal))),
     };
-    probe_sender(
-        mail(cx),
-        accounts(cx).store().clone(),
-        admin.workspace_id.clone(),
-    );
+    let store = accounts(cx).store().clone();
+    probe_sender(mail(cx), store.clone(), admin.workspace_id.clone());
+    let _ = store
+        .record_event(
+            Some(&admin.id),
+            &ActivityKind::Other("sender_checked".to_string()),
+            "",
+            time::OffsetDateTime::now_utc(),
+        )
+        .await;
     Ok(saved_or_refused("check_sender", None))
 }
 
@@ -1132,6 +1138,21 @@ fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
     (refusal, saved)
 }
 
+/// The password pane words a refusal itself: on this surface `Rejected` can
+/// only be the current password failing, so the pane says which half did
+/// rather than the generic "that did not work".
+fn password_pane_word(lang: Lang, refusal: &Refusal) -> String {
+    match refusal {
+        Refusal::Rejected => t(lang, Key::PWCurrentWrong).to_string(),
+        Refusal::Password(problem) => match problem {
+            PasswordProblem::TooShort => t(lang, Key::PWTooShort).to_string(),
+            PasswordProblem::LooksLikeYou => t(lang, Key::PWLooksLikeYou).to_string(),
+            PasswordProblem::IsCurrent => t(lang, Key::PWIsCurrent).to_string(),
+        },
+        other => other.message_in(lang),
+    }
+}
+
 fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
     query.split('&').find_map(|pair| {
         pair.split_once('=')
@@ -1221,7 +1242,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let (invite_refusal, _) = call_state(query, "invite_member");
     let (role_refusal, _) = call_state(query, "set_role");
     let member_refusal = resend_refusal.or(invite_refusal).or(role_refusal);
-    let (password_refusal, _) = call_state(query, "change_password");
+    let (password_refusal, password_saved) = call_state(query, "change_password");
     let (message_refusal, message_saved) = call_state(query, "send_message");
     let mailed = query_value(query, "mailed").map(decode_q);
 
@@ -1343,7 +1364,10 @@ async fn settings_page(cx: &Cx) -> Result {
                         </label>
                         <div class="panel-foot">
                             if let Some(refusal) = &password_refusal {
-                                <span class="field-error">(refusal.message_in(lang))</span>
+                                <span class="field-error">(password_pane_word(lang, refusal))</span>
+                            }
+                            if password_saved {
+                                <span class="field-note">(t(lang, Key::PasswordSaved))</span>
                             }
                             <button class="primary" type="submit">(t(lang, Key::ChangePassword))</button>
                         </div>

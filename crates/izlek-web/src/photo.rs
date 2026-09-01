@@ -77,6 +77,14 @@ async fn upload(
                 if let Some(stamps) = try_app_context::<PhotoStamps>(cx) {
                     stamps.bump(&user.id);
                 }
+                let _ = store
+                    .record_event(
+                        Some(&user.id),
+                        &izlek_core::detail::ActivityKind::Other("photo_saved".to_string()),
+                        "",
+                        OffsetDateTime::now_utc(),
+                    )
+                    .await;
                 saved_or_refused("profile_photo", None)
             }
             Err(_) => saved_or_refused("profile_photo", Some(Refusal::Unavailable)),
@@ -93,7 +101,17 @@ async fn delete(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> {
     };
     let store = accounts(cx).store().clone();
     Ok(match store.clear_photo(&user.id).await {
-        Ok(()) => saved_or_refused("delete_profile_photo", None),
+        Ok(()) => {
+            let _ = store
+                .record_event(
+                    Some(&user.id),
+                    &izlek_core::detail::ActivityKind::Other("photo_removed".to_string()),
+                    "",
+                    OffsetDateTime::now_utc(),
+                )
+                .await;
+            saved_or_refused("delete_profile_photo", None)
+        }
         Err(_) => saved_or_refused("delete_profile_photo", Some(Refusal::Unavailable)),
     })
 }

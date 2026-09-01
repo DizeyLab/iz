@@ -1106,7 +1106,8 @@ mod backoff_tests {
 #[cfg(test)]
 mod trigger_fold_tests {
     use super::fires_on;
-    use crate::detail::{ActivityKind, Trigger};
+    use crate::detail::ActivityKind;
+    use crate::store::Trigger;
 
     #[test]
     fn a_time_change_fires_the_deadline_triggers() {

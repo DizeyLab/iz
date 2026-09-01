@@ -340,8 +340,13 @@ impl ActivityEntry {
             | ActivityKind::RuleEdited
             | ActivityKind::RuleToggled
             | ActivityKind::RuleDeleted
-            | ActivityKind::MessageSent
-            | ActivityKind::Other(_) => detail.to_string(),
+            | ActivityKind::MessageSent => detail.to_string(),
+            ActivityKind::Other(raw) => match raw.as_str() {
+                // A kind this version knows gets its words; anything a newer
+                // version wrote falls through as the raw detail it stored.
+                "tagged" => format!("tagged it {detail}"),
+                _ => detail.to_string(),
+            },
         }
     }
 

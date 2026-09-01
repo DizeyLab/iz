@@ -332,7 +332,10 @@ impl TursoStore {
     /// wrong more often — a reminder row is a promise the queue is holding,
     /// and a promise whose grounds moved is re-made, not patched. Rows that
     /// already went out (or failed on their own retry clock) are history and
-    /// stay untouched.
+    /// stay untouched — and stay served: a recipient this task's reminders
+    /// have already been written for is never minted a second row, or every
+    /// later write about the card would quietly re-queue a mail they have
+    /// already had, one copy per write.
     ///
     /// Answers whether anything was written or abandoned, so the caller can
     /// announce the queue only when this did something — the task-write
@@ -343,11 +346,36 @@ impl TursoStore {
         task_id: &str,
         now: OffsetDateTime,
     ) -> Result<bool> {
+        // Who this task's reminders have already served: a row that went
+        // out (`sent`), is riding its own retries (`failed`), or was given
+        // up on by that same retry ladder (`abandoned` with attempts on the
+        // clock) settles that recipient's reminder. A draft the re-derive
+        // itself abandoned has attempts 0 and serves nobody — the promise it
+        // stood for is unkept, and the mint below owes it fresh. Read before
+        // the abandon below, in the same transaction: a row still pending
+        // here is an unkept promise, and the moment it counts as served it
+        // would be silenced forever.
+        let mut rows = tx
+            .query(
+                "SELECT DISTINCT recipient FROM mail_send \
+                 WHERE task_id = ?1 AND kind = 'reminder' \
+                   AND (state IN ('sent', 'failed') \
+                        OR (state = 'abandoned' AND attempts > 0))",
+                params![task_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut served = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            served.insert(text(&row, 0)?);
+        }
+        drop(rows);
+
         // Nothing the re-derivation below can say changes a row that is no
         // longer pending.
         let abandoned = tx
             .execute(
-                "UPDATE mail_send SET state = 'abandoned' \
+                "UPDATE mail_send SET state = 'abandoned', next_attempt_at = NULL \
                  WHERE task_id = ?1 AND kind = 'reminder' AND state = 'pending'",
                 params![task_id],
             )
@@ -417,7 +445,13 @@ impl TursoStore {
         }
         drop(rows);
 
+        let mut minted = 0usize;
         for (email, timezone) in people {
+            // Already reminded of this meeting, or their reminder is on the
+            // queue's own retry clock: a second row here is a second mail.
+            if served.contains(&email) {
+                continue;
+            }
             // Each recipient reads the moment in their own stored timezone:
             // the meeting is one fact, and what it says on the clock where
             // they sit is not.
@@ -452,9 +486,10 @@ impl TursoStore {
             )
             .await
             .map_err(backend)?;
+            minted += 1;
         }
 
-        Ok(true)
+        Ok(abandoned > 0 || minted > 0)
     }
 }
 
