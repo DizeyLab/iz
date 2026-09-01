@@ -1330,12 +1330,7 @@ async fn deadline_control(
     }
     let toggle = format!("deadline-{}", task.id);
     let input_value = task.deadline_input();
-    let hour_value = local
-        .map(|at| format!("{:02}", at.hour()))
-        .unwrap_or_default();
-    let minute_value = local
-        .map(|at| format!("{:02}", at.minute()))
-        .unwrap_or_default();
+    let hm = local.map(|at| (at.hour(), at.minute()));
     let change_aria = t(lang, Key::ChangeTheDeadline);
     let no_deadline = t(lang, Key::NoDeadline);
     view! {
@@ -1352,9 +1347,19 @@ async fn deadline_control(
                     <input type="hidden" name="task_id" value=(task.id.clone())>
                     (datepicker_grid(cx, "deadline", &input_value, true, lang).await?)
                     <div class="datepick-time">
-                        <input class="field-input" name="clock_hour" type="text" inputmode="numeric" maxlength="2" placeholder="HH" aria-label=(t(lang, Key::ClockHour)) value=(hour_value)>
+                        <select class="field-input" name="clock_hour" aria-label=(t(lang, Key::ClockHour)) data-search="">
+                            <option value="">("--")</option>
+                            for hour in 0u8..24 {
+                                <option value=(format!("{hour:02}")) selected=(hm.map(|(h, _)| h) == Some(hour))>(format!("{hour:02}"))</option>
+                            }
+                        </select>
                         <span class="datepick-colon">(":")</span>
-                        <input class="field-input" name="clock_minute" type="text" inputmode="numeric" maxlength="2" placeholder="MM" aria-label=(t(lang, Key::ClockMinute)) value=(minute_value)>
+                        <select class="field-input" name="clock_minute" aria-label=(t(lang, Key::ClockMinute)) data-search="">
+                            <option value="">("--")</option>
+                            for minute in 0u8..60 {
+                                <option value=(format!("{minute:02}")) selected=(hm.map(|(_, m)| m) == Some(minute))>(format!("{minute:02}"))</option>
+                            }
+                        </select>
                     </div>
                 </form>
                 (refused(cx, "save_task", lang).await?)
@@ -1441,7 +1446,7 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                 var input = panel.querySelector('.datepick-input');\
                 if (!input) {{ return; }}\
                 input.value = ymd ? (ymd.y + '-' + pad(ymd.m) + '-' + pad(ymd.d)) : '';\
-                if (!ymd) {{ var hh = panel.querySelector('[name=clock_hour]'); if (hh) {{ hh.value = ''; }} var mm = panel.querySelector('[name=clock_minute]'); if (mm) {{ mm.value = ''; }} }}\
+                if (!ymd) {{ ['clock_hour', 'clock_minute'].forEach(function (name) {{ var box = panel.querySelector('[name=' + name + ']'); if (!box) {{ return; }} box.value = ''; var trig = box.__ddTrigger; if (trig) {{ trig.textContent = box.options[0].textContent; trig.setAttribute('aria-expanded', 'false'); }} var drop = box.__ddPanel; if (drop) {{ drop.classList.remove('dd-open'); drop.querySelectorAll('.dd-option-selected').forEach(function (r) {{ r.classList.remove('dd-option-selected'); r.setAttribute('aria-selected', 'false'); }}); }} }}); }} \
                 var pop = panel.closest('.datepick-pop');\
                 var label = pop.querySelector('.datepick-label');\
                 if (label) {{ label.textContent = ymd ? (MONTHS[ymd.m - 1].slice(0, 3) + ' ' + pad(ymd.d)) : label.dataset.empty; }}\
@@ -1483,7 +1488,7 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
                     return;\
                 }}\
                 var openPop = document.querySelector('.datepick-pop > .edit-toggle:checked');\
-                if (openPop && !openPop.closest('.datepick-pop').contains(e.target)) {{ openPop.checked = false; }}\
+                if (openPop && !openPop.closest('.datepick-pop').contains(e.target) && !e.target.closest('.dd-panel')) {{ openPop.checked = false; }} \
             }}, true);\
         }})();"
     );
@@ -2616,12 +2621,22 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                                 <div class="edit-form pop-panel datepick-panel">
                                     (datepicker_grid(cx, "deadline", "", false, lang).await?)
                                     <div class="datepick-time">
-                                        <input class="field-input" name="clock_hour" type="text" inputmode="numeric" maxlength="2" placeholder="HH" aria-label=(t(lang, Key::ClockHour))>
+                                        <select class="field-input" name="clock_hour" aria-label=(t(lang, Key::ClockHour)) data-search="">
+                                            <option value="">("--")</option>
+                                            for hour in 0u8..24 {
+                                                <option value=(format!("{hour:02}"))>(format!("{hour:02}"))</option>
+                                            }
+                                        </select>
                                         <span class="datepick-colon">(":")</span>
-                                        <input class="field-input" name="clock_minute" type="text" inputmode="numeric" maxlength="2" placeholder="MM" aria-label=(t(lang, Key::ClockMinute))>
+                                        <select class="field-input" name="clock_minute" aria-label=(t(lang, Key::ClockMinute)) data-search="">
+                                            <option value="">("--")</option>
+                                            for minute in 0u8..60 {
+                                                <option value=(format!("{minute:02}"))>(format!("{minute:02}"))</option>
+                                            }
+                                        </select>
                                     </div>
-                                </div>
-                            </div>
+                        </div>
+                    </div>
                         </div>
                     </div>
                     <label class="field">

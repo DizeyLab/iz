@@ -121,8 +121,6 @@ fn trigger_of(kind: &str, column_id: Option<String>) -> Option<Trigger> {
         ("commented", None) => Some(Trigger::Commented),
         ("deadline_set", None) => Some(Trigger::DeadlineSet),
         ("deadline_cleared", None) => Some(Trigger::DeadlineCleared),
-        ("clock_set", None) => Some(Trigger::ClockSet),
-        ("clock_cleared", None) => Some(Trigger::ClockCleared),
         ("retitled", None) => Some(Trigger::Retitled),
         ("linked", None) => Some(Trigger::Linked),
         ("unlinked", None) => Some(Trigger::Unlinked),
@@ -238,18 +236,6 @@ fn sentence_of(
             t(lang, Key::WhenDeadlineRemoved).to_string(),
             None,
             "deadline_cleared".to_string(),
-            None,
-        ),
-        Trigger::ClockSet => (
-            t(lang, Key::WhenClockSet).to_string(),
-            None,
-            "clock_set".to_string(),
-            None,
-        ),
-        Trigger::ClockCleared => (
-            t(lang, Key::WhenClockCleared).to_string(),
-            None,
-            "clock_cleared".to_string(),
             None,
         ),
         Trigger::Retitled => (
@@ -710,8 +696,6 @@ async fn rule_form(
                     <option value="commented" selected=(trigger_kind == "commented")>(t(lang, Key::TriggerCommented))</option>
                     <option value="deadline_set" selected=(trigger_kind == "deadline_set")>(t(lang, Key::TriggerDeadlineSet))</option>
                     <option value="deadline_cleared" selected=(trigger_kind == "deadline_cleared")>(t(lang, Key::TriggerDeadlineCleared))</option>
-                    <option value="clock_set" selected=(trigger_kind == "clock_set")>(t(lang, Key::TriggerClockSet))</option>
-                    <option value="clock_cleared" selected=(trigger_kind == "clock_cleared")>(t(lang, Key::TriggerClockCleared))</option>
                     <option value="retitled" selected=(trigger_kind == "retitled")>(t(lang, Key::TriggerRetitled))</option>
                     <option value="linked" selected=(trigger_kind == "linked")>(t(lang, Key::TriggerLinked))</option>
                     <option value="unlinked" selected=(trigger_kind == "unlinked")>(t(lang, Key::TriggerUnlinked))</option>

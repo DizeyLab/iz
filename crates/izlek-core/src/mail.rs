@@ -468,7 +468,7 @@ impl Engine {
                     .await?;
                 continue;
             }
-            if activity_kind_for(&rule.trigger).as_ref() == Some(&event.kind) {
+            if fires_on(&rule.trigger, &event.kind) {
                 self.owe(rule, &happened, &event.task_id, &mut report)
                     .await?;
                 continue;
@@ -1015,11 +1015,25 @@ impl Engine {
     }
 }
 
-/// The `ActivityKind` a trigger fires on. `StatusBecomes`/`Unblocked` fire on
-/// a crossing or a freeing instead and never on an activity row, so they
-/// answer `None` — this is the one place a new `Trigger` variant has to be
+/// Whether a trigger fires on an activity row of this kind, and what each
+/// remaining trigger means on the rows it watches — `StatusBecomes` and
+/// `Unblocked` fire on a crossing or a freeing instead and never on an
+/// activity row, so this is the one place a new `Trigger` variant has to be
 /// taught what it means, for `on_transition`, `on_freeing` and `on_activity`
-/// alike.
+/// alike. A time change fires the deadline triggers: the clock is the
+/// deadline field's other half, not a second thing to arm rules on.
+fn fires_on(trigger: &Trigger, kind: &ActivityKind) -> bool {
+    match trigger {
+        Trigger::DeadlineSet => {
+            *kind == ActivityKind::DeadlineSet || *kind == ActivityKind::ClockSet
+        }
+        Trigger::DeadlineCleared => {
+            *kind == ActivityKind::DeadlineCleared || *kind == ActivityKind::ClockCleared
+        }
+        other => activity_kind_for(other).as_ref() == Some(kind),
+    }
+}
+
 fn activity_kind_for(trigger: &Trigger) -> Option<ActivityKind> {
     match trigger {
         Trigger::Created => Some(ActivityKind::Created),
@@ -1028,8 +1042,6 @@ fn activity_kind_for(trigger: &Trigger) -> Option<ActivityKind> {
         Trigger::Commented => Some(ActivityKind::Commented),
         Trigger::DeadlineSet => Some(ActivityKind::DeadlineSet),
         Trigger::DeadlineCleared => Some(ActivityKind::DeadlineCleared),
-        Trigger::ClockSet => Some(ActivityKind::ClockSet),
-        Trigger::ClockCleared => Some(ActivityKind::ClockCleared),
         Trigger::Retitled => Some(ActivityKind::Retitled),
         Trigger::Linked => Some(ActivityKind::Linked),
         Trigger::Unlinked => Some(ActivityKind::Unlinked),
@@ -1077,6 +1089,7 @@ mod backoff_tests {
         assert_eq!(backoff(1), Duration::minutes(5));
         assert_eq!(backoff(2), Duration::minutes(10));
         assert_eq!(backoff(3), Duration::minutes(20));
+
         assert_eq!(backoff(4), Duration::minutes(40));
         assert_eq!(backoff(5), Duration::minutes(60));
         // Nothing waits longer than an hour, whatever it is handed.
@@ -1087,5 +1100,30 @@ mod backoff_tests {
     #[test]
     fn a_send_is_tried_a_bounded_number_of_times() {
         assert_eq!(MAX_ATTEMPTS, 5);
+    }
+}
+
+#[cfg(test)]
+mod trigger_fold_tests {
+    use super::fires_on;
+    use crate::detail::{ActivityKind, Trigger};
+
+    #[test]
+    fn a_time_change_fires_the_deadline_triggers() {
+        assert!(fires_on(&Trigger::DeadlineSet, &ActivityKind::ClockSet));
+        assert!(fires_on(
+            &Trigger::DeadlineCleared,
+            &ActivityKind::ClockCleared
+        ));
+        assert!(fires_on(&Trigger::DeadlineSet, &ActivityKind::DeadlineSet));
+        assert!(!fires_on(
+            &Trigger::DeadlineSet,
+            &ActivityKind::DeadlineCleared
+        ));
+        assert!(!fires_on(
+            &Trigger::DeadlineCleared,
+            &ActivityKind::ClockSet
+        ));
+        assert!(!fires_on(&Trigger::DeadlineSet, &ActivityKind::Created));
     }
 }

@@ -8290,8 +8290,8 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(r#"aria-label="Hour" value="11""#)
-            && html.contains(r#"aria-label="Minute" value="00""#),
+        html.contains(r#"<option value="11" selected="">11</option>"#)
+            && html.contains(r#"<option value="00" selected="">00</option>"#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 11:00<"), "{html}");
@@ -8320,8 +8320,8 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .await;
     let html = String::from_utf8_lossy(&shifted.bytes);
     assert!(
-        html.contains(r#"aria-label="Hour" value="14""#)
-            && html.contains(r#"aria-label="Minute" value="00""#),
+        html.contains(r#"<option value="14" selected="">14</option>"#)
+            && html.contains(r#"<option value="00" selected="">00</option>"#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 14:00<"), "{html}");
@@ -8913,19 +8913,26 @@ async fn the_reminder_knob_saves_renders_and_keeps_when_absent() {
     assert_eq!(workspace.reminder_minutes, 0);
 }
 
+/// A time change is a `ClockSet` activity, and the `deadline_set` rule
+/// fires on it — the clock is the deadline field's other half, not a
+/// second trigger to arm. The rule's own words and the rules-page menu
+/// stay the deadline's.
 #[tokio::test]
-async fn a_clock_rule_round_trips_and_renders_on_the_rules_page() {
-    let app = App::open().await;
+async fn a_time_change_fires_the_deadline_rule_and_round_trips() {
+    let app = App::open_with_mail().await;
     let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Ship it").await;
 
     let answer = app
         .post(
             "/api/create_rule",
             Some(&admin_cookie),
             &[
-                ("trigger", "clock_set"),
+                ("trigger", "deadline_set"),
                 ("column_id", ""),
-                ("subject", "Meeting soon"),
+                ("subject", "Moment moved"),
                 ("audience", "board"),
             ],
         )
@@ -8940,25 +8947,56 @@ async fn a_clock_rule_round_trips_and_renders_on_the_rules_page() {
         "{:?}",
         answer.location
     );
-
     let rules = app
         .post("/api/current_rules", Some(&admin_cookie), &[])
         .await;
     assert!(
-        rules.body.contains(r#""when":"When a time is set""#),
+        rules.body.contains(r#""when":"When a deadline is set""#),
         "{}",
         rules.body
     );
-    assert!(
-        rules.body.contains(r#""subject":"Meeting soon""#),
-        "{}",
-        rules.body
-    );
-
     let page = app.get("/rules", Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("When a time is set"), "{html}");
-    assert!(html.contains(r#"<option value="clock_set""#), "{html}");
+    assert!(html.contains("When a deadline is set"), "{html}");
+
+    let day = app
+        .post(
+            "/api/save_task",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("deadline", "2026-09-02")],
+        )
+        .await;
+    assert!(
+        !day.location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        day.location
+    );
+
+    // Deniz sets the time and nothing else — a `ClockSet` activity — and
+    // the deadline rule owes the admin (the board audience excludes the
+    // actor) mail for it.
+    let answer = app
+        .post(
+            "/api/save_task",
+            Some(&member),
+            &[("task_id", &task), ("clock_hour", "9"), ("clock_minute", "30")],
+        )
+        .await;
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+    let rule = only_rule(&app, &admin_cookie).await;
+    let send = until_rule_send_to(&app, &rule, "ada@izlek.sh", 0).await;
+    assert_eq!(send.recipient, "ada@izlek.sh");
 }
 
 #[tokio::test]
@@ -9023,11 +9061,10 @@ async fn the_datepicker_script_guards_a_panel_with_no_day_input() {
         html.contains("input.value = ymd ?"),
         "the datepicker script lost the day write: {html}"
     );
-    // The moment field's panel: the grid's hidden day input and the time
-    // box ride the same form.
     assert!(
-        html.contains(r#"name="clock_hour""#) && html.contains(r#"name="clock_minute""#),
-        "the moment boxes lost their names: {html}"
+        html.contains(r#"name="clock_hour" aria-label="Hour" data-search=""#)
+            && html.contains(r#"name="clock_minute" aria-label="Minute" data-search=""#),
+        "the moment combos lost their searchable chrome: {html}"
     );
     assert!(html.contains("datepick-input"), "{html}");
 }
@@ -9046,7 +9083,12 @@ async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("deadline", "2026-09-02"), ("clock_hour", "11"), ("clock_minute", "23")],
+            &[
+                ("task_id", &task),
+                ("deadline", "2026-09-02"),
+                ("clock_hour", "11"),
+                ("clock_minute", "23"),
+            ],
         )
         .await;
     assert!(
@@ -9062,8 +9104,8 @@ async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
     let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(r#"aria-label="Hour" value="11""#)
-            && html.contains(r#"aria-label="Minute" value="23""#),
+        html.contains(r#"<option value="11" selected="">11</option>"#)
+            && html.contains(r#"<option value="23" selected="">23</option>"#),
         "{html}"
     );
     assert!(html.contains(">Sep 02 11:23<"), "{html}");

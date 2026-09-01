@@ -482,8 +482,6 @@ fn trigger_parts(trigger: &Trigger) -> (&'static str, Option<String>) {
         Trigger::Retitled => ("retitled", None),
         Trigger::Linked => ("linked", None),
         Trigger::Unlinked => ("unlinked", None),
-        Trigger::ClockSet => ("clock_set", None),
-        Trigger::ClockCleared => ("clock_cleared", None),
         Trigger::Deleted => ("deleted", None),
     }
 }
@@ -508,8 +506,6 @@ fn rule_from(row: &Row) -> Result<MailRule> {
         ("commented", None) => Trigger::Commented,
         ("deadline_set", None) => Trigger::DeadlineSet,
         ("deadline_cleared", None) => Trigger::DeadlineCleared,
-        ("clock_set", None) => Trigger::ClockSet,
-        ("clock_cleared", None) => Trigger::ClockCleared,
         ("retitled", None) => Trigger::Retitled,
         ("linked", None) => Trigger::Linked,
         ("unlinked", None) => Trigger::Unlinked,

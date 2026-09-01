@@ -319,11 +319,6 @@ pub enum Trigger {
     Commented,
     DeadlineSet,
     DeadlineCleared,
-    /// The meeting instant was set, or the exact time changed. `None` never
-    /// watches a column, so the variant carries nothing.
-    ClockSet,
-    /// The meeting instant was removed.
-    ClockCleared,
     Retitled,
     Linked,
     Unlinked,

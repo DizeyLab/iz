@@ -95,8 +95,10 @@ impl Mail {
             return;
         };
         tokio::spawn(async move {
-            let report = match store.event(&activity_id).await {
+            let ev = store.event(&activity_id).await;
+            let report = match ev {
                 Ok(Some(izlek_core::store::Event::Happened(ev))) => {
+                    eprintln!("AFTER_ACTIVITY happened kind={:?}", ev.kind);
                     match engine.on_activity(&ev).await {
                         Ok(_) => {
                             engine

@@ -6140,6 +6140,55 @@ async fn assigning_one_person_mails_that_person_not_every_assignee() {
 }
 
 #[tokio::test]
+async fn a_time_change_fires_a_deadline_set_rule() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@izlek.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::DeadlineSet,
+            "Moment moved",
+            Audience::Board,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://izlek.sh");
+    // Ada sets the time on her own card — a ClockSet activity, no deadline
+    // in sight — and the only person the board audience can mail is Emre,
+    // the board minus the actor.
+    let activity_id = store
+        .record_activity(
+            &task,
+            Some(&admin),
+            None,
+            &ActivityKind::ClockSet,
+            "2026-09-02T09:30:00+00:00",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let event = activity_event(&store, &activity_id).await;
+
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 1, "the time change mails the board");
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@izlek.sh");
+    assert!(
+        sent[0].body.contains("set the time to"),
+        "the body says the honest per-kind sentence: {}",
+        sent[0].body
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn an_unassignment_mails_the_person_removed_not_the_rest() {
     let (dir, store, workspace, admin) = shared().await;
     let staying = member(&store, &workspace, "grace@izlek.sh", "Grace").await;

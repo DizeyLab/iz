@@ -99,12 +99,30 @@ const chipLabel = `${MONTHS[picked.month - 1]} ${pad(picked.day)} · 16:20`;
 const fieldLabel = `${MONTHS[picked.month - 1]} ${pad(picked.day)} 16:20`;
 
 
-// The time rides the same panel as two two-digit boxes — hour, colon,
-// minute — typed before the day press, so the one form post carries both.
-// Neither box autosubmits: a lone box is half a value.
-await page.fill('.modal-new-task input[name="clock_hour"]', '16');
-await page.fill('.modal-new-task input[name="clock_minute"]', '20');
-
+// The time rides the same panel as two house searchable dropdowns — hour
+// and minute. Each is driven like a hand on it: click the trigger, type to
+// filter, press the row through its own handler (the panel's scroll-close
+// race makes a point-click flake). Neither select carries
+// data-autosubmit: a lone pick is half a value, and the commit is the day
+// press, which carries both.
+for (const [name, value] of [
+    ['clock_hour', '16'],
+    ['clock_minute', '20'],
+]) {
+    const trigger = page.locator(
+        `.modal-new-task select[name="${name}"] >> xpath=preceding-sibling::button[1]`,
+    );
+    await trigger.click({ timeout: 5000 });
+    const menu = page.locator('.dd-panel.dd-open');
+    await menu.locator('.dd-search').fill(value);
+    const rowOn = await menu.locator('.dd-search').evaluate((el, want) => {
+        const panel = el.closest('.dd-panel');
+        const row = panel.querySelector(`.dd-option[data-value="${want}"]`);
+        return !!row && !row.classList.contains('dd-option-hidden');
+    }, value);
+    if (!rowOn) failures.push(`typing '${value}' in the ${name} menu hid its row`);
+    await menu.locator(`.dd-option[data-value="${value}"]`).evaluate((el) => el.click());
+}
 // Then the day press, whose pick() writes the hidden input in place — in
 // the modal nothing autosubmits, so the value is read in the same tick as
 // the click, before anything can replace the panel.
@@ -122,10 +140,16 @@ if (!/^\d{4}-\d{2}-\d{2}$/.test(written.after)) {
     failures.push(`the day pick never wrote the hidden input: '${written.after}'`);
 }
 const atSubmit = await page.evaluate(() => ({
-    time: `${document.querySelector('.modal-new-task input[name="clock_hour"]')?.value}:${document.querySelector('.modal-new-task input[name="clock_minute"]')?.value}`,
+    hour: document.querySelector('.modal-new-task select[name="clock_hour"]')?.value,
+    minute: document.querySelector('.modal-new-task select[name="clock_minute"]')?.value,
+    dayInput: !!document.querySelector('.modal-new-task .datepick-input'),
+    panel: !!document.querySelector('.modal-new-task .datepick-panel'),
+    modal: !!document.querySelector('.modal-new-task'),
     day: document.querySelector('.modal-new-task .datepick-input')?.value,
 }));
-if (atSubmit.time !== '16:20') failures.push(`the time box read '${atSubmit.time}' at submit`);
+if (atSubmit.hour !== '16' || atSubmit.minute !== '20') {
+    failures.push(`the boxes read '${atSubmit.hour}':${atSubmit.minute}' at submit`);
+}
 if (atSubmit.day !== written.after) failures.push(`the day box read '${atSubmit.day}' at submit`);
 // The board, where the new card must wear the moment. In the modal the
 // grid carries data-autosubmit=false — the day pick only writes the
