@@ -2695,6 +2695,29 @@ img.avatar {
   opacity: 0;
 }
 
+// Upload progress: a client-made hairline along the upload box's inside
+// bottom edge; the accent fill tracks the request as it climbs. No text and
+// no native `<progress>` chrome — the box is the control, the rule is the
+// meter, in the same border/accent pair the box itself wears.
+.upload-progress {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 2px;
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.upload-progress-fill {
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--dur-fast) var(--ease);
+}
+
 // -- comments ---------------------------------------------------------------
 
 .comment-list {

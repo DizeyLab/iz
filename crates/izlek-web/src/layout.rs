@@ -529,8 +529,47 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 e.preventDefault(); \
                 var data = e.submitter ? new FormData(form, e.submitter) : new FormData(form); \
                 var multipart = (form.getAttribute('enctype') || '').indexOf('multipart') !== -1; \
+                if (multipart) { \
+                    if (form.__izlekUploading) { return; } \
+                    form.__izlekUploading = true; \
+                    var n = navStep(); \
+                    var box = form.querySelector('.file-upload-box'); \
+                    var input = form.querySelector('.file-upload-input'); \
+                    var bar = null; \
+                    if (box) { \
+                        bar = document.createElement('div'); \
+                        bar.className = 'upload-progress'; \
+                        var fill = document.createElement('div'); \
+                        fill.className = 'upload-progress-fill'; \
+                        bar.appendChild(fill); \
+                        box.appendChild(window.__izlekAdded(bar)); \
+                    } \
+                    if (input) { input.disabled = true; window.__izlekOwn(input, [], ['disabled']); } \
+                    var settle = function () { \
+                        form.__izlekUploading = false; \
+                        if (input) { input.disabled = false; } \
+                        if (bar && bar.parentNode) { bar.parentNode.removeChild(bar); } \
+                    }; \
+                    var x = new XMLHttpRequest(); \
+                    x.open('POST', form.getAttribute('action') || window.location.href); \
+                    x.setRequestHeader('accept', 'text/html'); \
+                    x.upload.onprogress = function (ev) { \
+                        if (!fill) { return; } \
+                        if (!bar.isConnected) { box.appendChild(bar); } \
+                        if (ev.lengthComputable && ev.total > 0) { fill.style.width = Math.min(100, Math.round((ev.loaded / ev.total) * 100)) + '%'; } \
+                    }; \
+                    x.onload = function () { \
+                        settle(); \
+                        if (!stillCurrent(n)) { return; } \
+                        swap(x.responseText, x.responseURL || form.getAttribute('action') || window.location.href); \
+                    }; \
+                    x.onerror = function () { settle(); form.submit(); }; \
+                    x.onabort = function () { settle(); }; \
+                    x.send(data); \
+                    return; \
+                } \
                 var n = navStep(); \
-                fetch(form.getAttribute('action'), { method: 'POST', headers: { accept: 'text/html' }, body: multipart ? data : new URLSearchParams(data) }).then( \
+                fetch(form.getAttribute('action'), { method: 'POST', headers: { accept: 'text/html' }, body: new URLSearchParams(data) }).then( \
                     function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url); } }); }, \
                     function () { form.submit(); } \
                 ); \
