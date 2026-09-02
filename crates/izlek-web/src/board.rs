@@ -235,6 +235,15 @@ fn valid_tag(tag: Option<&str>, tags: &[izlek_core::store::Tag]) -> Option<Strin
     tag.and_then(|id| tags.iter().find(|t| t.id == id).map(|t| t.id.clone()))
 }
 
+/// The `?q=` search: the box's text trimmed, and an empty box is no search
+/// at all — clearing it restores the whole board.
+fn searched(query: Option<&str>) -> Option<String> {
+    query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_string)
+}
+
 /// `deadline` is the order [`izlek_core::board::load`] already hands back
 /// (soonest first); the other two re-order in place here so core stays free
 /// of a UI sort preference. `created` reads the task id, a ULID, which sorts
@@ -252,6 +261,7 @@ async fn board_columns(
     cx: &Cx,
     sort: String,
     tag_filter: Option<String>,
+    search: Option<String>,
     default_tag_id: Option<&str>,
 ) -> Result {
     let user = match require_user(cx).await {
@@ -274,14 +284,13 @@ async fn board_columns(
             <div class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></div>
         };
     };
+    if let Some(needle) = &search {
+        view_data.searching(needle);
+    }
+    view_data.tagged(tag_filter.as_deref());
     for column in &mut view_data.columns {
         column.column.name = crate::i18n::column_name(lang, &column.column.name);
         sort_column_cards(&mut column.cards, &sort);
-        if let Some(tag_id) = &tag_filter {
-            column
-                .cards
-                .retain(|card| card.tag.as_ref().is_some_and(|tag| tag.id == *tag_id));
-        }
     }
     let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
@@ -569,6 +578,7 @@ struct BoardQuery {
     confirm: Option<String>,
     new: Option<String>,
     tag: Option<String>,
+    q: Option<String>,
 }
 
 /// The noun a sort key shows in the `<select>` — terse, no explainer.
@@ -601,10 +611,20 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     for column in &mut view_data.columns {
         column.column.name = crate::i18n::column_name(lang, &column.column.name);
     }
+    let query = query_params::<BoardQuery>(cx)?;
     let tags = {
         let store = accounts(cx).store().clone();
         store.tags(&view_data.board.id).await?
     };
+    // The whole filter pipeline narrows the board before anything counts or
+    // renders it, so the chips, the columns and the empty state all describe
+    // the same set.
+    let search = searched(query.q.as_deref());
+    let tag_filter = valid_tag(query.tag.as_deref(), &tags);
+    if let Some(needle) = &search {
+        view_data.searching(needle);
+    }
+    view_data.tagged(tag_filter.as_deref());
     let today = OffsetDateTime::now_utc().date();
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
@@ -614,7 +634,6 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         .iter()
         .map(|column| (column.column.id.clone(), column.column.name.clone()))
         .collect();
-    let query = query_params::<BoardQuery>(cx)?;
     let open_task = query.task.clone();
     let open_tab = crate::detail::Tab::from_query(query.tab.as_deref());
     // Which sheet of an open workbook is drawn. Anything that is not a number
@@ -637,7 +656,6 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     // an open task wins and `new` is ignored.
     let open_new = may_write && query.new.is_some() && open_task.is_none();
     let sort = valid_sort(query.sort.as_deref()).to_string();
-    let tag_filter = valid_tag(query.tag.as_deref(), &tags);
     let default_tag_id = tags.iter().find(|tag| tag.is_default).map(|tag| tag.id.as_str());
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
@@ -658,19 +676,8 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 <a class="primary new-task-open" href="/?new=1">(t(lang, Key::NewTask))</a>
             }
             <form class="field-box field-box-sort" method="get" action="/">
-                <span class="field-text">(t(lang, Key::Sort))</span>
-                <select class="status-select" name="sort" data-autosubmit="">
-                    for key in SORT_KEYS {
-                        <option value=(key) selected=(key == sort)>(sort_label(key, lang))</option>
-                    }
-                </select>
-                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
-                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                    stroke-linejoin="round" aria-hidden="true">
-                    <path d="M4 6l4 4 4-4"></path>
-                </svg>
-            </form>
-            <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="sort" value=(sort.clone())>
+                <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
                 <span class="field-text">(t(lang, Key::Project))</span>
                 <select class="status-select" name="tag" data-autosubmit="" data-search="">
                     <option value="" selected=(tag_filter.is_none())>(t(lang, Key::AllTags))</option>
@@ -684,6 +691,27 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                     <path d="M4 6l4 4 4-4"></path>
                 </svg>
             </form>
+            <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <span class="field-text">(t(lang, Key::Sort))</span>
+                <select class="status-select" name="sort" data-autosubmit="">
+                    for key in SORT_KEYS {
+                        <option value=(key) selected=(key == sort)>(sort_label(key, lang))</option>
+                    }
+                </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
+            </form>
+            <form class="field-box field-box-search" method="get" action="/">
+                <input type="hidden" name="sort" value=(sort.clone())>
+                <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <span class="field-text">(t(lang, Key::Search))</span>
+                <input class="field-input" type="search" name="q" value=(search.as_deref().unwrap_or(""))>
+            </form>
             <div class="spacer"></div>
             if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} {}", t(lang, Key::Overdue)))</span> }
             if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} {}", t(lang, Key::Blocked)))</span> }
@@ -692,9 +720,13 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <p class="field-error">(refusal.message_in(lang))</p>
         }
         <main class="board-stage">
-            <div class="board-columns">
-            (board_columns(cx, sort.clone(), tag_filter.clone(), default_tag_id).await?)
-            </div>
+            if search.is_some() && view_data.is_empty() {
+                <div class="scaffold-note"><p>(t(lang, Key::NoMatches))</p></div>
+            } else {
+                <div class="board-columns">
+                (board_columns(cx, sort.clone(), tag_filter.clone(), search.clone(), default_tag_id).await?)
+                </div>
+            }
         </main>
         if let Some(task_id) = &open_task {
             (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?)

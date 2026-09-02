@@ -759,6 +759,12 @@ impl Engine {
                 for one in sends {
                     self.store.record_send_accepted(&one.id, now).await?;
                 }
+                // A reminder that went out is a fact of the meeting's card,
+                // and a fact of the person's feed: the system did the
+                // reminding, the recipient is the line's subject.
+                for one in sends.iter().filter(|one| one.kind == SendKind::Reminder) {
+                    self.record_reminded(one, now).await?;
+                }
                 report.sent += 1;
             }
             Err(problem) if !problem.attempted => {
@@ -790,6 +796,38 @@ impl Engine {
                 }
             }
         }
+        Ok(())
+    }
+    /// The trail line a delivered reminder writes: on the meeting's card, with
+    /// the system as the actor and the recipient as the subject, so the feed
+    /// a person reads carries the reminder they were sent. A recipient whose
+    /// account has since gone still gets the line — about nobody.
+    async fn record_reminded(
+        &self,
+        send: &ClaimedSend,
+        at: OffsetDateTime,
+    ) -> crate::store::Result<()> {
+        let Some(task_id) = send.task_id.as_deref() else {
+            return Ok(());
+        };
+        let subject = match self.store.workspace().await? {
+            Some(workspace) => self
+                .store
+                .user_by_email(&workspace.id, &send.recipient)
+                .await?
+                .map(|user| user.id),
+            None => None,
+        };
+        self.store
+            .record_activity(
+                task_id,
+                None,
+                subject.as_deref(),
+                &ActivityKind::Other("reminded".to_string()),
+                &send.recipient,
+                at,
+            )
+            .await?;
         Ok(())
     }
 

@@ -19,7 +19,7 @@ use super::{
     Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
     MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
     SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, Tag, TaskCreated, Trigger,
-    User, UserStats, Workspace,
+    User, UserStats, Workspace, LinkKind,
 };
 use super::{reconcile, ReconcileOptions, schema};
 use crate::Role;
@@ -863,6 +863,8 @@ fn signin_link_from(row: &Row) -> Result<SigninLink> {
         created_at: parse_stamp(&text(row, 2)?)?,
         expires_at: parse_stamp(&text(row, 3)?)?,
         used_at: opt_stamp(row, 4)?,
+        kind: LinkKind::from_str(&text(row, 5)?)
+            .ok_or_else(|| StoreError::Corrupt("signin_link kind".into()))?,
     })
 }
 
@@ -1482,20 +1484,22 @@ impl Store for TursoStore {
         user_id: &str,
         token_hash: &str,
         expires_at: OffsetDateTime,
+        kind: LinkKind,
     ) -> Result<SigninLink> {
         let id = Ulid::new().to_string();
         self.conn
             .lock()
             .await
             .execute(
-                "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at, kind) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     id.clone(),
                     user_id,
                     token_hash,
                     now_text()?,
-                    stamp(expires_at)?
+                    stamp(expires_at)?,
+                    kind.as_str(),
                 ],
             )
             .await
@@ -1503,7 +1507,8 @@ impl Store for TursoStore {
         self.announce([Topic::Members]);
         match self
             .one_row(
-                "SELECT id, user_id, created_at, expires_at, used_at FROM signin_link WHERE id = ?1",
+                "SELECT id, user_id, created_at, expires_at, used_at, kind \
+                 FROM signin_link WHERE id = ?1",
                 params![id],
             )
             .await?
@@ -1516,8 +1521,8 @@ impl Store for TursoStore {
     async fn signin_link_by_hash(&self, token_hash: &str) -> Result<Option<SigninLink>> {
         match self
             .one_row(
-                "SELECT id, user_id, created_at, expires_at, used_at FROM signin_link \
-                 WHERE token_hash = ?1",
+                "SELECT id, user_id, created_at, expires_at, used_at, kind \
+                 FROM signin_link WHERE token_hash = ?1",
                 params![token_hash],
             )
             .await?
@@ -1857,6 +1862,13 @@ impl Store for TursoStore {
                 ],
             )
             .await?;
+            // The maker watches what they made: its changes concern them
+            // until they say otherwise.
+            tx.execute(
+                "INSERT OR IGNORE INTO task_watcher (task_id, user_id) VALUES (?1, ?2)",
+                params![id.clone(), new.created_by],
+            )
+            .await?;
             Ok::<_, turso::Error>(Ok((task_key, position)))
         }
         .await;
@@ -2052,6 +2064,15 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        // Being assigned is being concerned: the assignee watches the task
+        // until an unassign takes the watch back off. Idempotent, so a
+        // no-change assign leaves the watch exactly as it is.
+        tx.execute(
+            "INSERT OR IGNORE INTO task_watcher (task_id, user_id) VALUES (?1, ?2)",
+            params![task_id, user_id],
+        )
+        .await
+        .map_err(backend)?;
         // A no-change assign changes no facts, so the reminders stand as
         // they are.
         let reminded = if n > 0 {
@@ -2091,6 +2112,14 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
+        // Leaving the task takes the watch back off: its changes stop
+        // concerning the person who left.
+        tx.execute(
+            "DELETE FROM task_watcher WHERE task_id = ?1 AND user_id = ?2",
+            params![task_id, user_id],
+        )
+        .await
+        .map_err(backend)?;
         let reminded = if n > 0 {
             match self.sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc()).await {
                 Ok(reminded) => reminded,
@@ -2292,6 +2321,11 @@ impl Store for TursoStore {
                     ActivityKind::Commented.as_str(),
                     when.clone()
                 ],
+            )
+            .await?;
+            tx.execute(
+                "INSERT OR IGNORE INTO task_watcher (task_id, user_id) VALUES (?1, ?2)",
+                params![task_id, author_id],
             )
             .await?;
             Ok::<_, turso::Error>(())
@@ -3942,6 +3976,122 @@ impl Store for TursoStore {
         );
         let row = self.one_row(&sql, filter_vals).await?;
         row.as_ref().map(count_of).unwrap_or(Ok(0))
+    }
+
+    async fn watch_task(&self, task_id: &str, user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT OR IGNORE INTO task_watcher (task_id, user_id) VALUES (?1, ?2)",
+            params![task_id, user_id],
+        )
+        .await
+        .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Activity]);
+        Ok(())
+    }
+
+    async fn unwatch_task(&self, task_id: &str, user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM task_watcher WHERE task_id = ?1 AND user_id = ?2",
+            params![task_id, user_id],
+        )
+        .await
+        .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Activity]);
+        Ok(())
+    }
+
+    async fn feed_for_user(&self, user_id: &str, limit: u32) -> Result<Vec<ActivityLine>> {
+        const SELECT: &str = "SELECT a.id, a.task_id, t.title, u.display_name, a.kind, a.detail, \
+             a.created_at, t.task_key FROM activity a \
+             JOIN task t ON t.id = a.task_id \
+             LEFT JOIN user u ON u.id = a.actor_id";
+        // Two ways an event can concern somebody, unioned: it happened on a
+        // task they watch, or it names them. An event arriving both ways is
+        // one row — UNION, not UNION ALL — and a person's own actions are
+        // nobody's news, not even their own (`IS NOT`, so the system's rows
+        // with no actor still pass).
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "{SELECT} JOIN task_watcher w ON w.task_id = a.task_id AND w.user_id = ?1 \
+             WHERE a.actor_id IS NOT ?2 \
+             UNION {SELECT} WHERE a.subject_id = ?3 AND a.actor_id IS NOT ?4 \
+             ORDER BY created_at DESC, id DESC LIMIT ?5"
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                params![user_id, user_id, user_id, user_id, i64::from(limit)],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(ActivityLine {
+                id: text(&row, 0)?,
+                task_id: opt_text(&row, 1)?,
+                title: opt_text(&row, 2)?,
+                actor_name: opt_text(&row, 3)?,
+                kind: ActivityKind::parse(&text(&row, 4)?),
+                detail: text(&row, 5)?,
+                at: parse_stamp(&text(&row, 6)?)?,
+                task_key: opt_text(&row, 7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn count_feed_unseen(&self, user_id: &str) -> Result<u64> {
+        const SELECT: &str = "SELECT a.id FROM activity a \
+             JOIN task t ON t.id = a.task_id \
+             LEFT JOIN user u ON u.id = a.actor_id";
+        // Unseen is the same union as the feed, narrowed to rows that landed
+        // after the reader's marker. A reader who has never visited has no
+        // marker, and COALESCE with the empty string — which sorts before
+        // every stamp — reads the whole feed as news.
+        let conn = self.conn.lock().await;
+        let sql = format!(
+            "SELECT COUNT(*) FROM (\
+             {SELECT} JOIN task_watcher w ON w.task_id = a.task_id AND w.user_id = ?1 \
+             WHERE a.actor_id IS NOT ?2 \
+               AND a.created_at > COALESCE((SELECT feed_seen_at FROM user WHERE id = ?3), '') \
+             UNION \
+             {SELECT} WHERE a.subject_id = ?4 AND a.actor_id IS NOT ?5 \
+               AND a.created_at > COALESCE((SELECT feed_seen_at FROM user WHERE id = ?6), ''))"
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                params![
+                    user_id, user_id, user_id, user_id, user_id, user_id,
+                ],
+            )
+            .await
+            .map_err(backend)?;
+        let row = rows.next().await.map_err(backend)?;
+        match row {
+            Some(row) => {
+                let n: i64 = row.get(0).map_err(backend)?;
+                Ok(usize::try_from(n).unwrap_or(0) as u64)
+            }
+            None => Ok(0),
+        }
+    }
+
+    async fn mark_feed_seen(&self, user_id: &str, at: OffsetDateTime) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE user SET feed_seen_at = ?1 WHERE id = ?2",
+            params![stamp(at)?, user_id],
+        )
+        .await
+        .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Activity]);
+        Ok(())
     }
 
     async fn count_activity_preceding(

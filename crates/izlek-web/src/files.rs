@@ -69,6 +69,51 @@ fn label_of(file_name: &str) -> String {
     base.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// The `accept` attribute the task modal's upload input wears, built from
+/// the workspace's allowed extensions. Known extensions travel as MIME
+/// types — a mobile picker filters on MIME and opens on the documents
+/// shelf, with the camera at most one option among many and never the
+/// forced door; an unknown extension keeps its `.ext` form; an empty list
+/// is no attribute at all, and the picker opens on the whole filesystem.
+/// The word `capture` appears nowhere in this crate: it is the attribute
+/// that turns a file input into a camera.
+pub(crate) fn accept_attribute(allowed: &[String]) -> String {
+    allowed
+        .iter()
+        .map(|ext| {
+            let ext = ext.trim_start_matches('.').to_lowercase();
+            match mime_of_extension(&ext) {
+                Some(mime) => mime.to_string(),
+                None => format!(".{ext}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The MIME types a mobile picker understands, for the extensions a
+/// workspace is likely to allow; anything else stays an extension hint.
+fn mime_of_extension(ext: &str) -> Option<&'static str> {
+    match ext {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        "pdf" => Some("application/pdf"),
+        "txt" | "md" => Some("text/plain"),
+        "csv" => Some("text/csv"),
+        "json" => Some("application/json"),
+        "zip" => Some("application/zip"),
+        "mp4" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "ogg" => Some("audio/ogg"),
+        _ => None,
+    }
+}
+
 /// What the bytes are, decided from the bytes themselves — never from the
 /// part's `content_type()`, which is whatever the browser felt like sending.
 pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
@@ -291,14 +336,18 @@ struct DownloadQuery {
     dl: Option<String>,
 }
 
-/// Takes one file onto a task. The route this hangs off already caps the
-/// whole request body at the widest limit any workspace could set
-/// ([`crate::settings::WIDEST_ATTACHMENT_MB`], registered in `main.rs`); this handler enforces
-/// the workspace's own, usually narrower, limit while the bytes are still
-/// arriving rather than after they have all landed.
+/// Takes the files a task's upload form carries onto that task — one per
+/// `file` part, and a `multiple` picker posts several. The route this hangs
+/// off already caps the whole request body at the widest limit any
+/// workspace could set ([`crate::settings::WIDEST_ATTACHMENT_MB`],
+/// registered in `main.rs`); this handler enforces the workspace's own,
+/// usually narrower, limit per file while the bytes are still arriving
+/// rather than after they have all landed, and a part that breaks it
+/// refuses the whole post before anything is inserted.
 ///
-/// Fields arrive in request order: `task_id` before `file`, so the task and
-/// the workspace's limits are known before a byte of the file is kept.
+/// Fields arrive in request order: `task_id` before the `file` parts, so
+/// the task and the workspace's limits are known before a byte of any file
+/// is kept.
 #[route(POST "/files")]
 async fn upload(
     cx: &Cx,
@@ -314,8 +363,7 @@ async fn upload(
 
     let mut task_id: Option<String> = None;
     let mut comment_id: Option<String> = None;
-    let mut file_name: Option<String> = None;
-    let mut bytes: Option<Vec<u8>> = None;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
     let store = accounts(cx).store().clone();
 
@@ -374,8 +422,7 @@ async fn upload(
                     }
                 }
 
-                file_name = Some(name);
-                bytes = Some(collected);
+                files.push((name, collected));
             }
             _ => {}
         }
@@ -384,10 +431,9 @@ async fn upload(
     let Some(task_id) = task_id else {
         return Ok(home(Refusal::NotFound));
     };
-    let Some(file_name) = file_name else {
+    if files.is_empty() {
         return Ok(back_to(&task_id, Some(Refusal::NoFile)));
-    };
-    let bytes = bytes.unwrap_or_default();
+    }
 
     // A `comment_id` only travels if it names a comment that is actually on
     // this task; anything else is dropped rather than refused, since the
@@ -404,32 +450,36 @@ async fn upload(
         None => None,
     };
 
-    let label = label_of(&file_name);
-    let mime_type = sniff(&bytes);
+    let mut added: Result<(), izlek_core::store::StoreError> = Ok(());
+    for (file_name, bytes) in files {
+        let label = label_of(&file_name);
+        let mime_type = sniff(&bytes);
 
-    let added = store
-        .add_attachment(NewAttachment {
-            task_id: &task_id,
-            comment_id: comment_id.as_deref(),
-            file_name: &label,
-            mime_type,
-            bytes,
-            uploaded_by: &user.id,
-            at: OffsetDateTime::now_utc(),
-        })
-        .await;
+        added = store
+            .add_attachment(NewAttachment {
+                task_id: &task_id,
+                comment_id: comment_id.as_deref(),
+                file_name: &label,
+                mime_type,
+                bytes,
+                uploaded_by: &user.id,
+                at: OffsetDateTime::now_utc(),
+            })
+            .await
+            .map(|_| ());
 
-    if added.is_ok() && comment_id.is_none() {
-        let _ = store
-            .record_activity(
-                &task_id,
-                Some(&user.id),
-                None,
-                &izlek_core::detail::ActivityKind::FileAdded,
-                &label,
-                OffsetDateTime::now_utc(),
-            )
-            .await;
+        if added.is_ok() && comment_id.is_none() {
+            let _ = store
+                .record_activity(
+                    &task_id,
+                    Some(&user.id),
+                    None,
+                    &izlek_core::detail::ActivityKind::FileAdded,
+                    &label,
+                    OffsetDateTime::now_utc(),
+                )
+                .await;
+        }
     }
 
     Ok(match added {
@@ -661,5 +711,19 @@ mod tests {
             None,
             "an empty file has no range to satisfy"
         );
+    }
+
+    #[test]
+    fn accept_attribute_speaks_mime_for_known_extensions_and_dots_for_the_rest() {
+        let allowed: Vec<String> = ["png", "PDF", ".txt", "weird1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            accept_attribute(&allowed),
+            "image/png,application/pdf,text/plain,.weird1",
+            "MIME types filter a mobile picker; the camera is never the only door"
+        );
+        assert_eq!(accept_attribute(&[]), "", "no list, no attribute");
     }
 }

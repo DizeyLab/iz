@@ -106,7 +106,10 @@ CREATE TABLE user (
     photo             BLOB,
     photo_mime        TEXT,
     created_at        TEXT NOT NULL,
-    last_signed_in_at TEXT
+    last_signed_in_at TEXT,
+    -- Where the person's "what changed for me" feed has been read to. NULL
+    -- until their first visit, which reads every line as news.
+    feed_seen_at      TEXT
 );
 CREATE UNIQUE INDEX user_email_unique ON user(workspace_id, email);
 
@@ -126,7 +129,8 @@ CREATE TABLE signin_link (
     token_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    used_at    TEXT
+    used_at    TEXT,
+    kind       TEXT NOT NULL DEFAULT 'join'
 );
 CREATE UNIQUE INDEX signin_link_token ON signin_link(token_hash);
 

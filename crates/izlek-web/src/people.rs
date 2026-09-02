@@ -48,6 +48,12 @@ fn kind_word(lang: Lang, kind: &ActivityKind) -> String {
         ActivityKind::LimitsSaved => t(lang, Key::ActLimitsSaved).into(),
         ActivityKind::TestMailSent => t(lang, Key::ActTestMailSent).into(),
         ActivityKind::MessageSent => t(lang, Key::ActMessageSent).into(),
+        ActivityKind::Other(raw) if raw == "password_reset_requested" => {
+            t(lang, Key::ActResetRequested).into()
+        }
+        ActivityKind::Other(raw) if raw == "password_reset_completed" => {
+            t(lang, Key::ActResetDone).into()
+        }
         other => crate::i18n::activity_kind_word(lang, other.as_str()),
     }
 }

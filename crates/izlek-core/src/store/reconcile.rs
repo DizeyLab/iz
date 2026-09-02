@@ -294,23 +294,30 @@ fn build_maps(
 
     maps.push(TableMap {
         name: "user",
-        columns: old_cols(&[
-            "id",
-            "workspace_id",
-            "email",
-            "display_name",
-            "role",
-            "password_hash",
-            "invited_by",
-            "timezone",
-            "theme",
-            "language",
-            "ui",
-            "photo",
-            "photo_mime",
-            "created_at",
-            "last_signed_in_at",
-        ]),
+        columns: {
+            let mut columns = old_cols(&[
+                "id",
+                "workspace_id",
+                "email",
+                "display_name",
+                "role",
+                "password_hash",
+                "invited_by",
+                "timezone",
+                "theme",
+                "language",
+                "ui",
+                "photo",
+                "photo_mime",
+                "created_at",
+                "last_signed_in_at",
+            ]);
+            // The feed's read marker is new with this schema: no database old
+            // enough to be reconciled ever carried it, so every copied row
+            // starts unseen rather than pretending to have been read.
+            columns.push(("feed_seen_at", "NULL".into()));
+            columns
+        }
     });
     maps.push(TableMap {
         name: "workspace_owner",
@@ -318,7 +325,21 @@ fn build_maps(
     });
     maps.push(TableMap {
         name: "signin_link",
-        columns: old_cols(&["id", "user_id", "token_hash", "created_at", "expires_at", "used_at"]),
+        columns: {
+            let mut columns = old_cols(&[
+                "id",
+                "user_id",
+                "token_hash",
+                "created_at",
+                "expires_at",
+                "used_at",
+            ]);
+            // The link's kind is new with this schema: every link a database
+            // old enough to be reconciled could carry is an invitation —
+            // resets did not exist to be mailed yet.
+            columns.push(("kind", "'join'".into()));
+            columns
+        }
     });
     maps.push(TableMap {
         name: "session",

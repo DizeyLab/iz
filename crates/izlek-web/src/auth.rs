@@ -339,3 +339,108 @@ struct InvitationForm {
 async fn invitation(cx: &Cx, Form(input): Form<InvitationForm>) -> Result<Json<Option<Invited>>> {
     Ok(Json(invited_by_token(cx, &input.token).await?))
 }
+
+/// Who a reset link was mailed to, looked up by the link's own token — the
+/// reset page's "signing in as" line. Only a link of the reset kind resolves
+/// here, and only while it is still usable: a spent or expired link shows
+/// the same dead card an unknown token does.
+pub async fn reset_by_token(cx: &Cx, token: &str) -> Result<Option<Invited>> {
+    use izlek_core::auth::hash_token;
+    use time::OffsetDateTime;
+
+    let store = accounts(cx).store().clone();
+    let digest = hash_token(token);
+    let Some(link) = store.signin_link_by_hash(&digest).await? else {
+        return Ok(None);
+    };
+    if link.kind != izlek_core::store::LinkKind::Reset
+        || !link.is_usable(OffsetDateTime::now_utc())
+    {
+        return Ok(None);
+    }
+    let Some(user) = store.user(&link.user_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(Invited {
+        display_name: user.display_name,
+        email: user.email,
+        invited_by: None,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ForgotPasswordForm {
+    email: String,
+}
+
+/// Asks for a password-reset mail. The answer is the same whether the
+/// address has an account or not — the difference is not the browser's
+/// business. The request is the trail's fact either way; a rate-limited
+/// client is refused by name.
+#[route(POST "/api/forgot_password")]
+async fn forgot_password(cx: &Cx, Form(input): Form<ForgotPasswordForm>) -> Redirect {
+    match accounts(cx)
+        .request_password_reset(&input.email, &client_label(cx))
+        .await
+    {
+        Ok(()) => {
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    None,
+                    &ActivityKind::Other("password_reset_requested".to_string()),
+                    &input.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await;
+            // The sent note rides the redirect, the way `saved=` does: one
+            // sentence for every address.
+            let back = back_to(cx, "/forgot");
+            let sep = if back.contains('?') { "&" } else { "?" };
+            Ok((
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, format!("{back}{sep}sent=forgot_password"))],
+                Json(None),
+            ))
+        }
+        Err(error) => redirect(cx, Some(error.into())),
+    }
+}
+
+#[derive(Deserialize)]
+struct RedeemResetForm {
+    token: String,
+    password: String,
+}
+
+/// The reset link spends itself on the new password, and every other
+/// browser is signed out — the promise the change-password pane makes.
+#[route(POST "/api/redeem_reset")]
+async fn redeem_reset(cx: &Cx, Form(input): Form<RedeemResetForm>) -> Redirect {
+    match accounts(cx)
+        .redeem_reset_link(&input.token, &input.password, &client_label(cx))
+        .await
+    {
+        Ok(signed_in) => {
+            set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&signed_in.user.id),
+                    &ActivityKind::Other("password_reset_completed".to_string()),
+                    &signed_in.user.email,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await;
+            // The referring `/reset/{token}` names a spent link now; a
+            // browser that just signed in belongs on the board, the way the
+            // invitation redeem lands.
+            Ok((
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, "/".to_string())],
+                Json(None),
+            ))
+        }
+        Err(error) => redirect(cx, Some(error.into())),
+    }
+}

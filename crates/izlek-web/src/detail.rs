@@ -1956,14 +1956,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
     };
     let has_deps = !detail.blocked_by.is_empty() || !detail.blocks.is_empty();
     let accept = (!allowed_file_types.is_empty())
-        .then(|| {
-            allowed_file_types
-                .iter()
-                .map(|kind| format!(".{kind}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
+        .then(|| crate::files::accept_attribute(&allowed_file_types));
 
     // The delete confirmation is computed eagerly rather than fetched on
     // demand: there is no script here to hold the intermediate "did they
@@ -2193,7 +2186,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                 <label class="field-box file-upload-box">
                                     (glyph::plus(cx).await?)
                                     <span class="field-text file-upload-name">(t(lang, Key::File))</span>
-                                    <input class="file-upload-input" type="file" name="file" accept=(accept) required="">
+                                    <input class="file-upload-input" type="file" name="file" accept=(accept) multiple="" required="">
                                 </label>
                             </form>
                             (refused(cx, "upload_file", lang).await?)

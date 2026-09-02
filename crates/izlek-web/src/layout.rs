@@ -133,10 +133,11 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
     }
 }
 
-/// The five signed-in pages, as the topbar nav links between them.
+/// The signed-in pages, as the topbar nav links between them.
 #[derive(Clone, Copy, PartialEq)]
 pub enum NavPage {
     Board,
+    Feed,
     Rules,
     Logs,
     Tags,
@@ -144,11 +145,19 @@ pub enum NavPage {
 }
 
 impl NavPage {
-    const ALL: [Self; 5] = [Self::Board, Self::Rules, Self::Logs, Self::Tags, Self::Settings];
+    const ALL: [Self; 6] = [
+        Self::Board,
+        Self::Feed,
+        Self::Rules,
+        Self::Logs,
+        Self::Tags,
+        Self::Settings,
+    ];
 
     fn href(self) -> &'static str {
         match self {
             Self::Board => "/",
+            Self::Feed => "/feed",
             Self::Rules => "/rules",
             Self::Logs => "/logs",
             Self::Tags => "/tags",
@@ -159,6 +168,7 @@ impl NavPage {
     fn label(self) -> Key {
         match self {
             Self::Board => Key::NavBoard,
+            Self::Feed => Key::NavFeed,
             Self::Rules => Key::NavMailRules,
             Self::Logs => Key::NavLogs,
             Self::Tags => Key::NavTags,
@@ -167,11 +177,21 @@ impl NavPage {
     }
 }
 
-/// The topbar's page nav, shared by every signed-in page: the five pages
-/// with the current one marked, the admin-only ones (rules, logs, tags) shown
-/// only to roles that can administer. Plain `<a>`s — the soft-nav forwarder
-/// swaps them like any same-origin link, so `data-hard` stays off.
+/// The topbar's page nav, shared by every signed-in page: the pages with the
+/// current one marked, the admin-only ones (rules, logs, tags) shown only to
+/// roles that can administer. The feed link carries the unread count — how
+/// many lines have landed since the person last read their feed — as a chip
+/// that disappears at zero. Plain `<a>`s — the soft-nav forwarder swaps them
+/// like any same-origin link, so `data-hard` stays off.
 pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: Lang) -> Result {
+    let unread = match current_user(cx).await {
+        Ok(Some(me)) => crate::server::accounts(cx)
+            .store()
+            .count_feed_unseen(&me.id)
+            .await
+            .unwrap_or(0),
+        _ => 0,
+    };
     view! {
         cx =>
         <nav class="topbar-nav-links">
@@ -182,6 +202,9 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
                     href=(page.href())
                 >
                     (t(lang, page.label()))
+                    if page == NavPage::Feed && unread > 0 {
+                        <span class="feed-badge">(unread)</span>
+                    }
                 </a>
                 }
             }
@@ -494,7 +517,9 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 if (control.classList && control.classList.contains('file-upload-input')) { \
                     var label = control.closest('label'); \
                     var name = label ? label.querySelector('.file-upload-name') : null; \
-                    if (name && control.files && control.files[0]) { name.textContent = control.files[0].name; } \
+                    if (name && control.files && control.files[0]) { \
+                        name.textContent = control.files[0].name + (control.files.length > 1 ? ' +' + (control.files.length - 1) : ''); \
+                    } \
                     control.form.requestSubmit(); \
                     return; \
                 } \
@@ -676,8 +701,8 @@ pub async fn live_script(cx: &Cx) -> Result {
                 if (path === '/rules') { return topic === 'rules' || topic === 'members'; } \
                 if (path === '/tags') { return topic === 'tags' || topic === 'members'; } \
                 if (path === '/settings') { return topic === 'settings' || topic === 'members'; } \
-                if (path.indexOf('/people/') === 0) { return topic === 'members'; } \
-                return topic === 'board' || topic === 'task' || topic === 'members'; \
+                if (path === '/people/') { return topic === 'members'; } \
+                if (path === '/feed') { return true; } \
             } \
             try { \
                 var src = new EventSource('/api/live'); \

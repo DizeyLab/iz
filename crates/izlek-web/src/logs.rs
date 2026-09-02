@@ -152,7 +152,7 @@ pub(crate) fn outcome_word(outcome: izlek_core::store::MailOutcome, lang: Lang) 
 /// The sentence after a task's name, mirroring `ActivityEntry::sentence` —
 /// the per-task strip on the detail screen — since the workspace feed carries
 /// the same kind and detail but no `Person` to build an `ActivityEntry` from.
-fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang: Lang) -> String {
+pub(crate) fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang: Lang) -> String {
     use izlek_core::detail::ActivityKind;
     let detail = detail.trim();
     match kind {
@@ -201,6 +201,9 @@ fn activity_sentence(kind: &izlek_core::detail::ActivityKind, detail: &str, lang
             "tag_moved" => crate::i18n::tag_moved_label(lang, detail),
             "send_retried" => t(lang, Key::ActSendRetried).to_string(),
             "photo_saved" => t(lang, Key::ActPhotoSaved).to_string(),
+            "password_reset_requested" => t(lang, Key::ActResetRequested).to_string(),
+            "password_reset_completed" => t(lang, Key::ActResetDone).to_string(),
+            "reminded" => t(lang, Key::ActReminded).to_string(),
             "photo_removed" => t(lang, Key::ActPhotoRemoved).to_string(),
             "sender_checked" => t(lang, Key::ActSenderChecked).to_string(),
             _ => detail.to_string(),

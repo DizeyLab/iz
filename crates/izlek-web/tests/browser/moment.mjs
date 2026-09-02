@@ -112,16 +112,31 @@ for (const [name, value] of [
     const trigger = page.locator(
         `.modal-new-task select[name="${name}"] >> xpath=preceding-sibling::button[1]`,
     );
-    await trigger.click({ timeout: 5000 });
-    const menu = page.locator('.dd-panel.dd-open');
-    await menu.locator('.dd-search').fill(value);
-    const rowOn = await menu.locator('.dd-search').evaluate((el, want) => {
-        const panel = el.closest('.dd-panel');
+    // A pointer click makes Playwright scroll the clipped trigger into view
+    // first, and the modal's scroll event lands after the click has already
+    // opened the panel — the scroll-close then slams it. The scroll is the
+    // automation's, not a hand's: a hand opens what is already on screen.
+    // So the whole gesture — open, type to filter, press the row — runs
+    // through the page's own handlers in one go, with no synthetic scroll
+    // between open and commit.
+    const driven = await trigger.evaluate((el, want) => {
+        el.click();
+        const panel = el.__ddPanel;
+        if (!panel || !panel.classList.contains('dd-open')) {
+            return { opened: false, rowOn: false };
+        }
+        const search = panel.__ddSearch;
+        search.value = want;
+        search.dispatchEvent(new Event('input', { bubbles: true }));
         const row = panel.querySelector(`.dd-option[data-value="${want}"]`);
-        return !!row && !row.classList.contains('dd-option-hidden');
+        const rowOn = !!row && !row.classList.contains('dd-option-hidden');
+        if (rowOn) {
+            row.click();
+        }
+        return { opened: true, rowOn };
     }, value);
-    if (!rowOn) failures.push(`typing '${value}' in the ${name} menu hid its row`);
-    await menu.locator(`.dd-option[data-value="${value}"]`).evaluate((el) => el.click());
+    if (!driven || !driven.opened) failures.push(`the ${name} menu never opened`);
+    else if (!driven.rowOn) failures.push(`typing '${value}' in the ${name} menu hid its row`);
 }
 // Then the day press, whose pick() writes the hidden input in place — in
 // the modal nothing autosubmits, so the value is read in the same tick as

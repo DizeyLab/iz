@@ -232,8 +232,36 @@ pub struct UserStats {
     pub comments: u32,
 }
 
-/// A first-sign-in link. Only the hash of the token is ever stored; the
-/// plaintext is shown once, when the link is created or resent.
+/// What a link is for. The same table and the same token machinery carry
+/// both; the kind decides which redeeming flow may spend it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    /// An invited person's first sign-in.
+    Join,
+    /// A self-serve password reset, mailed to the account's own address.
+    Reset,
+}
+
+impl LinkKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LinkKind::Join => "join",
+            LinkKind::Reset => "reset",
+        }
+    }
+
+    pub fn from_str(raw: &str) -> Option<LinkKind> {
+        match raw {
+            "join" => Some(LinkKind::Join),
+            "reset" => Some(LinkKind::Reset),
+            _ => None,
+        }
+    }
+}
+
+/// A mailed link — an invitation or a password reset. Only the hash of the
+/// token is ever stored; the plaintext is shown once, when the link is
+/// created or mailed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SigninLink {
     pub id: String,
@@ -241,6 +269,7 @@ pub struct SigninLink {
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub used_at: Option<OffsetDateTime>,
+    pub kind: LinkKind,
 }
 
 impl SigninLink {
@@ -824,12 +853,13 @@ pub trait Store: BoardReads + DetailReads + 'static {
     // -- sign-in links -----------------------------------------------------
 
     /// Stores the hash of a freshly minted link. The caller keeps the plaintext
-    /// and shows it once.
+    /// and shows it once. The kind decides which redeeming flow may spend it.
     async fn create_signin_link(
         &self,
         user_id: &str,
         token_hash: &str,
         expires_at: OffsetDateTime,
+        kind: LinkKind,
     ) -> Result<SigninLink>;
 
     /// Looks a link up by the hash of the presented token. Returns the link
@@ -1334,6 +1364,26 @@ pub trait Store: BoardReads + DetailReads + 'static {
         dir: Dir,
         cursor: Option<&FeedCursor>,
     ) -> Result<u64>;
+
+    /// Puts `user_id` on a task's watchers. Idempotent: watching twice is
+    /// watching once.
+    async fn watch_task(&self, task_id: &str, user_id: &str) -> Result<()>;
+
+    /// Takes `user_id` off a task's watchers. Absent watch, absent row: no
+    /// error.
+    async fn unwatch_task(&self, task_id: &str, user_id: &str) -> Result<()>;
+
+    /// The "what changed for me" feed: activity events on the tasks the user
+    /// watches, plus events that name them (`subject_id` — an assignment
+    /// outlives the watch it created), minus the user's own actions. Newest
+    /// first, capped at `limit`.
+    async fn feed_for_user(&self, user_id: &str, limit: u32) -> Result<Vec<ActivityLine>>;
+
+    /// How many feed lines have landed since the user last read the feed.
+    async fn count_feed_unseen(&self, user_id: &str) -> Result<u64>;
+
+    /// Reads the feed to `at`: the unseen count resets, the history stays.
+    async fn mark_feed_seen(&self, user_id: &str, at: OffsetDateTime) -> Result<()>;
 
     // -- who gets mailed ---------------------------------------------------
 

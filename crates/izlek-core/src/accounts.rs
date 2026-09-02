@@ -17,7 +17,9 @@ use time::{Duration, OffsetDateTime};
 
 use crate::Role;
 use crate::auth::{self, AuthError, PasswordProblem, Token, hash_password, verify_password};
-use crate::store::{NewUser, Session, Store, StoreError, User, Workspace};
+use crate::store::{
+    LinkKind, NewUser, Session, Store, StoreError, User, Workspace,
+};
 
 /// How long a first-sign-in link is good for. The mockups say seven days, and
 /// an expired link is not a dead account: resending opens the same one.
@@ -230,7 +232,7 @@ impl Accounts {
         let token = Token::mint();
         let expires_at = OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME;
         self.store
-            .create_signin_link(&user.id, &token.hash(), expires_at)
+            .create_signin_link(&user.id, &token.hash(), expires_at, LinkKind::Join)
             .await?;
         let subject = "Your İzlek sign-in link";
         let body = format!(
@@ -294,6 +296,13 @@ impl Accounts {
                 return Err(AccountError::Rejected);
             }
         };
+        // A reset link is not an invitation: the flow that spends it checks
+        // the password rules itself and signs the other browsers out. Same
+        // answer, same work.
+        if link.kind != LinkKind::Join {
+            let _ = hash_password(password);
+            return Err(AccountError::Rejected);
+        }
 
         // The rules are checked before the link is spent, so a rejected
         // password does not burn the invitation.
@@ -319,7 +328,121 @@ impl Accounts {
         self.start_session(user).await
     }
 
-    // -- signing in --------------------------------------------------------
+    // -- forgot password ---------------------------------------------------
+
+    /// Mails a password-reset link to the address, if the address has an
+    /// account. The answer is the same whether it does or not: the miss path
+    /// pays for an Argon2 hash the way sign-in's pays for a verify, and only
+    /// the queued mail knows the difference. The token travels in the mail
+    /// and nowhere else — this method hands it to nobody.
+    ///
+    /// The client bucket refuses outright, like sign-in's. The address bucket
+    /// counts but stays silent: refusing by name would hand anyone who knows
+    /// a colleague's address a lock-out, so past the limit the request simply
+    /// mints nothing and answers the same success.
+    pub async fn request_password_reset(&self, email: &str, client: &str) -> Result<()> {
+        let now = OffsetDateTime::now_utc();
+        let client_bucket = format!("client:{client}");
+        self.check_rate(&client_bucket).await?;
+        self.store.record_auth_attempt(&client_bucket, now).await?;
+
+        let address_bucket = format!("address:{}", email.trim().to_lowercase());
+        let address_over_limit = self.over_limit(&address_bucket).await?;
+        self.store.record_auth_attempt(&address_bucket, now).await?;
+
+        let user = match self.store.workspace().await? {
+            Some(workspace) => self.store.user_by_email(&workspace.id, email).await?,
+            None => None,
+        };
+        let Some(user) = user else {
+            // Same work as the minting path, minus the effect.
+            let _ = hash_password(email);
+            return Ok(());
+        };
+        if address_over_limit {
+            // The request counts, the mail does not go: the answer above is
+            // still the answer a working reset gets.
+            return Ok(());
+        }
+
+        let token = Token::mint();
+        let expires_at = now + SIGNIN_LINK_LIFETIME;
+        self.store
+            .create_signin_link(&user.id, &token.hash(), expires_at, LinkKind::Reset)
+            .await?;
+        let (subject, body) = reset_mail(&user, self.base().await?, &token.expose());
+        self.store
+            .queue_notice(&user.email, &subject, &body, now)
+            .await?;
+        Ok(())
+    }
+
+    /// Redeems a reset link and sets the password the person chose, signing
+    /// every other browser out. Everything the invitation redeem refuses,
+    /// this refuses the same way — an unknown, expired, spent or wrong-kind
+    /// link is one [`AccountError::Rejected`], and every miss pays for a
+    /// hash. The limit is bucketed on the client, exactly as there.
+    pub async fn redeem_reset_link(
+        &self,
+        presented: &str,
+        password: &str,
+        client: &str,
+    ) -> Result<SignedIn> {
+        let now = OffsetDateTime::now_utc();
+        let client_bucket = format!("client:{client}");
+        self.check_rate(&client_bucket).await?;
+        self.store.record_auth_attempt(&client_bucket, now).await?;
+        let digest = auth::hash_token(presented);
+
+        let link = match self.store.signin_link_by_hash(&digest).await? {
+            Some(link) => link,
+            None => {
+                let _ = hash_password(password);
+                return Err(AccountError::Rejected);
+            }
+        };
+        if !link.is_usable(now) {
+            let _ = hash_password(password);
+            return Err(AccountError::Rejected);
+        }
+        let user = match self.store.user(&link.user_id).await? {
+            Some(user) => user,
+            None => {
+                let _ = hash_password(password);
+                return Err(AccountError::Rejected);
+            }
+        };
+        // An invitation is not a reset: it carries no expiry of the other
+        // browsers, so it must not be spendable on this screen.
+        if link.kind != LinkKind::Reset {
+            let _ = hash_password(password);
+            return Err(AccountError::Rejected);
+        }
+
+        // The rules are checked before the link is spent, so a rejected
+        // password does not burn it.
+        auth::check_password(password, &user.email, &user.display_name)?;
+        let hash = hash_password(password)?;
+
+        if !self.store.consume_signin_link(&link.id, now).await? {
+            return Err(AccountError::Rejected);
+        }
+
+        self.store.set_password_hash(&user.id, &hash).await?;
+        // The charter the password change lives by: the new password signs
+        // the other browsers out, all of them.
+        self.store
+            .revoke_sessions_for_user(&user.id, now)
+            .await?;
+        self.store.mark_signed_in(&user.id, now).await?;
+        self.store.clear_auth_attempts(&client_bucket).await?;
+        let user = self
+            .store
+            .user(&user.id)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        self.start_session(user).await
+    }
 
     /// Signs a person in. `client` is whatever identifies the caller's machine
     /// — it only ever becomes a rate-limit bucket.
@@ -504,5 +627,29 @@ impl Accounts {
     async fn over_limit(&self, bucket: &str) -> Result<bool> {
         let since = OffsetDateTime::now_utc() - RATE_WINDOW;
         Ok(self.store.count_auth_attempts(bucket, since).await? >= RATE_LIMIT)
+    }
+}
+
+/// The reset mail, in the account's own language. Terse like the invitation's:
+/// what happened, the link, the once-only fact.
+fn reset_mail(user: &User, base: String, token: &str) -> (String, String) {
+    if user.language == "tr" {
+        (
+            "İzlek parolanı sıfırla".to_string(),
+            format!(
+                "Bu adres için bir İzlek parola sıfırlaması istendi.\n\n\
+                 {base}/reset/{token}\n\n\
+                 Bağlantı bir kez çalışır ve 7 gün içinde geçersiz olur.\n"
+            ),
+        )
+    } else {
+        (
+            "Reset your İzlek password".to_string(),
+            format!(
+                "A reset was asked for the İzlek password on this address.\n\n\
+                 {base}/reset/{token}\n\n\
+                 The link works once and expires in 7 days.\n"
+            ),
+        )
     }
 }

@@ -9574,3 +9574,332 @@ async fn a_card_lists_both_dependency_directions_as_keys() {
         "the blocked card did not name its blocker: {html}"
     );
 }
+
+/// The board search filters server-side by key and title, composes with the
+/// project filter, and a query nothing answers says so in one line.
+#[tokio::test]
+async fn the_board_search_filters_and_composes_with_the_project_filter() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+    let panel = a_task(&app, &admin, &column, "Panel polish").await;
+    let _wire = a_task(&app, &admin, &column, "Wire the exporter").await;
+    let aurora = a_tag(&app, &admin, "Aurora").await;
+    let boreal = a_tag(&app, &admin, "Boreal").await;
+    let answer = app
+        .post(
+            "/api/set_task_tag",
+            Some(&admin),
+            &[("task_id", &panel), ("tag_id", &aurora.id)],
+        )
+        .await;
+    assert_eq!(answer.body, "null", "the tag did not attach: {}", answer.body);
+    let panel_key = app
+        .store
+        .task(&panel)
+        .await
+        .unwrap()
+        .expect("panel task gone")
+        .row
+        .task_key;
+
+    // By key, typed in any case: its card stays, the other goes.
+    let page = app
+        .get(&format!("/?q={}", panel_key.to_lowercase()), Some(&admin))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("Panel polish"), "{html}");
+    assert!(!html.contains("Wire the exporter"), "{html}");
+
+    // By title fragment, any case.
+    let page = app.get("/?q=EXPORTER", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("Wire the exporter"), "{html}");
+    assert!(!html.contains("Panel polish"), "{html}");
+
+    // Search and project compose: both must hold for a card to show.
+    let page = app
+        .get(&format!("/?q=polish&tag={}", aurora.id), Some(&admin))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("Panel polish"), "{html}");
+    let page = app
+        .get(&format!("/?q=polish&tag={}", boreal.id), Some(&admin))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("No matches"), "{html}");
+    assert!(!html.contains("Panel polish"), "{html}");
+
+    // Clearing the box restores the whole board.
+    let page = app.get("/", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains("Panel polish") && html.contains("Wire the exporter"),
+        "{html}"
+    );
+}
+// ---------------------------------------------------------------------------
+// Self-serve password reset: the forgot form, the indistinguishable answer,
+// and the redeem flow over the mailed link.
+// ---------------------------------------------------------------------------
+
+/// The reset token out of the newest notice queued for the address — the mail
+/// is the token's only carrier, so the test reads it like a recipient would.
+async fn queued_reset_token(app: &App, email: &str) -> Option<String> {
+    let sends = app
+        .store
+        .mail_queue(50, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    let body = sends
+        .into_iter()
+        .rev()
+        .find(|send| {
+            send.kind == SendKind::Notice && send.recipient == email
+        })
+        .and_then(|send| send.body)?;
+    body.rsplit_once("/reset/")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .map(str::to_string)
+}
+
+#[tokio::test]
+async fn forgot_password_answers_the_same_whatever_the_address() {
+    let app = App::open().await;
+    let _admin = admin(&app).await;
+
+    let known = app
+        .post("/api/forgot_password", None, &[("email", "ada@izlek.sh")])
+        .await;
+    let unknown = app
+        .post("/api/forgot_password", None, &[("email", "ghost@izlek.sh")])
+        .await;
+
+    assert_eq!(known.status, StatusCode::SEE_OTHER, "{}", known.body);
+    assert_eq!(unknown.status, StatusCode::SEE_OTHER, "{}", unknown.body);
+    assert_eq!(known.body, "null", "{}", known.body);
+    // The two answers are word for word the same, and both land back on the
+    // forgot form, which says its one sentence either way.
+    assert_eq!(known.body, unknown.body);
+    assert_eq!(
+        known.location.as_deref().map(str::to_string),
+        Some("/forgot?sent=forgot_password".to_string()),
+        "{:?}",
+        known.location
+    );
+
+    // The ledger keeps the difference the surface refuses to show: one reset
+    // mail, for the address that has an account.
+    let token = queued_reset_token(&app, "ada@izlek.sh")
+        .await
+        .expect("no reset mail queued for the admin");
+    assert!(
+        queued_reset_token(&app, "ghost@izlek.sh").await.is_none(),
+        "the unknown address was mailed a reset link"
+    );
+    assert!(!token.is_empty());
+}
+
+#[tokio::test]
+async fn a_reset_link_redeems_on_its_own_screen() {
+    let app = App::open().await;
+    let _admin = admin(&app).await;
+    app.post("/api/forgot_password", None, &[("email", "ada@izlek.sh")])
+        .await;
+    let token = queued_reset_token(&app, "ada@izlek.sh")
+        .await
+        .expect("no reset mail queued");
+
+    // The mailed link opens the choose-password card, naming the address it
+    // was mailed to.
+    let page = app.get(&format!("/reset/{token}"), None).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("Choose a new password"), "{html}");
+    assert!(html.contains("ada@izlek.sh"), "{html}");
+
+    // Redeeming signs this browser in and lands on the board.
+    let answer = app
+        .post(
+            "/api/redeem_reset",
+            None,
+            &[("token", token.as_str()), ("password", "chronometer-1761")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert_eq!(answer.body, "null", "{}", answer.body);
+    assert_eq!(answer.location.as_deref(), Some("/"));
+    let cookie = answer.session.expect("redeeming set no session cookie");
+
+    // The old password is refused, the new one signs in.
+    let old = app
+        .post(
+            "/api/sign_in",
+            None,
+            &[("email", "ada@izlek.sh"), ("password", "correct horse battery staple")],
+        )
+        .await;
+    assert_ne!(old.body, "null", "the old password still signed in");
+    assert!(old.session.is_none(), "the old password set a session");
+    let new = app
+        .post(
+            "/api/sign_in",
+            None,
+            &[("email", "ada@izlek.sh"), ("password", "chronometer-1761")],
+        )
+        .await;
+    assert_eq!(new.body, "null", "{}", new.body);
+    assert!(new.session.is_some(), "the new password signed nobody in");
+    let _ = cookie;
+
+    // The spent link shows the dead card, not the password form.
+    let page = app.get(&format!("/reset/{token}"), None).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("no longer works"), "{html}");
+    assert!(!html.contains("Choose a new password"), "{html}");
+}
+
+#[tokio::test]
+async fn a_used_or_wrong_token_shows_the_dead_card() {
+    let app = App::open().await;
+    let _admin = admin(&app).await;
+
+    let page = app.get("/reset/not-a-token", None).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("no longer works"), "{html}");
+
+    // Redeeming over a bogus token is refused, and nothing signs in.
+    let answer = app
+        .post(
+            "/api/redeem_reset",
+            None,
+            &[("token", "not-a-token"), ("password", "chronometer-1761")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_ne!(answer.body, "null", "a bogus token redeemed");
+    assert!(answer.session.is_none());
+}
+
+// A `multiple` picker posts several `file` parts in one form; every part
+// lands as its own attachment with its own bytes, under the same type and
+// size rules the single-file path always had.
+#[tokio::test]
+async fn a_multi_file_picker_lands_every_part_as_its_own_attachment() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Two parts, one post")
+        .await;
+
+    const BOUNDARY: &str = "izlek-test-boundary";
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9, 9];
+    let text = b"hello, from the second part".as_slice();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"task_id\"\r\n\r\n{task}\r\n"
+        )
+        .as_bytes(),
+    );
+    for (filename, content_type, bytes) in [
+        ("first.png", "image/png", &png[..]),
+        ("notes.txt", "text/plain", text),
+    ] {
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/files")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .header(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={admin_cookie}")).unwrap(),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let answer = Answer::from_response(app.router.handle(request).await).await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&tab=files").as_str())
+    );
+
+    let snapshot = app
+        .post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)])
+        .await;
+    let png_id = attachment_id_named(&snapshot.body, "first.png");
+    let txt_id = attachment_id_named(&snapshot.body, "notes.txt");
+
+    let png_back = app
+        .get(&format!("/files/{png_id}"), Some(&admin_cookie))
+        .await;
+    assert_eq!(png_back.bytes, png);
+    let txt_back = app
+        .get(&format!("/files/{txt_id}"), Some(&admin_cookie))
+        .await;
+    assert_eq!(txt_back.bytes, text);
+}
+
+/// The feed page: a member sees the events that concern them (the task they
+/// were assigned, named with the actor), the topbar badge counts what is
+/// unread, and visiting the feed clears it. A viewer gets the page too —
+/// empty, not refused.
+#[tokio::test]
+async fn the_feed_shows_each_person_their_stake() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let columns = columns_of(&app).await;
+    let task = a_task(&app, &admin_cookie, &columns[0], "Watch me").await;
+    let deniz_id = person_id(&app, &admin_cookie, &task, "Deniz").await;
+
+    // Ada assigns Deniz: the assignment names him and starts his watch.
+    app
+        .post(
+            "/api/assign",
+            Some(&admin_cookie),
+            &[("task_id", &task), ("user_id", &deniz_id)],
+        )
+        .await;
+
+    // The badge rides every page's topbar while the news is unread...
+    let board = app.get("/", Some(&member)).await;
+    let board_html = String::from_utf8_lossy(&board.bytes);
+    assert!(board_html.contains("feed-badge"), "{board_html}");
+    assert!(board_html.contains("href=\"/feed\""), "{board_html}");
+
+    // ...and the feed page names what happened, with the actor.
+    let feed = app.get("/feed", Some(&member)).await;
+    assert_eq!(feed.status, StatusCode::OK);
+    let feed_html = String::from_utf8_lossy(&feed.bytes);
+    assert!(feed_html.contains("Watch me"), "{feed_html}");
+    assert!(feed_html.contains("Ada Lovelace"), "{feed_html}");
+    assert!(feed_html.contains("assigned"), "{feed_html}");
+
+    // Visiting was reading: the badge is gone on the next page.
+    let board = app.get("/", Some(&member)).await;
+    let board_html = String::from_utf8_lossy(&board.bytes);
+    assert!(
+        !board_html.contains("feed-badge"),
+        "badge survived the read: {board_html}"
+    );
+
+    // A viewer's feed is empty, not hidden: every role gets the page.
+    let viewer = invited(&app, &admin_cookie, "kim@izlek.sh", "Kim", Role::Viewer).await;
+    let feed = app.get("/feed", Some(&viewer)).await;
+    assert_eq!(feed.status, StatusCode::OK);
+    let feed_html = String::from_utf8_lossy(&feed.bytes);
+    assert!(feed_html.contains("Nothing yet."), "{feed_html}");
+}

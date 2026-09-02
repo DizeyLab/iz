@@ -274,6 +274,33 @@ impl BoardView {
     pub fn blocked_count(&self) -> usize {
         self.cards().filter(|card| card.is_blocked()).count()
     }
+
+    /// Keeps only the cards whose key or title answers `query`: a literal,
+    /// case-insensitive substring of either. The human key typed in any
+    /// case matches; a fragment of a title matches; nothing is
+    /// pattern-matched, so there are no wildcards to escape.
+    pub fn searching(&mut self, query: &str) {
+        let needle = query.to_lowercase();
+        for column in &mut self.columns {
+            column.cards.retain(|card| {
+                card.task_key.to_lowercase().contains(&needle)
+                    || card.title.to_lowercase().contains(&needle)
+            });
+        }
+    }
+
+    /// Keeps only the cards wearing `tag`, when one is named — the Project
+    /// filter, riding the same narrowing pass as [`BoardView::searching`].
+    pub fn tagged(&mut self, tag_id: Option<&str>) {
+        let Some(tag_id) = tag_id else {
+            return;
+        };
+        for column in &mut self.columns {
+            column
+                .cards
+                .retain(|card| card.tag.as_ref().is_some_and(|tag| tag.id == tag_id));
+        }
+    }
 }
 
 /// `Sep 12` — the card chips are day-and-month, never a year.

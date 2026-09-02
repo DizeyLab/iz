@@ -1333,7 +1333,7 @@ async fn a_signin_link_stores_only_the_hash_and_is_used_once() {
     let now = OffsetDateTime::now_utc();
     let link = scratch
         .store
-        .create_signin_link(&user.id, "hash-of-the-token", now + Duration::days(7))
+        .create_signin_link(&user.id, "hash-of-the-token", now + Duration::days(7), izlek_core::store::LinkKind::Join)
         .await
         .unwrap();
     assert!(link.is_usable(now));
@@ -1398,7 +1398,7 @@ async fn an_expired_link_is_still_a_live_account() {
     let now = OffsetDateTime::now_utc();
     let stale = scratch
         .store
-        .create_signin_link(&user.id, "stale-hash", now - Duration::hours(1))
+        .create_signin_link(&user.id, "stale-hash", now - Duration::hours(1), izlek_core::store::LinkKind::Join)
         .await
         .unwrap();
     assert!(!stale.is_usable(now));
@@ -1406,7 +1406,7 @@ async fn an_expired_link_is_still_a_live_account() {
     // Resending opens the same account rather than making a new one.
     let fresh = scratch
         .store
-        .create_signin_link(&user.id, "fresh-hash", now + Duration::days(7))
+        .create_signin_link(&user.id, "fresh-hash", now + Duration::days(7), izlek_core::store::LinkKind::Join)
         .await
         .unwrap();
     assert_eq!(fresh.user_id, stale.user_id);
@@ -1437,7 +1437,7 @@ async fn a_prefetched_link_is_consumed_exactly_once() {
     let token = Token::mint();
     let now = OffsetDateTime::now_utc();
     let link = store
-        .create_signin_link(&user_id, &token.hash(), now + Duration::days(7))
+        .create_signin_link(&user_id, &token.hash(), now + Duration::days(7), izlek_core::store::LinkKind::Join)
         .await
         .unwrap();
 
@@ -1996,6 +1996,7 @@ async fn an_expired_link_is_refused_and_resending_opens_the_same_account() {
             &invitation.user.id,
             &stale.hash(),
             OffsetDateTime::now_utc() - Duration::minutes(1),
+            izlek_core::store::LinkKind::Join,
         )
         .await
         .unwrap();
@@ -8542,4 +8543,448 @@ async fn a_change_back_to_the_same_password_is_refused_and_signs_nobody_out() {
         .sign_in("ada@izlek.sh", "tide-tables-1892", "198.51.100.7")
         .await
         .unwrap();
+}
+
+/// The board search keeps the cards whose key or title answers the query —
+/// case-insensitively, each in the column it already sits in — and drops
+/// the rest.
+#[tokio::test]
+async fn board_search_matches_keys_and_titles_in_place() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let panel = add_task(&scratch.store, &workspace, "Backlog", "Panel polish", None, &admin).await;
+    let wire = add_task(&scratch.store, &workspace, "In Progress", "Wire the exporter", None, &admin).await;
+    let panel_key = scratch
+        .store
+        .task(&panel)
+        .await
+        .unwrap()
+        .expect("panel task gone")
+        .row
+        .task_key;
+
+    // The human key, typed in any case, finds its card — and only its card.
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.searching(&panel_key.to_lowercase());
+    assert_eq!(board.task_count(), 1);
+    let backlog = board
+        .columns
+        .iter()
+        .find(|column| column.column.name == "Backlog")
+        .expect("no Backlog column");
+    assert_eq!(backlog.cards.len(), 1);
+    assert_eq!(backlog.cards[0].id, panel);
+    assert!(
+        board
+            .columns
+            .iter()
+            .find(|column| column.column.name == "In Progress")
+            .expect("no In Progress column")
+            .cards
+            .is_empty()
+    );
+
+    // A title fragment, any case, the same story in the other column.
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.searching("EXPORT");
+    assert_eq!(board.task_count(), 1);
+    let progress = board
+        .columns
+        .iter()
+        .find(|column| column.column.name == "In Progress")
+        .expect("no In Progress column");
+    assert_eq!(progress.cards[0].id, wire);
+
+    // A query nothing answers empties the board.
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.searching("no-such-card-anywhere");
+    assert!(board.is_empty());
+}
+// ---------------------------------------------------------------------------
+// Self-serve password reset: a "Forgot it?" ask mails a reset link, the link
+// redeems on its own screen only, and the new password signs every other
+// browser out. The address's existence stays the requester's guess.
+// ---------------------------------------------------------------------------
+
+/// The reset token out of the newest notice queued for the address — the mail
+/// is the token's only carrier, so the test reads it like a recipient would.
+async fn queued_reset_token(
+    store: &std::sync::Arc<dyn Store>,
+    email: &str,
+) -> Option<String> {
+    let sends = store
+        .mail_queue(50, izlek_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    let body = sends
+        .into_iter()
+        .rev()
+        .find(|send| {
+            send.kind == izlek_core::store::SendKind::Notice && send.recipient == email
+        })
+        .and_then(|send| send.body)?;
+    body.rsplit_once("/reset/")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .map(str::to_string)
+}
+
+#[tokio::test]
+async fn a_reset_link_is_mailed_only_to_a_known_address() {
+    let (dir, store, workspace, _admin) = shared().await;
+    let _grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let store = store as std::sync::Arc<dyn Store>;
+    let accounts = Accounts::new(store.clone(), "https://izlek.sh");
+
+    // One ask for an address with an account, one without: the caller sees
+    // two identical answers.
+    accounts
+        .request_password_reset("grace@izlek.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    accounts
+        .request_password_reset("nobody@izlek.sh", "203.0.113.9")
+        .await
+        .unwrap();
+
+    let link = scalar(
+        &dir.join("izlek.db").to_string_lossy(),
+        "SELECT COUNT(*) FROM signin_link WHERE kind = 'reset'",
+    )
+    .await;
+    assert_eq!(link, 1, "only the known address gets a link");
+    assert!(
+        queued_reset_token(&store, "grace@izlek.sh").await.is_some(),
+        "the known address was mailed a reset link"
+    );
+    assert!(
+        queued_reset_token(&store, "nobody@izlek.sh").await.is_none(),
+        "the unknown address was mailed nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_reset_redeems_and_signs_the_other_browsers_out() {
+    let (_scratch, accounts, _admin) = claimed().await;
+    // A second browser, signed in before the reset.
+    let before = accounts
+        .sign_in("ada@izlek.sh", "tide-tables-1892", "198.51.100.7")
+        .await
+        .unwrap();
+
+    accounts
+        .request_password_reset("ada@izlek.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let token = queued_reset_token(accounts.store(), "ada@izlek.sh")
+        .await
+        .expect("no reset mail queued");
+
+    let after = accounts
+        .redeem_reset_link(&token, "chronometer-1761", "203.0.113.10")
+        .await
+        .unwrap();
+
+    // The old password is gone, the new one signs in.
+    assert!(matches!(
+        accounts
+            .sign_in("ada@izlek.sh", "tide-tables-1892", "198.51.100.11")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+    accounts
+        .sign_in("ada@izlek.sh", "chronometer-1761", "198.51.100.11")
+        .await
+        .unwrap();
+    // The browser that was signed in before the reset is out; the redeeming
+    // browser's own session is alive.
+    assert!(matches!(
+        accounts.authenticate(&before.session_token.expose()).await.unwrap(),
+        None
+    ));
+    assert!(matches!(
+        accounts.authenticate(&after.session_token.expose()).await.unwrap(),
+        Some(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_reset_link_only_redeems_once() {
+    let (_scratch, accounts, _admin) = claimed().await;
+    accounts
+        .request_password_reset("ada@izlek.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let token = queued_reset_token(accounts.store(), "ada@izlek.sh")
+        .await
+        .expect("no reset mail queued");
+
+    accounts
+        .redeem_reset_link(&token, "chronometer-1761", "203.0.113.10")
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .redeem_reset_link(&token, "chronometer-1761", "203.0.113.10")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+}
+
+#[tokio::test]
+async fn an_expired_reset_link_is_refused() {
+    let (scratch, accounts, admin) = claimed().await;
+    let token = izlek_core::auth::Token::mint();
+    scratch
+        .store
+        .create_signin_link(
+            &admin.id,
+            &token.hash(),
+            time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
+            izlek_core::store::LinkKind::Reset,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .redeem_reset_link(token.expose(), "chronometer-1761", "203.0.113.9")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+}
+
+#[tokio::test]
+async fn each_link_redeems_only_on_its_own_screen() {
+    let (scratch, accounts, admin) = claimed().await;
+    // An invitation is not a reset: it must not spend itself where the other
+    // browsers get signed out.
+    let join = izlek_core::auth::Token::mint();
+    scratch
+        .store
+        .create_signin_link(
+            &admin.id,
+            &join.hash(),
+            time::OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME,
+            izlek_core::store::LinkKind::Join,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .redeem_reset_link(&join.expose(), "chronometer-1761", "203.0.113.9")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+    // And a reset link is not an invitation.
+    accounts
+        .request_password_reset("ada@izlek.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let reset = queued_reset_token(accounts.store(), "ada@izlek.sh")
+        .await
+        .expect("no reset mail queued");
+    assert!(matches!(
+        accounts
+            .redeem_signin_link(&reset, "chronometer-1761", "203.0.113.9")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+}
+
+#[tokio::test]
+async fn reset_asks_are_rate_limited_per_client_and_silenced_per_address() {
+    let (dir, store, workspace, _admin) = shared().await;
+    let _grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let store = store as std::sync::Arc<dyn Store>;
+    let accounts = Accounts::new(store.clone(), "https://izlek.sh");
+
+    // One machine asks RATE_LIMIT times: every ask answers the same, and the
+    // eleventh from that machine is refused by name.
+    for _ in 0..RATE_LIMIT {
+        accounts
+            .request_password_reset("grace@izlek.sh", "203.0.113.9")
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        accounts
+            .request_password_reset("grace@izlek.sh", "203.0.113.9")
+            .await,
+        Err(AccountError::RateLimited)
+    ));
+    // A fresh client hammering one address gets the same answer as ever, and
+    // the mailbox stays quiet: the address bucket caps the mail, not the
+    // answer.
+    accounts
+        .request_password_reset("grace@izlek.sh", "203.0.113.201")
+        .await
+        .unwrap();
+    let queued = scalar(
+        &dir.join("izlek.db").to_string_lossy(),
+        "SELECT COUNT(*) FROM mail_send WHERE kind = 'notice'",
+    )
+    .await;
+    assert_eq!(queued, RATE_LIMIT as i64, "the flood minted no mail");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Watches and the personal feed: creating, being assigned and commenting
+/// each start a watch; an unassign ends it. The feed carries events on
+/// watched tasks and events naming the reader, never the reader's own
+/// actions; the unseen marker counts what landed since the last read.
+#[tokio::test]
+async fn the_personal_feed_follows_watches_names_and_the_marker() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let now = OffsetDateTime::now_utc();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    let column_id = column_named(&store, &workspace, "Backlog").await;
+    let task = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id: &column_id,
+            parent_id: None,
+            title: "Feed me",
+            description: "",
+            deadline: None,
+            clock_at: None,
+            created_by: &admin,
+        })
+        .await
+        .unwrap()
+        .row
+        .id;
+
+    store.assign_task(&task, &grace).await.unwrap();
+
+    // Creating started Ada's watch; the assignment starts Grace's. Nobody's
+    // own actions are their own news: Ada's created line is Grace's news,
+    // and Grace's feed shows it while Ada's stays empty.
+    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
+    assert_eq!(grace_feed.len(), 1);
+    assert_eq!(grace_feed[0].kind, ActivityKind::Created);
+    assert_eq!(grace_feed[0].actor_name.as_deref(), Some("Ada"));
+    assert!(store.feed_for_user(&admin, 50).await.unwrap().is_empty());
+    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 1);
+
+    // Grace's own comment is her own action: it is Ada's news, not hers.
+    store
+        .add_comment(&task, &grace, "Looking at it now", now)
+        .await
+        .unwrap();
+    // Her feed keeps the created line; her own comment never comes back.
+    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
+    assert_eq!(grace_feed.len(), 1);
+    assert_eq!(grace_feed[0].kind, ActivityKind::Created);
+    let admin_feed = store.feed_for_user(&admin, 50).await.unwrap();
+    assert_eq!(admin_feed.len(), 1);
+    assert_eq!(admin_feed[0].kind, ActivityKind::Commented);
+    assert_eq!(admin_feed[0].actor_name.as_deref(), Some("Grace"));
+    assert_eq!(store.count_feed_unseen(&admin).await.unwrap(), 1);
+
+    // Reading the feed is reading it: the marker resets, the history stays.
+    store
+        .mark_feed_seen(&admin, now + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(store.count_feed_unseen(&admin).await.unwrap(), 0);
+    assert_eq!(store.feed_for_user(&admin, 50).await.unwrap().len(), 1);
+
+    // Grace reads the feed too: her marker takes the created line off her
+    // unseen count, history included.
+    store
+        .mark_feed_seen(&grace, now + Duration::seconds(3))
+        .await
+        .unwrap();
+    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 0);
+    assert_eq!(store.feed_for_user(&grace, 50).await.unwrap().len(), 1);
+
+    // Ada's comment lands on a task Grace watches, after her marker: news.
+    store
+        .add_comment(&task, &admin, "Thanks — ship it", now + Duration::seconds(6))
+        .await
+        .unwrap();
+    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 1);
+    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
+    assert_eq!(grace_feed.len(), 2, "{grace_feed:?}");
+    assert_eq!(grace_feed[0].kind, ActivityKind::Commented);
+    assert_eq!(grace_feed[0].actor_name.as_deref(), Some("Ada"));
+
+    // An unassign takes the watch back off: history on the task stops
+    // concerning the person who left.
+    store.unassign_task(&task, &grace).await.unwrap();
+    assert!(store.feed_for_user(&grace, 50).await.unwrap().is_empty());
+    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 0);
+
+    // An event that NAMES her concerns her with no watch at all — the
+    // second way into the feed.
+    store
+        .record_activity(
+            &task,
+            Some(&admin),
+            Some(&grace),
+            &ActivityKind::Assigned,
+            "Grace",
+            now + Duration::seconds(7),
+        )
+        .await
+        .unwrap();
+    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
+    assert_eq!(grace_feed.len(), 1);
+    assert_eq!(grace_feed[0].kind, ActivityKind::Assigned);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+#[tokio::test]
+async fn a_delivered_reminder_writes_the_reminded_event() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
+    let clock = OffsetDateTime::now_utc() + Duration::hours(2);
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &grace).await.unwrap();
+
+    let engine = Engine::new(
+        store.clone() as std::sync::Arc<dyn Store>,
+        Remembering::taking_everything(),
+        "https://izlek.sh",
+    );
+    let later = clock - Duration::minutes(14);
+    assert_eq!(engine.deliver_owed(later, 10).await.unwrap().sent, 1);
+
+    // The delivery wrote the trail line: on the meeting's card, about the
+    // person the reminder landed on, with the system as the actor.
+    let path = dir.join("izlek.db").to_string_lossy().into_owned();
+    let events = scalar(
+        &path,
+        "SELECT COUNT(*) FROM activity WHERE kind = 'reminded' AND actor_id IS NULL",
+    )
+    .await;
+    assert_eq!(events, 1, "one delivery, one line");
+    let about = scalar(
+        &path,
+        &format!(
+            "SELECT COUNT(*) FROM activity WHERE kind = 'reminded' \
+             AND subject_id = '{grace}' AND task_id = '{task}'"
+        ),
+    )
+    .await;
+    assert_eq!(about, 1, "the line is about the reminded person");
+
+    // Sweeping again re-sends nothing and writes nothing.
+    engine.deliver_owed(later + Duration::minutes(1), 10).await.unwrap();
+    let events = scalar(
+        &path,
+        "SELECT COUNT(*) FROM activity WHERE kind = 'reminded'",
+    )
+    .await;
+    assert_eq!(events, 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }

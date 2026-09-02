@@ -178,6 +178,7 @@ async fn sign_in_card(cx: &Cx) -> Result {
                             <span class="auth-key">"↵"</span>
                         </button>
                     </form>
+                    <a class="auth-alt" href="/forgot">(t(lang, Key::ForgotIt))</a>
                     if let Some(refusal) = &refusal {
                         <div class="auth-problem">(refusal.message())</div>
                     }
@@ -243,4 +244,125 @@ async fn join_card(cx: &Cx, token: &str, person: Invited) -> Result {
 /// The signed-in landing, once a session resolves to a real user: the board.
 async fn signed_in_shell(cx: &Cx, user: User) -> Result {
     crate::board::board_page(cx, &user).await
+}
+
+/// "Forgot it?" — the self-serve reset ask, reached from the sign-in card.
+/// It answers the same whether the address has an account: one terse note,
+/// the same one for every address.
+#[page("/forgot")]
+async fn forgot(cx: &Cx) -> Result {
+    let lang = Lang::En;
+    let refusal = refusal_of(cx, "forgot_password");
+    let sent = topcoat::router::request::uri(cx)
+        .query()
+        .and_then(|query| {
+            query.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key == "sent" && value == "forgot_password").then_some(())
+            })
+        })
+        .is_some();
+
+    view! {
+        cx =>
+        (topbar(cx).await?)
+        <main class="auth-stage">
+            <div class="auth-column">
+                <div class="auth-card">
+                    <div class="auth-head">
+                        <div class="auth-title">(t(lang, Key::ForgotTitle))</div>
+                    </div>
+                    <form method="post" action="/api/forgot_password" data-hard="">
+                        <label class="auth-field">
+                            <span class="auth-label">(t(lang, Key::EmailLabel))</span>
+                            <input
+                                class="auth-input auth-input-mono"
+                                type="email"
+                                name="email"
+                                autocomplete="email"
+                                required=""
+                            >
+                        </label>
+                        <button class="auth-submit" type="submit">
+                            <span class="auth-submit-text">(t(lang, Key::ForgotSend))</span>
+                            <span class="auth-key">"↵"</span>
+                        </button>
+                    </form>
+                    if sent {
+                        <div class="auth-note">(t(lang, Key::ForgotSent))</div>
+                    }
+                    if let Some(refusal) = &refusal {
+                        <div class="auth-problem">(refusal.message())</div>
+                    }
+                </div>
+            </div>
+        </main>
+    }
+}
+
+/// "Choose a new password" — reached from the mailed reset link. Same shape
+/// as the invitation's pick-a-password card; the address is the account's
+/// own and cannot be edited here. A spent, expired or unknown token shows
+/// the dead card, and says which kind of link it was.
+#[page("/reset/{token}")]
+async fn reset(cx: &Cx) -> Result {
+    let token: &str = path_param::<Token>(cx);
+    match crate::auth::reset_by_token(cx, token).await? {
+        Some(person) => reset_card(cx, token, person).await,
+        None => view! {
+            cx =>
+            <main class="auth-stage">
+                <div class="auth-column">
+                    <div class="auth-card">
+                        <div class="auth-title">(t(Lang::En, Key::ResetLinkDead))</div>
+                    </div>
+                </div>
+            </main>
+        },
+    }
+}
+
+/// The reset card itself, once the token resolved to a live reset link.
+async fn reset_card(cx: &Cx, token: &str, person: Invited) -> Result {
+    let refusal = refusal_of(cx, "redeem_reset");
+    let lang = Lang::En;
+
+    view! {
+        cx =>
+        <main class="auth-stage">
+            <div class="auth-column">
+                <div class="auth-card">
+                    <div class="auth-head">
+                        <div class="auth-title">(t(lang, Key::ResetTitle))</div>
+                    </div>
+                    <div class="auth-field">
+                        <span class="auth-label">(t(lang, Key::SigningInAsLabel))</span>
+                        <div class="auth-locked">
+                            <span class="auth-locked-value">(person.email)</span>
+                        </div>
+                    </div>
+                    <form method="post" action="/api/redeem_reset" data-hard="">
+                        <input type="hidden" name="token" value=(token)>
+                        <label class="auth-field">
+                            <span class="auth-label">(t(lang, Key::NewPasswordLabel))</span>
+                            <input
+                                class="auth-input auth-input-mono"
+                                type="password"
+                                name="password"
+                                autocomplete="new-password"
+                                minlength=(izlek_core::auth::MIN_PASSWORD_CHARS.to_string())
+                                required=""
+                            >
+                        </label>
+                        <button class="auth-submit" type="submit">
+                            <span class="auth-submit-text">(t(lang, Key::SetPasswordAndSignIn))</span>
+                        </button>
+                    </form>
+                    if let Some(refusal) = &refusal {
+                        <div class="auth-problem">(refusal.message())</div>
+                    }
+                </div>
+            </div>
+        </main>
+    }
 }
