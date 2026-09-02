@@ -1660,6 +1660,13 @@ img.avatar {
 .edit:not(.edit-pop) > .edit-toggle:checked ~ .edit-view { display: none; }
 .edit-toggle:checked ~ .edit-form { display: block; }
 .edit-toggle:checked ~ .title-form { display: flex; }
+.detail-head:has(.edit-toggle:checked) .detail-state,
+.detail-head:has(.edit-toggle:checked) .spacer,
+.detail-head:has(.edit-toggle:checked) .detail-esc,
+.detail-head:has(.edit-toggle:checked) .detail-close,
+.detail-head:has(.edit-toggle:checked) .detail-board {
+  display: none;
+}
 .edit-toggle:focus-visible ~ .edit-view {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1939,9 +1946,8 @@ img.avatar {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--muted-soft);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 1px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .detail-close {
