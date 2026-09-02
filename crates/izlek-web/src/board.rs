@@ -710,7 +710,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 <input type="hidden" name="sort" value=(sort.clone())>
                 <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
                 <span class="field-text">(t(lang, Key::Search))</span>
-                <input class="field-input" type="search" name="q" value=(search.as_deref().unwrap_or(""))>
+                <input class="dd-search" type="text" name="q" value=(search.as_deref().unwrap_or(""))>
             </form>
             <div class="spacer"></div>
             if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} {}", t(lang, Key::Overdue)))</span> }

@@ -1938,27 +1938,23 @@ img.avatar {
   }
 }
 
-// The board's search field wears the same recessed box as the Sort and
-// Project selects; the input inside gives up its own border and height the
-// way the selects do, and the box shrinks before the chips do when the
-// 390px rail wraps.
+// The board's search field is the bar's third field-box, and its typing
+// area is the house's own type-as-filter input: the rules `.dd-search`
+// wears inside dropdown panels, freed of the panel-only block geometry and
+// filling the box past its label.
 .field-box-search {
-  flex: 0 1 190px;
+  flex: 0 1 240px;
+  min-width: 0;
 
   .field-text { flex: none; }
 
-  .field-input {
+  .dd-search {
     flex: 1;
     min-width: 0;
+    width: auto;
     height: auto;
+    margin-bottom: 0;
     padding: 0;
-    border: none;
-    background: transparent;
-
-    &:focus-visible {
-      background: transparent;
-      border: none;
-    }
   }
 }
 
