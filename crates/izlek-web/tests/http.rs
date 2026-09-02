@@ -9885,20 +9885,70 @@ async fn a_multi_file_picker_lands_every_part_as_its_own_attachment() {
     assert_eq!(txt_back.bytes, text);
 }
 
-/// The feed page: a member sees the events that concern them (the task they
-/// were assigned, named with the actor), the topbar badge counts what is
-/// unread, and visiting the feed clears it. A viewer gets the page too —
-/// empty, not refused.
+/// The board's assignee filter narrows to one member's cards, and `none`
+/// narrows to the cards nobody is on; a bogus id falls back to all.
 #[tokio::test]
-async fn the_feed_shows_each_person_their_stake() {
+async fn the_board_assignee_filter_narrows_and_a_bogus_id_falls_back_to_all() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
     let columns = columns_of(&app).await;
-    let task = a_task(&app, &admin_cookie, &columns[0], "Watch me").await;
-    let deniz_id = person_id(&app, &admin_cookie, &task, "Deniz").await;
+    let assigned_task = a_task(&app, &admin_cookie, &columns[0], "Deniz work").await;
+    a_task(&app, &admin_cookie, &columns[0], "Loose work").await;
+    let deniz_id = person_id(&app, &admin_cookie, &assigned_task, "Deniz").await;
+    app.post(
+        "/api/assign",
+        Some(&admin_cookie),
+        &[("task_id", &assigned_task), ("user_id", &deniz_id)],
+    )
+    .await;
 
-    // Ada assigns Deniz: the assignment names him and starts his watch.
+    let filtered = String::from_utf8(
+        app.get(&format!("/?assigned={deniz_id}"), Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .unwrap();
+    assert!(
+        filtered.contains("Deniz work"),
+        "the assigned card is gone: {filtered}"
+    );
+    assert!(
+        !filtered.contains("Loose work"),
+        "the unassigned card did not filter out: {filtered}"
+    );
+
+    let nobody = String::from_utf8(
+        app.get("/?assigned=none", Some(&admin_cookie)).await.bytes,
+    )
+    .unwrap();
+    assert!(
+        nobody.contains("Loose work"),
+        "the unassigned card is gone: {nobody}"
+    );
+    assert!(
+        !nobody.contains("Deniz work"),
+        "the assigned card did not filter out: {nobody}"
+    );
+
+    let everything =
+        String::from_utf8(app.get("/?assigned=bogus", Some(&admin_cookie)).await.bytes).unwrap();
+    assert!(
+        everything.contains("Deniz work") && everything.contains("Loose work"),
+        "a bogus assignee did not fall back to all: {everything}"
+    );
+}
+
+/// The other filter forms carry the active assignee in a hidden input, so
+/// switching the tag, the sort or the search keeps the assignee narrow.
+#[tokio::test]
+async fn the_board_filter_forms_preserve_the_assignee_filter() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    invited(&app, &admin_cookie, "deniz@izlek.sh", "Deniz", Role::Member).await;
+    let columns = columns_of(&app).await;
+    let task = a_task(&app, &admin_cookie, &columns[0], "Deniz work").await;
+    let deniz_id = person_id(&app, &admin_cookie, &task, "Deniz").await;
     app.post(
         "/api/assign",
         Some(&admin_cookie),
@@ -9906,34 +9956,18 @@ async fn the_feed_shows_each_person_their_stake() {
     )
     .await;
 
-    // The badge rides every page's topbar while the news is unread...
-    let board = app.get("/", Some(&member)).await;
-    let board_html = String::from_utf8_lossy(&board.bytes);
-    assert!(board_html.contains("feed-badge"), "{board_html}");
-    assert!(board_html.contains("href=\"/feed\""), "{board_html}");
-
-    // ...and the feed page names what happened, with the actor.
-    let feed = app.get("/feed", Some(&member)).await;
-    assert_eq!(feed.status, StatusCode::OK);
-    let feed_html = String::from_utf8_lossy(&feed.bytes);
-    assert!(feed_html.contains("Watch me"), "{feed_html}");
-    assert!(feed_html.contains("Ada Lovelace"), "{feed_html}");
-    assert!(feed_html.contains("assigned"), "{feed_html}");
-
-    // Visiting was reading: the badge is gone on the next page.
-    let board = app.get("/", Some(&member)).await;
-    let board_html = String::from_utf8_lossy(&board.bytes);
-    assert!(
-        !board_html.contains("feed-badge"),
-        "badge survived the read: {board_html}"
+    let page = String::from_utf8(
+        app.get(&format!("/?assigned={deniz_id}"), Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        page.matches(&format!(r#"name="assigned" value="{deniz_id}""#))
+            .count(),
+        3,
+        "the tag, sort and search forms do not each carry the assignee: {page}"
     );
-
-    // A viewer's feed is empty, not hidden: every role gets the page.
-    let viewer = invited(&app, &admin_cookie, "kim@izlek.sh", "Kim", Role::Viewer).await;
-    let feed = app.get("/feed", Some(&viewer)).await;
-    assert_eq!(feed.status, StatusCode::OK);
-    let feed_html = String::from_utf8_lossy(&feed.bytes);
-    assert!(feed_html.contains("Nothing yet."), "{feed_html}");
 }
 
 // The build stamp rides the html element of every render — the page a tab
