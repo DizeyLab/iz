@@ -478,6 +478,13 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                     function () {} \
                 ); \
             }; \
+            window.__izlekQuery = function (url) { \
+                var n = navStep(); \
+                fetch(url).then( \
+                    function (r) { return r.text().then(function (t) { if (stillCurrent(n)) { swap(t, r.url, false, false, true); } }); }, \
+                    function () {} \
+                ); \
+            }; \
             window.__izlekPost = function (action, fields) { \
                 var n = navStep(); \
                 fetch(action, { method: 'POST', headers: { accept: 'text/html' }, body: new URLSearchParams(fields) }).then( \

@@ -564,8 +564,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (MoveTagUp, Tr) => "Yukarı taşı",
         (MoveTagDown, En) => "Move down",
         (MoveTagDown, Tr) => "Aşağı taşı",
-        (Project, En) => "Project",
-        (Project, Tr) => "Proje",
+        (Project, En) => "Tag",
+        (Project, Tr) => "Etiket",
         (AllTags, En) => "All",
         (AllTags, Tr) => "Tümü",
 

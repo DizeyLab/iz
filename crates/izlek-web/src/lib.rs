@@ -20,5 +20,6 @@ pub mod rules;
 pub mod server;
 pub mod settings;
 pub mod sheet;
+pub mod slides;
 pub mod smtp;
 pub mod tags;

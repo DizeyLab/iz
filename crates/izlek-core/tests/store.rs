@@ -7144,6 +7144,43 @@ fn backups_beside(dir: &PathBuf) -> Vec<String> {
     found
 }
 
+/// Brings a `live_shaped_database` up to the shape İzlek deployed between the
+/// schema collapse and today: the `tag` table exists, tasks wear `tag_id`,
+/// and each board carries its default `General` plus a tag the admin made —
+/// with the four declared-schema objects a live database still lacks absent,
+/// which is exactly the shape the next rebuild will meet.
+async fn tagged_live_database() -> (PathBuf, String) {
+    let (dir, path) = live_shaped_database().await;
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    conn.execute_batch(
+        "CREATE TABLE tag (
+            id         TEXT PRIMARY KEY,
+            board_id   TEXT NOT NULL REFERENCES board(id),
+            name       TEXT NOT NULL,
+            position   INTEGER NOT NULL,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX tag_one_default ON tag(board_id) WHERE is_default = 1;
+        CREATE UNIQUE INDEX tag_name_unique ON tag(board_id, name);
+        CREATE INDEX tag_by_board ON tag(board_id, position);
+        ALTER TABLE task ADD COLUMN tag_id TEXT REFERENCES tag(id);
+        INSERT INTO tag (id, board_id, name, position, is_default, created_at) VALUES
+            ('G1', 'B1', 'General', 0, 1, '2026-08-30T12:00:00Z'),
+            ('X1', 'B1', 'tasty',   1, 0, '2026-08-31T01:39:46Z'),
+            ('G2', 'B2', 'General', 0, 1, '2026-08-30T12:00:00Z');
+        UPDATE task SET tag_id = 'X1' WHERE id = 'T1';
+        UPDATE task SET tag_id = 'G1' WHERE id = 'T2';
+        UPDATE task SET tag_id = 'G2' WHERE id = 'T3';
+        UPDATE task SET tag_id = 'G2' WHERE id = 'T4';",
+    )
+    .await
+    .unwrap();
+    (dir, path)
+}
+
 #[tokio::test]
 async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
     let (dir, path) = live_shaped_database().await;
@@ -7279,6 +7316,162 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
         scalar(&backup, "SELECT COUNT(*) FROM task").await,
         4,
         "the backup lost rows"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rebuild the tag map exists for: a database that already carries user
+/// tags hands every one of them across untouched — same id, same board, same
+/// name, same order, same default mark — and every task still points at the
+/// tag it pointed at before. Two real rebuilds wiped exactly this.
+#[tokio::test]
+async fn reconcile_preserves_user_tags_and_the_tasks_that_wear_them() {
+    let (dir, path) = tagged_live_database().await;
+
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .expect("reconcile refused a database that already carried tags");
+
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM tag").await,
+        3,
+        "the rebuild did not carry every tag across"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM tag WHERE id IN ('G1', 'X1', 'G2')"
+        )
+        .await,
+        3,
+        "the rebuild reissued tag ids instead of preserving them"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM tag WHERE id = 'X1' AND board_id = 'B1' AND name = 'tasty' \
+             AND position = 1 AND is_default = 0 AND created_at = '2026-08-31T01:39:46Z'",
+        )
+        .await,
+        1,
+        "the user tag came across with a changed column"
+    );
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM tag WHERE is_default = 1").await,
+        2,
+        "the boards did not come across with exactly one default each"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task WHERE (id = 'T1' AND tag_id = 'X1') \
+             OR (id = 'T2' AND tag_id = 'G1') OR (id = 'T3' AND tag_id = 'G2') \
+             OR (id = 'T4' AND tag_id = 'G2')",
+        )
+        .await,
+        4,
+        "a task came out of the rebuild pointing at a different tag"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task t JOIN tag g ON g.id = t.tag_id \
+             WHERE g.board_id != t.board_id",
+        )
+        .await,
+        0,
+        "a task wears another board's tag"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The seeding is a fallback, not a replacement: a board that comes across
+/// with tags but no default gets exactly one General beside the tags it
+/// already has, and a board whose default came across is left alone.
+#[tokio::test]
+async fn reconcile_seeds_a_default_only_for_a_board_without_one() {
+    let (dir, path) = tagged_live_database().await;
+    // B2's default becomes an ordinary tag by hand — as a rename in the app
+    // could leave it. The copy must not touch it, and the seeding must top
+    // the board up with exactly one new default beside it.
+    {
+        let db = turso::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "UPDATE tag SET is_default = 0, name = 'Projects' WHERE id = 'G2'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .expect("reconcile refused a database with a default-less board");
+
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM tag").await,
+        4,
+        "the rebuild did not leave exactly the old tags plus one seeded default"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM tag WHERE id = 'G2' AND board_id = 'B2' \
+             AND name = 'Projects' AND is_default = 0",
+        )
+        .await,
+        1,
+        "the rebuild changed a tag the copy should have left alone"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM tag WHERE board_id = 'B2' \
+             AND name = 'General' AND is_default = 1",
+        )
+        .await,
+        1,
+        "the board without a default was not topped up with exactly one"
+    );
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM tag WHERE board_id = 'B1'").await,
+        2,
+        "the seeding touched a board that already had its tags"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM tag WHERE board_id = 'B1' AND is_default = 1"
+        )
+        .await,
+        1,
+        "the seeding duplicated a default"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task WHERE id IN ('T3', 'T4') AND tag_id = 'G2'"
+        )
+        .await,
+        2,
+        "a task lost its tag when its board was topped up"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -104,6 +104,7 @@ fn mime_of_extension(ext: &str) -> Option<&'static str> {
         "txt" | "md" => Some("text/plain"),
         "csv" => Some("text/csv"),
         "json" => Some("application/json"),
+        "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         "zip" => Some("application/zip"),
         "mp4" => Some("video/mp4"),
         "webm" => Some("video/webm"),
@@ -128,12 +129,16 @@ pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
     } else if bytes.starts_with(b"PK\x03\x04") {
         // Every OOXML and OpenDocument file is a zip; what kind it is lives in
         // the entry names, which a zip stores uncompressed. `xl/workbook.xml`
-        // is the one part an xlsx cannot be without, and an ods declares its
-        // type in the `mimetype` entry the format requires be stored first.
+        // is the one part an xlsx cannot be without, an ods declares its
+        // type in the `mimetype` entry the format requires be stored first,
+        // and `ppt/presentation.xml` is the one part a pptx cannot be
+        // without.
         if contains(bytes, b"xl/workbook.xml") {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         } else if contains(bytes, b"opendocument.spreadsheet") {
             "application/vnd.oasis.opendocument.spreadsheet"
+        } else if contains(bytes, b"ppt/presentation.xml") {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         } else {
             "application/zip"
         }
@@ -256,6 +261,8 @@ pub(crate) enum ViewerKind {
     /// renders one, so this is the only viewer whose bytes are parsed here
     /// rather than handed to an element.
     Sheet,
+    /// A presentation, read the same way: slide order and text runs only.
+    Slides,
 }
 
 /// The stored mime types [`crate::sheet`] opens: the two Excel workbook
@@ -283,6 +290,9 @@ pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
         Some(ViewerKind::Pdf)
     } else if is_spreadsheet(mime_type) {
         Some(ViewerKind::Sheet)
+    } else if mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    {
+        Some(ViewerKind::Slides)
     } else {
         None
     }
@@ -725,5 +735,51 @@ mod tests {
             "MIME types filter a mobile picker; the camera is never the only door"
         );
         assert_eq!(accept_attribute(&[]), "", "no list, no attribute");
+    }
+
+    /// A zip of the named entries, bytes inside irrelevant: the sniff reads
+    /// the entry names a zip stores uncompressed.
+    fn zip_with(names: &[&str]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in names {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"<xml/>").unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_presentation_sniffs_its_presentation_mime_and_a_plain_zip_stays_a_zip() {
+        let pptx = zip_with(&["ppt/presentation.xml", "ppt/slides/slide1.xml"]);
+        assert_eq!(
+            sniff(&pptx),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        );
+        assert_eq!(sniff(&zip_with(&["notes.txt"])), "application/zip");
+    }
+
+    #[test]
+    fn an_ole_presentation_stays_download_only() {
+        // The pre-2007 .ppt shares the OLE container magic with .doc and
+        // carries no UTF-16 `Workbook` stream, so it sniffs as the unnamed
+        // container — which has no viewer element and never renders inline:
+        // a filename's own link is the download.
+        let ppt = [
+            0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1,
+            0, 0, 0, 0,
+        ];
+        assert_eq!(sniff(&ppt), "application/x-ole-storage");
+        assert_eq!(viewer_kind("application/x-ole-storage"), None);
+        assert!(!renders_inline("application/x-ole-storage"));
+    }
+
+    #[test]
+    fn a_presentation_opens_the_slides_viewer() {
+        assert_eq!(
+            viewer_kind("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+            Some(ViewerKind::Slides)
+        );
     }
 }

@@ -143,9 +143,10 @@ pub async fn reconcile(path: &str, opts: ReconcileOptions) -> Result<()> {
     Ok(())
 }
 
-/// Does the actual rebuild: creates `.rebuilt`, copies the data (seeding the
-/// tags partway, where the foreign keys allow it), and verifies the result. On success the rebuilt file is complete and
-/// checkpointed; on failure the caller deletes it.
+/// Does the actual rebuild: creates `.rebuilt`, copies the data (topping up
+/// a default tag for any board that comes across with none), and verifies
+/// the result. On success the rebuilt file is complete and checkpointed; on
+/// failure the caller deletes it.
 async fn rebuild(path: &str, rebuilt_path: &str, old_conn: &Connection) -> Result<()> {
     // The copy runs as `INSERT ... SELECT FROM old.<table>`, which needs
     // ATTACH — still gated in this engine, and switched on only here, for the
@@ -188,14 +189,24 @@ async fn rebuild(path: &str, rebuilt_path: &str, old_conn: &Connection) -> Resul
     Ok(())
 }
 
-/// Seeds one `General` tag per board into the new database, before `task`
-/// is copied. The tag is the default for that board, so every task copied
-/// afterwards can map its `tag_id` to it.
-async fn seed_general_tags(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
-    let mut rows = old_conn
-        .query("SELECT id, created_at FROM board", ())
+/// Seeds one `General` default tag into every board that, after the old tags
+/// were copied, still has none. A database that carried tags loses nothing
+/// here — only a board the copy left without a default is topped up, so
+/// `tag_one_default` can never be violated. It runs after `board` and `tag`
+/// and before `task`: boards and tags must be in for the foreign keys, and a
+/// pre-tag database's task map fills `tag_id` from exactly these defaults.
+async fn seed_general_tags(new_conn: &Connection) -> Result<()> {
+    // One connection sees both databases here: `main` is the rebuild, `old`
+    // the attached file being copied from.
+    let mut rows = new_conn
+        .query(
+            "SELECT b.id, b.created_at FROM old.board AS b \
+             WHERE NOT EXISTS (SELECT 1 FROM main.tag WHERE board_id = b.id AND is_default = 1)",
+            (),
+        )
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
+    let mut boards = Vec::new();
     while let Some(row) = rows
         .next()
         .await
@@ -203,6 +214,9 @@ async fn seed_general_tags(old_conn: &Connection, new_conn: &Connection) -> Resu
     {
         let board_id: String = row.get(0).map_err(|e| StoreError::Backend(e.to_string()))?;
         let created_at: String = row.get(1).map_err(|e| StoreError::Backend(e.to_string()))?;
+        boards.push((board_id, created_at));
+    }
+    for (board_id, created_at) in boards {
         let id = Ulid::new().to_string();
         new_conn
             .execute(
@@ -231,6 +245,7 @@ fn build_maps(
     old_has_clock: bool,
     old_has_reminder: bool,
     old_has_feed_seen: bool,
+    old_has_tag: bool,
 ) -> Vec<TableMap> {
     let mut maps = Vec::new();
 
@@ -384,7 +399,22 @@ fn build_maps(
         name: "board_column",
         columns: old_cols(&["id", "board_id", "name", "position", "is_done"]),
     });
-    // `tag` is seeded, not copied.
+    // `tag` is user data like any other table: copied with its ids intact,
+    // so every `task.tag_id` keeps pointing at the tag it pointed at before.
+    // The map stands even for a database from before the tag feature — the
+    // copy skips it there and the seeding tops the boards up instead — so
+    // the declared-schema check in `validate_maps` always sees it covered.
+    maps.push(TableMap {
+        name: "tag",
+        columns: old_cols(&[
+            "id",
+            "board_id",
+            "name",
+            "position",
+            "is_default",
+            "created_at",
+        ]),
+    });
     maps.push(TableMap {
         name: "task",
         columns: vec![
@@ -396,8 +426,18 @@ fn build_maps(
             ("description", "old.description".into()),
             ("column_id", "old.column_id".into()),
             (
+                // A database that already wears tags keeps every task's own
+                // tag: the ids were copied untouched, so the reference
+                // copies untouched. A database from before the tag feature
+                // has no `tag_id` to copy — its tasks arrive on the board's
+                // default, seeded just before this table was copied.
                 "tag_id",
-                "(SELECT id FROM main.tag WHERE board_id = old.board_id AND is_default = 1)".into(),
+                if old_has_tag {
+                    "old.tag_id".into()
+                } else {
+                    "(SELECT id FROM main.tag WHERE board_id = old.board_id AND is_default = 1)"
+                        .into()
+                },
             ),
             ("deadline", "old.deadline".into()),
             (
@@ -600,6 +640,35 @@ async fn validate_maps(conn: &Connection, maps: &[TableMap]) -> Result<()> {
             }
         }
     }
+
+    // Every table the declared schema creates must have a map: a declared
+    // table without one is a table the rebuild would create empty while the
+    // copy ran — the exact silence that once wiped every user tag. Engine
+    // bookkeeping (`sqlite_*`) is not user data. A table the old database
+    // carries but the declared schema does not is dropped on purpose; it is
+    // the declared side that may never go unmapped.
+    let mut rows = conn
+        .query("SELECT name FROM sqlite_master WHERE type = 'table'", ())
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    let mut declared = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
+        let name: String = row.get(0).map_err(|e| StoreError::Backend(e.to_string()))?;
+        if !name.starts_with("sqlite_") {
+            declared.push(name);
+        }
+    }
+    for table in declared {
+        if !maps.iter().any(|m| m.name == table) {
+            return Err(StoreError::Backend(format!(
+                "reconcile has no map for declared table {table} (its rows would be dropped)"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -617,21 +686,32 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
     let has_clock = old_has_column(old_conn, "task", "clock_at").await?;
     let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
     let has_feed_seen = old_has_column(old_conn, "user", "feed_seen_at").await?;
+    let has_tag = old_has_column(old_conn, "tag", "id").await?;
     let maps = build_maps(
         has_smtp_check,
         has_batch_window,
         has_clock,
         has_reminder,
         has_feed_seen,
+        has_tag,
     );
     validate_maps(new_conn, &maps).await?;
 
     for map in maps {
-        // The `General` tags are seeded between `board` and `task`: they point
-        // at boards, so the boards must already be here, and the tasks that
-        // will point back at them must not be here yet.
+        // A database from before the tag feature has no `tag` table: nothing
+        // to copy and nothing to lose — the seeding below stands in for it.
+        // The map itself still exists, so `validate_maps` sees the declared
+        // table covered whatever shape crosses the rebuild.
+        if map.name == "tag" && !has_tag {
+            continue;
+        }
+        // The default tags are seeded just before `task`: the old tags are
+        // already in, so seeding only tops up the boards the copy left
+        // without a default — it can therefore never violate
+        // `tag_one_default` — and the task map of a pre-tag database fills
+        // `tag_id` from exactly these defaults.
         if map.name == "task" {
-            seed_general_tags(old_conn, new_conn).await?;
+            seed_general_tags(new_conn).await?;
         }
         let cols = map
             .columns
@@ -782,17 +862,73 @@ async fn verify(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
         }
     }
 
-    // `tag` is new: one default tag per board.
-    let board_count = count_rows(old_conn, "board").await?;
-    let tag_count = count_rows(new_conn, "tag").await?;
-    if tag_count != board_count {
-        return Err(StoreError::Backend(format!(
-            "tag row count {} does not match board count {}",
-            tag_count, board_count
-        )));
+    // must be here row for row — same id, board, name, order, default mark,
+    // creation instant — and anything new must be a default the seeding put
+    // there for a board that came across with none. This is the strongest
+    // cheap check: a full row comparison rather than a count, so a rebuild
+    // that dropped, renumbered or rewrote a single tag fails here instead of
+    // shipping.
+    let old_has_tag = old_has_column(old_conn, "tag", "id").await?;
+    let old_tags = if old_has_tag {
+        read_tag_rows(old_conn).await?
+    } else {
+        Vec::new()
+    };
+    let new_tags = read_tag_rows(new_conn).await?;
+    for lost in &old_tags {
+        if !new_tags.contains(lost) {
+            return Err(StoreError::Backend(format!(
+                "tag {} ({}) did not survive the rebuild unchanged",
+                lost.0, lost.2
+            )));
+        }
+    }
+    for extra in &new_tags {
+        if !old_tags.contains(extra) && (extra.4 != 1 || extra.2 != "General") {
+            return Err(StoreError::Backend(format!(
+                "tag {} ({}) appeared in the rebuild without being a seeded default",
+                extra.0, extra.2
+            )));
+        }
     }
 
     Ok(())
+}
+
+/// Reads every tag row as plain values, so the verification can compare the
+/// old and the new table row for row.
+async fn read_tag_rows(
+    conn: &Connection,
+) -> Result<Vec<(String, String, String, i64, i64, String)>> {
+    let mut rows = conn
+        .query(
+            "SELECT id, board_id, name, position, is_default, created_at FROM tag",
+            (),
+        )
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    let mut tags = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
+        tags.push((
+            row.get::<String>(0)
+                .map_err(|e| StoreError::Backend(e.to_string()))?,
+            row.get::<String>(1)
+                .map_err(|e| StoreError::Backend(e.to_string()))?,
+            row.get::<String>(2)
+                .map_err(|e| StoreError::Backend(e.to_string()))?,
+            row.get::<i64>(3)
+                .map_err(|e| StoreError::Backend(e.to_string()))?,
+            row.get::<i64>(4)
+                .map_err(|e| StoreError::Backend(e.to_string()))?,
+            row.get::<String>(5)
+                .map_err(|e| StoreError::Backend(e.to_string()))?,
+        ));
+    }
+    Ok(tags)
 }
 
 async fn count_rows(conn: &Connection, table: &str) -> Result<i64> {
@@ -862,7 +998,10 @@ fn backup_name(path: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::backup_name;
+    use super::{TableMap, backup_name, build_maps, validate_maps};
+    use turso::Builder;
+    use ulid::Ulid;
+    use crate::store::schema::SCHEMA;
 
     #[test]
     fn backup_name_has_no_colons_or_spaces() {
@@ -880,4 +1019,36 @@ mod tests {
         assert_ne!(first, second);
         std::fs::remove_file(&first).unwrap();
     }
+
+    #[tokio::test]
+    async fn validate_maps_refuses_a_declared_table_without_a_map() {
+        let dir = std::env::temp_dir().join(format!("izlek-validate-{}", Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("izlek.db").to_str().unwrap().to_string();
+        let db = Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(SCHEMA).await.unwrap();
+
+        let maps = build_maps(false, false, false, false, false, false);
+        validate_maps(&conn, &maps)
+            .await
+            .expect("the full map set was refused against the declared schema");
+
+        // Drop any one table's map — here the tags, the table the maps once
+        // silently wiped — and the guard must name the table rather than let
+        // the rebuild create it empty.
+        let maps: Vec<TableMap> = maps.into_iter().filter(|m| m.name != "tag").collect();
+        let err = validate_maps(&conn, &maps)
+            .await
+            .expect_err("an unmapped declared table passed validation");
+        assert!(
+            err.to_string().contains("tag"),
+            "the error does not name the unmapped table: {err}"
+        );
+
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

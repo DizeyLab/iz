@@ -1498,6 +1498,127 @@ img.avatar {
   &:hover { color: var(--text-dim); border-color: var(--border); }
 }
 
+// A deck is the second format no browser renders, read the same way a
+// workbook is: the panel takes the viewer the whole way out, the outline
+// pans inside its own box, and the document never scrolls. The slide strip
+// is the sheet tab strip with numbers instead of names; the pager is the
+// sheet's pair with one step set.
+.viewer:has(.viewer-slides) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  .viewer-body {
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+    padding: 16px 20px 20px;
+  }
+}
+
+.viewer-slides {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.slides-nav {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+}
+
+.slide-tab {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.slide-tab-on {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+// The outline is what the deck says, not what it draws, so the card takes
+// the room left under the strip and pans inside itself when a slide runs
+// long rather than pushing the pager out of view.
+.slide-card {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: none;
+  padding: 20px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+
+  &::-webkit-scrollbar { display: none; }
+}
+
+.slide-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.slide-line {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.slides-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.slides-pager {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.slides-range {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+
+.slides-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+
+  &:hover { color: var(--text); border-color: var(--accent); }
+}
+
+// The chevron points down; the pair turns it sideways.
+.slides-step-left .glyph { transform: rotate(90deg); }
+.slides-step-right .glyph { transform: rotate(-90deg); }
+
+.slides-step-off {
+  opacity: 0.3;
+
+  &:hover { color: var(--text-dim); border-color: var(--border); }
+}
+
 .new-task-form {
   display: flex;
   flex-direction: column;
@@ -2479,11 +2600,26 @@ img.avatar {
 
 .file-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+// Rows, not chips: every attachment takes the full width, the name takes
+// what is left, and size/note/remove hold their columns — a long name
+// ellipsizes instead of wrapping the row's tail onto a second line.
+.file-list .file-chip {
+  display: flex;
+  width: 100%;
   gap: 8px;
 }
 
 .file-chip-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: inherit;
   text-decoration: none;
   transition: color var(--dur-fast) var(--ease);
@@ -2492,17 +2628,21 @@ img.avatar {
 }
 
 .file-chip-size {
+  flex: none;
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted-soft);
 }
 
 .file-chip-note {
+  flex: none;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--muted-soft);
 }
 
-.file-chip-drop-form { display: inline-flex; }
+.file-chip-drop-form { display: inline-flex; flex: none; }
 
 .file-chip-drop {
   display: inline-flex;
@@ -3539,13 +3679,18 @@ input[type="radio"] {
   white-space: nowrap;
 }
 
-// The filter row above `.log-list`: house field boxes, wrapping rather than
-// squeezing when the rail narrows the stage.
-.log-filterbar {
-  height: auto;
+// The activity panel's filter row is the board's control row living inside a
+// panel body: the page-bar chrome (min strip, own bottom rule, bar padding)
+// is opted out of — the panel head rules the row, the body pads it. The
+// two-class selector out-ranks both `.filterbar` bases, the
+// narrow-viewport one included.
+.filterbar.log-filterbar {
+  min-height: 0;
+  padding: 0;
+  background: none;
+  border-bottom: none;
   flex-wrap: wrap;
   gap: 10px;
-  padding: 14px 18px;
 }
 
 .log-range-dash {

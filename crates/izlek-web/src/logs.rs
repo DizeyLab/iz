@@ -18,7 +18,7 @@ use topcoat::router::content::{Form, Json};
 use topcoat::router::{HeaderName, StatusCode, header, page, route};
 use topcoat::view::view;
 
-use crate::detail::{Me, datepicker_grid};
+use crate::detail::{Me, datepicker_grid, glyph};
 use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, accounts, back_to, require_admin};
 use crate::settings::{decode_q, encode_q};
@@ -1095,29 +1095,40 @@ async fn logs_screen(
                     <div class="panel-body">
                         <form class="filterbar log-filterbar" method="get" action="/logs">
                             <input type="hidden" name="section" value="activity">
-                            <select class="field-input" name="actor" data-autosubmit="" data-search="">
-                                <option value="" selected=(filter_actor.is_empty())>(t(lang, Key::All))</option>
-                                <option value="system" selected=(filter_actor == "system")>(t(lang, Key::LogSystem))</option>
-                                for member in &members {
-                                    <option value=(member.0.clone()) selected=(filter_actor == member.0)>(member.1.clone())</option>
-                                }
-                            </select>
-                            <select class="field-input" name="kind" data-autosubmit="" data-search="">
-                                <option value="" selected=(filter_kind.is_empty())>(t(lang, Key::All))</option>
-                                for kind in ACTIVITY_KINDS {
-                                    <option value=(kind) selected=(filter_kind == *kind)>(crate::i18n::activity_kind_word(lang, kind))</option>
-                                }
-                            </select>
-                            <select class="field-input" name="task" data-autosubmit="" data-search="">
-                                <option value="" selected=(filter_task.is_empty())>(t(lang, Key::All))</option>
-                                for task in &tasks {
-                                    <option value=(task.0.clone()) selected=(filter_task == task.0)>(format!("{} {}", task.0, task.1))</option>
-                                }
-                            </select>
+                            <div class="field-box field-box-sort">
+                                <select class="status-select" name="actor" data-autosubmit="" data-search="">
+                                    <option value="" selected=(filter_actor.is_empty())>(t(lang, Key::All))</option>
+                                    <option value="system" selected=(filter_actor == "system")>(t(lang, Key::LogSystem))</option>
+                                    for member in &members {
+                                        <option value=(member.0.clone()) selected=(filter_actor == member.0)>(member.1.clone())</option>
+                                    }
+                                </select>
+                                (glyph::chevron(cx).await?)
+                            </div>
+                            <div class="field-box field-box-sort">
+                                <select class="status-select" name="kind" data-autosubmit="" data-search="">
+                                    <option value="" selected=(filter_kind.is_empty())>(t(lang, Key::All))</option>
+                                    for kind in ACTIVITY_KINDS {
+                                        <option value=(kind) selected=(filter_kind == *kind)>(crate::i18n::activity_kind_word(lang, kind))</option>
+                                    }
+                                </select>
+                                (glyph::chevron(cx).await?)
+                            </div>
+                            <div class="field-box field-box-sort">
+                                <select class="status-select" name="task" data-autosubmit="" data-search="">
+                                    <option value="" selected=(filter_task.is_empty())>(t(lang, Key::All))</option>
+                                    for task in &tasks {
+                                        <option value=(task.0.clone()) selected=(filter_task == task.0)>(format!("{} {}", task.0, task.1))</option>
+                                    }
+                                </select>
+                                (glyph::chevron(cx).await?)
+                            </div>
                             <div class="edit edit-pop datepick-pop">
                                 <input class="edit-toggle" type="checkbox" id="log-from-toggle" aria-label=(t(lang, Key::From))>
                                 <label class="field-box edit-view edit-hit" for="log-from-toggle">
+                                    (glyph::calendar(cx).await?)
                                     <span class="field-text datepick-label" data-empty=(t(lang, Key::From))>(if filter_from.is_empty() { t(lang, Key::From).to_string() } else { filter_from.clone() })</span>
+                                    (glyph::chevron(cx).await?)
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
                                     (datepicker_grid(cx, "from", &filter_from, true, lang).await?)
@@ -1127,16 +1138,21 @@ async fn logs_screen(
                             <div class="edit edit-pop datepick-pop">
                                 <input class="edit-toggle" type="checkbox" id="log-to-toggle" aria-label=(t(lang, Key::To))>
                                 <label class="field-box edit-view edit-hit" for="log-to-toggle">
+                                    (glyph::calendar(cx).await?)
                                     <span class="field-text datepick-label" data-empty=(t(lang, Key::To))>(if filter_to.is_empty() { t(lang, Key::To).to_string() } else { filter_to.clone() })</span>
+                                    (glyph::chevron(cx).await?)
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
                                     (datepicker_grid(cx, "to", &filter_to, true, lang).await?)
                                 </div>
                             </div>
-                            <select class="field-input" name="dir" data-autosubmit="">
-                                <option value="" selected=(filter_dir != "oldest")>(t(lang, Key::Newest))</option>
-                                <option value="oldest" selected=(filter_dir == "oldest")>(t(lang, Key::Oldest))</option>
-                            </select>
+                            <div class="field-box field-box-sort">
+                                <select class="status-select" name="dir" data-autosubmit="">
+                                    <option value="" selected=(filter_dir != "oldest")>(t(lang, Key::Newest))</option>
+                                    <option value="oldest" selected=(filter_dir == "oldest")>(t(lang, Key::Oldest))</option>
+                                </select>
+                                (glyph::chevron(cx).await?)
+                            </div>
                         </form>
                         <div class="log-list" data-rows=(limit) data-section="activity">
                             for line in activity {

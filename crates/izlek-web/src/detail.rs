@@ -2452,6 +2452,23 @@ pub async fn file_viewer_modal(
     } else {
         None
     };
+    // A deck rides the same decision: its bytes are parsed here, off the
+    // runtime's threads, and `?sheet=` carries the slide index the way it
+    // carries a workbook's — one number of overlay state, parsed once on the
+    // board and passed down.
+    let deck = if kind == crate::files::ViewerKind::Slides {
+        match store.attachment_bytes(file_id).await {
+            Ok(Some(bytes)) => tokio::task::spawn_blocking(move || {
+                crate::slides::read(bytes, sheet_index)
+            })
+            .await
+            .ok()
+            .flatten(),
+            _ => None,
+        }
+    } else {
+        None
+    };
     view! {
         cx =>
         <div class="modal-scrim viewer-scrim">
@@ -2481,6 +2498,9 @@ pub async fn file_viewer_modal(
                         </div>,
                         crate::files::ViewerKind::Pdf => <object class="viewer-media viewer-pdf" data=(src) type="application/pdf"></object>,
                         crate::files::ViewerKind::Sheet => (sheet_view(cx, sheet, task_id, file_id, tab, lang).await?),
+                        crate::files::ViewerKind::Slides => {
+                            (slides_view(cx, deck, task_id, file_id, tab, lang).await?)
+                        }
                     }
                 </div>
             </div>
@@ -2617,6 +2637,87 @@ async fn sheet_view(
                         <a class="sheet-step sheet-step-right" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
                     } else {
                         <span class="sheet-step sheet-step-right sheet-step-off">(glyph::chevron(cx).await?)</span>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// One slide of a deck as an outline: the strip of slide numbers when the
+/// deck has more than one, the slide's own paragraphs — a title shape's
+/// paragraph as the heading, the rest as lines — and the pager that moves
+/// between slides. A deck no reader here understands says so in one line;
+/// the header's download link is still the whole file.
+async fn slides_view(
+    cx: &Cx,
+    deck: Option<crate::slides::Deck>,
+    task_id: &str,
+    file_id: &str,
+    tab: Tab,
+    lang: Lang,
+) -> Result {
+    let Some(deck) = deck else {
+        return view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> };
+    };
+    // Every link out of here is the same page with one number moved: the
+    // slide index rides the query param a sheet's tabs use, so the two
+    // readers share the one overlay route instead of splitting it.
+    let at = |slide: usize| {
+        format!(
+            "/?task={task_id}&tab={}&file={file_id}&sheet={slide}",
+            tab.slug()
+        )
+    };
+    let slide = &deck.slides[deck.index];
+    let steps: Vec<(String, String, &'static str)> = (0..deck.slides.len())
+        .map(|index| {
+            (
+                (index + 1).to_string(),
+                at(index),
+                if index == deck.index {
+                    "slide-tab slide-tab-on"
+                } else {
+                    "slide-tab"
+                },
+            )
+        })
+        .collect();
+    let back = (deck.index > 0).then(|| at(deck.index - 1));
+    let on = (deck.index + 1 < deck.slides.len()).then(|| at(deck.index + 1));
+    view! {
+        cx =>
+        <div class="viewer-slides">
+            if steps.len() > 1 {
+                <nav class="slides-nav">
+                    for step in &steps {
+                        <a class=(step.2) href=(step.1.clone())>(step.0.clone())</a>
+                    }
+                </nav>
+            }
+            <div class="slide-card">
+                for paragraph in &slide.paragraphs {
+                    if paragraph.title {
+                        <h3 class="slide-title">(paragraph.text.clone())</h3>
+                    } else {
+                        <p class="slide-line">(paragraph.text.clone())</p>
+                    }
+                }
+            </div>
+            <div class="slides-foot">
+                <div class="slides-pager">
+                    <span class="slides-range">
+                        (format!("{} / {}", deck.index + 1, deck.slides.len()))
+                    </span>
+                    if let Some(href) = back {
+                        <a class="slides-step slides-step-left" href=(href) aria-label=(t(lang, Key::Previous))>(glyph::chevron(cx).await?)</a>
+                    } else {
+                        <span class="slides-step slides-step-left slides-step-off">(glyph::chevron(cx).await?)</span>
+                    }
+                    if let Some(href) = on {
+                        <a class="slides-step slides-step-right" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
+                    } else {
+                        <span class="slides-step slides-step-right slides-step-off">(glyph::chevron(cx).await?)</span>
                     }
                 </div>
             </div>

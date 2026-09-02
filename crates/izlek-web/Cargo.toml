@@ -40,6 +40,11 @@ lettre = { version = "0.11.23", default-features = false, features = [
   "pool",
 ] }
 calamine = { version = "0.36.1", default-features = false }
+# Opens a pptx directly: the slide order and text live in plain entries of
+# the same zip calamine opens for a workbook, read with the XML parser
+# already in the tree — both crates ride the lockfile as it stands.
+quick-xml = { version = "0.41.0", default-features = false }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # Hashes the compiled stylesheet against the bundle's bytes at boot, so a
 # bundle from another generation refuses the boot instead of serving under
 # this binary (see `server.rs`'s `stylesheet_guard`).

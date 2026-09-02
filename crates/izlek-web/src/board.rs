@@ -560,6 +560,37 @@ async fn card_menu_script(cx: &Cx) -> Result {
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
+/// Live search: the filter bar's `q` input fetches the board as the user
+/// types — debounced, URL rewritten in place without a history entry per
+/// keystroke. The listener is delegated on `document`, so the morph cannot
+/// orphan it, and the value is deduped against the last one fetched, so an
+/// unchanged box never refetches. Enter still submits through the shared
+/// soft-nav handler.
+async fn search_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+        if (window.__izlekBoardSearch) { return; } \
+        window.__izlekBoardSearch = true; \
+        var timer = null; \
+        var last = (document.querySelector('.field-box-search input[name=q]') || {}).value || ''; \
+        function fire() { \
+            var el = document.querySelector('.field-box-search input[name=q]'); \
+            if (!el || !el.form || !window.__izlekQuery || el.value === last) { return; } \
+            last = el.value; \
+            window.__izlekKeep = true; \
+            window.__izlekQuery((el.form.getAttribute('action') || window.location.pathname) + '?' + new URLSearchParams(new FormData(el.form)).toString()); \
+        } \
+        document.addEventListener('input', function (e) { \
+            var el = e.target; \
+            if (!el || el.name !== 'q' || !el.closest || !el.closest('.field-box-search')) { return; } \
+            if (timer) { clearTimeout(timer); } \
+            timer = setTimeout(function () { timer = null; fire(); }, 200); \
+        }); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+
 /// Which task, if any, `/` renders the detail modal open on, and the refusal
 /// (if any) a create or move landed back here with. `file` opens the viewer
 /// over that task's modal, the same nested query-param convention `confirm`
@@ -740,6 +771,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         (crate::dropdown::dropdown_script(cx).await?)
         (crate::layout::escape_script(cx).await?)
         (card_menu_script(cx).await?)
+        (search_script(cx).await?)
     }
 }
 
