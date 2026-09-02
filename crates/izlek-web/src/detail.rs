@@ -2077,6 +2077,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                                 <option value=(tag.id.clone()) selected=(Some(tag.id.as_str()) == detail.tag.as_ref().map(|t| t.id.as_str()))>(tag.name.clone())</option>
                                             }
                                         </select>
+                                        (glyph::chevron(cx).await?)
                                     </form>
                                 } else {
                                     <span class="field-box">
