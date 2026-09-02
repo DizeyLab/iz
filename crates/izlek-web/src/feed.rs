@@ -20,7 +20,6 @@ use topcoat::context::Cx;
 use topcoat::router::{error::not_found, page};
 use topcoat::view::view;
 
-
 use crate::i18n::{Key, Lang, t};
 use crate::server::{accounts, require_user};
 
@@ -29,10 +28,13 @@ use crate::server::{accounts, require_user};
 /// growing past the viewport.
 const LIMIT: u32 = 50;
 
-/// One rendered feed line: the strings the view stamps in, decided here so
-/// the template stays a list of facts rather than a chain of lookups.
+/// One rendered feed line — the same anatomy as the Logs page's activity
+/// rows (`log-row`: stamp · actor · sentence · subject), with the subject
+/// as the one link. The strings are decided here so the template stays a
+/// list of facts rather than a chain of lookups.
 struct FeedRow {
-    task_label: String,
+    key: String,
+    title: String,
     href: String,
     actor: String,
     sentence: String,
@@ -57,14 +59,12 @@ async fn feed_page(cx: &Cx) -> Result {
         .await?;
     let zone = izlek_core::detail::parse_zone(&user.timezone);
 
+    let empty = lines.is_empty();
     let rows: Vec<FeedRow> = lines
         .iter()
         .map(|line| FeedRow {
-            task_label: match (&line.task_key, &line.title) {
-                (Some(key), Some(title)) => format!("{key} · {title}"),
-                (Some(key), None) => key.clone(),
-                _ => line.title.clone().unwrap_or_default(),
-            },
+            key: line.task_key.clone().unwrap_or_default(),
+            title: line.title.clone().unwrap_or_default(),
             href: format!("/?task={}", line.task_id.as_deref().unwrap_or_default()),
             actor: line
                 .actor_name
@@ -89,22 +89,24 @@ async fn feed_page(cx: &Cx) -> Result {
                 <div class="panel-head">
                     <h2 class="panel-title">(t(lang, Key::NavFeed))</h2>
                 </div>
-                if rows.is_empty() {
-                    <p class="feed-empty">(t(lang, Key::FeedEmpty))</p>
-                } else {
-                    <ol class="feed-list">
+                <div class="panel-body">
+                    <div class="log-list">
                         for row in rows {
-                            <li class="feed-row">
-                                <a class="feed-task" href=(row.href)>(row.task_label)</a>
-                                <span class="feed-line">
-                                    <span class="feed-actor">(row.actor)</span>
-                                    <span class="feed-sentence">(row.sentence)</span>
-                                </span>
-                                <span class="feed-when">(row.when)</span>
-                            </li>
+                            <div class="log-row">
+                                <span class="log-stamp">(row.when)</span>
+                                <span class="log-actor">(row.actor)</span>
+                                <span class="log-line">(row.sentence)</span>
+                                <a class="log-task" href=(row.href)>
+                                    <span class="log-key">(format!("({})", row.key))</span>
+                                    <span class="log-title">(row.title)</span>
+                                </a>
+                            </div>
                         }
-                    </ol>
-                }
+                    </div>
+                    if empty {
+                        <p class="rules-quiet">(t(lang, Key::FeedEmpty))</p>
+                    }
+                </div>
             </section>
         </main>
     }

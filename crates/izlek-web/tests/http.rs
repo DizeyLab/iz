@@ -9903,3 +9903,31 @@ async fn the_feed_shows_each_person_their_stake() {
     let feed_html = String::from_utf8_lossy(&feed.bytes);
     assert!(feed_html.contains("Nothing yet."), "{feed_html}");
 }
+
+// The build stamp rides the html element of every render — the page a tab
+// loaded and every response a soft navigation or live refresh will fetch —
+// so a tab open across a deploy can tell stale css from current and reload
+// itself rather than paint new markup with old styles.
+#[tokio::test]
+async fn the_build_stamp_matches_across_page_and_refetch() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let mut stamps = Vec::new();
+    for path in ["/", "/settings", "/"] {
+        let page = app.get(path, Some(&admin_cookie)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        let html = String::from_utf8_lossy(&page.bytes);
+        let stamp = html
+            .split("data-build=\"")
+            .nth(1)
+            .map(|rest| rest.split('"').next().unwrap_or("").to_string())
+            .unwrap_or_default();
+        assert!(!stamp.is_empty(), "no data-build stamp on {path}");
+        stamps.push(stamp);
+    }
+    assert!(
+        stamps.windows(2).all(|pair| pair[0] == pair[1]),
+        "the build stamp drifted between renders: {stamps:?}"
+    );
+}

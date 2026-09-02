@@ -283,6 +283,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
         (function () { \
             if (window.__izlekSoft) { return; } \
             window.__izlekSoft = true; \
+            window.__izlekBuild = document.documentElement.getAttribute('data-build') || ''; \
             window.__izlekOwn = function (node, classes, attrs) { \
                 var own = node.__izlekMine; \
                 if (!own) { own = node.__izlekMine = { c: [], a: [] }; } \
@@ -416,9 +417,24 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
             function navStep() { return ++window.__izlekNav; } \
             function stillCurrent(n) { return window.__izlekNav === n; } \
             function swap(html, url, fresh, push, morphing) { \
+                var doc = new DOMParser().parseFromString(html, 'text/html'); \
+                var build = doc.documentElement.getAttribute('data-build') || ''; \
+                if (build && window.__izlekBuild && build !== window.__izlekBuild) { \
+                    var dirty = captureFields().length > 0; \
+                    var reloaded = null; \
+                    try { reloaded = sessionStorage.getItem('izlekSkewFor'); } catch (err) { } \
+                    if (!dirty && reloaded !== build) { \
+                        try { sessionStorage.setItem('izlekSkewFor', build); } catch (err) { } \
+                        location.reload(); \
+                        return; \
+                    } \
+                    if (!dirty) { \
+                        window.__izlekBuild = build; \
+                        document.documentElement.setAttribute('data-build', build); \
+                    } \
+                } \
                 var keep = window.__izlekKeep ? captureFields() : null; \
                 window.__izlekKeep = false; \
-                var doc = new DOMParser().parseFromString(html, 'text/html'); \
                 var x = window.scrollX, y = window.scrollY; \
                 var root = doc.documentElement; \
                 if (root.getAttribute('lang')) { document.documentElement.setAttribute('lang', root.getAttribute('lang')); } \
@@ -815,9 +831,16 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
         content => content,
     }?;
 
+    // The build stamp rides the html element on every render — page load,
+    // soft navigation and live refresh all answer through this layout, and
+    // the swap path reads it off the fetched document before it touches the
+    // page. A tab left open across a deploy keeps the old stylesheet link
+    // (the morph swaps body children, never the head), so a mismatch is
+    // the client's cue to hard-reload rather than wear the old css.
+    let build = STYLE.id().as_u64().to_string();
     view! {
         <!DOCTYPE html>
-        <html lang=(lang.code()) data-theme=(dark.then_some("dark")) data-ui=(ui)>
+        <html lang=(lang.code()) data-theme=(dark.then_some("dark")) data-ui=(ui) data-build=(build)>
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
