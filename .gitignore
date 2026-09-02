@@ -3,6 +3,7 @@
 /style/main.css
 *.db
 *.db-*
+/storage
 .env
 izlek.key
 /config/izlek.toml

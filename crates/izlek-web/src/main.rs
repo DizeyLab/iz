@@ -36,6 +36,7 @@ async fn main() {
         };
         if let Err(problem) = izlek_core::store::reconcile(
             &config.database.to_string_lossy(),
+            Some(config.storage.as_path()),
             izlek_core::store::ReconcileOptions {
                 dry_run,
                 yes,
@@ -88,11 +89,17 @@ async fn main() {
     };
     println!("izlek    {stylesheet}");
 
+    // Attachments and profile photos are files beside the database now, not
+    // bytes in a table. The tree is made before the store opens, because the
+    // reconcile an old database triggers on the way extracts every blob into
+    // it.
+    ensure_storage_tree(&config.storage);
+
     // One process per database file: Turso is a single-writer engine and a
     // second process on the same file loses writes rather than queueing.
     //
     // `open` applies any unapplied migration before it returns.
-    let store = TursoStore::open(&config.database.to_string_lossy())
+    let store = TursoStore::open(&config.database.to_string_lossy(), &config.storage)
         .await
         .expect("failed to open the database");
     let store: Arc<dyn izlek_core::store::Store> = Arc::new(store);
@@ -152,6 +159,34 @@ async fn main() {
     })
     .await
     .expect("server error");
+}
+
+/// Makes the storage tree the store keeps binary files in, if it is not
+/// there: `<storage>/attachments` and `<storage>/photos`, private to the user
+/// the process runs as. A directory that exists is left exactly as it is; one
+/// that cannot be made stops the boot — the failure this prevents is a
+/// rebuild extracting blobs into a tree that is not there, and it is better
+/// met before anything is opened.
+fn ensure_storage_tree(storage: &std::path::Path) {
+    let make = |dir: &std::path::Path| {
+        if let Err(err) = std::fs::create_dir_all(dir) {
+            eprintln!("izlek: could not create {}: {err}", dir.display());
+            std::process::exit(2);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(err) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            {
+                eprintln!("izlek: could not restrict {}: {err}", dir.display());
+                std::process::exit(2);
+            }
+        }
+    };
+    make(storage);
+    for name in ["attachments", "photos"] {
+        make(&storage.join(name));
+    }
 }
 
 /// Resolves when the process is asked to stop: Ctrl+C, or `SIGTERM` from a

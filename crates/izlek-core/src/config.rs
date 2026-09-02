@@ -47,6 +47,8 @@ const FILE_NAME: &str = "config/izlek.toml";
 /// defaults, so that a plain `izlek` in an empty directory is one command.
 const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One process holds it.
 database = "izlek.db"
+# Where attachments and profile photos live as files, created on boot.
+storage = "storage"
 # The address the server listens on. Environment variables are ignored —
 # this is the only thing that decides where İzlek binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
@@ -106,6 +108,7 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[
 #[derive(Deserialize)]
 struct Toml {
     database: Option<String>,
+    storage: Option<String>,
     listen: Option<String>,
     live_seconds: Option<u64>,
     #[serde(flatten)]
@@ -117,6 +120,10 @@ struct Toml {
 pub struct Config {
     /// The database file, absolute. One process holds it.
     pub database: PathBuf,
+    /// Where attachments and profile photos live as files, absolute. Binary
+    /// never sits in the database: this directory and the database file are
+    /// backed up together, or not at all.
+    pub storage: PathBuf,
     /// The address the server binds. The only source for this — `HOST` and
     /// `PORT` environment variables are never read.
     pub listen: SocketAddr,
@@ -186,7 +193,7 @@ impl Config {
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let config = Config::parse(&text, dir, false)?;
-                complete(&path, &text);
+                complete(&path, &text, dir);
                 Ok(config)
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -213,12 +220,19 @@ impl Config {
     /// The reading itself, against a string — which is how it is tested
     /// without a test being able to disturb another test's filesystem.
     pub fn parse(text: &str, dir: &Path, defaulted: bool) -> Result<Config, ConfigError> {
-        let toml: Toml =
-            toml::from_str(text).map_err(|err| ConfigError::Unparseable { why: err.to_string() })?;
+        let toml: Toml = toml::from_str(text).map_err(|err| ConfigError::Unparseable {
+            why: err.to_string(),
+        })?;
 
         let value = |raw: Option<String>| raw.filter(|value| !value.trim().is_empty());
 
         let database = value(toml.database).ok_or(ConfigError::Missing("database"))?;
+        let database = absolute(dir, Path::new(&database));
+
+        let storage = match value(toml.storage) {
+            Some(raw) => absolute(dir, Path::new(&raw)),
+            None => default_storage(&database),
+        };
 
         let listen = value(toml.listen).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
         let listen: SocketAddr = listen.parse().map_err(|err| ConfigError::Invalid {
@@ -239,7 +253,8 @@ impl Config {
         }
 
         Ok(Config {
-            database: absolute(dir, Path::new(&database)),
+            database,
+            storage,
             listen,
             live_seconds,
             ignored: toml.other.into_keys().collect(),
@@ -274,7 +289,7 @@ impl Config {
     pub fn report(&self) -> Vec<String> {
         let mut lines = vec![
             format!("database  {}", self.database.display()),
-            format!("listen    {}", self.listen),
+            format!("storage   {}", self.storage.display()),
             format!("mail url  {} until an admin sets one", self.listen_url()),
         ];
         lines.push("mail      the sender is in Settings, not here".to_string());
@@ -302,12 +317,36 @@ impl Config {
 /// written is not a reason not to start; the defaults it is missing are the
 /// ones already in force, so the run is correct either way and the note says
 /// what could not be done.
-fn complete(path: &Path, text: &str) {
-    let missing: Vec<&str> = OPTIONAL_KEYS
+fn complete(path: &Path, text: &str, base: &Path) {
+    let mut missing: Vec<(&str, String)> = OPTIONAL_KEYS
         .iter()
         .filter(|(key, _)| !mentions(text, key))
-        .map(|(_, block)| *block)
+        .map(|(key, block)| (*key, (*block).to_string()))
         .collect();
+    // `storage` has no fixed default to print: a file silent about it derives
+    // the directory from where `database` points, so the completed line says
+    // the value this boot actually resolved rather than a placeholder.
+    if !mentions(text, "storage") {
+        // The same base `parse` resolves against, or the completed line would
+        // point somewhere this boot never looks (config/ vs the directory
+        // the app runs from).
+        let database: Option<String> = toml::from_str::<Toml>(text)
+            .ok()
+            .and_then(|t| t.database)
+            .filter(|value| !value.trim().is_empty());
+        let storage = database
+            .as_deref()
+            .map(|db| default_storage(&absolute(base, Path::new(db))))
+            .unwrap_or_else(|| PathBuf::from("storage"));
+        missing.push((
+            "storage",
+            format!(
+                "# Where attachments and profile photos live as files, created on boot.\n\
+                 storage = {:?}\n",
+                storage.display().to_string()
+            ),
+        ));
+    }
     if missing.is_empty() {
         return;
     }
@@ -316,13 +355,18 @@ fn complete(path: &Path, text: &str) {
         completed.push('\n');
     }
     completed.push('\n');
-    completed.push_str(&missing.join("\n"));
+    completed.push_str(
+        &missing
+            .iter()
+            .map(|(_, block)| block.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
     match std::fs::write(path, completed) {
         Ok(()) => println!(
             "izlek    added {} to {FILE_NAME}, at the default already in use",
-            OPTIONAL_KEYS
+            missing
                 .iter()
-                .filter(|(key, _)| !mentions(text, key))
                 .map(|(key, _)| *key)
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -339,6 +383,17 @@ fn mentions(text: &str, key: &str) -> bool {
             .strip_prefix(key)
             .is_some_and(|rest| rest.trim_start().starts_with('='))
     })
+}
+
+/// Where binary files live when the file is silent about it: beside the
+/// database file. The two are one backup unit — a backup that takes the
+/// database but not the files beside it restores a board whose attachments
+/// and photos are gone — so the default keeps them siblings.
+fn default_storage(database: &Path) -> PathBuf {
+    database
+        .parent()
+        .map(|parent| parent.join("storage"))
+        .unwrap_or_else(|| PathBuf::from("storage"))
 }
 
 /// An absolute path for a file that may not exist yet: the directory is
@@ -399,7 +454,13 @@ mod tests {
         // A second load reads the file it just wrote, identically.
         let again = Config::load_from(&dir).unwrap();
         assert!(!again.defaulted);
-        assert_eq!(again, Config { defaulted: false, ..config });
+        assert_eq!(
+            again,
+            Config {
+                defaulted: false,
+                ..config
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -421,12 +482,23 @@ mod tests {
 
         let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert!(written.contains("listen = \"127.0.0.1:7654\""), "{written}");
+        // `storage` has no literal default: the completed line is where the
+        // file's own `database` put it — beside `state/izlek.db` here.
+        assert!(written.contains("storage = "), "{written}");
         // What was there is untouched, comment and all.
-        assert!(written.starts_with("# mine\ndatabase = \"state/izlek.db\"\n"), "{written}");
+        assert!(
+            written.starts_with("# mine\ndatabase = \"state/izlek.db\"\n"),
+            "{written}"
+        );
 
-        // Completing is not rewriting: a second load leaves the file alone.
-        Config::load_from(&dir).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), written);
+        // Completing is not rewriting: a second load leaves the file alone,
+        // and reads the completed key as the default already in use.
+        let again = Config::load_from(&dir).unwrap();
+        assert_eq!(again.storage, config.storage);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(),
+            written
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -435,13 +507,46 @@ mod tests {
     fn completion_leaves_a_key_that_is_already_there() {
         let dir = scratch();
         std::fs::create_dir_all(dir.join("config")).unwrap();
-        let mine =
-            "database = \"izlek.db\"\nlisten = \"0.0.0.0:8080\"\nlive_seconds = 30\n";
+        let mine = "database = \"izlek.db\"\nstorage = \"files\"\n\
+                    listen = \"0.0.0.0:8080\"\nlive_seconds = 30\n";
         std::fs::write(dir.join(FILE_NAME), mine).unwrap();
         let config = Config::load_from(&dir).unwrap();
         assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.live_seconds, 30);
+        assert!(config.storage.ends_with("files"), "{:?}", config.storage);
         assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), mine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Binary lives where the file says, or — when it says nothing — beside
+    /// the database, so a backup that takes the database takes the files.
+    #[test]
+    fn a_file_without_storage_puts_it_beside_the_database() {
+        let config = Config::parse(
+            "database = \"/srv/izlek/izlek.db\"\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.storage, PathBuf::from("/srv/izlek/storage"));
+    }
+
+    /// An explicit storage is taken absolute, the way the database is.
+    #[test]
+    fn a_relative_storage_is_reported_absolute() {
+        let dir = scratch();
+        let config = Config::parse(
+            "database = \"izlek.db\"\nstorage = \"state/files\"\n",
+            &dir,
+            false,
+        )
+        .unwrap();
+        assert!(config.storage.is_absolute(), "{:?}", config.storage);
+        assert!(
+            config.storage.ends_with("state/files"),
+            "{:?}",
+            config.storage
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -456,7 +561,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(problem, ConfigError::Invalid { key: "live_seconds", .. }),
+            matches!(
+                problem,
+                ConfigError::Invalid {
+                    key: "live_seconds",
+                    ..
+                }
+            ),
             "{problem:?}"
         );
     }
@@ -464,8 +575,7 @@ mod tests {
     /// A file that never mentions the key still boots, on the default.
     #[test]
     fn a_file_without_a_live_window_takes_the_default() {
-        let config =
-            Config::parse("database = \"izlek.db\"\n", Path::new("."), false).unwrap();
+        let config = Config::parse("database = \"izlek.db\"\n", Path::new("."), false).unwrap();
         assert_eq!(config.live_seconds, 300);
     }
 
@@ -514,7 +624,8 @@ mod tests {
     /// default it is about to be completed with.
     #[test]
     fn a_file_without_listen_takes_the_default() {
-        let config = Config::parse("database = \"/srv/izlek.db\"\n", Path::new("."), false).unwrap();
+        let config =
+            Config::parse("database = \"/srv/izlek.db\"\n", Path::new("."), false).unwrap();
         assert_eq!(config.listen, "127.0.0.1:7654".parse().unwrap());
     }
 

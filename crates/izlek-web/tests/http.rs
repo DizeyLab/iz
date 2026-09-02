@@ -67,7 +67,7 @@ impl App {
         let dir = std::env::temp_dir().join(format!("izlek-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store: Arc<dyn Store> = Arc::new(
-            TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+            TursoStore::open(dir.join("izlek.db").to_str().unwrap(), &dir.join("storage"))
                 .await
                 .unwrap(),
         );
@@ -109,7 +109,7 @@ impl App {
         let dir = std::env::temp_dir().join(format!("izlek-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let store: Arc<dyn Store> = Arc::new(
-            TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+            TursoStore::open(dir.join("izlek.db").to_str().unwrap(), &dir.join("storage"))
                 .await
                 .unwrap(),
         );

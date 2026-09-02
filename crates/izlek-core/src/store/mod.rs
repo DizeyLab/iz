@@ -115,7 +115,8 @@ pub struct Attachment {
     pub uploaded_at: OffsetDateTime,
 }
 
-/// A file on its way into the table, bytes and all.
+/// A file on its way into the store, bytes and all: the row goes to the
+/// database, the bytes to the storage tree beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAttachment<'a> {
     pub task_id: &'a str,
@@ -982,9 +983,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
         at: OffsetDateTime,
     ) -> Result<CommentWritten>;
 
-    /// Hangs a file off a task. The bytes go into the database file with the
-    /// row: there is no second place for an İzlek deployment to keep, and no
-    /// path for an uploaded name to become.
+    /// Hangs a file off a task. The bytes go to the storage tree, at
+    /// `<storage>/attachments/<id>`, named by the row's own id — never by
+    /// anything an upload carried, so an uploaded name cannot become a path.
+    /// The database keeps the row; the directory keeps the bytes; back the
+    /// two up together.
     ///
     /// Nothing here decides whether the file was allowed — its size, its type
     /// and who may attach it are the handler's questions, answered before the

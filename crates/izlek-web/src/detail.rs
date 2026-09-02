@@ -547,9 +547,7 @@ pub(crate) fn combine_clock(
     match (hour, minute) {
         (None, None) => Ok(None),
         (Some(""), Some("")) => Ok(Some(String::new())),
-        (Some(hour), Some(minute)) => {
-            Ok(Some(format!("{}:{}", hour.trim(), minute.trim())))
-        }
+        (Some(hour), Some(minute)) => Ok(Some(format!("{}:{}", hour.trim(), minute.trim()))),
         _ => Err(Refusal::BadClock),
     }
 }
@@ -968,9 +966,10 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
     ))
 }
 
-/// Deletes an attachment's row and its bytes. A hard delete, unlike
-/// [`delete_task`]'s soft one — a file is a blob in the database, not a fact
-/// worth an audit trail. Only the person who put it there, or an admin, may
+/// Deletes an attachment's row and its file. A hard delete, unlike
+/// [`delete_task`]'s soft one — an upload is not a fact worth an audit
+/// trail.
+/// Only the person who put it there, or an admin, may
 /// take it away.
 #[route(POST "/api/delete_file")]
 async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
@@ -1298,8 +1297,6 @@ async fn deadline_control(
     may_write: bool,
     lang: Lang,
 ) -> Result {
-
-
     let overdue = task.is_overdue(today);
     let local = task.clock_at.map(|at| at.to_offset(zone));
     let label = match (&local, task.deadline_parts(today)) {
@@ -2459,12 +2456,12 @@ pub async fn file_viewer_modal(
     // board and passed down.
     let deck = if kind == crate::files::ViewerKind::Slides {
         match store.attachment_bytes(file_id).await {
-            Ok(Some(bytes)) => tokio::task::spawn_blocking(move || {
-                crate::slides::read(bytes, sheet_index)
-            })
-            .await
-            .ok()
-            .flatten(),
+            Ok(Some(bytes)) => {
+                tokio::task::spawn_blocking(move || crate::slides::read(bytes, sheet_index))
+                    .await
+                    .ok()
+                    .flatten()
+            }
             _ => None,
         }
     } else {

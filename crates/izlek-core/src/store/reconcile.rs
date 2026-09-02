@@ -4,6 +4,13 @@
 //! `migrations/0001_init.sql`, the data is copied with an explicit per-table
 //! column map, the copy is verified, and only then the files are swapped. The
 //! original file is kept as a timestamped backup and is never deleted.
+//!
+//! Binary is the one thing that does not travel with the copy. A database of
+//! an older shape keeps attachment bytes and profile photos inside its
+//! tables, and the declared schema has no column for them: when such columns
+//! exist, every blob is written to the storage directory, keyed by its id,
+//! while the rebuild runs. An extraction failure fails the rebuild, so the
+//! swap never trades the tables' binary for a directory that is not there.
 
 use super::schema::{SCHEMA, declared_fingerprint, diff_report, fingerprint};
 use super::{Result, StoreError};
@@ -25,9 +32,17 @@ pub struct ReconcileOptions {
 /// - Empty or already-current databases are a no-op.
 /// - A differing database is backed up, rebuilt, verified and swapped into
 ///   place.
+/// - A database that still keeps binary in its tables has it extracted to
+///   `storage`'s `attachments` and `photos` subdirectories during the
+///   rebuild. `None` is accepted only when there is nothing to extract: a
+///   caller with nowhere to put files must not quietly drop them.
 /// - A rebuild that fails verification deletes the `.rebuilt` file and leaves
 ///   the original untouched.
-pub async fn reconcile(path: &str, opts: ReconcileOptions) -> Result<()> {
+pub async fn reconcile(
+    path: &str,
+    storage: Option<&std::path::Path>,
+    opts: ReconcileOptions,
+) -> Result<()> {
     if path == ":memory:" {
         return Err(StoreError::Backend(
             "reconcile is not meaningful on an in-memory database".into(),
@@ -87,7 +102,7 @@ pub async fn reconcile(path: &str, opts: ReconcileOptions) -> Result<()> {
     let rebuilt_path = format!("{}.rebuilt", path);
     cleanup_rebuilt(&rebuilt_path);
 
-    let result = rebuild(path, &rebuilt_path, &old_conn).await;
+    let result = rebuild(path, &rebuilt_path, &old_conn, storage).await;
 
     // Close the read-only connection before any file moves; this also
     // releases the WAL locks on the original file.
@@ -147,7 +162,12 @@ pub async fn reconcile(path: &str, opts: ReconcileOptions) -> Result<()> {
 /// a default tag for any board that comes across with none), and verifies
 /// the result. On success the rebuilt file is complete and checkpointed; on
 /// failure the caller deletes it.
-async fn rebuild(path: &str, rebuilt_path: &str, old_conn: &Connection) -> Result<()> {
+async fn rebuild(
+    path: &str,
+    rebuilt_path: &str,
+    old_conn: &Connection,
+    storage: Option<&std::path::Path>,
+) -> Result<()> {
     // The copy runs as `INSERT ... SELECT FROM old.<table>`, which needs
     // ATTACH — still gated in this engine, and switched on only here, for the
     // one connection that does the rebuild. The verification afterwards is
@@ -169,6 +189,11 @@ async fn rebuild(path: &str, rebuilt_path: &str, old_conn: &Connection) -> Resul
         .execute_batch(SCHEMA)
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
+    // The blobs leave the old database before any row is copied: the copy's
+    // maps have no column to carry them, so this is the one moment to secure
+    // them. A failure here fails the whole rebuild, and the original file
+    // stays exactly as it was.
+    extract_blobs(old_conn, storage).await?;
 
     copy_data(old_conn, &new_conn, path).await?;
     verify(old_conn, &new_conn).await?;
@@ -337,7 +362,10 @@ fn build_maps(
                 "theme",
                 "language",
                 "ui",
-                "photo",
+                // `photo` is deliberately unmapped: the bytes do not travel
+                // with the copy. `extract_blobs` wrote each one to the
+                // storage directory under the user's id; the mime type is
+                // metadata and stays with the row.
                 "photo_mime",
                 "created_at",
                 "last_signed_in_at",
@@ -482,6 +510,9 @@ fn build_maps(
     });
     maps.push(TableMap {
         name: "attachment",
+        // `bytes` is deliberately unmapped: the file's contents live under
+        // the storage directory now, and `extract_blobs` wrote each one
+        // there before this copy ran. The row keeps only the metadata.
         columns: old_cols(&[
             "id",
             "task_id",
@@ -489,7 +520,6 @@ fn build_maps(
             "file_name",
             "mime_type",
             "size_bytes",
-            "bytes",
             "uploaded_by",
             "created_at",
         ]),
@@ -579,6 +609,81 @@ fn build_maps(
 
 fn old_cols(cols: &[&'static str]) -> Vec<(&'static str, String)> {
     cols.iter().map(|c| (*c, format!("old.{}", c))).collect()
+}
+
+/// Writes every blob the old schema still carried to the storage directory,
+/// before any row is copied: attachments under `<storage>/attachments/<id>`,
+/// profile photos under `<storage>/photos/<user id>`. Each file goes down
+/// through a temp name in its own directory and a rename, so a crash
+/// mid-write never leaves a half file wearing a real name, and a name an
+/// earlier failed attempt left behind is simply overwritten.
+async fn extract_blobs(old_conn: &Connection, storage: Option<&std::path::Path>) -> Result<()> {
+    let has_bytes = old_has_column(old_conn, "attachment", "bytes").await?;
+    let has_photo = old_has_column(old_conn, "user", "photo").await?;
+    if (has_bytes || has_photo) && storage.is_none() {
+        return Err(StoreError::Backend(
+            "the old schema keeps binary in its tables but no storage directory \
+             was given; the rebuild would drop it"
+                .into(),
+        ));
+    }
+    let Some(storage) = storage else {
+        return Ok(());
+    };
+    if has_bytes {
+        extract_column(old_conn, &storage.join("attachments"), "attachment", "bytes").await?;
+    }
+    if has_photo {
+        extract_column(old_conn, &storage.join("photos"), "user", "photo").await?;
+    }
+    Ok(())
+}
+
+/// Reads `<table>.<column>` row by row and writes each value to `<dir>/<row
+/// id>`. NULLs are skipped — a photo that was cleared carried no bytes and
+/// leaves no file. The directory is made if missing, so a storage root that
+/// predates the boot's own creation still holds together. Any failure stops
+/// the rebuild.
+async fn extract_column(
+    old_conn: &Connection,
+    dir: &std::path::Path,
+    table: &str,
+    column: &str,
+) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| StoreError::Backend(format!("could not create {}: {e}", dir.display())))?;
+    let sql = format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL");
+    let mut rows = old_conn
+        .query(&sql, ())
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
+        let id: String = row.get(0).map_err(|e| StoreError::Backend(e.to_string()))?;
+        let bytes: Vec<u8> = row.get(1).map_err(|e| StoreError::Backend(e.to_string()))?;
+        write_blob(dir, &id, &bytes).map_err(|e| {
+            StoreError::Backend(format!("extracting {table}.{column} for {id}: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// One blob, one file: written to a temp name in the target directory and
+/// renamed onto the final name, so a reader of the final name never sees a
+/// partial file.
+fn write_blob(dir: &std::path::Path, id: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = dir.join(format!(".{}.tmp-{}", id, Ulid::new()));
+    std::fs::write(&temp, bytes)?;
+    match std::fs::rename(&temp, dir.join(id)) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
 }
 
 /// Returns true if the attached old `workspace` table already carries the
@@ -962,8 +1067,11 @@ fn backup_name(path: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TableMap, backup_name, build_maps, validate_maps};
-    use turso::Builder;
+    use super::{
+        ReconcileOptions, TableMap, backup_name, build_maps, old_has_column, reconcile,
+        validate_maps,
+    };
+    use turso::{Builder, params};
     use ulid::Ulid;
     use crate::store::schema::SCHEMA;
 
@@ -1015,4 +1123,167 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Writes an old-shape database at `path`: the declared schema, plus the
+    /// two blob columns the swap removed, holding one attachment and two
+    /// users — one photographed, one not. Returns the bytes it planted.
+    async fn old_shape_database(path: &str) -> (Vec<u8>, Vec<u8>) {
+        let attachment_bytes = b"file-bytes".to_vec();
+        let photo_bytes = b"face-bytes".to_vec();
+        let db = Builder::new_local(path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(SCHEMA).await.unwrap();
+        // ALTER keeps the tables' own constraints intact, so this is the
+        // shape a live database of the previous generation has.
+        conn.execute(
+            "ALTER TABLE attachment ADD COLUMN bytes BLOB NOT NULL DEFAULT x''",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute("ALTER TABLE user ADD COLUMN photo BLOB", ())
+            .await
+            .unwrap();
+        let now = "2026-01-01T00:00:00Z";
+        conn.execute(
+            "INSERT INTO user (id, workspace_id, email, display_name, role, photo_mime, photo, \
+                 created_at) \
+                 VALUES ('U1', 'W1', 'one@izlek.sh', 'One', 'admin', 'image/png', ?1, ?2)",
+            params![&photo_bytes[..], now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user (id, workspace_id, email, display_name, role, created_at) \
+                 VALUES ('U2', 'W1', 'two@izlek.sh', 'Two', 'member', ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspace (id, name, created_at) VALUES ('W1', 'Dizey', ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO board (id, workspace_id, name, created_at) \
+                 VALUES ('B1', 'W1', 'Board', ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
+                 VALUES ('TG1', 'B1', 'General', 0, 1, ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO board_column (id, board_id, name, position) \
+                 VALUES ('C1', 'B1', 'Backlog', 0)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task (id, board_id, task_key, title, column_id, tag_id, created_by, \
+                 created_at, updated_at) \
+                 VALUES ('T1', 'B1', 'DZ-1', 'a task', 'C1', 'TG1', 'U1', ?1, ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachment (id, task_id, file_name, mime_type, size_bytes, bytes, \
+                 uploaded_by, created_at) \
+                 VALUES ('F1', 'T1', 'a.bin', 'application/octet-stream', ?1, ?2, 'U1', ?3)",
+            params![attachment_bytes.len() as i64, &attachment_bytes[..], now],
+        )
+        .await
+        .unwrap();
+        (attachment_bytes, photo_bytes)
+    }
+
+    /// An old-shape database rebuilds with its binary outside the tables: one
+    /// file per attachment under `attachments/`, one per photographed user
+    /// under `photos/`, byte-identical, and the rebuilt tables carry neither
+    /// column any more.
+    #[tokio::test]
+    async fn an_old_shaped_database_extracts_its_blobs_to_the_storage_dir() {
+        let dir = std::env::temp_dir().join(format!("izlek-reconcile-{}", Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("izlek.db").to_str().unwrap().to_string();
+        let (attachment_bytes, photo_bytes) = old_shape_database(&path).await;
+
+        let storage = dir.join("storage");
+        reconcile(
+            &path,
+            Some(storage.as_path()),
+            ReconcileOptions {
+                dry_run: false,
+                yes: true,
+                auto: true,
+            },
+        )
+        .await
+        .expect("the rebuild with extraction failed");
+
+        assert_eq!(
+            std::fs::read(storage.join("attachments").join("F1")).unwrap(),
+            attachment_bytes
+        );
+        assert_eq!(
+            std::fs::read(storage.join("photos").join("U1")).unwrap(),
+            photo_bytes
+        );
+        // A photo that was never set carried no bytes and leaves no file.
+        assert!(!storage.join("photos").join("U2").exists());
+
+        let db = Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        assert!(
+            !old_has_column(&conn, "attachment", "bytes").await.unwrap(),
+            "the rebuilt attachment table still carries bytes"
+        );
+        assert!(
+            !old_has_column(&conn, "user", "photo").await.unwrap(),
+            "the rebuilt user table still carries photo"
+        );
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rebuilding an old-shape database with nowhere to put the binary is
+    /// refused rather than dropping every blob on the floor, and the refusal
+    /// leaves the original file in place with nothing staged beside it.
+    #[tokio::test]
+    async fn a_rebuild_without_storage_refuses_to_drop_blobs() {
+        let dir = std::env::temp_dir().join(format!("izlek-reconcile-{}", Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("izlek.db").to_str().unwrap().to_string();
+        old_shape_database(&path).await;
+
+        let err = reconcile(
+            &path,
+            None,
+            ReconcileOptions {
+                dry_run: false,
+                yes: true,
+                auto: true,
+            },
+        )
+        .await
+        .expect_err("a rebuild that would drop binary passed");
+        assert!(err.to_string().contains("storage"), "{err}");
+        assert!(std::path::Path::new(&path).exists());
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".backup-") || name.ends_with(".rebuilt"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

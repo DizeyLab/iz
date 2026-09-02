@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use rand::Rng;
-use time::{Duration, OffsetDateTime};
 use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime};
 use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Row, Value, params, params_from_iter};
 use ulid::Ulid;
@@ -16,12 +16,12 @@ use ulid::Ulid;
 use super::secret;
 use super::{
     ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, ClaimedSend, CommentWritten,
-    Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
-    MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind, SendState,
-    SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, Tag, TaskCreated, Trigger,
-    User, UserStats, Workspace, LinkKind,
+    Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, LinkKind, MailDecision, MailOutcome,
+    MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind,
+    SendState, SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, Tag, TaskCreated,
+    Trigger, User, UserStats, Workspace,
 };
-use super::{reconcile, ReconcileOptions, schema, sniff};
+use super::{ReconcileOptions, reconcile, schema, sniff};
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TagChip, TaskRow, Transition};
 use crate::detail::{
@@ -57,6 +57,12 @@ pub struct TursoStore {
     /// can hand out a receiver per subscriber; nothing is ever read from here
     /// by the store itself.
     live: tokio::sync::broadcast::Sender<Change>,
+    /// Root of the file tree the binary payloads live under: `attachments/`
+    /// for task files, `photos/` for profile pictures, one raw file per row,
+    /// named by the row's own id. The database keeps the facts and this tree
+    /// keeps the bytes; a boot sweep deletes whichever half outlives the
+    /// other.
+    storage: std::path::PathBuf,
 }
 
 impl TursoStore {
@@ -79,13 +85,20 @@ impl TursoStore {
     }
 
     /// Opens (creating if needed) the database at `path` and brings the schema
-    /// up to date. `:memory:` gives a throwaway database for tests.
-    pub async fn open(path: &str) -> Result<Self> {
+    /// up to date. `storage` is the root of the file tree the binary payloads
+    /// (attachment bytes, profile photos) live under — created here if
+    /// missing. `:memory:` gives a throwaway database for tests, which still
+    /// hand in a storage directory, usually a tempdir, for the files.
+    pub async fn open(path: &str, storage: &std::path::Path) -> Result<Self> {
+        // Before anything else, including the reconcile below that extracts
+        // old blobs into this tree: a fresh storage path is a normal first
+        // boot, and every writer past this point assumes the tree is there.
+        ensure_storage_dirs(storage)?;
         let existed = path != ":memory:" && std::path::Path::new(path).exists();
         // Before anything holds this file open: a database of an older shape is
         // rebuilt now, while no handle of ours points at the file that the
         // rebuild is about to replace.
-        Self::repair_if_stale(path).await?;
+        Self::repair_if_stale(path, storage).await?;
         let db = Builder::new_local(path).build().await.map_err(backend)?;
         let conn = db.connect().map_err(backend)?;
         // Turso is a single-writer engine. Two connections on one Database
@@ -121,10 +134,12 @@ impl TursoStore {
             db,
             key,
             live,
+            storage: storage.to_path_buf(),
         };
         store.migrate(path).await?;
         store.encrypt_plaintext_passwords().await?;
         store.resniff_generic_attachments().await?;
+        store.sweep_orphan_files().await?;
         // The file may have been rebuilt from a backup; its permissions and
         // any transient WAL/SHM siblings should still be private.
         if path != ":memory:" {
@@ -187,7 +202,7 @@ impl TursoStore {
     ///
     /// Cheap by design. The pass opens with a count of generic rows and, when
     /// there are none — every database after one pass, and every database
-    /// whose uploads all postdate the sniffer — reads no blob bytes at all.
+    /// whose uploads all postdate the sniffer — reads no file bytes at all.
     /// Otherwise each such row donates two windows, the first
     /// [`sniff::HEAD_WINDOW`] and last [`sniff::TAIL_WINDOW`] bytes, and only
     /// when the windows find a zip with no office marker in them does the row
@@ -207,7 +222,7 @@ impl TursoStore {
         let conn = self.conn.lock().await;
 
         // The existence probe the whole pass hangs off: one count of a short
-        // text column, no blob reads, and the common case is done here.
+        // text column, no file reads, and the common case is done here.
         let mut rows = conn
             .query(
                 &format!("SELECT COUNT(*) FROM attachment WHERE mime_type IN ({marks})"),
@@ -226,10 +241,7 @@ impl TursoStore {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT id, mime_type, substr(bytes, 1, {head}), substr(bytes, -{tail}) \
-                     FROM attachment WHERE mime_type IN ({marks})",
-                    head = sniff::HEAD_WINDOW,
-                    tail = sniff::TAIL_WINDOW,
+                    "SELECT id, mime_type FROM attachment WHERE mime_type IN ({marks})",
                     marks = marks,
                 ),
                 params_from_iter(buckets.iter().copied()),
@@ -240,22 +252,26 @@ impl TursoStore {
         while let Some(row) = rows.next().await.map_err(backend)? {
             let id = text(&row, 0)?;
             let stored = text(&row, 1)?;
-            let head: Vec<u8> = row.get(2).map_err(backend)?;
-            let tail: Vec<u8> = row.get(3).map_err(backend)?;
+            let path = attachment_file(&self.storage, &id);
+            let (head, tail) = match read_windows(&path, sniff::HEAD_WINDOW, sniff::TAIL_WINDOW) {
+                Ok(windows) => windows,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!(
+                        "attachment {id} wears a generic mime but its file is missing; \
+                         leaving it as stored"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(backend(e)),
+            };
             let candidate = match sniff::refine(&stored, &head, &tail) {
                 sniff::Verdict::Settle(candidate) => candidate,
                 sniff::Verdict::ReadDirectory { offset, size } => {
                     let len = size.min(sniff::DIRECTORY_CAP as u64) as i64;
-                    let mut directory = conn
-                        .query(
-                            "SELECT substr(bytes, ?1, ?2) FROM attachment WHERE id = ?3",
-                            params![offset as i64 + 1, len, id.clone()],
-                        )
-                        .await
-                        .map_err(backend)?;
-                    match directory.next().await.map_err(backend)? {
-                        Some(row) => sniff::office_entry_mime(&row.get::<Vec<u8>>(0).map_err(backend)?),
-                        None => None,
+                    match read_window_at(&path, offset, len) {
+                        Ok(directory) => sniff::office_entry_mime(&directory),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => return Err(backend(e)),
                     }
                 }
             };
@@ -270,6 +286,58 @@ impl TursoStore {
             )
             .await
             .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    /// Sets the storage tree against the database, once per boot, after the
+    /// resniff. The database and the tree are two halves of one state, and a
+    /// crash between a row write and its file write — either order — leaves
+    /// exactly one half behind. A file no row names goes, including a `.tmp`
+    /// a crash abandoned mid-write; a row whose file is gone is only said
+    /// out loud and otherwise kept, because deleting the row would turn a
+    /// lost file into a lost fact — the row is still what screens list, and
+    /// a re-upload replaces it cleanly.
+    async fn sweep_orphan_files(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let attachments = known_ids(&conn, "SELECT id FROM attachment").await?;
+        let photos = known_ids(&conn, "SELECT id FROM user WHERE photo_mime IS NOT NULL").await?;
+        drop(conn);
+        for (dir, known, kind) in [
+            (
+                self.storage.join(ATTACHMENTS_DIR),
+                &attachments,
+                "attachment",
+            ),
+            (self.storage.join(PHOTOS_DIR), &photos, "photo"),
+        ] {
+            for id in known.iter() {
+                if !dir.join(id).is_file() {
+                    eprintln!("{kind} {id} names a file that is not there");
+                }
+            }
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(backend(e)),
+            };
+            for entry in entries {
+                let entry = entry.map_err(backend)?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let named = entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| known.contains(n));
+                if !named && let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!(
+                        "could not delete orphaned storage file {}: {e}",
+                        path.display()
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -295,6 +363,7 @@ impl TursoStore {
             )
             .await
             .map_err(backend)?;
+
         let empty = match rows.next().await.map_err(backend)? {
             Some(row) => row.get::<i64>(0).map_err(backend)? == 0,
             None => true,
@@ -307,7 +376,11 @@ impl TursoStore {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 return Err(backend(e));
             }
-            return conn.execute("COMMIT", ()).await.map_err(backend).map(|_| ());
+            return conn
+                .execute("COMMIT", ())
+                .await
+                .map_err(backend)
+                .map(|_| ());
         }
 
         if path == ":memory:" {
@@ -340,7 +413,7 @@ impl TursoStore {
     /// `turso::Database` opened beforehand still refers to the file that is
     /// now the backup. Reconnecting such a handle reads the old database and
     /// makes a successful rebuild look like a failed one.
-    async fn repair_if_stale(path: &str) -> Result<()> {
+    async fn repair_if_stale(path: &str, storage: &std::path::Path) -> Result<()> {
         if path == ":memory:" || !std::path::Path::new(path).exists() {
             return Ok(());
         }
@@ -381,6 +454,7 @@ impl TursoStore {
         );
         reconcile(
             path,
+            Some(storage),
             ReconcileOptions {
                 dry_run: false,
                 yes: false,
@@ -745,6 +819,120 @@ fn restrict_if_present(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// The storage tree's two subdirectories. One file per row under each, the
+/// file named by the row's own id — an id the store minted, never anything
+/// an upload carried, so a path here is always exactly one store-named file
+/// deep and `file_name` stays a label.
+const ATTACHMENTS_DIR: &str = "attachments";
+const PHOTOS_DIR: &str = "photos";
+
+/// Where attachment `id`'s bytes live.
+fn attachment_file(storage: &std::path::Path, id: &str) -> std::path::PathBuf {
+    storage.join(ATTACHMENTS_DIR).join(id)
+}
+
+/// Where `user_id`'s photo lives.
+fn photo_file(storage: &std::path::Path, user_id: &str) -> std::path::PathBuf {
+    storage.join(PHOTOS_DIR).join(user_id)
+}
+
+/// Creates the storage tree — the root and its two subdirectories — when it
+/// is missing, private to the process owner. A fresh storage path is a
+/// normal first boot, not a failure, and everything below this point
+/// assumes the directories are there to write into.
+fn ensure_storage_dirs(storage: &std::path::Path) -> Result<()> {
+    for dir in [
+        storage.to_path_buf(),
+        storage.join(ATTACHMENTS_DIR),
+        storage.join(PHOTOS_DIR),
+    ] {
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            StoreError::Backend(format!("creating storage directory {}: {e}", dir.display()))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| StoreError::Backend(format!("restricting {}: {e}", dir.display())))?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes `bytes` to `path` through a temporary file in the same directory
+/// and a rename: a crash or a full disk mid-write leaves whatever file was
+/// there before intact, never a truncated one under the real name. The
+/// temporary carries a name no row will ever wear, so one a crash abandoned
+/// is exactly what the boot sweep deletes.
+fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let tmp = path.with_extension(format!("{}.tmp", Ulid::new()));
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Whatever of `buf.len()` bytes the file holds from here — a file that ends
+/// (or shrinks) under a read hands over the short read, the same answer
+/// `substr` gave, and the sniffer decides from what it gets or declines.
+fn read_up_to(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read as _;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
+}
+
+/// `path`'s first `head` and last `tail` bytes — the windows the sniffer
+/// decides from, the same shape `substr(bytes, ...)` used to hand over. A
+/// file shorter than a window gives that window its whole self.
+fn read_windows(
+    path: &std::path::Path,
+    head: i64,
+    tail: i64,
+) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    use std::io::Seek as _;
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut head_buf = vec![0u8; len.min(head.max(0) as u64) as usize];
+    let got = read_up_to(&mut file, &mut head_buf)?;
+    head_buf.truncate(got);
+    file.seek(std::io::SeekFrom::Start(len - len.min(tail.max(0) as u64)))?;
+    let mut tail_buf = vec![0u8; len.min(tail.max(0) as u64) as usize];
+    let got = read_up_to(&mut file, &mut tail_buf)?;
+    tail_buf.truncate(got);
+    Ok((head_buf, tail_buf))
+}
+
+/// `len` bytes of `path` starting at `offset` — the central-directory read
+/// `substr(bytes, offset + 1, len)` used to do. A directory the file does
+/// not actually hold comes back short; the caller treats that as no
+/// verdict, exactly as it treated `substr`'s empty answer.
+fn read_window_at(path: &std::path::Path, offset: u64, len: i64) -> std::io::Result<Vec<u8>> {
+    use std::io::Seek as _;
+    let mut file = std::fs::File::open(path)?;
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; len.max(0) as usize];
+    let got = read_up_to(&mut file, &mut buf)?;
+    buf.truncate(got);
+    Ok(buf)
+}
+
+/// Every id `sql` hands back — the set of files the sweep must keep.
+async fn known_ids(conn: &Connection, sql: &str) -> Result<std::collections::HashSet<String>> {
+    let mut rows = conn.query(sql, ()).await.map_err(backend)?;
+    let mut out = std::collections::HashSet::new();
+    while let Some(row) = rows.next().await.map_err(backend)? {
+        out.insert(text(&row, 0)?);
+    }
+    Ok(out)
+}
+
 /// The key for `path`'s database. `:memory:` has no directory to anchor a
 /// sibling file to and does not survive the process anyway, so it gets a
 /// key generated fresh in memory — every in-memory store in the test suite
@@ -956,7 +1144,7 @@ fn user_from(row: &Row) -> Result<User> {
 }
 
 const USER_COLUMNS: &str = "id, workspace_id, email, display_name, role, password_hash, \
-     (photo IS NOT NULL), created_at, last_signed_in_at, invited_by, timezone, theme, language, ui";
+     (photo_mime IS NOT NULL), created_at, last_signed_in_at, invited_by, timezone, theme, language, ui";
 
 fn signin_link_from(row: &Row) -> Result<SigninLink> {
     Ok(SigninLink {
@@ -1434,28 +1622,50 @@ impl Store for TursoStore {
     }
 
     async fn set_photo(&self, user_id: &str, bytes: &[u8], mime: &str) -> Result<()> {
+        // The new bytes stage under a name no row wears, the row commits,
+        // and only then does the rename put them over the old photo: a failed
+        // update leaves the committed photo exactly as it was, and a crash
+        // between commit and rename serves the old bytes next to a staged
+        // file the boot sweep collects — stale, never destroyed.
+        let path = photo_file(&self.storage, user_id);
+        let staged = path.with_extension(format!("incoming-{}", Ulid::new()));
+        write_file_atomic(&staged, bytes).map_err(|e| StoreError::Backend(e.to_string()))?;
         let conn = self.conn.lock().await;
-        let n = conn
+        let written = conn
             .execute(
-                "UPDATE user SET photo = ?1, photo_mime = ?2 WHERE id = ?3",
-                params![bytes, mime, user_id],
+                "UPDATE user SET photo_mime = ?1 WHERE id = ?2",
+                params![mime, user_id],
             )
-            .await
-            .map_err(backend)?;
+            .await;
+        let n = match written {
+            Ok(n) => n,
+            Err(e) => {
+                drop(conn);
+                let _ = std::fs::remove_file(&staged);
+                return Err(backend(e));
+            }
+        };
         if n == 0 {
+            drop(conn);
+            let _ = std::fs::remove_file(&staged);
             Err(StoreError::NotFound)
         } else {
             drop(conn);
+            std::fs::rename(&staged, &path).map_err(|e| StoreError::Backend(e.to_string()))?;
             self.announce([Topic::Members]);
             Ok(())
         }
     }
 
     async fn clear_photo(&self, user_id: &str) -> Result<()> {
+        // The row goes first: the file may only follow a delete that
+        // committed, or a crash in between would leave a row whose photo is
+        // gone. The unlink is best-effort — a file that survives it is
+        // orphaned bytes the boot sweep collects.
         let conn = self.conn.lock().await;
         let n = conn
             .execute(
-                "UPDATE user SET photo = NULL, photo_mime = NULL WHERE id = ?1",
+                "UPDATE user SET photo_mime = NULL WHERE id = ?1",
                 params![user_id],
             )
             .await
@@ -1464,6 +1674,7 @@ impl Store for TursoStore {
             Err(StoreError::NotFound)
         } else {
             drop(conn);
+            let _ = std::fs::remove_file(photo_file(&self.storage, user_id));
             self.announce([Topic::Members]);
             Ok(())
         }
@@ -1473,17 +1684,25 @@ impl Store for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT photo, photo_mime FROM user WHERE id = ?1",
+                "SELECT photo_mime FROM user WHERE id = ?1",
                 params![user_id],
             )
             .await
             .map_err(backend)?;
-        match rows.next().await.map_err(backend)? {
-            Some(row) => match row.get::<Option<Vec<u8>>>(0).map_err(backend)? {
-                Some(bytes) => Ok(Some((bytes, text(&row, 1)?))),
-                None => Ok(None),
-            },
-            None => Ok(None),
+        let mime = match rows.next().await.map_err(backend)? {
+            Some(row) => opt_text(&row, 0)?,
+            None => return Ok(None),
+        };
+        drop(conn);
+        let Some(mime) = mime else {
+            return Ok(None);
+        };
+        match std::fs::read(photo_file(&self.storage, user_id)) {
+            Ok(bytes) => Ok(Some((bytes, mime))),
+            // A row whose file went missing is reported at boot; the photo
+            // read answers "nothing to serve" rather than failing the page.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Backend(e.to_string())),
         }
     }
 
@@ -1991,11 +2210,7 @@ impl Store for TursoStore {
         tx.commit().await.map_err(backend)?;
 
         // Task birth touches the board and the task page at once.
-        let mut topics = vec![
-            Topic::Board,
-            Topic::Task(id.clone()),
-            Topic::Activity,
-        ];
+        let mut topics = vec![Topic::Board, Topic::Task(id.clone()), Topic::Activity];
         if reminded {
             topics.push(Topic::Queue);
         }
@@ -2162,7 +2377,10 @@ impl Store for TursoStore {
         // A no-change assign changes no facts, so the reminders stand as
         // they are.
         let reminded = if n > 0 {
-            match self.sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc()).await {
+            match self
+                .sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc())
+                .await
+            {
                 Ok(reminded) => reminded,
                 Err(e) => {
                     let _ = tx.rollback().await;
@@ -2199,7 +2417,10 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         let reminded = if n > 0 {
-            match self.sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc()).await {
+            match self
+                .sync_task_reminders(&tx, task_id, OffsetDateTime::now_utc())
+                .await
+            {
                 Ok(reminded) => reminded,
                 Err(e) => {
                     let _ = tx.rollback().await;
@@ -2419,27 +2640,38 @@ impl Store for TursoStore {
     }
 
     async fn add_attachment(&self, new: NewAttachment<'_>) -> Result<String> {
-        let conn = self.conn.lock().await;
+        // The file lands first, temp-plus-rename, then the row says it is
+        // there: a crash in between leaves an orphan file the boot sweep
+        // deletes, never a row pointing at nothing. If the row write fails,
+        // the file is unlinked best-effort — the row was never born, so the
+        // bytes must not outlive it under a name nothing points at.
         let id = Ulid::new().to_string();
         let size = new.bytes.len() as i64;
-        conn.execute(
-            "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
-                 size_bytes, bytes, uploaded_by, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                id.clone(),
-                new.task_id,
-                new.comment_id,
-                new.file_name,
-                new.mime_type,
-                size,
-                new.bytes,
-                new.uploaded_by,
-                stamp(new.at)?
-            ],
-        )
-        .await
-        .map_err(backend)?;
+        let path = attachment_file(&self.storage, &id);
+        write_file_atomic(&path, &new.bytes).map_err(|e| StoreError::Backend(e.to_string()))?;
+        let conn = self.conn.lock().await;
+        let written = conn
+            .execute(
+                "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
+                     size_bytes, uploaded_by, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id.clone(),
+                    new.task_id,
+                    new.comment_id,
+                    new.file_name,
+                    new.mime_type,
+                    size,
+                    new.uploaded_by,
+                    stamp(new.at)?
+                ],
+            )
+            .await;
+        if let Err(e) = written {
+            drop(conn);
+            let _ = std::fs::remove_file(&path);
+            return Err(backend(e));
+        }
         drop(conn);
         self.announce([Topic::Task(new.task_id.to_string())]);
         Ok(id)
@@ -2482,12 +2714,20 @@ impl Store for TursoStore {
     async fn attachment_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().await;
         let mut rows = conn
-            .query("SELECT bytes FROM attachment WHERE id = ?1", params![id])
+            .query("SELECT 1 FROM attachment WHERE id = ?1", params![id])
             .await
             .map_err(backend)?;
-        match rows.next().await.map_err(backend)? {
-            Some(row) => Ok(Some(row.get::<Vec<u8>>(0).map_err(backend)?)),
-            None => Ok(None),
+        let known = rows.next().await.map_err(backend)?.is_some();
+        drop(conn);
+        if !known {
+            return Ok(None);
+        }
+        match std::fs::read(attachment_file(&self.storage, id)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            // A row whose file went missing is reported at boot; the read
+            // answers "nothing to serve" rather than failing the panel.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Backend(e.to_string())),
         }
     }
 
@@ -2506,10 +2746,15 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         drop(conn);
-        if gone > 0
-            && let Some(task_id) = owner
-        {
-            self.announce([Topic::Task(task_id)]);
+        if gone > 0 {
+            // After the delete: the file may only follow a delete that
+            // committed, or a crash in between would leave a row whose file
+            // is gone. Best-effort — a file that survives is orphaned bytes
+            // the boot sweep collects.
+            let _ = std::fs::remove_file(attachment_file(&self.storage, id));
+            if let Some(task_id) = owner {
+                self.announce([Topic::Task(task_id)]);
+            }
         }
         Ok(gone > 0)
     }
@@ -4543,7 +4788,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT u.id, u.display_name, (u.photo IS NOT NULL) FROM task_assignee a \
+                "SELECT u.id, u.display_name, (u.photo_mime IS NOT NULL) FROM task_assignee a \
                  JOIN user u ON u.id = a.user_id \
                  WHERE a.task_id = ?1 ORDER BY u.display_name",
                 params![task_id],
@@ -4567,7 +4812,7 @@ impl DetailReads for TursoStore {
         // so neither leaves the server for this screen.
         let mut rows = conn
             .query(
-                "SELECT id, display_name, (photo IS NOT NULL) FROM user \
+                "SELECT id, display_name, (photo_mime IS NOT NULL) FROM user \
                  WHERE workspace_id = ?1 AND role <> ?2 ORDER BY display_name",
                 params![workspace_id, Role::Viewer.as_str()],
             )
@@ -4626,7 +4871,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, (u.photo IS NOT NULL) \
+                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, (u.photo_mime IS NOT NULL) \
                  FROM comment c JOIN user u ON u.id = c.author_id \
                  WHERE c.task_id = ?1 ORDER BY c.created_at, c.rowid",
                 params![task_id],
@@ -4682,7 +4927,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
-                 (u.photo IS NOT NULL) \
+                 (u.photo_mime IS NOT NULL) \
                  FROM activity a LEFT JOIN user u ON u.id = a.actor_id \
                  WHERE a.task_id = ?1 ORDER BY a.created_at DESC, a.rowid DESC",
                 params![task_id],
@@ -4719,7 +4964,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT t.id, t.task_key, t.title, t.column_id, t.done_at, t.parent_id, \
-                 u.id, u.display_name, (u.photo IS NOT NULL) \
+                 u.id, u.display_name, (u.photo_mime IS NOT NULL) \
                  FROM task t \
                  LEFT JOIN task_assignee a ON a.task_id = t.id \
                  LEFT JOIN user u ON u.id = a.user_id \
@@ -4852,7 +5097,7 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT a.task_id, u.id, u.display_name, (u.photo IS NOT NULL) \
+                "SELECT a.task_id, u.id, u.display_name, (u.photo_mime IS NOT NULL) \
                  FROM task_assignee a \
                  JOIN task t ON t.id = a.task_id \
                  JOIN user u ON u.id = a.user_id \
@@ -5070,7 +5315,7 @@ mod probe {
     async fn the_workspace_read_path_cannot_carry_the_password() {
         let dir = std::env::temp_dir().join(format!("izlek-sender-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+        let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap(), &dir.join("storage"))
             .await
             .unwrap();
         use crate::store::Store as _;
@@ -5111,5 +5356,279 @@ mod probe {
         );
         assert_eq!(loaded.smtp_host.as_deref(), Some("smtp.fastmail.com"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The storage tree is the other half of the state the rows describe. These
+/// drive the file half through the same [`Store`] API the handlers use: a
+/// row's bytes live at exactly one path named by the row's id, a delete
+/// takes the file with it, and a boot sweep collects what the rows stopped
+/// naming. Nothing binary is in the database any more — the premise a
+/// missing file is recoverable-by-reread no longer holds, and these are
+/// where that shows up if it breaks.
+#[cfg(test)]
+mod storage_fs {
+    use super::*;
+
+    /// A file-backed store and its storage tree, both under one tempdir the
+    /// fixture keeps alive. File-backed because the boot passes (reconcile,
+    /// resniff, sweep) only run for a database that survives its handle.
+    struct Fixture {
+        store: TursoStore,
+        dir: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        async fn open() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = TursoStore::open(
+                dir.path().join("izlek.db").to_str().unwrap(),
+                &dir.path().join("storage"),
+            )
+            .await
+            .unwrap();
+            Self { store, dir }
+        }
+
+        fn storage(&self) -> std::path::PathBuf {
+            self.dir.path().join("storage")
+        }
+
+        /// A workspace with its admin, and one task on the default board.
+        async fn with_task(&self) -> (String, String, String) {
+            let (ws, admin) = self
+                .store
+                .claim_workspace("İzlek", "ada@izlek.sh", "Ada", "hash")
+                .await
+                .unwrap();
+            let admin = admin.id;
+            let board = self.store.board(&ws.id).await.unwrap().unwrap();
+            let column = self
+                .store
+                .columns(&board.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|c| !c.is_done)
+                .unwrap_or_else(|| panic!("no open column"))
+                .id;
+            let task = self
+                .store
+                .create_task(NewTask {
+                    clock_at: None,
+                    board_id: &board.id,
+                    column_id: &column,
+                    parent_id: None,
+                    title: "a task",
+                    description: "",
+                    deadline: None,
+                    created_by: &admin,
+                })
+                .await
+                .unwrap()
+                .row
+                .id;
+            (ws.id, admin, task)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_attachment_round_trips_through_its_file() {
+        let fx = Fixture::open().await;
+        let (_ws, admin, task) = fx.with_task().await;
+        let bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0xff, 0x00];
+        let id = fx
+            .store
+            .add_attachment(NewAttachment {
+                task_id: &task,
+                comment_id: None,
+                file_name: "shot.png",
+                mime_type: "image/png",
+                bytes: bytes.clone(),
+                uploaded_by: &admin,
+                at: OffsetDateTime::now_utc(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fx.store.attachment_bytes(&id).await.unwrap().unwrap(),
+            bytes
+        );
+        // The bytes are a file the row's id names, under attachments/, and
+        // nothing binary went into the database: the temp file the write
+        // passed through is gone, and the tree holds exactly one file.
+        let file = attachment_file(&fx.storage(), &id);
+        assert!(file.is_file(), "the attachment file exists");
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        let dir = fx.storage().join(ATTACHMENTS_DIR);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_photo_round_trips_through_its_file() {
+        let fx = Fixture::open().await;
+        let (_ws, admin, _task) = fx.with_task().await;
+        fx.store
+            .set_photo(&admin, b"grace-bytes", "image/png")
+            .await
+            .unwrap();
+
+        let photo = fx.store.photo(&admin).await.unwrap().unwrap();
+        assert_eq!(photo.0, b"grace-bytes".to_vec());
+        assert_eq!(photo.1, "image/png");
+        let file = photo_file(&fx.storage(), &admin);
+        assert!(file.is_file(), "the photo file exists");
+        assert_eq!(std::fs::read(&file).unwrap(), b"grace-bytes");
+    }
+
+    #[tokio::test]
+    async fn deleting_an_attachment_takes_its_file_with_it() {
+        let fx = Fixture::open().await;
+        let (_ws, admin, task) = fx.with_task().await;
+        let id = fx
+            .store
+            .add_attachment(NewAttachment {
+                task_id: &task,
+                comment_id: None,
+                file_name: "note.txt",
+                mime_type: "text/plain",
+                bytes: b"hello".to_vec(),
+                uploaded_by: &admin,
+                at: OffsetDateTime::now_utc(),
+            })
+            .await
+            .unwrap();
+        let file = attachment_file(&fx.storage(), &id);
+
+        assert!(fx.store.delete_attachment(&id).await.unwrap());
+        assert!(!file.exists(), "the file went with the row");
+        assert!(fx.store.attachment(&id).await.unwrap().is_none());
+        assert!(fx.store.attachment_bytes(&id).await.unwrap().is_none());
+        // A second delete is still a no-op, file and all.
+        assert!(!fx.store.delete_attachment(&id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn clearing_a_photo_takes_its_file_with_it() {
+        let fx = Fixture::open().await;
+        let (_ws, admin, _task) = fx.with_task().await;
+        fx.store
+            .set_photo(&admin, b"grace-bytes", "image/png")
+            .await
+            .unwrap();
+        let file = photo_file(&fx.storage(), &admin);
+
+        fx.store.clear_photo(&admin).await.unwrap();
+        assert!(!file.exists(), "the file went with the marker");
+        assert!(fx.store.photo(&admin).await.unwrap().is_none());
+        assert!(!fx.store.user(&admin).await.unwrap().unwrap().has_photo);
+    }
+
+    #[tokio::test]
+    async fn the_boot_sweep_deletes_files_no_row_names() {
+        let fx = Fixture::open().await;
+        let attachments = fx.storage().join(ATTACHMENTS_DIR);
+        let photos = fx.storage().join(PHOTOS_DIR);
+        // Strays in both subdirs: a file under a made-up id, and the temp
+        // file a crash abandoned mid-write.
+        std::fs::write(attachments.join("01AAAAAAAAAAAAAAAAAAAAAAAA"), b"x").unwrap();
+        std::fs::write(attachments.join("02BBBBBBBBBBBBBBBBBBBBBBBB.tmp"), b"x").unwrap();
+        std::fs::write(photos.join("03CCCCCCCCCCCCCCCCCCCCCCCC"), b"x").unwrap();
+
+        // A reopen is a boot; the sweep runs inside it.
+        let Fixture { store, dir } = fx;
+        drop(store);
+        let db_path = dir.path().join("izlek.db").to_str().unwrap().to_string();
+        let storage = dir.path().join("storage");
+        let store = TursoStore::open(&db_path, &storage).await.unwrap();
+        assert_eq!(std::fs::read_dir(&attachments).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&photos).unwrap().count(), 0);
+        drop(store);
+    }
+
+    #[tokio::test]
+    async fn a_row_whose_file_is_missing_is_kept_and_said_out_loud() {
+        let fx = Fixture::open().await;
+        let (_ws, admin, task) = fx.with_task().await;
+        let id = fx
+            .store
+            .add_attachment(NewAttachment {
+                task_id: &task,
+                comment_id: None,
+                file_name: "shot.png",
+                mime_type: "image/png",
+                bytes: b"payload".to_vec(),
+                uploaded_by: &admin,
+                at: OffsetDateTime::now_utc(),
+            })
+            .await
+            .unwrap();
+        fx.store
+            .set_photo(&admin, b"grace-bytes", "image/png")
+            .await
+            .unwrap();
+        // The files are lost the way a botched restore loses them: rows on
+        // disk, files gone.
+        std::fs::remove_file(attachment_file(&fx.storage(), &id)).unwrap();
+        std::fs::remove_file(photo_file(&fx.storage(), &admin)).unwrap();
+
+        let Fixture { store, dir } = fx;
+        drop(store);
+        let db_path = dir.path().join("izlek.db").to_str().unwrap().to_string();
+        let storage = dir.path().join("storage");
+        let store = TursoStore::open(&db_path, &storage).await.unwrap();
+        // Both rows survive the sweep; the reads answer "nothing to serve".
+        assert!(store.attachment(&id).await.unwrap().is_some());
+        assert!(store.attachment_bytes(&id).await.unwrap().is_none());
+        let admin_row = store.user(&admin).await.unwrap().unwrap();
+        assert!(admin_row.has_photo, "the row still says a photo is there");
+        assert!(store.photo(&admin).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_boot_resniff_reads_its_windows_from_the_file() {
+        let fx = Fixture::open().await;
+        let (_ws, admin, task) = fx.with_task().await;
+        // A zip whose entry names name a presentation. Uploaded with the
+        // generic bucket a pre-sniffer write froze on — the store does not
+        // sniff on the way in, so the row wears it until a boot pass runs.
+        let bytes = zip_with(&["ppt/presentation.xml", "ppt/slides/slide1.xml"]);
+        let id = fx
+            .store
+            .add_attachment(NewAttachment {
+                task_id: &task,
+                comment_id: None,
+                file_name: "old.pptx",
+                mime_type: "application/zip",
+                bytes,
+                uploaded_by: &admin,
+                at: OffsetDateTime::now_utc(),
+            })
+            .await
+            .unwrap();
+        let Fixture { store, dir } = fx;
+        drop(store);
+        let db_path = dir.path().join("izlek.db").to_str().unwrap().to_string();
+        let storage = dir.path().join("storage");
+        let store = TursoStore::open(&db_path, &storage).await.unwrap();
+        assert_eq!(
+            store.attachment(&id).await.unwrap().unwrap().mime_type,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "the windows came off the file, and they settled the type"
+        );
+    }
+
+    /// A zip of the named entries, contents irrelevant: the sniffer reads
+    /// the entry names a zip stores uncompressed.
+    fn zip_with(names: &[&str]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in names {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"<xml/>").unwrap();
+        }
+        zip.finish().unwrap().into_inner()
     }
 }

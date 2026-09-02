@@ -101,9 +101,9 @@ CREATE TABLE user (
     theme             TEXT NOT NULL DEFAULT 'light',
     language          TEXT NOT NULL DEFAULT 'en',
     ui                TEXT NOT NULL DEFAULT 'instrument',
-    -- The profile picture lives here as bytes, the way an attachment does:
-    -- no filesystem path survives a backup or a move.
-    photo             BLOB,
+    -- The profile picture lives as a file under the storage directory, at
+    -- `<storage>/photos/<user-id>`, the way an attachment does — this column
+    -- only marks that one is there.
     photo_mime        TEXT,
     created_at        TEXT NOT NULL,
     last_signed_in_at TEXT,
@@ -280,14 +280,16 @@ CREATE TABLE comment (
 );
 CREATE INDEX comment_by_task ON comment(task_id);
 
--- Attachments live in the database file, not on disk beside it.
+-- Attachments live as files under the storage directory, not in this table.
 --
--- Izlek is one process over one file, and a second place to keep state is a
--- second thing to back up, to lock, and to get out of step with the rows that
--- name it. And a path is exactly where an uploaded file name must never end
--- up: `../../etc` is a valid file name and a terrible path. Keeping the bytes
--- here means `file_name` is only ever a label printed on a chip, never
--- anything the server resolves.
+-- One row, one file: the bytes sit at `<storage>/attachments/<id>`, named by
+-- the row's own id, and profile photos keep theirs at
+-- `<storage>/photos/<user-id>` the same way. The directory is state the same
+-- way the database file is — back the two up together, and boot deletes any
+-- file no row names. And a path is still exactly where an uploaded file name
+-- must never end up: `../../etc` is a valid file name and a terrible path, so
+-- `file_name` remains a label printed on a chip; the file a row names is
+-- found by its id alone, never resolved from anything the row was given.
 CREATE TABLE attachment (
     id          TEXT PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES task(id),
@@ -295,7 +297,6 @@ CREATE TABLE attachment (
     file_name   TEXT NOT NULL,
     mime_type   TEXT NOT NULL,
     size_bytes  INTEGER NOT NULL,
-    bytes       BLOB NOT NULL,
     uploaded_by TEXT NOT NULL REFERENCES user(id),
     created_at  TEXT NOT NULL
 );

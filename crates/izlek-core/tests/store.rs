@@ -19,6 +19,7 @@ use ulid::Ulid;
 /// runs, so the tests exercise a real file.
 struct Scratch {
     dir: PathBuf,
+    storage: PathBuf,
     store: TursoStore,
 }
 
@@ -26,10 +27,11 @@ impl Scratch {
     async fn open() -> Self {
         let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+        let storage = dir.join("storage");
+        let store = TursoStore::open(dir.join("izlek.db").to_str().unwrap(), &storage)
             .await
             .unwrap();
-        Self { dir, store }
+        Self { dir, storage, store }
     }
 }
 
@@ -100,14 +102,14 @@ async fn the_schema_is_created_once_and_survives_reopen() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
-    let first = TursoStore::open(&path).await.unwrap();
+    let first = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     claim(&first).await;
     drop(first);
 
     // Re-opening a database that already has tables must not re-run the
     // schema (its CREATE TABLE would fail on the first one) and must not
     // lose what the first open wrote.
-    let second = TursoStore::open(&path).await.unwrap();
+    let second = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     assert_eq!(second.workspace().await.unwrap().unwrap().name, "İzlek");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
@@ -699,7 +701,7 @@ async fn concurrent_claims_produce_exactly_one_admin() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
-    let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
+    let store = std::sync::Arc::new(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
 
     let hash = hash_password("tide-tables-1892").unwrap();
     let mut claims = Vec::new();
@@ -752,7 +754,7 @@ async fn many_concurrent_callers_never_see_concurrent_use_forbidden() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
-    let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
+    let store = std::sync::Arc::new(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
     let (workspace_id, _) = claim(&store).await;
 
     let mut tasks = Vec::new();
@@ -1211,6 +1213,10 @@ async fn profile_and_role_updates_stick() {
     let photo = scratch.store.photo(&user.id).await.unwrap().unwrap();
     assert_eq!(photo.0, b"grace-bytes".to_vec());
     assert_eq!(photo.1, "image/png");
+    // The bytes are the file the row's id names, not anything in the
+    // database.
+    let photo_file = scratch.storage.join("photos").join(&user.id);
+    assert_eq!(std::fs::read(&photo_file).unwrap(), b"grace-bytes");
     let user = scratch.store.user(&user.id).await.unwrap().unwrap();
     assert_eq!(user.display_name, "Grace H.");
     assert!(user.has_photo);
@@ -1221,11 +1227,13 @@ async fn profile_and_role_updates_stick() {
         at.unix_timestamp()
     );
 
-    // Clearing the photo is a real update, not a no-op.
+    // Clearing the photo is a real update, not a no-op — the file goes
+    // with the marker.
     scratch.store.clear_photo(&user.id).await.unwrap();
     let user = scratch.store.user(&user.id).await.unwrap().unwrap();
     assert!(!user.has_photo);
     assert!(scratch.store.photo(&user.id).await.unwrap().is_none());
+    assert!(!photo_file.exists());
 }
 
 #[tokio::test]
@@ -1235,7 +1243,7 @@ async fn email_change_persists_and_refuses_a_taken_address() {
     let path = dir.join("izlek.db").to_str().unwrap().to_string();
 
     let user_id = {
-        let store = TursoStore::open(&path).await.unwrap();
+        let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
         let (ws_id, _admin_id) = claim(&store).await;
         let user_id = member(&store, &ws_id, "grace@izlek.sh", "Grace").await;
         store
@@ -1268,7 +1276,7 @@ async fn email_change_persists_and_refuses_a_taken_address() {
     };
 
     // Persists across a reopen, and the refused attempt did not stick.
-    let store = TursoStore::open(&path).await.unwrap();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let user = store.user(&user_id).await.unwrap().unwrap();
     assert_eq!(user.email, "grace.new@izlek.sh");
 
@@ -1281,7 +1289,7 @@ async fn display_preferences_default_and_persist_across_reopen() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
 
-    let store = TursoStore::open(&path).await.unwrap();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let (_, admin_id) = claim(&store).await;
 
     let admin = store.user(&admin_id).await.unwrap().unwrap();
@@ -1296,7 +1304,7 @@ async fn display_preferences_default_and_persist_across_reopen() {
         .unwrap();
     drop(store);
 
-    let reopened = TursoStore::open(&path).await.unwrap();
+    let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let admin = reopened.user(&admin_id).await.unwrap().unwrap();
     assert_eq!(admin.timezone, "Europe/Istanbul");
     assert_eq!(admin.theme, "dark");
@@ -1451,7 +1459,7 @@ async fn a_prefetched_link_is_consumed_exactly_once() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
-    let store = std::sync::Arc::new(TursoStore::open(&path).await.unwrap());
+    let store = std::sync::Arc::new(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
     let (ws_id, _) = claim(&store).await;
     let user_id = member(&store, &ws_id, "grace@izlek.sh", "Grace").await;
 
@@ -1694,9 +1702,12 @@ use std::sync::Arc;
 /// by the returned guard.
 async fn accounts() -> (Scratch, Accounts) {
     let scratch = Scratch::open().await;
-    let store = TursoStore::open(scratch.dir.join("izlek.db").to_str().unwrap())
-        .await
-        .unwrap();
+    let store = TursoStore::open(
+        scratch.dir.join("izlek.db").to_str().unwrap(),
+        &scratch.dir.join("storage"),
+    )
+    .await
+    .unwrap();
     let accounts = Accounts::new(Arc::new(store) as Arc<dyn Store>, "https://izlek.sh");
     (scratch, accounts)
 }
@@ -3988,7 +3999,7 @@ async fn an_orphan_row_is_refused() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_str().unwrap().to_owned();
     {
-        TursoStore::open(&path).await.unwrap();
+        TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     }
 
     let db = turso::Builder::new_local(&path).build().await.unwrap();
@@ -4065,7 +4076,7 @@ async fn a_rule_naming_a_column_it_cannot_act_on_is_refused_by_the_schema() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
-    let store = TursoStore::open(&path).await.unwrap();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let (workspace, _admin) = claim(&store).await;
     let board = store.board(&workspace).await.unwrap().unwrap();
     drop(store);
@@ -4550,7 +4561,7 @@ async fn waiting(minutes: u32) -> (PathBuf, Arc<TursoStore>, String, String) {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = Arc::new(
-        TursoStore::open(dir.join("izlek.db").to_str().unwrap())
+        TursoStore::open(dir.join("izlek.db").to_str().unwrap(), &dir.join("storage"))
             .await
             .unwrap(),
     );
@@ -5439,14 +5450,14 @@ async fn an_account_records_the_admin_who_made_it() {
 }
 
 #[tokio::test]
-async fn a_file_goes_into_the_database_file_and_comes_back_byte_for_byte() {
+async fn a_file_lands_in_the_storage_tree_and_comes_back_byte_for_byte() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
     let now = OffsetDateTime::now_utc();
     let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
 
     // Bytes that are not text and are not valid UTF-8, because an attachment
-    // is not a string and the column it lives in must not treat it as one.
+    // is not a string and must not be treated as one, wherever it sits.
     let bytes: Vec<u8> = vec![
         0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0xfe,
     ];
@@ -5470,6 +5481,17 @@ async fn a_file_goes_into_the_database_file_and_comes_back_byte_for_byte() {
     assert_eq!(row.size_bytes, bytes.len() as u64);
     assert_eq!(row.uploaded_by, admin);
     assert_eq!(store.attachment_bytes(&id).await.unwrap().unwrap(), bytes);
+
+    // The bytes are the file the row's id names, under the storage tree —
+    // not a second copy anywhere else. The temp file the write passed
+    // through is gone, and the directory holds exactly one file.
+    let file = scratch.storage.join("attachments").join(&id);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    let files: Vec<String> = std::fs::read_dir(scratch.storage.join("attachments"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, vec![id], "the tree holds exactly the row's file");
 }
 
 #[tokio::test]
@@ -5495,12 +5517,24 @@ async fn a_file_name_that_is_a_path_is_stored_as_the_label_it_is() {
         .unwrap();
     let row = store.attachment(&id).await.unwrap().unwrap();
     assert_eq!(row.file_name, "../../etc/passwd");
-    // And nothing was written anywhere but the database file and its key
-    // (see `store::secret`) — never a file named after the attachment.
+
+    // The label never became a path: the bytes sit at the one place the
+    // row's own id names, under the storage tree, and nothing was written
+    // outside it beside the database file and its key (see `store::secret`).
+    let attachments = scratch.storage.join("attachments");
+    let files: Vec<String> = std::fs::read_dir(&attachments)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, vec![id.clone()], "the tree holds exactly the row's file");
+    assert_eq!(
+        std::fs::read(attachments.join(&id)).unwrap(),
+        b"root:x:0:0"
+    );
     let written: Vec<String> = std::fs::read_dir(&scratch.dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.starts_with("izlek.db") && name != "izlek.key")
+        .filter(|name| !name.starts_with("izlek.db") && name != "izlek.key" && name != "storage")
         .collect();
     assert!(written.is_empty(), "{written:?}");
 }
@@ -5555,7 +5589,11 @@ async fn a_file_can_be_taken_away_and_saying_so_twice_is_answered_honestly() {
         .await
         .unwrap();
 
+    let file = scratch.storage.join("attachments").join(&id);
+    assert!(file.is_file(), "the file is there before the delete");
+
     assert!(store.delete_attachment(&id).await.unwrap());
+    assert!(!file.exists(), "the file went with the row");
     assert!(!store.delete_attachment(&id).await.unwrap());
     assert!(store.attachment(&id).await.unwrap().is_none());
     assert!(store.attachment_bytes(&id).await.unwrap().is_none());
@@ -7187,6 +7225,7 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
 
     izlek_core::store::reconcile(
         &path,
+        Some(&dir.join("storage")),
         izlek_core::store::ReconcileOptions {
             dry_run: false,
             yes: true,
@@ -7239,23 +7278,30 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
         "each board owes exactly one default tag"
     );
 
-    // The blob survived byte for byte.
+    // The blob survived byte for byte — as the file the row's id names,
+    // under the storage tree the rebuild was handed, with the row still
+    // agreeing with it. (The database has no bytes column any more; the
+    // fingerprint check above already fails if one came back.)
+    let stored = std::fs::read(
+        dir.join("storage")
+            .join("attachments")
+            .join("F1"),
+    )
+    .expect("the attachment's file did not survive the rebuild");
+    assert_eq!(stored.len(), 5000);
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT length(bytes) FROM attachment WHERE id = 'F1'"
-        )
-        .await,
-        5000
+        &stored[..4],
+        &[0, 1, 2, 3],
+        "the attachment's bytes changed in the rebuild"
     );
     assert_eq!(
         scalar(
             &path,
-            "SELECT COUNT(*) FROM attachment WHERE id = 'F1' AND hex(substr(bytes, 1, 4)) = '00010203'",
+            "SELECT size_bytes FROM attachment WHERE id = 'F1'"
         )
         .await,
-        1,
-        "the attachment's bytes changed in the rebuild"
+        5000,
+        "the row no longer agrees with its file"
     );
 
     // The quiet window is a column the old shape never had: a workspace that
@@ -7331,6 +7377,7 @@ async fn reconcile_preserves_user_tags_and_the_tasks_that_wear_them() {
 
     izlek_core::store::reconcile(
         &path,
+        Some(&dir.join("storage")),
         izlek_core::store::ReconcileOptions {
             dry_run: false,
             yes: true,
@@ -7416,6 +7463,7 @@ async fn reconcile_seeds_a_default_only_for_a_board_without_one() {
 
     izlek_core::store::reconcile(
         &path,
+        Some(&dir.join("storage")),
         izlek_core::store::ReconcileOptions {
             dry_run: false,
             yes: true,
@@ -7484,6 +7532,7 @@ async fn reconciling_a_database_that_already_matches_changes_nothing() {
 
     izlek_core::store::reconcile(
         &path,
+        Some(&scratch.dir.join("storage")),
         izlek_core::store::ReconcileOptions {
             dry_run: false,
             yes: true,
@@ -7505,7 +7554,7 @@ async fn opening_a_stale_database_repairs_it() {
 
     // The boot path: no flag, no prompt — the store comes up on a database of
     // the old shape, having repaired it on the way.
-    let store = TursoStore::open(&path)
+    let store = TursoStore::open(&path, &dir.join("storage"))
         .await
         .expect("the store would not open a database it was supposed to repair");
     drop(store);
@@ -7522,7 +7571,7 @@ async fn opening_a_stale_database_repairs_it() {
     assert_eq!(backups_beside(&dir).len(), 1);
 
     // Opening it again finds it current and leaves it alone.
-    let store = TursoStore::open(&path).await.unwrap();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     drop(store);
     assert_eq!(
         backups_beside(&dir).len(),
@@ -7542,7 +7591,7 @@ async fn two_repairs_leave_two_backups() {
         auto: true,
     };
 
-    izlek_core::store::reconcile(&path, opts()).await.unwrap();
+    izlek_core::store::reconcile(&path, Some(&dir.join("storage")), opts()).await.unwrap();
     assert_eq!(backups_beside(&dir).len(), 1);
 
     // Put the database back to the old shape and repair it again: the first
@@ -7556,7 +7605,7 @@ async fn two_repairs_leave_two_backups() {
     drop(conn);
     drop(db);
 
-    izlek_core::store::reconcile(&path, opts()).await.unwrap();
+    izlek_core::store::reconcile(&path, Some(&dir.join("storage")), opts()).await.unwrap();
     let backups = backups_beside(&dir);
     assert_eq!(
         backups.len(),
@@ -7600,6 +7649,7 @@ async fn a_rebuild_keeps_a_window_the_admin_already_set() {
 
     izlek_core::store::reconcile(
         &path,
+        Some(&scratch.dir.join("storage")),
         izlek_core::store::ReconcileOptions {
             dry_run: false,
             yes: true,
@@ -8675,7 +8725,7 @@ async fn reminder_rows_survive_a_reopen() {
     let dir = std::env::temp_dir().join(format!("izlek-test-{}", Ulid::new()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("izlek.db").to_string_lossy().into_owned();
-    let store = TursoStore::open(&path).await.unwrap();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let (workspace, admin) = claim(&store).await;
     let mate = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
     let clock = OffsetDateTime::now_utc() + Duration::hours(2);
@@ -8686,7 +8736,7 @@ async fn reminder_rows_survive_a_reopen() {
     let before = before;
     drop(store);
 
-    let reopened = TursoStore::open(&path).await.unwrap();
+    let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let after = reminders(&reopened, &task).await;
     assert_eq!(after.len(), before.len());
     assert_eq!(
@@ -9423,10 +9473,12 @@ fn ole_bytes(with_workbook: bool) -> Vec<u8> {
     bytes
 }
 
-/// A scratch database carrying old-style attachment rows: real bytes under
-/// the generic mime a pre-sniffer upload froze on. The first open creates
-/// the schema and finds nothing to do; the rows go in through a raw
-/// connection; the caller then opens the store again, which runs the pass.
+/// A scratch database carrying pre-fs attachment rows: generic mimes under
+/// which the boot pass may refine, with the bytes where the pass reads them
+/// now — a file per row, named by the row's id. The first open creates the
+/// schema and finds nothing to do; the rows go in through a raw connection
+/// and their bytes land in the storage tree by hand; the caller then opens
+/// the store again, which runs the pass.
 struct Planted {
     dir: PathBuf,
     path: String,
@@ -9437,18 +9489,19 @@ impl Planted {
         let dir = std::env::temp_dir().join(format!("izlek-resniff-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("izlek.db").to_str().unwrap().to_string();
-        drop(TursoStore::open(&path).await.unwrap());
+        drop(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
         let db = turso::Builder::new_local(&path).build().await.unwrap();
         let conn = db.connect().unwrap();
         for (id, mime, bytes) in rows {
             conn.execute(
                 "INSERT INTO attachment (id, task_id, file_name, mime_type, size_bytes, \
-                     bytes, uploaded_by, created_at) \
-                 VALUES (?1, 'T1', 'old.bin', ?2, ?3, ?4, 'U1', '2026-08-01T00:00:00Z')",
-                turso::params![id, mime, bytes.len() as i64, bytes.clone()],
+                     uploaded_by, created_at) \
+                 VALUES (?1, 'T1', 'old.bin', ?2, ?3, 'U1', '2026-08-01T00:00:00Z')",
+                turso::params![id, mime, bytes.len() as i64],
             )
             .await
             .unwrap();
+            std::fs::write(dir.join("storage").join("attachments").join(id), bytes).unwrap();
         }
         drop(conn);
         drop(db);
@@ -9460,7 +9513,9 @@ impl Planted {
     }
 
     async fn open(&self) -> TursoStore {
-        TursoStore::open(self.path()).await.unwrap()
+        TursoStore::open(self.path(), &self.dir.join("storage"))
+            .await
+            .unwrap()
     }
 }
 
