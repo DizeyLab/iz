@@ -803,7 +803,10 @@ async fn workspace_defaults_match_the_settings_screen() {
         "every type until narrowed"
     );
     assert_eq!(ws.mail_batch_minutes, 5);
-    assert_eq!(ws.reminder_minutes, 15, "a workspace starts with reminders on");
+    assert_eq!(
+        ws.reminder_minutes, 15,
+        "a workspace starts with reminders on"
+    );
 }
 
 /// An admin edits the sender from Settings, so the record carries host, port,
@@ -1076,7 +1079,10 @@ async fn limits_round_trip_including_the_file_type_list() {
     assert_eq!(ws.photo_limit_bytes, 512 * 1024);
     assert_eq!(ws.allowed_file_types, types);
     assert_eq!(ws.mail_batch_minutes, 5);
-    assert_eq!(ws.reminder_minutes, 15, "the reminder lead rides the same save");
+    assert_eq!(
+        ws.reminder_minutes, 15,
+        "the reminder lead rides the same save"
+    );
 }
 
 #[tokio::test]
@@ -1333,7 +1339,12 @@ async fn a_signin_link_stores_only_the_hash_and_is_used_once() {
     let now = OffsetDateTime::now_utc();
     let link = scratch
         .store
-        .create_signin_link(&user.id, "hash-of-the-token", now + Duration::days(7), izlek_core::store::LinkKind::Join)
+        .create_signin_link(
+            &user.id,
+            "hash-of-the-token",
+            now + Duration::days(7),
+            izlek_core::store::LinkKind::Join,
+        )
         .await
         .unwrap();
     assert!(link.is_usable(now));
@@ -1398,7 +1409,12 @@ async fn an_expired_link_is_still_a_live_account() {
     let now = OffsetDateTime::now_utc();
     let stale = scratch
         .store
-        .create_signin_link(&user.id, "stale-hash", now - Duration::hours(1), izlek_core::store::LinkKind::Join)
+        .create_signin_link(
+            &user.id,
+            "stale-hash",
+            now - Duration::hours(1),
+            izlek_core::store::LinkKind::Join,
+        )
         .await
         .unwrap();
     assert!(!stale.is_usable(now));
@@ -1406,7 +1422,12 @@ async fn an_expired_link_is_still_a_live_account() {
     // Resending opens the same account rather than making a new one.
     let fresh = scratch
         .store
-        .create_signin_link(&user.id, "fresh-hash", now + Duration::days(7), izlek_core::store::LinkKind::Join)
+        .create_signin_link(
+            &user.id,
+            "fresh-hash",
+            now + Duration::days(7),
+            izlek_core::store::LinkKind::Join,
+        )
         .await
         .unwrap();
     assert_eq!(fresh.user_id, stale.user_id);
@@ -1437,7 +1458,12 @@ async fn a_prefetched_link_is_consumed_exactly_once() {
     let token = Token::mint();
     let now = OffsetDateTime::now_utc();
     let link = store
-        .create_signin_link(&user_id, &token.hash(), now + Duration::days(7), izlek_core::store::LinkKind::Join)
+        .create_signin_link(
+            &user_id,
+            &token.hash(),
+            now + Duration::days(7),
+            izlek_core::store::LinkKind::Join,
+        )
         .await
         .unwrap();
 
@@ -7138,8 +7164,13 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
 
     // The schema is now the declared one, exactly.
     let after = izlek_core::store::schema::fingerprint(&conn).await.unwrap();
-    let declared = izlek_core::store::schema::declared_fingerprint().await.unwrap();
-    assert_eq!(after, declared, "the rebuilt schema is not the declared one");
+    let declared = izlek_core::store::schema::declared_fingerprint()
+        .await
+        .unwrap();
+    assert_eq!(
+        after, declared,
+        "the rebuilt schema is not the declared one"
+    );
 
     // Nothing was dropped on the floor.
     assert_eq!(scalar(&path, "SELECT COUNT(*) FROM user").await, 2);
@@ -7173,7 +7204,11 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
 
     // The blob survived byte for byte.
     assert_eq!(
-        scalar(&path, "SELECT length(bytes) FROM attachment WHERE id = 'F1'").await,
+        scalar(
+            &path,
+            "SELECT length(bytes) FROM attachment WHERE id = 'F1'"
+        )
+        .await,
         5000
     );
     assert_eq!(
@@ -7190,7 +7225,11 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
     // crosses over gets the declared default rather than a NULL the app would
     // have to read around.
     assert_eq!(
-        scalar(&path, "SELECT mail_batch_minutes FROM workspace WHERE id = 'W1'").await,
+        scalar(
+            &path,
+            "SELECT mail_batch_minutes FROM workspace WHERE id = 'W1'"
+        )
+        .await,
         5,
         "the workspace came across without a quiet window"
     );
@@ -7198,12 +7237,20 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
     // had either: the workspace crosses onto the declared default, and tasks
     // that never carried a meeting instant arrive without one.
     assert_eq!(
-        scalar(&path, "SELECT reminder_minutes FROM workspace WHERE id = 'W1'").await,
+        scalar(
+            &path,
+            "SELECT reminder_minutes FROM workspace WHERE id = 'W1'"
+        )
+        .await,
         15,
         "the workspace came across without a reminder lead"
     );
     assert_eq!(
-        scalar(&path, "SELECT COUNT(*) FROM task WHERE clock_at IS NOT NULL").await,
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task WHERE clock_at IS NOT NULL"
+        )
+        .await,
         0,
         "a task came out of the rebuild with a clock it never had"
     );
@@ -7274,7 +7321,9 @@ async fn opening_a_stale_database_repairs_it() {
     let conn = db.connect().unwrap();
     assert_eq!(
         izlek_core::store::schema::fingerprint(&conn).await.unwrap(),
-        izlek_core::store::schema::declared_fingerprint().await.unwrap(),
+        izlek_core::store::schema::declared_fingerprint()
+            .await
+            .unwrap(),
     );
     assert_eq!(scalar(&path, "SELECT COUNT(*) FROM task").await, 4);
     assert_eq!(backups_beside(&dir).len(), 1);
@@ -7397,9 +7446,20 @@ async fn user_stats_counts_what_a_person_holds_finished_opened_and_said() {
 
     let hold = add_task(store, &workspace, "Backlog", "Hold the door", None, &admin).await;
     store.assign_task(&hold, &mem).await.unwrap();
-    let finished = add_task(store, &workspace, "Backlog", "Paint the frame", None, &admin).await;
+    let finished = add_task(
+        store,
+        &workspace,
+        "Backlog",
+        "Paint the frame",
+        None,
+        &admin,
+    )
+    .await;
     store.assign_task(&finished, &mem).await.unwrap();
-    store.move_task(&finished, &backlog, &done, &admin, now).await.unwrap();
+    store
+        .move_task(&finished, &backlog, &done, &admin, now)
+        .await
+        .unwrap();
     // One of her own that she also holds: created and assigned must each
     // count it in its own column, not argue about it.
     let own = add_task(store, &workspace, "Backlog", "Sweep", None, &mem).await;
@@ -7407,12 +7467,20 @@ async fn user_stats_counts_what_a_person_holds_finished_opened_and_said() {
     add_task(store, &workspace, "Backlog", "Mop", None, &mem).await;
     add_task(store, &workspace, "Backlog", "Dust", None, &mem).await;
     for i in 0..4 {
-        store.add_comment(&hold, &mem, "a note", now + Duration::seconds(i)).await.unwrap();
+        store
+            .add_comment(&hold, &mem, "a note", now + Duration::seconds(i))
+            .await
+            .unwrap();
     }
 
     assert_eq!(
         store.user_stats(&mem).await.unwrap(),
-        izlek_core::store::UserStats { assigned_open: 2, assigned_done: 1, created: 3, comments: 4 },
+        izlek_core::store::UserStats {
+            assigned_open: 2,
+            assigned_done: 1,
+            created: 3,
+            comments: 4
+        },
     );
 }
 
@@ -7427,19 +7495,32 @@ async fn a_deleted_task_counts_nowhere_and_a_person_with_nothing_counts_nothing(
 
     assert_eq!(
         store.user_stats(&shy).await.unwrap(),
-        izlek_core::store::UserStats { assigned_open: 0, assigned_done: 0, created: 0, comments: 0 },
+        izlek_core::store::UserStats {
+            assigned_open: 0,
+            assigned_done: 0,
+            created: 0,
+            comments: 0
+        },
     );
 
     let doomed = add_task(store, &workspace, "Backlog", "Doomed", None, &mem).await;
     store.assign_task(&doomed, &mem).await.unwrap();
-    store.add_comment(&doomed, &mem, "a note", now).await.unwrap();
+    store
+        .add_comment(&doomed, &mem, "a note", now)
+        .await
+        .unwrap();
     assert_eq!(store.user_stats(&mem).await.unwrap().assigned_open, 1);
     assert_eq!(store.user_stats(&mem).await.unwrap().comments, 1);
 
     store.delete_task(&doomed, &admin, now).await.unwrap();
     assert_eq!(
         store.user_stats(&mem).await.unwrap(),
-        izlek_core::store::UserStats { assigned_open: 0, assigned_done: 0, created: 0, comments: 0 },
+        izlek_core::store::UserStats {
+            assigned_open: 0,
+            assigned_done: 0,
+            created: 0,
+            comments: 0
+        },
         "a soft-deleted task stays out of every number, its comments included",
     );
 }
@@ -7698,7 +7779,8 @@ async fn the_hold_has_a_ceiling_measured_from_the_oldest_mail() {
         "the push is clipped rather than granted: {due} vs {far}",
     );
     assert_eq!(
-        due, born + Duration::minutes(4),
+        due,
+        born + Duration::minutes(4),
         "the ceiling is the oldest mail's own patience running out",
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -7723,7 +7805,11 @@ async fn a_hold_never_pulls_a_leased_row_back_under_the_pass_that_took_it() {
         .expect("a fresh row is claimed");
     // A delivery pass takes it: the lease is five minutes out.
     let taken = store
-        .claim_sends_owed(now + Duration::seconds(1), now + izlek_core::mail::LEASE, 10)
+        .claim_sends_owed(
+            now + Duration::seconds(1),
+            now + izlek_core::mail::LEASE,
+            10,
+        )
         .await
         .unwrap();
     assert_eq!(taken.len(), 1, "the pass did not take the row");
@@ -7815,16 +7901,28 @@ async fn a_batch_is_one_card_and_one_reader() {
     let mut addressed: Vec<String> = mailer
         .sent()
         .into_iter()
-        .map(|mail| format!("{} {}", mail.to, mail.body.lines().next().unwrap_or_default()))
+        .map(|mail| {
+            format!(
+                "{} {}",
+                mail.to,
+                mail.body.lines().next().unwrap_or_default()
+            )
+        })
         .collect();
     addressed.sort();
     assert_eq!(addressed.len(), 4);
     assert_eq!(
-        addressed.iter().filter(|line| line.contains("First")).count(),
+        addressed
+            .iter()
+            .filter(|line| line.contains("First"))
+            .count(),
         2,
     );
     assert_eq!(
-        addressed.iter().filter(|line| line.contains("emre@izlek.sh")).count(),
+        addressed
+            .iter()
+            .filter(|line| line.contains("emre@izlek.sh"))
+            .count(),
         2,
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -7859,13 +7957,15 @@ async fn an_invitation_is_never_folded_into_a_batch() {
         .await
         .unwrap();
     assert_eq!(report.sent, 2, "the invitation and the card's mail");
-    let subjects: Vec<String> = mailer
-        .sent()
-        .into_iter()
-        .map(|mail| mail.subject)
-        .collect();
-    assert!(subjects.contains(&"Join the workspace".to_string()), "{subjects:?}");
-    assert!(subjects.contains(&"Card is done".to_string()), "{subjects:?}");
+    let subjects: Vec<String> = mailer.sent().into_iter().map(|mail| mail.subject).collect();
+    assert!(
+        subjects.contains(&"Join the workspace".to_string()),
+        "{subjects:?}"
+    );
+    assert!(
+        subjects.contains(&"Card is done".to_string()),
+        "{subjects:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8023,7 +8123,10 @@ async fn a_clocked_task_owes_each_assignee_one_reminder_before_the_meeting() {
             "the workspace's default lead of fifteen minutes"
         );
         assert!(
-            row.subject.as_deref().unwrap().starts_with("Reminder: The quarterly review ("),
+            row.subject
+                .as_deref()
+                .unwrap()
+                .starts_with("Reminder: The quarterly review ("),
             "the subject names the meeting: {}",
             row.subject.as_deref().unwrap()
         );
@@ -8122,7 +8225,11 @@ async fn moving_the_clock_re_makes_the_reminders() {
         .filter(|r| r.state == SendState::Abandoned)
         .collect();
     assert_eq!(pending.len(), 1, "exactly one reminder is still owed");
-    assert_eq!(abandoned.len(), 1, "the promise the old clock stood on died");
+    assert_eq!(
+        abandoned.len(),
+        1,
+        "the promise the old clock stood on died"
+    );
     assert_eq!(
         pending[0].next_attempt_at.unwrap(),
         new_clock - Duration::minutes(15),
@@ -8206,8 +8313,8 @@ async fn an_assignee_removed_takes_their_reminder_with_them() {
     // Grace's warning is gone from what is owed; Emre's stands.
     let rows = reminders(&store, &task).await;
     assert!(
-        rows.iter().any(|r| r.recipient == "grace@izlek.sh"
-            && r.state == SendState::Abandoned),
+        rows.iter()
+            .any(|r| r.recipient == "grace@izlek.sh" && r.state == SendState::Abandoned),
         "the removed person's reminder was abandoned: {rows:?}"
     );
     let still_owed = pending_reminders(&store, &task).await;
@@ -8334,18 +8441,39 @@ async fn each_reminder_tells_the_meeting_in_its_own_recipients_clock() {
         .set_preferences(&emre, "UTC+03:00", "dark", "en", "default")
         .await
         .unwrap();
-    let clock = OffsetDateTime::parse("2026-09-15T12:00:00Z", &time::format_description::well_known::Rfc3339)
-        .unwrap();
+    let clock = OffsetDateTime::parse(
+        "2026-09-15T12:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
     let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
     store.assign_task(&task, &grace).await.unwrap();
     store.assign_task(&task, &emre).await.unwrap();
 
     let rows = pending_reminders(&store, &task).await;
     assert_eq!(rows.len(), 2);
-    let grace_body = rows.iter().find(|r| r.recipient == "grace@izlek.sh").unwrap().body.as_deref().unwrap();
-    let emre_body = rows.iter().find(|r| r.recipient == "emre@izlek.sh").unwrap().body.as_deref().unwrap();
-    assert!(grace_body.contains("Meets at Sep 15 12:00"), "grace: {grace_body}");
-    assert!(emre_body.contains("Meets at Sep 15 15:00"), "emre: {emre_body}");
+    let grace_body = rows
+        .iter()
+        .find(|r| r.recipient == "grace@izlek.sh")
+        .unwrap()
+        .body
+        .as_deref()
+        .unwrap();
+    let emre_body = rows
+        .iter()
+        .find(|r| r.recipient == "emre@izlek.sh")
+        .unwrap()
+        .body
+        .as_deref()
+        .unwrap();
+    assert!(
+        grace_body.contains("Meets at Sep 15 12:00"),
+        "grace: {grace_body}"
+    );
+    assert!(
+        emre_body.contains("Meets at Sep 15 15:00"),
+        "emre: {emre_body}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8368,7 +8496,10 @@ async fn reminder_rows_survive_a_reopen() {
     let reopened = TursoStore::open(&path).await.unwrap();
     let after = reminders(&reopened, &task).await;
     assert_eq!(after.len(), before.len());
-    assert_eq!(after[0].id, before[0].id, "the same row, not a re-minted one");
+    assert_eq!(
+        after[0].id, before[0].id,
+        "the same row, not a re-minted one"
+    );
     assert_eq!(after[0].state, SendState::Pending);
     assert_eq!(after[0].next_attempt_at, before[0].next_attempt_at);
     let _ = std::fs::remove_dir_all(&dir);
@@ -8457,7 +8588,10 @@ async fn a_reminder_failing_on_retries_is_not_minted_twice() {
     store.assign_task(&task, &emre).await.unwrap();
     let rows = reminders(&store, &task).await;
     assert_eq!(rows.len(), 2, "one row per person: {rows:?}");
-    let grace_row = rows.iter().find(|r| r.recipient == "grace@izlek.sh").unwrap();
+    let grace_row = rows
+        .iter()
+        .find(|r| r.recipient == "grace@izlek.sh")
+        .unwrap();
     assert_eq!(grace_row.state, SendState::Failed);
     assert_eq!(grace_row.attempts, 1);
 
@@ -8482,7 +8616,10 @@ async fn the_reminder_never_lands_at_or_after_the_deadline() {
     let clock = OffsetDateTime::now_utc() + Duration::hours(2);
     let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
     store
-        .assign_task(&task, &member(&store, &workspace, "grace@izlek.sh", "Grace").await)
+        .assign_task(
+            &task,
+            &member(&store, &workspace, "grace@izlek.sh", "Grace").await,
+        )
         .await
         .unwrap();
     let rows = reminders(&store, &task).await;
@@ -8500,7 +8637,10 @@ async fn the_reminder_never_lands_at_or_after_the_deadline() {
     let soon = OffsetDateTime::now_utc() + Duration::minutes(10);
     let task = clocked_task(&store, &workspace, &admin, Some(soon)).await;
     store
-        .assign_task(&task, &member(&store, &workspace, "emre@izlek.sh", "Emre").await)
+        .assign_task(
+            &task,
+            &member(&store, &workspace, "emre@izlek.sh", "Emre").await,
+        )
         .await
         .unwrap();
     let rows = reminders(&store, &task).await;
@@ -8551,8 +8691,24 @@ async fn a_change_back_to_the_same_password_is_refused_and_signs_nobody_out() {
 #[tokio::test]
 async fn board_search_matches_keys_and_titles_in_place() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
-    let panel = add_task(&scratch.store, &workspace, "Backlog", "Panel polish", None, &admin).await;
-    let wire = add_task(&scratch.store, &workspace, "In Progress", "Wire the exporter", None, &admin).await;
+    let panel = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Panel polish",
+        None,
+        &admin,
+    )
+    .await;
+    let wire = add_task(
+        &scratch.store,
+        &workspace,
+        "In Progress",
+        "Wire the exporter",
+        None,
+        &admin,
+    )
+    .await;
     let panel_key = scratch
         .store
         .task(&panel)
@@ -8616,10 +8772,7 @@ async fn board_search_matches_keys_and_titles_in_place() {
 
 /// The reset token out of the newest notice queued for the address — the mail
 /// is the token's only carrier, so the test reads it like a recipient would.
-async fn queued_reset_token(
-    store: &std::sync::Arc<dyn Store>,
-    email: &str,
-) -> Option<String> {
+async fn queued_reset_token(store: &std::sync::Arc<dyn Store>, email: &str) -> Option<String> {
     let sends = store
         .mail_queue(50, izlek_core::store::FeedPage::Newest)
         .await
@@ -8627,9 +8780,7 @@ async fn queued_reset_token(
     let body = sends
         .into_iter()
         .rev()
-        .find(|send| {
-            send.kind == izlek_core::store::SendKind::Notice && send.recipient == email
-        })
+        .find(|send| send.kind == izlek_core::store::SendKind::Notice && send.recipient == email)
         .and_then(|send| send.body)?;
     body.rsplit_once("/reset/")
         .and_then(|(_, rest)| rest.split_whitespace().next())
@@ -8665,7 +8816,9 @@ async fn a_reset_link_is_mailed_only_to_a_known_address() {
         "the known address was mailed a reset link"
     );
     assert!(
-        queued_reset_token(&store, "nobody@izlek.sh").await.is_none(),
+        queued_reset_token(&store, "nobody@izlek.sh")
+            .await
+            .is_none(),
         "the unknown address was mailed nothing"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -8707,11 +8860,17 @@ async fn a_reset_redeems_and_signs_the_other_browsers_out() {
     // The browser that was signed in before the reset is out; the redeeming
     // browser's own session is alive.
     assert!(matches!(
-        accounts.authenticate(&before.session_token.expose()).await.unwrap(),
+        accounts
+            .authenticate(&before.session_token.expose())
+            .await
+            .unwrap(),
         None
     ));
     assert!(matches!(
-        accounts.authenticate(&after.session_token.expose()).await.unwrap(),
+        accounts
+            .authenticate(&after.session_token.expose())
+            .await
+            .unwrap(),
         Some(_)
     ));
 }
@@ -8909,7 +9068,12 @@ async fn the_personal_feed_follows_watches_names_and_the_marker() {
 
     // Ada's comment lands on a task Grace watches, after her marker: news.
     store
-        .add_comment(&task, &admin, "Thanks — ship it", now + Duration::seconds(6))
+        .add_comment(
+            &task,
+            &admin,
+            "Thanks — ship it",
+            now + Duration::seconds(6),
+        )
         .await
         .unwrap();
     assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 1);
@@ -8979,12 +9143,189 @@ async fn a_delivered_reminder_writes_the_reminded_event() {
     assert_eq!(about, 1, "the line is about the reminded person");
 
     // Sweeping again re-sends nothing and writes nothing.
-    engine.deliver_owed(later + Duration::minutes(1), 10).await.unwrap();
+    engine
+        .deliver_owed(later + Duration::minutes(1), 10)
+        .await
+        .unwrap();
     let events = scalar(
         &path,
         "SELECT COUNT(*) FROM activity WHERE kind = 'reminded'",
     )
     .await;
     assert_eq!(events, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The search fold survives Turkish: a naive lowercase turns `İ` into `i`
+/// plus a combining dot, and then no plain-`i` query — `is` against a card
+/// titled `İş Planı Teslimi` — can ever match. Query and title fold
+/// through the same map instead.
+#[tokio::test]
+async fn board_search_folds_turkish_case() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let is_plan = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "İş Planı Teslimi",
+        None,
+        &admin,
+    )
+    .await;
+    let wire = add_task(
+        &scratch.store,
+        &workspace,
+        "In Progress",
+        "Wire the exporter",
+        None,
+        &admin,
+    )
+    .await;
+    let key = scratch
+        .store
+        .task(&is_plan)
+        .await
+        .unwrap()
+        .expect("task gone")
+        .row
+        .task_key;
+
+    for query in ["iş", "İŞ", "is", "İS", "plan", "PLAN"] {
+        let mut board = izlek_core::board::load(&scratch.store, &workspace)
+            .await
+            .unwrap()
+            .unwrap();
+        board.searching(query);
+        assert_eq!(
+            board.task_count(),
+            1,
+            "query {query:?} matched the wrong set"
+        );
+        let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+        assert_eq!(card.id, is_plan);
+    }
+
+    // ASCII titles still answer, any case.
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.searching("WIRE");
+    assert_eq!(board.task_count(), 1);
+    let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+    assert_eq!(card.id, wire);
+
+    // The key keeps answering whatever case it is typed in.
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.searching(&key.to_lowercase());
+    assert_eq!(board.task_count(), 1);
+    let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+    assert_eq!(card.id, is_plan);
+}
+
+/// The watch backfill rides the reconcile rebuild: a database from before
+/// the feed opens with a watch for every task somebody created, was
+/// assigned, or commented on — soft-deleted tasks included, history
+/// included. The pass can never run twice (it lives behind the fingerprint
+/// gate), so an unassign after the deploy keeps its watch off across
+/// restarts.
+#[tokio::test]
+async fn reconcile_backfills_watches_from_history_exactly_once() {
+    let (dir, path) = live_shaped_database().await;
+
+    // A historical comment — the third watch-worthy fact — on a task that
+    // already carries creation and assignment history.
+    {
+        let db = turso::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "INSERT INTO comment (id, task_id, author_id, body, created_at) \
+             VALUES ('CM1', 'T2', 'U1', 'on it', '2026-08-30T12:00:01Z')",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .expect("reconcile refused the backfill");
+
+    // T1: created by U1, assigned to U2. T2: created U1, assigned U2,
+    // commented U1. T3: created U1, assigned U2. T4 (soft-deleted): created
+    // U1. Distinct (task, watcher) pairs: 2 + 2 + 2 + 1.
+    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM task_watcher").await, 7);
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task_watcher WHERE user_id = 'U2'"
+        )
+        .await,
+        3,
+        "the assignee watches every task they are on"
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task_watcher WHERE user_id = 'U1'"
+        )
+        .await,
+        4,
+        "the creator watches every task they made, soft-deleted included"
+    );
+
+    // The deploy happens; THEN Deniz unassigns — here, the same write the
+    // store makes. The pass never re-runs (the shape matches now), so the
+    // watch stays off across a restart and a second reconcile.
+    {
+        let db = turso::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "DELETE FROM task_watcher WHERE task_id = 'T1' AND user_id = 'U2'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    izlek_core::store::reconcile(
+        &path,
+        izlek_core::store::ReconcileOptions {
+            dry_run: false,
+            yes: true,
+            auto: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task_watcher WHERE task_id = 'T1'"
+        )
+        .await,
+        1,
+        "the unassigned watch was resurrected"
+    );
+    let _store = TursoStore::open(&path).await.unwrap();
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM task_watcher WHERE task_id = 'T1'"
+        )
+        .await,
+        1,
+        "a restart resurrected the unassigned watch"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }

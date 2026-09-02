@@ -275,16 +275,15 @@ impl BoardView {
         self.cards().filter(|card| card.is_blocked()).count()
     }
 
-    /// Keeps only the cards whose key or title answers `query`: a literal,
-    /// case-insensitive substring of either. The human key typed in any
-    /// case matches; a fragment of a title matches; nothing is
+    /// Keeps only the cards whose key or title answers `query`: a literal
+    /// substring of the folded key or folded title. The human key typed in
+    /// any case matches; a fragment of a title matches; nothing is
     /// pattern-matched, so there are no wildcards to escape.
     pub fn searching(&mut self, query: &str) {
-        let needle = query.to_lowercase();
+        let needle = fold(query);
         for column in &mut self.columns {
             column.cards.retain(|card| {
-                card.task_key.to_lowercase().contains(&needle)
-                    || card.title.to_lowercase().contains(&needle)
+                fold(&card.task_key).contains(&needle) || fold(&card.title).contains(&needle)
             });
         }
     }
@@ -301,6 +300,29 @@ impl BoardView {
                 .retain(|card| card.tag.as_ref().is_some_and(|tag| tag.id == tag_id));
         }
     }
+}
+
+/// Folds text for search: Turkish letters collapse to their ASCII stems
+/// (`İ`/`I`/`ı` → `i`, `ş` → `s`, `ç` → `c`, `ğ` → `g`, `ü` → `u`, `ö` →
+/// `o`), case flattens. A naive lowercase cannot stand in for this: it
+/// turns `İ` into `i` plus a combining dot, and then no plain-`i` query —
+/// `is`, say, against a card titled `İş Planı Teslimi` — can ever match.
+/// Query and card fold through the same map, so `iş`, `İŞ`, `is`, and
+/// `İS` all find `İş`.
+fn fold(text: &str) -> String {
+    let mut folded = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            'İ' | 'I' | 'ı' => folded.push('i'),
+            'ş' | 'Ş' => folded.push('s'),
+            'ç' | 'Ç' => folded.push('c'),
+            'ğ' | 'Ğ' => folded.push('g'),
+            'ü' | 'Ü' => folded.push('u'),
+            'ö' | 'Ö' => folded.push('o'),
+            other => folded.extend(other.to_lowercase()),
+        }
+    }
+    folded
 }
 
 /// `Sep 12` — the card chips are day-and-month, never a year.

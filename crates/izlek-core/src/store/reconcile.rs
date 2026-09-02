@@ -5,8 +5,8 @@
 //! column map, the copy is verified, and only then the files are swapped. The
 //! original file is kept as a timestamped backup and is never deleted.
 
-use super::{Result, StoreError};
 use super::schema::{SCHEMA, declared_fingerprint, diff_report, fingerprint};
+use super::{Result, StoreError};
 use turso::{Builder, Connection, params};
 use ulid::Ulid;
 
@@ -43,7 +43,9 @@ pub async fn reconcile(path: &str, opts: ReconcileOptions) -> Result<()> {
         .build()
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    let old_conn = old_db.connect().map_err(|e| StoreError::Backend(e.to_string()))?;
+    let old_conn = old_db
+        .connect()
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
 
     let old_fp = fingerprint(&old_conn).await?;
     let new_fp = declared_fingerprint().await?;
@@ -127,7 +129,10 @@ pub async fn reconcile(path: &str, opts: ReconcileOptions) -> Result<()> {
     let _ = std::fs::remove_file(format!("{}-shm", rebuilt_path));
 
     if opts.auto {
-        eprintln!("database rebuilt and verified; original backed up to {}", backup_path);
+        eprintln!(
+            "database rebuilt and verified; original backed up to {}",
+            backup_path
+        );
         eprintln!("rebuilt database now at {}", path);
     } else {
         println!("database rebuilt and verified");
@@ -151,7 +156,9 @@ async fn rebuild(path: &str, rebuilt_path: &str, old_conn: &Connection) -> Resul
         .build()
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    let new_conn = new_db.connect().map_err(|e| StoreError::Backend(e.to_string()))?;
+    let new_conn = new_db
+        .connect()
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
 
     new_conn
         .execute("PRAGMA foreign_keys = ON", ())
@@ -189,7 +196,11 @@ async fn seed_general_tags(old_conn: &Connection, new_conn: &Connection) -> Resu
         .query("SELECT id, created_at FROM board", ())
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    while let Some(row) = rows.next().await.map_err(|e| StoreError::Backend(e.to_string()))? {
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
         let board_id: String = row.get(0).map_err(|e| StoreError::Backend(e.to_string()))?;
         let created_at: String = row.get(1).map_err(|e| StoreError::Backend(e.to_string()))?;
         let id = Ulid::new().to_string();
@@ -219,6 +230,7 @@ fn build_maps(
     old_has_batch_window: bool,
     old_has_clock: bool,
     old_has_reminder: bool,
+    old_has_feed_seen: bool,
 ) -> Vec<TableMap> {
     let mut maps = Vec::new();
 
@@ -228,7 +240,10 @@ fn build_maps(
             ("id", "old.id".into()),
             ("name", "old.name".into()),
             ("created_at", "old.created_at".into()),
-            ("attachment_limit_bytes", "old.attachment_limit_bytes".into()),
+            (
+                "attachment_limit_bytes",
+                "old.attachment_limit_bytes".into(),
+            ),
             ("photo_limit_bytes", "old.photo_limit_bytes".into()),
             ("allowed_file_types", "old.allowed_file_types".into()),
             (
@@ -312,12 +327,17 @@ fn build_maps(
                 "created_at",
                 "last_signed_in_at",
             ]);
-            // The feed's read marker is new with this schema: no database old
-            // enough to be reconciled ever carried it, so every copied row
-            // starts unseen rather than pretending to have been read.
-            columns.push(("feed_seen_at", "NULL".into()));
+            // The feed's read marker: new with the feed schema, so a
+            // database old enough to predate it starts unseen — and a
+            // database that already carries it keeps its marker across the
+            // rebuild rather than having its read state wiped.
+            columns.push(if old_has_feed_seen {
+                ("feed_seen_at", "old.feed_seen_at".into())
+            } else {
+                ("feed_seen_at", "NULL".into())
+            });
             columns
-        }
+        },
     });
     maps.push(TableMap {
         name: "workspace_owner",
@@ -339,11 +359,18 @@ fn build_maps(
             // resets did not exist to be mailed yet.
             columns.push(("kind", "'join'".into()));
             columns
-        }
+        },
     });
     maps.push(TableMap {
         name: "session",
-        columns: old_cols(&["id", "user_id", "token_hash", "created_at", "expires_at", "revoked_at"]),
+        columns: old_cols(&[
+            "id",
+            "user_id",
+            "token_hash",
+            "created_at",
+            "expires_at",
+            "revoked_at",
+        ]),
     });
     maps.push(TableMap {
         name: "auth_attempt",
@@ -521,7 +548,11 @@ async fn old_has_column(conn: &Connection, table: &str, column: &str) -> Result<
         .query(&format!("PRAGMA table_info({table})"), ())
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    while let Some(row) = rows.next().await.map_err(|e| StoreError::Backend(e.to_string()))? {
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
         let name: String = row.get(1).map_err(|e| StoreError::Backend(e.to_string()))?;
         if name == column {
             return Ok(true);
@@ -543,7 +574,11 @@ async fn validate_maps(conn: &Connection, maps: &[TableMap]) -> Result<()> {
             .await
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let mut actual = HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| StoreError::Backend(e.to_string()))? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))?
+        {
             let name: String = row.get(1).map_err(|e| StoreError::Backend(e.to_string()))?;
             actual.insert(name);
         }
@@ -578,11 +613,17 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
         .map_err(|e| StoreError::Backend(e.to_string()))?;
 
     let has_smtp_check = old_has_column(old_conn, "workspace", "smtp_check_at").await?;
-    let has_batch_window =
-        old_has_column(old_conn, "workspace", "mail_batch_minutes").await?;
+    let has_batch_window = old_has_column(old_conn, "workspace", "mail_batch_minutes").await?;
     let has_clock = old_has_column(old_conn, "task", "clock_at").await?;
     let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
-    let maps = build_maps(has_smtp_check, has_batch_window, has_clock, has_reminder);
+    let has_feed_seen = old_has_column(old_conn, "user", "feed_seen_at").await?;
+    let maps = build_maps(
+        has_smtp_check,
+        has_batch_window,
+        has_clock,
+        has_reminder,
+        has_feed_seen,
+    );
     validate_maps(new_conn, &maps).await?;
 
     for map in maps {
@@ -592,7 +633,12 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
         if map.name == "task" {
             seed_general_tags(old_conn, new_conn).await?;
         }
-        let cols = map.columns.iter().map(|(c, _)| *c).collect::<Vec<_>>().join(", ");
+        let cols = map
+            .columns
+            .iter()
+            .map(|(c, _)| *c)
+            .collect::<Vec<_>>()
+            .join(", ");
         // `old` is the attached SCHEMA, not a table, so `old.id` in a select
         // list reads as "table old, column id". The source table is aliased
         // and the maps' `old.` prefix rewritten onto that alias.
@@ -606,11 +652,27 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
             "INSERT INTO main.{} ({}) SELECT {} FROM old.{} AS src",
             map.name, cols, exprs, map.name
         );
-        new_conn
-            .execute(&sql, ())
-            .await
-            .map_err(|e| StoreError::Backend(format!("{} while copying {}: {}", e, map.name, sql)))?;
+        new_conn.execute(&sql, ()).await.map_err(|e| {
+            StoreError::Backend(format!("{} while copying {}: {}", e, map.name, sql))
+        })?;
     }
+
+    // Backfills the watches the feed reads: a watch for every task somebody
+    // created, was assigned, or commented on, including all history. This
+    // runs exactly once per database — the rebuild only happens on a schema
+    // mismatch — so watches removed by an unassign after the deploy stand,
+    // and the pass cannot fight the transactional auto-watch in the store's
+    // own writes: nothing is being served while the rebuild runs.
+    new_conn
+        .execute(
+            "INSERT OR IGNORE INTO task_watcher (task_id, user_id) \
+             SELECT t.id, t.created_by FROM task t WHERE t.created_by IS NOT NULL \
+             UNION SELECT task_id, user_id FROM task_assignee \
+             UNION SELECT task_id, author_id FROM comment",
+            (),
+        )
+        .await
+        .map_err(|e| StoreError::Backend(format!("seed watches: {e}")))?;
 
     new_conn
         .execute("DETACH DATABASE old", ())
@@ -627,7 +689,11 @@ async fn verify(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     let mut fk_errors = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| StoreError::Backend(e.to_string()))? {
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
         let table: String = row.get(0).map_err(|e| StoreError::Backend(e.to_string()))?;
         let rowid: i64 = row.get(1).map_err(|e| StoreError::Backend(e.to_string()))?;
         let parent: String = row.get(2).map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -649,7 +715,11 @@ async fn verify(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     let mut integrity = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| StoreError::Backend(e.to_string()))? {
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    {
         let msg: String = row.get(0).map_err(|e| StoreError::Backend(e.to_string()))?;
         integrity.push(msg);
     }
@@ -685,11 +755,30 @@ async fn verify(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
     for table in tables {
         let old_count = count_rows(old_conn, table).await?;
         let new_count = count_rows(new_conn, table).await?;
-        if old_count != new_count {
-            return Err(StoreError::Backend(format!(
-                "row count mismatch for {}: old {} new {}",
-                table, old_count, new_count
-            )));
+        // task_watcher: the rebuild backfills watches from history — every
+        // task somebody created, was assigned, or commented on — so the new
+        // count is that derived set (every old watch is in it by
+        // construction), not the old count.
+        let expected = if table == "task_watcher" {
+            Some(count_rows(new_conn, "(SELECT t.id, t.created_by AS user_id FROM task t WHERE t.created_by IS NOT NULL UNION SELECT task_id, user_id FROM task_assignee UNION SELECT task_id, author_id FROM comment)").await?)
+        } else {
+            None
+        };
+        match expected {
+            Some(want) if new_count != want => {
+                return Err(StoreError::Backend(format!(
+                    "task_watcher count {} does not match the backfilled set {}",
+                    new_count, want
+                )));
+            }
+            Some(_) => {}
+            None if old_count != new_count => {
+                return Err(StoreError::Backend(format!(
+                    "row count mismatch for {}: old {} new {}",
+                    table, old_count, new_count
+                )));
+            }
+            None => {}
         }
     }
 
@@ -712,13 +801,18 @@ async fn count_rows(conn: &Connection, table: &str) -> Result<i64> {
         .query(&sql, ())
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    let Some(row) = rows.next().await.map_err(|e| StoreError::Backend(e.to_string()))? else {
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| StoreError::Backend(e.to_string()))?
+    else {
         return Err(StoreError::Backend(format!(
             "could not count rows in {}",
             table
         )));
     };
-    row.get::<i64>(0).map_err(|e| StoreError::Backend(e.to_string()))
+    row.get::<i64>(0)
+        .map_err(|e| StoreError::Backend(e.to_string()))
 }
 
 fn cleanup_rebuilt(rebuilt_path: &str) {

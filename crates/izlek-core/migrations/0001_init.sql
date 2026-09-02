@@ -250,6 +250,7 @@ CREATE TABLE task_watcher (
     user_id TEXT NOT NULL REFERENCES user(id),
     PRIMARY KEY (task_id, user_id)
 );
+CREATE INDEX task_watcher_by_user ON task_watcher(user_id);
 
 -- blocked_task_id is blocked by blocking_task_id. cleared_at is set when the
 -- blocking task finishes, which is what the "you can start now" rule reads.
@@ -363,6 +364,7 @@ CREATE TABLE activity (
 );
 CREATE INDEX activity_by_task ON activity(task_id);
 CREATE INDEX activity_recent ON activity(created_at);
+CREATE INDEX activity_by_subject ON activity(subject_id);
 
 -- Mail rules are written only by the admin.
 --
