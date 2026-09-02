@@ -1367,26 +1367,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
         cursor: Option<&FeedCursor>,
     ) -> Result<u64>;
 
-    /// Puts `user_id` on a task's watchers. Idempotent: watching twice is
-    /// watching once.
-    async fn watch_task(&self, task_id: &str, user_id: &str) -> Result<()>;
-
-    /// Takes `user_id` off a task's watchers. Absent watch, absent row: no
-    /// error.
-    async fn unwatch_task(&self, task_id: &str, user_id: &str) -> Result<()>;
-
-    /// The "what changed for me" feed: activity events on the tasks the user
-    /// watches, plus events that name them (`subject_id` — an assignment
-    /// outlives the watch it created), minus the user's own actions. Newest
-    /// first, capped at `limit`.
-    async fn feed_for_user(&self, user_id: &str, limit: u32) -> Result<Vec<ActivityLine>>;
-
-    /// How many feed lines have landed since the user last read the feed.
-    async fn count_feed_unseen(&self, user_id: &str) -> Result<u64>;
-
-    /// Reads the feed to `at`: the unseen count resets, the history stays.
-    async fn mark_feed_seen(&self, user_id: &str, at: OffsetDateTime) -> Result<()>;
-
     // -- who gets mailed ---------------------------------------------------
 
     /// The people a task points at. Viewers cannot be assigned, so none appear.

@@ -137,7 +137,6 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
 #[derive(Clone, Copy, PartialEq)]
 pub enum NavPage {
     Board,
-    Feed,
     Rules,
     Logs,
     Tags,
@@ -145,9 +144,8 @@ pub enum NavPage {
 }
 
 impl NavPage {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 5] = [
         Self::Board,
-        Self::Feed,
         Self::Rules,
         Self::Logs,
         Self::Tags,
@@ -157,7 +155,6 @@ impl NavPage {
     fn href(self) -> &'static str {
         match self {
             Self::Board => "/",
-            Self::Feed => "/feed",
             Self::Rules => "/rules",
             Self::Logs => "/logs",
             Self::Tags => "/tags",
@@ -168,7 +165,6 @@ impl NavPage {
     fn label(self) -> Key {
         match self {
             Self::Board => Key::NavBoard,
-            Self::Feed => Key::NavFeed,
             Self::Rules => Key::NavMailRules,
             Self::Logs => Key::NavLogs,
             Self::Tags => Key::NavTags,
@@ -179,19 +175,9 @@ impl NavPage {
 
 /// The topbar's page nav, shared by every signed-in page: the pages with the
 /// current one marked, the admin-only ones (rules, logs, tags) shown only to
-/// roles that can administer. The feed link carries the unread count — how
-/// many lines have landed since the person last read their feed — as a chip
-/// that disappears at zero. Plain `<a>`s — the soft-nav forwarder swaps them
+/// roles that can administer. Plain `<a>`s — the soft-nav forwarder swaps them
 /// like any same-origin link, so `data-hard` stays off.
 pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: Lang) -> Result {
-    let unread = match current_user(cx).await {
-        Ok(Some(me)) => crate::server::accounts(cx)
-            .store()
-            .count_feed_unseen(&me.id)
-            .await
-            .unwrap_or(0),
-        _ => 0,
-    };
     view! {
         cx =>
         <nav class="topbar-nav-links">
@@ -202,9 +188,6 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: izlek_core::Role, lang: 
                     href=(page.href())
                 >
                     (t(lang, page.label()))
-                    if page == NavPage::Feed && unread > 0 {
-                        <span class="feed-badge">(unread)</span>
-                    }
                 </a>
                 }
             }
@@ -779,7 +762,6 @@ pub async fn live_script(cx: &Cx) -> Result {
                 if (path === '/tags') { return topic === 'tags' || topic === 'members'; } \
                 if (path === '/settings') { return topic === 'settings' || topic === 'members'; } \
                 if (path === '/people/') { return topic === 'members'; } \
-                if (path === '/feed') { return true; } \
             } \
             try { \
                 var src = new EventSource('/api/live'); \

@@ -300,6 +300,22 @@ impl BoardView {
                 .retain(|card| card.tag.as_ref().is_some_and(|tag| tag.id == tag_id));
         }
     }
+
+    /// Keeps only the cards carrying `assignee` — a member id — or, for the
+    /// literal `none`, only the cards carrying nobody. `None` (no filter)
+    /// leaves the board alone, riding the same narrowing pass as
+    /// [`BoardView::searching`].
+    pub fn assigned(&mut self, assignee: Option<&str>) {
+        let Some(assignee) = assignee else {
+            return;
+        };
+        for column in &mut self.columns {
+            column.cards.retain(|card| match assignee {
+                "none" => card.assignees.is_empty(),
+                id => card.assignees.iter().any(|person| &person.id == id),
+            });
+        }
+    }
 }
 
 /// Folds text for search: Turkish letters collapse to their ASCII stems

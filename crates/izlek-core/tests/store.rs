@@ -9188,118 +9188,6 @@ async fn reset_asks_are_rate_limited_per_client_and_silenced_per_address() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Watches and the personal feed: creating, being assigned and commenting
-/// each start a watch; an unassign ends it. The feed carries events on
-/// watched tasks and events naming the reader, never the reader's own
-/// actions; the unseen marker counts what landed since the last read.
-#[tokio::test]
-async fn the_personal_feed_follows_watches_names_and_the_marker() {
-    let (dir, store, workspace, admin) = shared().await;
-    let grace = member(&store, &workspace, "grace@izlek.sh", "Grace").await;
-    let now = OffsetDateTime::now_utc();
-    let board = store.board(&workspace).await.unwrap().unwrap();
-    let column_id = column_named(&store, &workspace, "Backlog").await;
-    let task = store
-        .create_task(NewTask {
-            board_id: &board.id,
-            column_id: &column_id,
-            parent_id: None,
-            title: "Feed me",
-            description: "",
-            deadline: None,
-            clock_at: None,
-            created_by: &admin,
-        })
-        .await
-        .unwrap()
-        .row
-        .id;
-
-    store.assign_task(&task, &grace).await.unwrap();
-
-    // Creating started Ada's watch; the assignment starts Grace's. Nobody's
-    // own actions are their own news: Ada's created line is Grace's news,
-    // and Grace's feed shows it while Ada's stays empty.
-    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
-    assert_eq!(grace_feed.len(), 1);
-    assert_eq!(grace_feed[0].kind, ActivityKind::Created);
-    assert_eq!(grace_feed[0].actor_name.as_deref(), Some("Ada"));
-    assert!(store.feed_for_user(&admin, 50).await.unwrap().is_empty());
-    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 1);
-
-    // Grace's own comment is her own action: it is Ada's news, not hers.
-    store
-        .add_comment(&task, &grace, "Looking at it now", now)
-        .await
-        .unwrap();
-    // Her feed keeps the created line; her own comment never comes back.
-    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
-    assert_eq!(grace_feed.len(), 1);
-    assert_eq!(grace_feed[0].kind, ActivityKind::Created);
-    let admin_feed = store.feed_for_user(&admin, 50).await.unwrap();
-    assert_eq!(admin_feed.len(), 1);
-    assert_eq!(admin_feed[0].kind, ActivityKind::Commented);
-    assert_eq!(admin_feed[0].actor_name.as_deref(), Some("Grace"));
-    assert_eq!(store.count_feed_unseen(&admin).await.unwrap(), 1);
-
-    // Reading the feed is reading it: the marker resets, the history stays.
-    store
-        .mark_feed_seen(&admin, now + Duration::seconds(5))
-        .await
-        .unwrap();
-    assert_eq!(store.count_feed_unseen(&admin).await.unwrap(), 0);
-    assert_eq!(store.feed_for_user(&admin, 50).await.unwrap().len(), 1);
-
-    // Grace reads the feed too: her marker takes the created line off her
-    // unseen count, history included.
-    store
-        .mark_feed_seen(&grace, now + Duration::seconds(3))
-        .await
-        .unwrap();
-    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 0);
-    assert_eq!(store.feed_for_user(&grace, 50).await.unwrap().len(), 1);
-
-    // Ada's comment lands on a task Grace watches, after her marker: news.
-    store
-        .add_comment(
-            &task,
-            &admin,
-            "Thanks — ship it",
-            now + Duration::seconds(6),
-        )
-        .await
-        .unwrap();
-    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 1);
-    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
-    assert_eq!(grace_feed.len(), 2, "{grace_feed:?}");
-    assert_eq!(grace_feed[0].kind, ActivityKind::Commented);
-    assert_eq!(grace_feed[0].actor_name.as_deref(), Some("Ada"));
-
-    // An unassign takes the watch back off: history on the task stops
-    // concerning the person who left.
-    store.unassign_task(&task, &grace).await.unwrap();
-    assert!(store.feed_for_user(&grace, 50).await.unwrap().is_empty());
-    assert_eq!(store.count_feed_unseen(&grace).await.unwrap(), 0);
-
-    // An event that NAMES her concerns her with no watch at all — the
-    // second way into the feed.
-    store
-        .record_activity(
-            &task,
-            Some(&admin),
-            Some(&grace),
-            &ActivityKind::Assigned,
-            "Grace",
-            now + Duration::seconds(7),
-        )
-        .await
-        .unwrap();
-    let grace_feed = store.feed_for_user(&grace, 50).await.unwrap();
-    assert_eq!(grace_feed.len(), 1);
-    assert_eq!(grace_feed[0].kind, ActivityKind::Assigned);
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
 #[tokio::test]
 async fn a_delivered_reminder_writes_the_reminded_event() {
     let (dir, store, workspace, admin) = shared().await;
@@ -9419,108 +9307,60 @@ async fn board_search_folds_turkish_case() {
     assert_eq!(card.id, is_plan);
 }
 
-/// The watch backfill rides the reconcile rebuild: a database from before
-/// the feed opens with a watch for every task somebody created, was
-/// assigned, or commented on — soft-deleted tasks included, history
-/// included. The pass can never run twice (it lives behind the fingerprint
-/// gate), so an unassign after the deploy keeps its watch off across
-/// restarts.
+/// The assignee narrowing keeps the cards a member is on and, for `none`,
+/// exactly the cards nobody is on — the same pass the tag filter rides.
 #[tokio::test]
-async fn reconcile_backfills_watches_from_history_exactly_once() {
-    let (dir, path) = live_shaped_database().await;
-
-    // A historical comment — the third watch-worthy fact — on a task that
-    // already carries creation and assignment history.
-    {
-        let db = turso::Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute(
-            "INSERT INTO comment (id, task_id, author_id, body, created_at) \
-             VALUES ('CM1', 'T2', 'U1', 'on it', '2026-08-30T12:00:01Z')",
-            (),
-        )
+async fn board_assigned_narrows_to_a_member_or_to_nobody() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let mate = member(&scratch.store, &workspace, "grace@izlek.sh", "Grace").await;
+    let assigned_task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Assigned work",
+        None,
+        &admin,
+    )
+    .await;
+    let loose_task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Loose work",
+        None,
+        &admin,
+    )
+    .await;
+    scratch
+        .store
+        .assign_task(&assigned_task, &mate)
         .await
         .unwrap();
-    }
 
-    izlek_core::store::reconcile(
-        &path,
-        izlek_core::store::ReconcileOptions {
-            dry_run: false,
-            yes: true,
-            auto: true,
-        },
-    )
-    .await
-    .expect("reconcile refused the backfill");
-
-    // T1: created by U1, assigned to U2. T2: created U1, assigned U2,
-    // commented U1. T3: created U1, assigned U2. T4 (soft-deleted): created
-    // U1. Distinct (task, watcher) pairs: 2 + 2 + 2 + 1.
-    assert_eq!(scalar(&path, "SELECT COUNT(*) FROM task_watcher").await, 7);
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM task_watcher WHERE user_id = 'U2'"
-        )
-        .await,
-        3,
-        "the assignee watches every task they are on"
-    );
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM task_watcher WHERE user_id = 'U1'"
-        )
-        .await,
-        4,
-        "the creator watches every task they made, soft-deleted included"
-    );
-
-    // The deploy happens; THEN Deniz unassigns — here, the same write the
-    // store makes. The pass never re-runs (the shape matches now), so the
-    // watch stays off across a restart and a second reconcile.
-    {
-        let db = turso::Builder::new_local(&path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute(
-            "DELETE FROM task_watcher WHERE task_id = 'T1' AND user_id = 'U2'",
-            (),
-        )
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
         .await
+        .unwrap()
         .unwrap();
-    }
-    izlek_core::store::reconcile(
-        &path,
-        izlek_core::store::ReconcileOptions {
-            dry_run: false,
-            yes: true,
-            auto: true,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM task_watcher WHERE task_id = 'T1'"
-        )
-        .await,
-        1,
-        "the unassigned watch was resurrected"
-    );
-    let _store = TursoStore::open(&path).await.unwrap();
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM task_watcher WHERE task_id = 'T1'"
-        )
-        .await,
-        1,
-        "a restart resurrected the unassigned watch"
-    );
+    board.assigned(Some(&mate));
+    assert_eq!(board.task_count(), 1);
+    let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+    assert_eq!(card.id, assigned_task);
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.assigned(Some("none"));
+    assert_eq!(board.task_count(), 1);
+    let card = board.columns.iter().flat_map(|c| &c.cards).next().unwrap();
+    assert_eq!(card.id, loose_task);
+
+    let mut board = izlek_core::board::load(&scratch.store, &workspace)
+        .await
+        .unwrap()
+        .unwrap();
+    board.assigned(None);
+    assert_eq!(board.task_count(), 2);
 }
 
 // ---------------------------------------------------------------------------

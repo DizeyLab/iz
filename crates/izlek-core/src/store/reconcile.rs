@@ -737,23 +737,6 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
         })?;
     }
 
-    // Backfills the watches the feed reads: a watch for every task somebody
-    // created, was assigned, or commented on, including all history. This
-    // runs exactly once per database — the rebuild only happens on a schema
-    // mismatch — so watches removed by an unassign after the deploy stand,
-    // and the pass cannot fight the transactional auto-watch in the store's
-    // own writes: nothing is being served while the rebuild runs.
-    new_conn
-        .execute(
-            "INSERT OR IGNORE INTO task_watcher (task_id, user_id) \
-             SELECT t.id, t.created_by FROM task t WHERE t.created_by IS NOT NULL \
-             UNION SELECT task_id, user_id FROM task_assignee \
-             UNION SELECT task_id, author_id FROM comment",
-            (),
-        )
-        .await
-        .map_err(|e| StoreError::Backend(format!("seed watches: {e}")))?;
-
     new_conn
         .execute("DETACH DATABASE old", ())
         .await
@@ -835,30 +818,11 @@ async fn verify(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
     for table in tables {
         let old_count = count_rows(old_conn, table).await?;
         let new_count = count_rows(new_conn, table).await?;
-        // task_watcher: the rebuild backfills watches from history — every
-        // task somebody created, was assigned, or commented on — so the new
-        // count is that derived set (every old watch is in it by
-        // construction), not the old count.
-        let expected = if table == "task_watcher" {
-            Some(count_rows(new_conn, "(SELECT t.id, t.created_by AS user_id FROM task t WHERE t.created_by IS NOT NULL UNION SELECT task_id, user_id FROM task_assignee UNION SELECT task_id, author_id FROM comment)").await?)
-        } else {
-            None
-        };
-        match expected {
-            Some(want) if new_count != want => {
-                return Err(StoreError::Backend(format!(
-                    "task_watcher count {} does not match the backfilled set {}",
-                    new_count, want
-                )));
-            }
-            Some(_) => {}
-            None if old_count != new_count => {
-                return Err(StoreError::Backend(format!(
-                    "row count mismatch for {}: old {} new {}",
-                    table, old_count, new_count
-                )));
-            }
-            None => {}
+        if old_count != new_count {
+            return Err(StoreError::Backend(format!(
+                "row count mismatch for {}: old {} new {}",
+                table, old_count, new_count
+            )));
         }
     }
 

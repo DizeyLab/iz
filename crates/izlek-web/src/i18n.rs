@@ -375,9 +375,9 @@ pub enum Key {
     ResetLinkDead,
     ActResetRequested,
     ActResetDone,
-    NavFeed,
+    Assignee,
     ActReminded,
-    FeedEmpty,
+    Nobody,
 }
 
 /// The lone templated phrase — a name in the middle reads worse as two
@@ -1075,10 +1075,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActResetDone, Tr) => "sıfırlama bağlantısıyla yeni parola aldı",
         (ActReminded, En) => "sent a reminder mail",
         (ActReminded, Tr) => "hatırlatma gönderdi",
-        (NavFeed, En) => "For me",
-        (NavFeed, Tr) => "Benim için",
-        (FeedEmpty, En) => "Nothing yet.",
-        (FeedEmpty, Tr) => "Henüz bir şey yok.",
+        (Assignee, En) => "Assignee",
+        (Assignee, Tr) => "Atanan",
+        (Nobody, En) => "Nobody",
+        (Nobody, Tr) => "Kimse",
     }
 }
 

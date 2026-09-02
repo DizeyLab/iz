@@ -235,6 +235,16 @@ fn valid_tag(tag: Option<&str>, tags: &[izlek_core::store::Tag]) -> Option<Strin
     tag.and_then(|id| tags.iter().find(|t| t.id == id).map(|t| t.id.clone()))
 }
 
+/// The assignee filter keeps a member id of this workspace or the literal
+/// `none` — a stale or hand-edited query string falls back to all.
+fn valid_assigned(assigned: Option<&str>, members: &[User]) -> Option<String> {
+    match assigned {
+        None | Some("") => None,
+        Some("none") => Some("none".to_string()),
+        Some(id) => members.iter().find(|m| m.id == id).map(|m| m.id.clone()),
+    }
+}
+
 /// The `?q=` search: the box's text trimmed, and an empty box is no search
 /// at all — clearing it restores the whole board.
 fn searched(query: Option<&str>) -> Option<String> {
@@ -261,6 +271,7 @@ async fn board_columns(
     cx: &Cx,
     sort: String,
     tag_filter: Option<String>,
+    assigned: Option<String>,
     search: Option<String>,
     default_tag_id: Option<&str>,
 ) -> Result {
@@ -288,6 +299,7 @@ async fn board_columns(
         view_data.searching(needle);
     }
     view_data.tagged(tag_filter.as_deref());
+    view_data.assigned(assigned.as_deref());
     for column in &mut view_data.columns {
         column.column.name = crate::i18n::column_name(lang, &column.column.name);
         sort_column_cards(&mut column.cards, &sort);
@@ -609,6 +621,7 @@ struct BoardQuery {
     confirm: Option<String>,
     new: Option<String>,
     tag: Option<String>,
+    assigned: Option<String>,
     q: Option<String>,
 }
 
@@ -647,15 +660,21 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
         let store = accounts(cx).store().clone();
         store.tags(&view_data.board.id).await?
     };
+    let members = {
+        let store = accounts(cx).store().clone();
+        store.users(&user.workspace_id).await?
+    };
     // The whole filter pipeline narrows the board before anything counts or
     // renders it, so the chips, the columns and the empty state all describe
     // the same set.
     let search = searched(query.q.as_deref());
     let tag_filter = valid_tag(query.tag.as_deref(), &tags);
+    let assigned_filter = valid_assigned(query.assigned.as_deref(), &members);
     if let Some(needle) = &search {
         view_data.searching(needle);
     }
     view_data.tagged(tag_filter.as_deref());
+    view_data.assigned(assigned_filter.as_deref());
     let today = OffsetDateTime::now_utc().date();
     let overdue = view_data.overdue_count(today);
     let blocked = view_data.blocked_count();
@@ -709,6 +728,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <form class="field-box field-box-sort" method="get" action="/">
                 <input type="hidden" name="sort" value=(sort.clone())>
                 <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <input type="hidden" name="assigned" value=(assigned_filter.clone().unwrap_or_default())>
                 <span class="field-text">(t(lang, Key::Project))</span>
                 <select class="status-select" name="tag" data-autosubmit="" data-search="">
                     <option value="" selected=(tag_filter.is_none())>(t(lang, Key::AllTags))</option>
@@ -723,8 +743,27 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 </svg>
             </form>
             <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="sort" value=(sort.clone())>
                 <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
                 <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <span class="field-text">(t(lang, Key::Assignee))</span>
+                <select class="status-select" name="assigned" data-autosubmit="" data-search="">
+                    <option value="" selected=(assigned_filter.is_none())>(t(lang, Key::All))</option>
+                    <option value="none" selected=(assigned_filter.as_deref() == Some("none"))>(t(lang, Key::Nobody))</option>
+                    for member in &members {
+                        <option value=(member.id.clone()) selected=(assigned_filter.as_deref() == Some(member.id.as_str()))>(member.display_name.clone())</option>
+                    }
+                </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
+            </form>
+            <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <input type="hidden" name="assigned" value=(assigned_filter.clone().unwrap_or_default())>
                 <span class="field-text">(t(lang, Key::Sort))</span>
                 <select class="status-select" name="sort" data-autosubmit="">
                     for key in SORT_KEYS {
@@ -740,6 +779,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
             <form class="field-box field-box-search" method="get" action="/">
                 <input type="hidden" name="sort" value=(sort.clone())>
                 <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <input type="hidden" name="assigned" value=(assigned_filter.clone().unwrap_or_default())>
                 <span class="field-text">(t(lang, Key::Search))</span>
                 <input class="dd-search" type="text" name="q" value=(search.as_deref().unwrap_or(""))>
             </form>
@@ -755,7 +795,7 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 <div class="scaffold-note"><p>(t(lang, Key::NoMatches))</p></div>
             } else {
                 <div class="board-columns">
-                (board_columns(cx, sort.clone(), tag_filter.clone(), search.clone(), default_tag_id).await?)
+                (board_columns(cx, sort.clone(), tag_filter.clone(), assigned_filter.clone(), search.clone(), default_tag_id).await?)
                 </div>
             }
         </main>
