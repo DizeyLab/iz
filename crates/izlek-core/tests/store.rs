@@ -9522,3 +9522,253 @@ async fn reconcile_backfills_watches_from_history_exactly_once() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Boot-time re-sniff — attachments uploaded before the sniffer could name
+// OOXML files froze on a generic bucket, and the viewer routes on the stored
+// type alone, so an old .pptx used to render as a plain download. Opening a
+// store runs the pass: these tests plant old-style rows, then open, then read
+// back what the rows became.
+// ---------------------------------------------------------------------------
+
+/// A zip of the named entries, contents irrelevant: the sniffer reads the
+/// entry names a zip stores uncompressed.
+fn zip_with(names: &[&str]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for name in names {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"<xml/>").unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+/// A zip whose only office marker sits in its central directory, beyond both
+/// boot windows: the filler entries before the marked one push its local
+/// header past the head window, and the filler entries after it push its
+/// directory record past the tail window — the shape only the directory
+/// read can settle.
+fn deep_zip(before: usize, after: usize) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut names: Vec<String> = (0..before).map(|i| format!("head/filler{i}.bin")).collect();
+    names.push("ppt/presentation.xml".into());
+    names.extend((0..after).map(|i| format!("tail/filler{i}.bin")));
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for name in &names {
+        zip.start_file(name.as_str(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&[b'x'; 64]).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+/// Whether the boot windows of `bytes` hold `marker` — the premise the deep
+/// zip's test stands on, checked rather than assumed.
+fn windows_hold(bytes: &[u8], marker: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(izlek_core::store::sniff::HEAD_WINDOW as usize)];
+    let tail = &bytes[bytes.len().saturating_sub(izlek_core::store::sniff::TAIL_WINDOW as usize)..];
+    head.windows(marker.len()).any(|w| w == marker)
+        || tail.windows(marker.len()).any(|w| w == marker)
+}
+
+/// OLE container bytes: the compound-file magic, then optionally the UTF-16
+/// `Workbook` stream name an .xls directory carries.
+fn ole_bytes(with_workbook: bool) -> Vec<u8> {
+    let mut bytes = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    bytes.extend_from_slice(&[0; 512]);
+    if with_workbook {
+        bytes.extend_from_slice(b"W\0o\0r\0k\0b\0o\0o\0k\0");
+    }
+    bytes
+}
+
+/// A scratch database carrying old-style attachment rows: real bytes under
+/// the generic mime a pre-sniffer upload froze on. The first open creates
+/// the schema and finds nothing to do; the rows go in through a raw
+/// connection; the caller then opens the store again, which runs the pass.
+struct Planted {
+    dir: PathBuf,
+    path: String,
+}
+
+impl Planted {
+    async fn plant(rows: &[(&str, &str, Vec<u8>)]) -> Self {
+        let dir = std::env::temp_dir().join(format!("izlek-resniff-{}", Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("izlek.db").to_str().unwrap().to_string();
+        drop(TursoStore::open(&path).await.unwrap());
+        let db = turso::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        for (id, mime, bytes) in rows {
+            conn.execute(
+                "INSERT INTO attachment (id, task_id, file_name, mime_type, size_bytes, \
+                     bytes, uploaded_by, created_at) \
+                 VALUES (?1, 'T1', 'old.bin', ?2, ?3, ?4, 'U1', '2026-08-01T00:00:00Z')",
+                turso::params![id, mime, bytes.len() as i64, bytes.clone()],
+            )
+            .await
+            .unwrap();
+        }
+        drop(conn);
+        drop(db);
+        Self { dir, path }
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    async fn open(&self) -> TursoStore {
+        TursoStore::open(self.path()).await.unwrap()
+    }
+}
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[tokio::test]
+async fn a_zip_mime_presentation_becomes_the_slides_mime_on_the_next_boot() {
+    let planted = Planted::plant(&[(
+        "FA",
+        "application/zip",
+        zip_with(&["ppt/presentation.xml", "ppt/slides/slide1.xml"]),
+    )])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FA").await.unwrap().unwrap().mime_type,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "the mime `viewer_kind` routes to the Slides overlay"
+    );
+}
+
+#[tokio::test]
+async fn a_zip_mime_workbook_becomes_the_sheet_mime_on_the_next_boot() {
+    let planted = Planted::plant(&[(
+        "FB",
+        "application/zip",
+        zip_with(&["xl/workbook.xml", "xl/worksheets/sheet1.xml"]),
+    )])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FB").await.unwrap().unwrap().mime_type,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "the mime `is_spreadsheet` routes to the Sheet overlay"
+    );
+}
+
+#[tokio::test]
+async fn an_ole_container_without_a_workbook_stream_stays_as_stored() {
+    let planted = Planted::plant(&[(
+        "FC",
+        "application/x-ole-storage",
+        ole_bytes(false),
+    )])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FC").await.unwrap().unwrap().mime_type,
+        "application/x-ole-storage"
+    );
+}
+
+#[tokio::test]
+async fn an_ole_container_with_a_workbook_stream_becomes_ms_excel() {
+    let planted = Planted::plant(&[(
+        "FD",
+        "application/x-ole-storage",
+        ole_bytes(true),
+    )])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FD").await.unwrap().unwrap().mime_type,
+        "application/vnd.ms-excel"
+    );
+}
+
+/// Every stored type the pass could touch but never should: specific rows
+/// wear no generic bucket, so the probe finds nothing and no blob moves —
+/// which is also why there is nothing here to un-write on the next boot.
+#[tokio::test]
+async fn specific_mimes_survive_a_boot_pass_that_has_nothing_to_do() {
+    let png = {
+        let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.extend_from_slice(&[0; 64]);
+        bytes
+    };
+    let planted = Planted::plant(&[
+        ("FE", "image/png", png),
+        ("FF", "application/pdf", b"%PDF-1.4 nothing to see".to_vec()),
+        ("FG", "text/plain", b"plainly text".to_vec()),
+    ])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(store.attachment("FE").await.unwrap().unwrap().mime_type, "image/png");
+    assert_eq!(store.attachment("FF").await.unwrap().unwrap().mime_type, "application/pdf");
+    assert_eq!(store.attachment("FG").await.unwrap().unwrap().mime_type, "text/plain");
+}
+
+#[tokio::test]
+async fn a_plain_zip_stays_a_plain_zip_across_the_boot_pass() {
+    let planted = Planted::plant(&[(
+        "FH",
+        "application/zip",
+        zip_with(&["notes.txt", "data/blob.bin"]),
+    )])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FH").await.unwrap().unwrap().mime_type,
+        "application/zip"
+    );
+}
+
+#[tokio::test]
+async fn a_presentation_hidden_beyond_both_windows_is_found_in_its_central_directory() {
+    let bytes = deep_zip(2000, 3000);
+    assert!(
+        !windows_hold(&bytes, b"ppt/presentation.xml"),
+        "the test's premise broke: the marker fell inside a boot window"
+    );
+    let planted = Planted::plant(&[("FI", "application/zip", bytes)]).await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FI").await.unwrap().unwrap().mime_type,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    );
+}
+
+#[tokio::test]
+async fn an_octet_stream_row_wearing_office_bytes_is_refined_too() {
+    let planted = Planted::plant(&[(
+        "FJ",
+        "application/octet-stream",
+        zip_with(&["ppt/presentation.xml", "ppt/slides/slide1.xml"]),
+    )])
+    .await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FJ").await.unwrap().unwrap().mime_type,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    );
+}
+
+/// A window cannot prove a whole blob is UTF-8: an octet-stream row whose
+/// head reads as text but whose tail is binary stays exactly what it is.
+#[tokio::test]
+async fn a_window_that_cannot_prove_text_keeps_the_octet_stream_bucket() {
+    let mut bytes = b"this front half is plainly text, ".to_vec();
+    bytes.extend_from_slice(&[0x00, 0xFF, 0xFE, 0x80]);
+    let planted = Planted::plant(&[("FK", "application/octet-stream", bytes)]).await;
+    let store = planted.open().await;
+    assert_eq!(
+        store.attachment("FK").await.unwrap().unwrap().mime_type,
+        "application/octet-stream"
+    );
+}

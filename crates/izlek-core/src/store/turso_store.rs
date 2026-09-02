@@ -10,7 +10,7 @@ use rand::Rng;
 use time::{Duration, OffsetDateTime};
 use time::format_description::well_known::Rfc3339;
 use turso::transaction::{Transaction, TransactionBehavior};
-use turso::{Builder, Connection, Row, Value, params};
+use turso::{Builder, Connection, Row, Value, params, params_from_iter};
 use ulid::Ulid;
 
 use super::secret;
@@ -21,7 +21,7 @@ use super::{
     SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, Tag, TaskCreated, Trigger,
     User, UserStats, Workspace, LinkKind,
 };
-use super::{reconcile, ReconcileOptions, schema};
+use super::{reconcile, ReconcileOptions, schema, sniff};
 use crate::Role;
 use crate::board::{BoardMeta, BoardReads, Column, Moved, Person, TagChip, TaskRow, Transition};
 use crate::detail::{
@@ -124,6 +124,7 @@ impl TursoStore {
         };
         store.migrate(path).await?;
         store.encrypt_plaintext_passwords().await?;
+        store.resniff_generic_attachments().await?;
         // The file may have been rebuilt from a backup; its permissions and
         // any transient WAL/SHM siblings should still be private.
         if path != ":memory:" {
@@ -165,6 +166,107 @@ impl TursoStore {
             conn.execute(
                 "UPDATE workspace SET smtp_password = ?1 WHERE id = ?2",
                 params![sealed, id],
+            )
+            .await
+            .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    /// Re-decides the stored type of attachments whose `mime_type` is one of
+    /// [`sniff::GENERIC_MIME_TYPES`] — rows written before the sniffer could
+    /// name OOXML files, which a file chip then renders as a plain download
+    /// because the viewer routes on the stored type alone. It runs here, once
+    /// per boot, for the same reason the password-sealing pass above does: it
+    /// is a data repair no migration can express, and a boot is the one moment
+    /// the store may rewrite what uploads wrote. It is idempotent by
+    /// construction — a row the pass refines leaves the generic buckets and is
+    /// never read again, and a row the bytes cannot settle is left exactly as
+    /// stored. Nothing is ever narrowed: the only verdicts written back are
+    /// specific mime types that differ from what is stored.
+    ///
+    /// Cheap by design. The pass opens with a count of generic rows and, when
+    /// there are none — every database after one pass, and every database
+    /// whose uploads all postdate the sniffer — reads no blob bytes at all.
+    /// Otherwise each such row donates two windows, the first
+    /// [`sniff::HEAD_WINDOW`] and last [`sniff::TAIL_WINDOW`] bytes, and only
+    /// when the windows find a zip with no office marker in them does the row
+    /// give up its central directory: the complete entry list, in which every
+    /// entry name the file has appears, so a pptx or xlsx cannot hide its
+    /// `ppt/presentation.xml` or `xl/workbook.xml` from the sweep. A window
+    /// verdict is never trusted for `text/plain` — a window cannot prove a
+    /// whole blob is UTF-8 — and a directory the end record locates beyond
+    /// [`sniff::DIRECTORY_CAP`], or a zip64 one, is left unread and the row
+    /// left alone.
+    async fn resniff_generic_attachments(&self) -> Result<()> {
+        let buckets = sniff::GENERIC_MIME_TYPES;
+        let marks = (1..=buckets.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let conn = self.conn.lock().await;
+
+        // The existence probe the whole pass hangs off: one count of a short
+        // text column, no blob reads, and the common case is done here.
+        let mut rows = conn
+            .query(
+                &format!("SELECT COUNT(*) FROM attachment WHERE mime_type IN ({marks})"),
+                params_from_iter(buckets.iter().copied()),
+            )
+            .await
+            .map_err(backend)?;
+        let count = match rows.next().await.map_err(backend)? {
+            Some(row) => row.get::<i64>(0).map_err(backend)?,
+            None => 0,
+        };
+        if count == 0 {
+            return Ok(());
+        }
+
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT id, mime_type, substr(bytes, 1, {head}), substr(bytes, -{tail}) \
+                     FROM attachment WHERE mime_type IN ({marks})",
+                    head = sniff::HEAD_WINDOW,
+                    tail = sniff::TAIL_WINDOW,
+                    marks = marks,
+                ),
+                params_from_iter(buckets.iter().copied()),
+            )
+            .await
+            .map_err(backend)?;
+        let mut pending = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            let id = text(&row, 0)?;
+            let stored = text(&row, 1)?;
+            let head: Vec<u8> = row.get(2).map_err(backend)?;
+            let tail: Vec<u8> = row.get(3).map_err(backend)?;
+            let candidate = match sniff::refine(&stored, &head, &tail) {
+                sniff::Verdict::Settle(candidate) => candidate,
+                sniff::Verdict::ReadDirectory { offset, size } => {
+                    let len = size.min(sniff::DIRECTORY_CAP as u64) as i64;
+                    let mut directory = conn
+                        .query(
+                            "SELECT substr(bytes, ?1, ?2) FROM attachment WHERE id = ?3",
+                            params![offset as i64 + 1, len, id.clone()],
+                        )
+                        .await
+                        .map_err(backend)?;
+                    match directory.next().await.map_err(backend)? {
+                        Some(row) => sniff::office_entry_mime(&row.get::<Vec<u8>>(0).map_err(backend)?),
+                        None => None,
+                    }
+                }
+            };
+            if let Some(mime) = sniff::refinement(&stored, candidate) {
+                pending.push((mime, id));
+            }
+        }
+        for (mime, id) in pending {
+            conn.execute(
+                "UPDATE attachment SET mime_type = ?1 WHERE id = ?2",
+                params![mime, id],
             )
             .await
             .map_err(backend)?;

@@ -17,6 +17,8 @@ pub mod secret;
 #[cfg(feature = "server")]
 pub mod reconcile;
 #[cfg(feature = "server")]
+pub mod sniff;
+#[cfg(feature = "server")]
 pub mod schema;
 pub mod turso_store;
 

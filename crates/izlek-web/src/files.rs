@@ -14,6 +14,7 @@ use topcoat::router::{
     HeaderMap, HeaderValue, StatusCode, header, path_param, query_params, route,
 };
 
+use izlek_core::store::sniff::sniff;
 use izlek_core::store::{NewAttachment, Store, User};
 
 use crate::server::{Refusal, accounts, require_user};
@@ -113,91 +114,6 @@ fn mime_of_extension(ext: &str) -> Option<&'static str> {
         "ogg" => Some("audio/ogg"),
         _ => None,
     }
-}
-
-/// What the bytes are, decided from the bytes themselves — never from the
-/// part's `content_type()`, which is whatever the browser felt like sending.
-pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png"
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF8") {
-        "image/gif"
-    } else if bytes.starts_with(b"%PDF-") {
-        "application/pdf"
-    } else if bytes.starts_with(b"PK\x03\x04") {
-        // Every OOXML and OpenDocument file is a zip; what kind it is lives in
-        // the entry names, which a zip stores uncompressed. `xl/workbook.xml`
-        // is the one part an xlsx cannot be without, an ods declares its
-        // type in the `mimetype` entry the format requires be stored first,
-        // and `ppt/presentation.xml` is the one part a pptx cannot be
-        // without.
-        if contains(bytes, b"xl/workbook.xml") {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        } else if contains(bytes, b"opendocument.spreadsheet") {
-            "application/vnd.oasis.opendocument.spreadsheet"
-        } else if contains(bytes, b"ppt/presentation.xml") {
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        } else {
-            "application/zip"
-        }
-    } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
-        // The pre-2007 OLE compound file .xls, .doc and .ppt all share. Its
-        // directory holds stream names in UTF-16, and only a workbook carries
-        // one called `Workbook` — a .doc or .ppt stays an unnamed container.
-        if contains(bytes, b"W\0o\0r\0k\0b\0o\0o\0k\0") {
-            "application/vnd.ms-excel"
-        } else {
-            "application/x-ole-storage"
-        }
-    } else if bytes.starts_with(&[0x1F, 0x8B]) {
-        "application/gzip"
-    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
-        "image/avif"
-    } else if bytes.len() >= 12
-        && &bytes[4..8] == b"ftyp"
-        && matches!(
-            &bytes[8..12],
-            b"heic" | b"heix" | b"hevc" | b"heif" | b"mif1" | b"msf1"
-        )
-    {
-        // Apple's HEIC container reuses the ISO-BMFF `ftyp` box video shares;
-        // the brand at bytes 8..12 is what tells a photo from a video apart.
-        "image/heic"
-    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"qt  " {
-        "video/quicktime"
-    } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
-        "video/mp4"
-    } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        "video/webm"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
-        "audio/wav"
-    } else if bytes.starts_with(b"fLaC") {
-        "audio/flac"
-    } else if bytes.starts_with(b"OggS") {
-        "audio/ogg"
-    } else if bytes.starts_with(b"ID3")
-        || bytes.starts_with(&[0xFF, 0xFB])
-        || bytes.starts_with(&[0xFF, 0xF3])
-        || bytes.starts_with(&[0xFF, 0xF2])
-    {
-        "audio/mpeg"
-    } else if std::str::from_utf8(bytes).is_ok() {
-        "text/plain"
-    } else {
-        "application/octet-stream"
-    }
-}
-
-/// Whether `haystack` holds `needle` anywhere in it. Used on zip bytes, where
-/// the entry names sit in the clear even when the entries themselves do not.
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
 }
 
 /// The `Content-Disposition` header for one download. `inline` is only ever
@@ -580,48 +496,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sniffs_the_magic_numbers() {
-        assert_eq!(sniff(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]), "image/png");
-        assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
-        assert_eq!(sniff(b"hello, this is plainly text"), "text/plain");
-        assert_eq!(
-            sniff(&[0x00, 0x01, 0xFE, 0xFF, 0x02]),
-            "application/octet-stream"
-        );
-    }
-
-    #[test]
-    fn sniffs_the_media_types() {
-        assert_eq!(
-            sniff(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"),
-            "video/mp4"
-        );
-        assert_eq!(
-            sniff(b"\x00\x00\x00\x18ftypavif\x00\x00\x00\x00"),
-            "image/avif"
-        );
-        assert_eq!(
-            sniff(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"),
-            "image/heic"
-        );
-        assert_eq!(
-            sniff(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00"),
-            "image/heic"
-        );
-        assert_eq!(
-            sniff(b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"),
-            "video/quicktime"
-        );
-        assert_eq!(sniff(&[0x1A, 0x45, 0xDF, 0xA3, 0x00, 0x00]), "video/webm");
-        assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
-        assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WAVEfmt "), "audio/wav");
-        assert_eq!(sniff(b"fLaC\x00\x00\x00\x00"), "audio/flac");
-        assert_eq!(sniff(b"OggS\x00\x00\x00\x00"), "audio/ogg");
-        assert_eq!(sniff(b"ID3\x03\x00\x00\x00"), "audio/mpeg");
-        assert_eq!(sniff(&[0xFF, 0xFB, 0x90, 0x00]), "audio/mpeg");
-    }
-
-    #[test]
     fn labels_strip_the_path_and_the_control_characters() {
         assert_eq!(label_of("../../etc/passwd"), "passwd");
         assert_eq!(label_of(r"a\b.txt"), "b.txt");
@@ -735,29 +609,6 @@ mod tests {
             "MIME types filter a mobile picker; the camera is never the only door"
         );
         assert_eq!(accept_attribute(&[]), "", "no list, no attribute");
-    }
-
-    /// A zip of the named entries, bytes inside irrelevant: the sniff reads
-    /// the entry names a zip stores uncompressed.
-    fn zip_with(names: &[&str]) -> Vec<u8> {
-        use std::io::Write as _;
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for name in names {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(b"<xml/>").unwrap();
-        }
-        zip.finish().unwrap().into_inner()
-    }
-
-    #[test]
-    fn a_presentation_sniffs_its_presentation_mime_and_a_plain_zip_stays_a_zip() {
-        let pptx = zip_with(&["ppt/presentation.xml", "ppt/slides/slide1.xml"]);
-        assert_eq!(
-            sniff(&pptx),
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        );
-        assert_eq!(sniff(&zip_with(&["notes.txt"])), "application/zip");
     }
 
     #[test]

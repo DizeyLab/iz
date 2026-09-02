@@ -10,7 +10,7 @@ use topcoat::router::content::multipart::Multipart;
 use topcoat::router::request::headers as request_headers;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, path_param, route};
 
-use crate::files::sniff;
+use izlek_core::store::sniff::sniff;
 use crate::server::{Refusal, accounts, require_user};
 use crate::settings::saved_or_refused;
 
