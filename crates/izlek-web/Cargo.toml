@@ -40,9 +40,14 @@ lettre = { version = "0.11.23", default-features = false, features = [
   "pool",
 ] }
 calamine = { version = "0.36.1", default-features = false }
+# Hashes the compiled stylesheet against the bundle's bytes at boot, so a
+# bundle from another generation refuses the boot instead of serving under
+# this binary (see `server.rs`'s `stylesheet_guard`).
+sha2 = "0.10"
 
 [build-dependencies]
 grass = "0.13"
+sha2 = "0.10"
 
 [dev-dependencies]
 http = "1.5"

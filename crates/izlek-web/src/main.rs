@@ -67,6 +67,27 @@ async fn main() {
         println!("izlek    {line}");
     }
 
+    // The bundle beside the executable is the only stylesheet this process
+    // can serve, and nothing in topcoat binds it to this binary's
+    // generation: a bundle left behind by another deploy loads as happily
+    // as the right one, and the pages then reference a stylesheet whose
+    // bytes are days old — the mixed generation a browser once caught on
+    // production. The fingerprint build.rs stamped into this binary is
+    // checked against the bundle's bytes, and a foreign bundle refuses the
+    // boot rather than serving under it.
+    let bundle = AssetBundle::load().unwrap_or_else(|err| {
+        eprintln!("izlek: the asset bundle beside the executable failed to load: {err}");
+        std::process::exit(2);
+    });
+    let stylesheet = match izlek_web::server::stylesheet_guard(&bundle) {
+        Ok(line) => line,
+        Err(problem) => {
+            eprintln!("izlek: {problem}");
+            std::process::exit(2);
+        }
+    };
+    println!("izlek    {stylesheet}");
+
     // One process per database file: Turso is a single-writer engine and a
     // second process on the same file loses writes rather than queueing.
     //
@@ -104,7 +125,7 @@ async fn main() {
                 .at("/api/profile_photo"),
         )
         .cookies()
-        .assets(AssetBundle::load().expect("failed to load the asset bundle"))
+        .assets(bundle)
         .app_context(accounts)
         .app_context(izlek_web::photo::PhotoStamps::default())
         .app_context(izlek_web::live::LiveWindow(std::time::Duration::from_secs(

@@ -13,6 +13,8 @@ use izlek_core::board::Transition;
 use izlek_core::mail::Engine;
 use izlek_core::store::{Freeing, User};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use topcoat::asset::AssetBundle;
 use topcoat::context::{Cx, app_context, memoize, try_app_context};
 use topcoat::cookie::{Cookie, Cookies, SameSite, cookie, cookies};
 use topcoat::router::request::headers;
@@ -206,6 +208,55 @@ pub fn client_label(cx: &Cx) -> String {
         Some(first) if !first.trim().is_empty() => first.trim().to_string(),
         _ => "unknown".to_string(),
     }
+}
+
+/// The stylesheet this binary serves must be the one compiled into it.
+///
+/// `asset!` embeds an asset's declaration — its id and source path — into
+/// the binary, but the served bytes live in the bundle directory beside the
+/// executable, and topcoat loads whatever manifest it finds there. A bundle
+/// left behind by another deploy sits beside a newer binary without a word
+/// of complaint, and the pages then reference a stylesheet whose bytes are
+/// from another generation — the mixed generation a browser once caught on
+/// production. `build.rs` stamps the compiled stylesheet's SHA-256 into the
+/// binary; this hashes the bundle's bytes against it, so a foreign bundle
+/// refuses the boot instead of serving under it.
+///
+/// Returns the startup log line naming the served fingerprint, or the
+/// reason the boot must not proceed.
+pub fn stylesheet_guard(bundle: &AssetBundle) -> Result<String, String> {
+    let expected = env!("IZLEK_STYLE_FINGERPRINT");
+    let stylesheet = bundle
+        .catalog()
+        .assets()
+        .find(|asset| {
+            let name = asset.name();
+            name.starts_with("main-") && name.ends_with(".css")
+        })
+        .ok_or_else(|| {
+            format!(
+                "the asset bundle at {} carries no stylesheet",
+                bundle.dir().display()
+            )
+        })?;
+    let bytes = std::fs::read(bundle.dir().join(stylesheet.name())).map_err(|err| {
+        format!(
+            "the bundled stylesheet {} could not be read: {err}",
+            stylesheet.name()
+        )
+    })?;
+    let actual = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+    if actual != expected {
+        return Err(format!(
+            "the asset bundle at {} is from another build: stylesheet {} is {actual} but this binary was compiled against {expected}; run `topcoat asset bundle` and redeploy",
+            bundle.dir().display(),
+            stylesheet.name()
+        ));
+    }
+    Ok(format!(
+        "assets  stylesheet {} ({actual})",
+        stylesheet.name()
+    ))
 }
 
 /// Writes the session cookie. `HttpOnly` so script cannot read it, `Secure` so
@@ -839,10 +890,9 @@ async fn cache_directives(cx: &Cx, body: Body, next: Next<'_>) -> topcoat::Resul
     if !is_html || parts.headers.contains_key(header::CACHE_CONTROL) {
         return Ok(Response::from_parts(parts, body));
     }
-    parts.headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
-    );
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     Ok(Response::from_parts(parts, body))
 }
 

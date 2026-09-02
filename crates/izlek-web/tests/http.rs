@@ -8422,7 +8422,12 @@ async fn an_empty_time_clears_the_clock_and_a_clear_clears_both() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("deadline", ""), ("clock_hour", ""), ("clock_minute", "")],
+            &[
+                ("task_id", &task),
+                ("deadline", ""),
+                ("clock_hour", ""),
+                ("clock_minute", ""),
+            ],
         )
         .await;
     assert!(
@@ -8644,7 +8649,6 @@ async fn a_time_that_cannot_be_used_is_refused_and_saves_nothing() {
     assert!(facts.row.clock_at.is_none(), "a lone minute was stored");
 }
 
-
 #[tokio::test]
 async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline() {
     let app = App::open().await;
@@ -8736,7 +8740,11 @@ async fn a_time_set_on_an_existing_day_writes_both_columns() {
         .post(
             "/api/save_task",
             Some(&admin_cookie),
-            &[("task_id", &task), ("clock_hour", "16"), ("clock_minute", "20")],
+            &[
+                ("task_id", &task),
+                ("clock_hour", "16"),
+                ("clock_minute", "20"),
+            ],
         )
         .await;
     assert!(
@@ -8981,7 +8989,11 @@ async fn a_time_change_fires_the_deadline_rule_and_round_trips() {
         .post(
             "/api/save_task",
             Some(&member),
-            &[("task_id", &task), ("clock_hour", "9"), ("clock_minute", "30")],
+            &[
+                ("task_id", &task),
+                ("clock_hour", "9"),
+                ("clock_minute", "30"),
+            ],
         )
         .await;
     assert!(
@@ -9100,7 +9112,9 @@ async fn an_off_step_clock_renders_itself_not_a_rounded_step() {
         saved.location
     );
 
-    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let page = app
+        .get(&format!("/?task={task}"), Some(&admin_cookie))
+        .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
         html.contains(r#"<option value="11" selected="">11</option>"#)
@@ -9176,13 +9190,12 @@ async fn tag_writes_record_their_events() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    app
-        .post(
-            "/api/create_tag",
-            Some(&admin_cookie),
-            &[("name", "Urgent")],
-        )
-        .await;
+    app.post(
+        "/api/create_tag",
+        Some(&admin_cookie),
+        &[("name", "Urgent")],
+    )
+    .await;
     let workspace_id = app.workspace_id().await;
     let tag = {
         let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
@@ -9197,27 +9210,24 @@ async fn tag_writes_record_their_events() {
             .find(|tag| tag.name == "Urgent")
             .expect("the tag was created")
     };
-    app
-        .post(
-            "/api/move_tag",
-            Some(&admin_cookie),
-            &[("tag_id", &tag.id), ("direction", "up")],
-        )
-        .await;
-    app
-        .post(
-            "/api/rename_tag",
-            Some(&admin_cookie),
-            &[("tag_id", &tag.id), ("name", "High")],
-        )
-        .await;
-    app
-        .post(
-            "/api/delete_tag",
-            Some(&admin_cookie),
-            &[("tag_id", &tag.id)],
-        )
-        .await;
+    app.post(
+        "/api/move_tag",
+        Some(&admin_cookie),
+        &[("tag_id", &tag.id), ("direction", "up")],
+    )
+    .await;
+    app.post(
+        "/api/rename_tag",
+        Some(&admin_cookie),
+        &[("tag_id", &tag.id), ("name", "High")],
+    )
+    .await;
+    app.post(
+        "/api/delete_tag",
+        Some(&admin_cookie),
+        &[("tag_id", &tag.id)],
+    )
+    .await;
 
     let lines = app
         .store
@@ -9261,13 +9271,12 @@ async fn tagging_a_task_records_a_trail_line() {
         .unwrap();
     let column = board.columns[0].column.id.clone();
     let task = a_task(&app, &admin_cookie, &column, "Audit me").await;
-    app
-        .post(
-            "/api/create_tag",
-            Some(&admin_cookie),
-            &[("name", "Shipped")],
-        )
-        .await;
+    app.post(
+        "/api/create_tag",
+        Some(&admin_cookie),
+        &[("name", "Shipped")],
+    )
+    .await;
     let tag = {
         let board = izlek_core::board::load(app.store.as_ref(), &workspace_id)
             .await
@@ -9282,13 +9291,12 @@ async fn tagging_a_task_records_a_trail_line() {
             .expect("the tag was created")
     };
 
-    app
-        .post(
-            "/api/set_task_tag",
-            Some(&admin_cookie),
-            &[("task_id", &task), ("tag_id", &tag.id)],
-        )
-        .await;
+    app.post(
+        "/api/set_task_tag",
+        Some(&admin_cookie),
+        &[("task_id", &task), ("tag_id", &tag.id)],
+    )
+    .await;
 
     let lines = app
         .store
@@ -9315,16 +9323,14 @@ async fn profile_photo_changes_record_their_events() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin_cookie),
-            &[],
-            Some(("me.png", "image/png", &PNG)),
-        )
-        .await;
-    app
-        .post("/api/delete_profile_photo", Some(&admin_cookie), &[])
+    app.post_multipart(
+        "/api/profile_photo",
+        Some(&admin_cookie),
+        &[],
+        Some(("me.png", "image/png", &PNG)),
+    )
+    .await;
+    app.post("/api/delete_profile_photo", Some(&admin_cookie), &[])
         .await;
 
     let lines = app
@@ -9382,10 +9388,7 @@ async fn checking_the_sender_records_an_event() {
 /// below reads the words the pane itself would show.
 async fn password_pane(app: &App, cookie: &str, query: &str) -> String {
     let page = app
-        .get(
-            &format!("/settings?section=profile&{query}"),
-            Some(cookie),
-        )
+        .get(&format!("/settings?section=profile&{query}"), Some(cookie))
         .await;
     String::from_utf8_lossy(&page.bytes).into_owned()
 }
@@ -9406,7 +9409,10 @@ async fn the_password_pane_names_each_failure() {
             "/api/change_password",
             Some(&admin_cookie),
             referer,
-            &[("current", "not the password"), ("new", "a whole new passphrase")],
+            &[
+                ("current", "not the password"),
+                ("new", "a whole new passphrase"),
+            ],
         )
         .await;
     let location = wrong.location.expect("a redirect location");
@@ -9433,14 +9439,15 @@ async fn the_password_pane_names_each_failure() {
         )
         .await;
     let location = same.location.expect("a redirect location");
+    assert!(location.contains("refusal=password-current"), "{location}");
     assert!(
-        location.contains("refusal=password-current"),
-        "{location}"
-    );
-    assert!(
-        password_pane(&app, &admin_cookie, "refusal=password-current&on=change_password")
-            .await
-            .contains("That's your current password.")
+        password_pane(
+            &app,
+            &admin_cookie,
+            "refusal=password-current&on=change_password"
+        )
+        .await
+        .contains("That's your current password.")
     );
 
     // Too short.
@@ -9449,15 +9456,22 @@ async fn the_password_pane_names_each_failure() {
             "/api/change_password",
             Some(&admin_cookie),
             referer,
-            &[("current", "correct horse battery staple"), ("new", "short")],
+            &[
+                ("current", "correct horse battery staple"),
+                ("new", "short"),
+            ],
         )
         .await;
     let location = short.location.expect("a redirect location");
     assert!(location.contains("refusal=password-short"), "{location}");
     assert!(
-        password_pane(&app, &admin_cookie, "refusal=password-short&on=change_password")
-            .await
-            .contains("At least 10 characters.")
+        password_pane(
+            &app,
+            &admin_cookie,
+            "refusal=password-short&on=change_password"
+        )
+        .await
+        .contains("At least 10 characters.")
     );
 
     // Looks like the address the account wears.
@@ -9466,15 +9480,22 @@ async fn the_password_pane_names_each_failure() {
             "/api/change_password",
             Some(&admin_cookie),
             referer,
-            &[("current", "correct horse battery staple"), ("new", "ada@izlek.sh!!")],
+            &[
+                ("current", "correct horse battery staple"),
+                ("new", "ada@izlek.sh!!"),
+            ],
         )
         .await;
     let location = you.location.expect("a redirect location");
     assert!(location.contains("refusal=password-you"), "{location}");
     assert!(
-        password_pane(&app, &admin_cookie, "refusal=password-you&on=change_password")
-            .await
-            .contains("Not your address or your name.")
+        password_pane(
+            &app,
+            &admin_cookie,
+            "refusal=password-you&on=change_password"
+        )
+        .await
+        .contains("Not your address or your name.")
     );
 
     // A change that works lands with the pane's own note, and the fresh
@@ -9495,7 +9516,10 @@ async fn the_password_pane_names_each_failure() {
     assert!(location.contains("saved=change_password"), "{location}");
     let fresh = right.session.clone().expect("a fresh session cookie");
     let page = app
-        .get("/settings?section=profile&saved=change_password", Some(&fresh))
+        .get(
+            "/settings?section=profile&saved=change_password",
+            Some(&fresh),
+        )
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
@@ -9504,13 +9528,12 @@ async fn the_password_pane_names_each_failure() {
     );
 
     // The same pane in Turkish names the same failures in Turkish.
-    app
-        .post(
-            "/api/save_profile",
-            Some(&fresh),
-            &[("display_name", "Ada Lovelace"), ("language", "tr")],
-        )
-        .await;
+    app.post(
+        "/api/save_profile",
+        Some(&fresh),
+        &[("display_name", "Ada Lovelace"), ("language", "tr")],
+    )
+    .await;
     let tr = app
         .get(
             "/settings?section=profile&refusal=password-current&on=change_password",
@@ -9564,7 +9587,9 @@ async fn a_card_lists_both_dependency_directions_as_keys() {
     let page = app.get("/", Some(&admin)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        html.contains(&format!(r#"class="card-blocks">blocks {second_key}</span>"#)),
+        html.contains(&format!(
+            r#"class="card-blocks">blocks {second_key}</span>"#
+        )),
         "the blocker's card did not name what it blocks: {html}"
     );
     assert!(
@@ -9593,7 +9618,11 @@ async fn the_board_search_filters_and_composes_with_the_project_filter() {
             &[("task_id", &panel), ("tag_id", &aurora.id)],
         )
         .await;
-    assert_eq!(answer.body, "null", "the tag did not attach: {}", answer.body);
+    assert_eq!(
+        answer.body, "null",
+        "the tag did not attach: {}",
+        answer.body
+    );
     let panel_key = app
         .store
         .task(&panel)
@@ -9654,9 +9683,7 @@ async fn queued_reset_token(app: &App, email: &str) -> Option<String> {
     let body = sends
         .into_iter()
         .rev()
-        .find(|send| {
-            send.kind == SendKind::Notice && send.recipient == email
-        })
+        .find(|send| send.kind == SendKind::Notice && send.recipient == email)
         .and_then(|send| send.body)?;
     body.rsplit_once("/reset/")
         .and_then(|(_, rest)| rest.split_whitespace().next())
@@ -9735,7 +9762,10 @@ async fn a_reset_link_redeems_on_its_own_screen() {
         .post(
             "/api/sign_in",
             None,
-            &[("email", "ada@izlek.sh"), ("password", "correct horse battery staple")],
+            &[
+                ("email", "ada@izlek.sh"),
+                ("password", "correct horse battery staple"),
+            ],
         )
         .await;
     assert_ne!(old.body, "null", "the old password still signed in");
@@ -9788,8 +9818,7 @@ async fn a_multi_file_picker_lands_every_part_as_its_own_attachment() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let column = first_column(&app).await;
-    let task = a_task(&app, &admin_cookie, &column, "Two parts, one post")
-        .await;
+    let task = a_task(&app, &admin_cookie, &column, "Two parts, one post").await;
 
     const BOUNDARY: &str = "izlek-test-boundary";
     let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9, 9];
@@ -9837,7 +9866,11 @@ async fn a_multi_file_picker_lands_every_part_as_its_own_attachment() {
     );
 
     let snapshot = app
-        .post("/api/fetch_task", Some(&admin_cookie), &[("task_id", &task)])
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
         .await;
     let png_id = attachment_id_named(&snapshot.body, "first.png");
     let txt_id = attachment_id_named(&snapshot.body, "notes.txt");
@@ -9866,13 +9899,12 @@ async fn the_feed_shows_each_person_their_stake() {
     let deniz_id = person_id(&app, &admin_cookie, &task, "Deniz").await;
 
     // Ada assigns Deniz: the assignment names him and starts his watch.
-    app
-        .post(
-            "/api/assign",
-            Some(&admin_cookie),
-            &[("task_id", &task), ("user_id", &deniz_id)],
-        )
-        .await;
+    app.post(
+        "/api/assign",
+        Some(&admin_cookie),
+        &[("task_id", &task), ("user_id", &deniz_id)],
+    )
+    .await;
 
     // The badge rides every page's topbar while the news is unread...
     let board = app.get("/", Some(&member)).await;
@@ -9930,4 +9962,62 @@ async fn the_build_stamp_matches_across_page_and_refetch() {
         stamps.windows(2).all(|pair| pair[0] == pair[1]),
         "the build stamp drifted between renders: {stamps:?}"
     );
+}
+
+/// The served stylesheet is the one compiled into this build: the page
+/// references it, the route answers it, and the bytes are the bytes
+/// build.rs wrote — not a bundle from another generation.
+#[tokio::test]
+async fn the_served_stylesheet_is_this_builds_bytes() {
+    let app = App::open().await;
+    let page = app.get("/", None).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    let url = html
+        .split('"')
+        .find(|piece| piece.starts_with("/_topcoat/assets/main-") && piece.ends_with(".css"))
+        .expect("the page references no stylesheet")
+        .to_string();
+    let served = app.get(&url, None).await;
+    assert_eq!(served.status, StatusCode::OK);
+    assert!(!served.bytes.is_empty());
+    let compiled = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/main.css"))
+        .expect("the compiled stylesheet is gone");
+    assert_eq!(
+        served.bytes, compiled,
+        "the server served another generation's stylesheet"
+    );
+}
+
+/// The boot guard refuses a bundle whose stylesheet bytes are not the
+/// generation this binary was compiled against, and accepts its own.
+#[test]
+fn the_stylesheet_guard_refuses_a_foreign_bundle() {
+    let bundle = AssetBundle::load_dir(asset_dir()).expect("no bundle: run `topcoat asset bundle`");
+    assert!(izlek_web::server::stylesheet_guard(&bundle).is_ok());
+
+    let foreign = std::env::temp_dir().join(format!("izlek-foreign-{}", Ulid::new()));
+    std::fs::create_dir_all(&foreign).unwrap();
+    for entry in std::fs::read_dir(asset_dir()).unwrap().flatten() {
+        std::fs::copy(entry.path(), foreign.join(entry.file_name())).unwrap();
+    }
+    let stylesheet = std::fs::read_dir(&foreign)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            (name.starts_with("main-") && name.ends_with(".css")).then_some(name)
+        })
+        .next()
+        .expect("no stylesheet in the copied bundle");
+    std::fs::write(
+        foreign.join(&stylesheet),
+        "body { color: another-generation }",
+    )
+    .unwrap();
+
+    let foreign_bundle = AssetBundle::load_dir(&foreign).expect("the copied bundle does not load");
+    let problem = izlek_web::server::stylesheet_guard(&foreign_bundle)
+        .expect_err("a foreign bundle passed the guard");
+    assert!(problem.contains("another build"), "{problem}");
+    std::fs::remove_dir_all(&foreign).unwrap();
 }
