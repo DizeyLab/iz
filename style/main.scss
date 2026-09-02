@@ -2702,7 +2702,7 @@ img.avatar {
 .upload-progress {
   position: absolute;
   left: 1px;
-  right: 1px;
+  right: 22px;
   bottom: 1px;
   height: 2px;
   background: var(--border);
@@ -2716,6 +2716,16 @@ img.avatar {
   height: 100%;
   background: var(--accent);
   transition: width var(--dur-fast) var(--ease);
+}
+
+// The cancel cross is the chip remove control seconded to the bar: same
+// `.file-chip-drop` 20px hit box, glyph and hover-to-danger, only moved to
+// the track's right end. It cancels the request and nothing else — never
+// the picker the box itself is.
+.upload-progress-drop {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
 }
 
 // -- comments ---------------------------------------------------------------

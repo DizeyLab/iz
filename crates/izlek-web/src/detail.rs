@@ -2181,7 +2181,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             <span class="detail-count">(detail.files.len())</span>
                         </div>
                         if may_comment {
-                            <form class="file-upload" method="post" action="/files" enctype="multipart/form-data">
+                            <form class="file-upload" method="post" action="/files" enctype="multipart/form-data" data-cancel-label=(t(lang, Key::Cancel)) data-empty-label=(t(lang, Key::File))>
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
                                 <label class="field-box file-upload-box">
                                     (glyph::plus(cx).await?)

@@ -535,7 +535,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                     var n = navStep(); \
                     var box = form.querySelector('.file-upload-box'); \
                     var input = form.querySelector('.file-upload-input'); \
-                    var bar = null; \
+                    var bar = null, drop = null; \
                     if (box) { \
                         bar = document.createElement('div'); \
                         bar.className = 'upload-progress'; \
@@ -543,19 +543,28 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                         fill.className = 'upload-progress-fill'; \
                         bar.appendChild(fill); \
                         box.appendChild(window.__izlekAdded(bar)); \
+                        drop = document.createElement('button'); \
+                        drop.type = 'button'; \
+                        drop.className = 'file-chip-drop upload-progress-drop'; \
+                        var cancelLabel = form.getAttribute('data-cancel-label'); \
+                        if (cancelLabel) { drop.setAttribute('aria-label', cancelLabel); } \
+                        drop.innerHTML = '<svg class=\"glyph\" width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M4 4l8 8M12 4l-8 8\"></path></svg>'; \
+                        drop.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); x.abort(); }); \
+                        box.appendChild(window.__izlekAdded(drop)); \
                     } \
                     if (input) { input.disabled = true; window.__izlekOwn(input, [], ['disabled']); } \
                     var settle = function () { \
                         form.__izlekUploading = false; \
                         if (input) { input.disabled = false; } \
                         if (bar && bar.parentNode) { bar.parentNode.removeChild(bar); } \
+                        if (drop && drop.parentNode) { drop.parentNode.removeChild(drop); } \
                     }; \
                     var x = new XMLHttpRequest(); \
                     x.open('POST', form.getAttribute('action') || window.location.href); \
                     x.setRequestHeader('accept', 'text/html'); \
                     x.upload.onprogress = function (ev) { \
                         if (!fill) { return; } \
-                        if (!bar.isConnected) { box.appendChild(bar); } \
+                        if (!bar.isConnected) { box.appendChild(bar); if (drop) { box.appendChild(drop); } } \
                         if (ev.lengthComputable && ev.total > 0) { fill.style.width = Math.min(100, Math.round((ev.loaded / ev.total) * 100)) + '%'; } \
                     }; \
                     x.onload = function () { \
@@ -564,7 +573,13 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                         swap(x.responseText, x.responseURL || form.getAttribute('action') || window.location.href); \
                     }; \
                     x.onerror = function () { settle(); form.submit(); }; \
-                    x.onabort = function () { settle(); }; \
+                    x.onabort = function () { \
+                        if (input) { input.value = ''; } \
+                        var name = box ? box.querySelector('.file-upload-name') : null; \
+                        var empty = form.getAttribute('data-empty-label'); \
+                        if (name && empty) { name.textContent = empty; } \
+                        settle(); \
+                    }; \
                     x.send(data); \
                     return; \
                 } \
