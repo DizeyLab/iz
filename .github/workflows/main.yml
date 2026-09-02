@@ -104,22 +104,29 @@ jobs:
           deploy_path="${{ secrets.DEPLOY_PATH }}"
           ssh_target="${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}"
 
-          ssh "$ssh_target" "
-            set -eu
-            case '${deploy_path}' in
-              ''|/|/home|/home/|/srv|/srv/|/var|/var/)
-                echo 'Refusing to deploy to a broad or empty path: ${deploy_path}' >&2
-                exit 1
-                ;;
-            esac
-            # The deploy path is the service's working directory: config/,
-            # izlek.db and izlek.key live there and are never touched from here.
-            # Only 'current' is replaced.
-            mkdir -p -- '${deploy_path}'
-            rm -rf -- '${deploy_path}/current.new'
-            mkdir -p -- '${deploy_path}/current.new'
-          "
-          tar -C stage -czf - . | ssh "$ssh_target" "tar -xzf - -C '${deploy_path}/current.new'"
+          # The server's login shell is not bash, and ssh would hand this
+          # script to it; `bash -s` takes it on stdin instead, so the login
+          # shell only ever parses one plain command. The deploy path goes
+          # as an argument, never interpolated into the script.
+          ssh "$ssh_target" "bash -se -- '$deploy_path'" <<'REMOTE'
+          set -euo pipefail
+          deploy_path=$1
+          case "$deploy_path" in
+            ''|/|/home|/home/|/srv|/srv/|/var|/var/)
+              echo "Refusing to deploy to a broad or empty path: $deploy_path" >&2
+              exit 1
+              ;;
+          esac
+          # The deploy path is the service's working directory: config/,
+          # izlek.db and izlek.key live there and are never touched from here.
+          # Only 'current' is replaced.
+          mkdir -p -- "$deploy_path"
+          rm -rf -- "$deploy_path/current.new"
+          mkdir -p -- "$deploy_path/current.new"
+          REMOTE
+          # A bare command with quoted arguments parses under any login
+          # shell, so the tar extraction needs no bash wrapper.
+          tar -C stage -czf - . | ssh "$ssh_target" "tar -xzf - -C '$deploy_path/current.new'"
 
       - name: Swap and restart
         run: |
@@ -127,39 +134,43 @@ jobs:
           deploy_path="${{ secrets.DEPLOY_PATH }}"
           ssh_target="${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}"
 
-          ssh "$ssh_target" "
-            set -eu
-            export XDG_RUNTIME_DIR=/run/user/\$(id -u)
-            # Read before anything moves: a config the health check cannot
-            # read is a failure to stop on, not one to roll back from.
-            listen=\$(sed -n 's/^listen[[:space:]]*=[[:space:]]*\"\(.*\)\"/\1/p' '${deploy_path}/config/izlek.toml')
-            if [ -z \"\$listen\" ]; then
-              echo 'no listen address in ${deploy_path}/config/izlek.toml' >&2
-              exit 1
-            fi
-            chmod +x -- '${deploy_path}/current.new/izlek-web'
-            rm -rf -- '${deploy_path}/current.previous'
-            if [ -e '${deploy_path}/current' ]; then
-              mv -- '${deploy_path}/current' '${deploy_path}/current.previous'
-            fi
-            mv -- '${deploy_path}/current.new' '${deploy_path}/current'
-            systemctl --user restart '${{ env.SERVICE }}'
-            # The unit is Type=simple, so a restart returns before the process
-            # has bound its port. Wait for the health route rather than a clock.
-            for _ in \$(seq 1 30); do
-              if curl -fsS \"http://\${listen}/healthz\" >/dev/null 2>&1; then
-                echo 'izlek is up'
-                rm -rf -- '${deploy_path}/current.previous'
-                exit 0
-              fi
-              sleep 1
-            done
-            echo 'izlek did not answer /healthz; rolling back' >&2
-            rm -rf -- '${deploy_path}/current'
-            mv -- '${deploy_path}/current.previous' '${deploy_path}/current'
-            systemctl --user restart '${{ env.SERVICE }}'
+          # bash -s for the same reason as above: the login shell is not
+          # bash and must never see this script.
+          ssh "$ssh_target" "bash -se -- '$deploy_path' '$SERVICE'" <<'REMOTE'
+          set -euo pipefail
+          deploy_path=$1
+          service=$2
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          # Read before anything moves: a config the health check cannot
+          # read is a failure to stop on, not one to roll back from.
+          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$deploy_path/config/izlek.toml")
+          if [ -z "$listen" ]; then
+            echo "no listen address in $deploy_path/config/izlek.toml" >&2
             exit 1
-          "
+          fi
+          chmod +x -- "$deploy_path/current.new/izlek-web"
+          rm -rf -- "$deploy_path/current.previous"
+          if [ -e "$deploy_path/current" ]; then
+            mv -- "$deploy_path/current" "$deploy_path/current.previous"
+          fi
+          mv -- "$deploy_path/current.new" "$deploy_path/current"
+          systemctl --user restart "$service"
+          # The unit is Type=simple, so a restart returns before the process
+          # has bound its port. Wait for the health route rather than a clock.
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://$listen/healthz" >/dev/null 2>&1; then
+              echo 'izlek is up'
+              rm -rf -- "$deploy_path/current.previous"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'izlek did not answer /healthz; rolling back' >&2
+          rm -rf -- "$deploy_path/current"
+          mv -- "$deploy_path/current.previous" "$deploy_path/current"
+          systemctl --user restart "$service"
+          exit 1
+          REMOTE
 
       # The boot-time fingerprint guard refuses a foreign bundle, so a
       # mixed generation cannot get this far unnoticed — this is the
