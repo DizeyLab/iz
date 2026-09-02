@@ -170,16 +170,24 @@ jobs:
           set -euo pipefail
           deploy_path="${{ secrets.DEPLOY_PATH }}"
           ssh_target="${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}"
-          listen=$(ssh "$ssh_target" "sed -n 's/^listen[[:space:]]*=[[:space:]]*\"\(.*\)\"/\1/p' '${deploy_path}/config/izlek.toml'")
-          url=$(ssh "$ssh_target" "curl -fsS 'http://\${listen}/'" | grep -oE '/_topcoat/assets/main-[a-f0-9]+\.css' | head -n1)
+          # One remote script: mixing runner-side and server-side variables in
+          # nested ssh quoting once shipped a check that failed on a healthy
+          # deploy. Everything server-side happens inside the heredoc; only the
+          # stylesheet bytes come back on stdout.
+          ssh "$ssh_target" "bash -se -- '$deploy_path'" > served-stylesheet.css <<'REMOTE'
+          set -euo pipefail
+          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$1/config/izlek.toml")
+          url=$(curl -fsS "http://${listen}/" | grep -oE '/_topcoat/assets/main-[a-f0-9]+\.css' | head -n1)
           if [ -z "$url" ]; then
             echo 'the served page references no stylesheet' >&2
             exit 1
           fi
-          ssh "$ssh_target" "curl -fsS 'http://\${listen}\${url}'" > served-stylesheet.css
+          echo "served stylesheet url: $url" >&2
+          curl -fsS "http://${listen}${url}"
+          REMOTE
           staged=$(sha256sum stage/assets/main-*.css | cut -d' ' -f1)
           served=$(sha256sum served-stylesheet.css | cut -d' ' -f1)
-          echo "served $url: staged sha256:$staged, served sha256:$served"
+          echo "staged sha256:$staged, served sha256:$served"
           test "$staged" = "$served"
 
       - name: Cleaning
