@@ -25,6 +25,11 @@ env:
   # CPU-bound on. See the profile in Cargo.toml.
   PROFILE: dist
   TOPCOAT: 0.6.2
+  # The deploy lives in this subdirectory of the SSH user's home. The home
+  # itself is resolved on the server ($HOME), so switching the deploy user
+  # moves the path with it — a baked-in absolute path once kept pointing at
+  # the previous user's home and failed the deploy on permissions.
+  DEPLOY_SUBDIR: izlek
 
 jobs:
   deploy:
@@ -101,22 +106,24 @@ jobs:
       - name: Upload the release
         run: |
           set -euo pipefail
-          deploy_path="${{ secrets.DEPLOY_PATH }}"
           ssh_target="${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}"
 
           # The server's login shell is not bash, and ssh would hand this
           # script to it; `bash -s` takes it on stdin instead, so the login
-          # shell only ever parses one plain command. The deploy path goes
-          # as an argument, never interpolated into the script.
-          ssh "$ssh_target" "bash -se -- '$deploy_path'" <<'REMOTE'
+          # shell only ever parses one plain command.
+          #
+          # The deploy path is $DEPLOY_SUBDIR under the SSH user's home,
+          # resolved on the server as $HOME: there is no path secret to go
+          # stale, and switching the deploy user moves the deploy with it.
+          ssh "$ssh_target" "bash -se -- '$DEPLOY_SUBDIR'" <<'REMOTE'
           set -euo pipefail
-          deploy_path=$1
-          case "$deploy_path" in
-            ''|/|/home|/home/|/srv|/srv/|/var|/var/)
-              echo "Refusing to deploy to a broad or empty path: $deploy_path" >&2
+          case "$1" in
+            ''|/*|*..*)
+              echo "Refusing a broad deploy subdirectory: '$1'" >&2
               exit 1
               ;;
           esac
+          deploy_path=$HOME/$1
           # The deploy path is the service's working directory: config/,
           # izlek.db and izlek.key live there and are never touched from here.
           # Only 'current' is replaced.
@@ -124,21 +131,21 @@ jobs:
           rm -rf -- "$deploy_path/current.new"
           mkdir -p -- "$deploy_path/current.new"
           REMOTE
-          # A bare command with quoted arguments parses under any login
-          # shell, so the tar extraction needs no bash wrapper.
-          tar -C stage -czf - . | ssh "$ssh_target" "tar -xzf - -C '$deploy_path/current.new'"
+          # stdin carries the tarball, so the script cannot; the extraction
+          # still goes through bash -c because the login shell is fish and
+          # would not expand $HOME.
+          tar -C stage -czf - . | ssh "$ssh_target" "bash -c 'exec tar -xzf - -C \"\$HOME/\$1/current.new\"' -- '$DEPLOY_SUBDIR'"
 
       - name: Swap and restart
         run: |
           set -euo pipefail
-          deploy_path="${{ secrets.DEPLOY_PATH }}"
           ssh_target="${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}"
 
           # bash -s for the same reason as above: the login shell is not
           # bash and must never see this script.
-          ssh "$ssh_target" "bash -se -- '$deploy_path' '$SERVICE'" <<'REMOTE'
+          ssh "$ssh_target" "bash -se -- '$DEPLOY_SUBDIR' '$SERVICE'" <<'REMOTE'
           set -euo pipefail
-          deploy_path=$1
+          deploy_path=$HOME/$1
           service=$2
           export XDG_RUNTIME_DIR=/run/user/$(id -u)
           # Read before anything moves: a config the health check cannot
@@ -179,15 +186,15 @@ jobs:
       - name: Verify the served stylesheet is this deploy's
         run: |
           set -euo pipefail
-          deploy_path="${{ secrets.DEPLOY_PATH }}"
           ssh_target="${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}"
           # One remote script: mixing runner-side and server-side variables in
           # nested ssh quoting once shipped a check that failed on a healthy
           # deploy. Everything server-side happens inside the heredoc; only the
           # stylesheet bytes come back on stdout.
-          ssh "$ssh_target" "bash -se -- '$deploy_path'" > served-stylesheet.css <<'REMOTE'
+          ssh "$ssh_target" "bash -se -- '$DEPLOY_SUBDIR'" > served-stylesheet.css <<'REMOTE'
           set -euo pipefail
-          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$1/config/izlek.toml")
+          deploy_path=$HOME/$1
+          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$deploy_path/config/izlek.toml")
           url=$(curl -fsS "http://${listen}/" | grep -oE '/_topcoat/assets/main-[a-f0-9]+\.css' | head -n1)
           if [ -z "$url" ]; then
             echo 'the served page references no stylesheet' >&2
