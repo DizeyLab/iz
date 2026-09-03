@@ -16,8 +16,8 @@ env:
   # broken deploy. In exchange: no cross-toolchain, and the linker is
   # rustc's default bundled lld.
   TARGET: x86_64-unknown-linux-gnu
-  # The systemd user unit that owns the process. See izlek.service.
-  SERVICE: izlek
+  # The systemd user unit that owns the process. See iz.service.
+  SERVICE: iz
   # `release` keeps fat LTO in one codegen unit for when the last few percent
   # are worth five minutes. `dist` is that profile with thin LTO and the cores
   # actually used: measured on a 12-core machine, the relink every deploy pays
@@ -29,7 +29,7 @@ env:
   # itself is resolved on the server ($HOME), so switching the deploy user
   # moves the path with it — a baked-in absolute path once kept pointing at
   # the previous user's home and failed the deploy on permissions.
-  DEPLOY_SUBDIR: izlek
+  DEPLOY_SUBDIR: iz
 
 jobs:
   deploy:
@@ -90,11 +90,11 @@ jobs:
       - name: Build the binary and bundle its assets
         run: |
           set -euo pipefail
-          # One compile: this builds izlek-web and writes out the asset bundle
+          # One compile: this builds iz-web and writes out the asset bundle
           # embedded in the binary it produced.
-          topcoat asset bundle --package izlek-web --profile "$PROFILE" --out stage/assets
-          cp "target/$TARGET/$PROFILE/izlek-web" stage/izlek-web
-          strip stage/izlek-web
+          topcoat asset bundle --package iz-web --profile "$PROFILE" --out stage/assets
+          cp "target/$TARGET/$PROFILE/iz-web" stage/iz-web
+          strip stage/iz-web
           ls -l stage stage/assets
 
       - name: Install SSH keys
@@ -125,7 +125,7 @@ jobs:
           esac
           deploy_path=$HOME/$1
           # The deploy path is the service's working directory: config/,
-          # izlek.db and izlek.key live there and are never touched from here.
+          # iz.db and iz.key live there and are never touched from here.
           # Only 'current' is replaced.
           mkdir -p -- "$deploy_path"
           rm -rf -- "$deploy_path/current.new"
@@ -150,12 +150,12 @@ jobs:
           export XDG_RUNTIME_DIR=/run/user/$(id -u)
           # Read before anything moves: a config the health check cannot
           # read is a failure to stop on, not one to roll back from.
-          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$deploy_path/config/izlek.toml")
+          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$deploy_path/config/iz.toml")
           if [ -z "$listen" ]; then
-            echo "no listen address in $deploy_path/config/izlek.toml" >&2
+            echo "no listen address in $deploy_path/config/iz.toml" >&2
             exit 1
           fi
-          chmod +x -- "$deploy_path/current.new/izlek-web"
+          chmod +x -- "$deploy_path/current.new/iz-web"
           rm -rf -- "$deploy_path/current.previous"
           if [ -e "$deploy_path/current" ]; then
             mv -- "$deploy_path/current" "$deploy_path/current.previous"
@@ -166,13 +166,13 @@ jobs:
           # has bound its port. Wait for the health route rather than a clock.
           for _ in $(seq 1 30); do
             if curl -fsS "http://$listen/healthz" >/dev/null 2>&1; then
-              echo 'izlek is up'
+              echo 'iz is up'
               rm -rf -- "$deploy_path/current.previous"
               exit 0
             fi
             sleep 1
           done
-          echo 'izlek did not answer /healthz; rolling back' >&2
+          echo 'iz did not answer /healthz; rolling back' >&2
           rm -rf -- "$deploy_path/current"
           mv -- "$deploy_path/current.previous" "$deploy_path/current"
           systemctl --user restart "$service"
@@ -194,7 +194,7 @@ jobs:
           ssh "$ssh_target" "bash -se -- '$DEPLOY_SUBDIR'" > served-stylesheet.css <<'REMOTE'
           set -euo pipefail
           deploy_path=$HOME/$1
-          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$deploy_path/config/izlek.toml")
+          listen=$(sed -n 's/^listen[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$deploy_path/config/iz.toml")
           url=$(curl -fsS "http://${listen}/" | grep -oE '/_topcoat/assets/main-[a-f0-9]+\.css' | head -n1)
           if [ -z "$url" ]; then
             echo 'the served page references no stylesheet' >&2

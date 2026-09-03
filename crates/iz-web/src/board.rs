@@ -1,0 +1,872 @@
+//! The board, from the Main artboard.
+//!
+//! The server renders every column and card; a drop posts `/api/move_card`
+//! over `fetch` and swaps the redirected page in via `layout.rs`'s
+//! `soft_nav_script`. There is no client board state to keep in sync with
+//! the server — a drag's only client-side memory is the browser's own drag
+//! session (`dataTransfer`), read back by the column that catches the drop.
+
+use iz_core::board::{DeadlineState, Moved, TaskCard, day_label};
+use iz_core::store::{NewTask, User};
+use time::{Date, OffsetDateTime};
+use topcoat::Result;
+use topcoat::context::Cx;
+use topcoat::router::content::Form;
+use topcoat::router::request::headers;
+use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
+use topcoat::view::{class, view};
+
+use crate::i18n::{Key, Lang, t};
+use crate::server::{Refusal, accounts, mail, require_user, require_writer};
+
+/// The board a task belongs to, checked against this person's workspace
+/// before anything trusts an id the browser sent.
+async fn task_board_id(cx: &Cx, user: &User, task_id: &str) -> Result<Option<String>> {
+    let store = accounts(cx).store().clone();
+    match store.task(task_id).await? {
+        Some(facts) if facts.workspace_id == user.workspace_id => Ok(Some(facts.board_id)),
+        _ => Ok(None),
+    }
+}
+
+/// Moves a card. The one path `/api/move_card` and the drop procedure both
+/// call, so the two cannot drift.
+async fn move_card_shared(
+    cx: &Cx,
+    task_id: &str,
+    from_column_id: &str,
+    to_column_id: &str,
+) -> Result<Option<Refusal>> {
+    let user = match require_writer(cx).await {
+        Ok(user) => user,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    let Some(board_id) = task_board_id(cx, &user, task_id).await? else {
+        return Ok(Some(Refusal::NotFound));
+    };
+    let store = accounts(cx).store().clone();
+    let columns = store.columns(&board_id).await?;
+    if !columns.iter().any(|column| column.id == to_column_id) {
+        return Ok(Some(Refusal::Forbidden));
+    }
+    match store
+        .move_task(
+            task_id,
+            from_column_id,
+            to_column_id,
+            &user.id,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+    {
+        Ok(Moved::Recorded(transition)) => {
+            mail(cx).after(transition);
+            Ok(None)
+        }
+        Ok(Moved::Unchanged) => Ok(None),
+        Ok(Moved::Stale) => Ok(Some(Refusal::MovedAlready)),
+        Ok(Moved::Held) => Ok(Some(Refusal::SubtasksOpen)),
+        Err(iz_core::store::StoreError::NotFound) => Ok(Some(Refusal::NotFound)),
+        Err(error) => {
+            eprintln!("store error: {error}");
+            Ok(Some(Refusal::Unavailable))
+        }
+    }
+}
+
+/// Adds a card to a column. A Viewer is refused here, in the handler.
+async fn create_task_shared(
+    cx: &Cx,
+    title: &str,
+    column_id: &str,
+    description: &str,
+    deadline_raw: &str,
+    clock_hour: Option<&str>,
+    clock_minute: Option<&str>,
+) -> Result<Option<Refusal>> {
+
+    let user = match require_writer(cx).await {
+        Ok(user) => user,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(Some(Refusal::EmptyTitle));
+    }
+    let zone = iz_core::detail::parse_zone(&user.timezone);
+    let time = match crate::detail::combine_clock(clock_hour, clock_minute) {
+        Ok(time) => time,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    let (deadline, clock_at) = match crate::detail::moment_field(
+        Some(deadline_raw),
+        (None, None),
+        time.as_deref(),
+        zone,
+    ) {
+        Ok(pair) => pair,
+        Err(refusal) => return Ok(Some(refusal)),
+    };
+    let store = accounts(cx).store().clone();
+    let Some(board) = store.board(&user.workspace_id).await? else {
+        return Ok(Some(Refusal::Unavailable));
+    };
+    let columns = store.columns(&board.id).await?;
+    if !columns.iter().any(|column| column.id == column_id) {
+        return Ok(Some(Refusal::Forbidden));
+    }
+    let created = store
+        .create_task(NewTask {
+            board_id: &board.id,
+            column_id,
+            parent_id: None,
+            title,
+            description: description.trim(),
+            deadline,
+            clock_at,
+            created_by: &user.id,
+        })
+        .await?;
+    mail(cx).after_activity(store, created.activity_id);
+    mail(cx).after(created.transition);
+    Ok(None)
+}
+
+type Redirect = Result<(StatusCode, [(HeaderName, String); 1])>;
+
+fn redirect(cx: &Cx) -> Redirect {
+    let back = headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("/")
+        .to_string();
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, back)]))
+}
+
+/// Back to the referer, with the refusal on the query the way `settings.rs`
+/// carries one, so a browser without script learns why a create or move did
+/// not happen.
+fn redirect_refused(cx: &Cx, call: &str, refusal: Refusal) -> Redirect {
+    let back = headers(cx)
+        .get(header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("/")
+        .to_string();
+    let separator = if back.contains('?') { '&' } else { '?' };
+    let location = format!("{back}{separator}refusal={}&on={call}", refusal.code());
+    Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]))
+}
+
+#[derive(serde::Deserialize)]
+struct CreateTaskForm {
+    title: String,
+    column_id: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    deadline: String,
+    #[serde(default)]
+    clock_hour: Option<String>,
+    #[serde(default)]
+    clock_minute: Option<String>,
+}
+
+/// A browser without script's way onto the board: a real form post, same
+/// fields the procedure below trades over the wire.
+#[route(POST "/api/create_task")]
+async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
+    match create_task_shared(
+        cx,
+        &input.title,
+        &input.column_id,
+        &input.description,
+        &input.deadline,
+        input.clock_hour.as_deref(),
+        input.clock_minute.as_deref(),
+    )
+    .await?
+    {
+        Some(refusal) => redirect_refused(cx, "create_task", refusal),
+        // Created; the referring `/?new=1` would reopen a blank new-task
+        // modal, so land on the board itself instead.
+        None => Ok((StatusCode::SEE_OTHER, [(header::LOCATION, "/".to_string())])),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MoveCardForm {
+    task_id: String,
+    from_column_id: String,
+    to_column_id: String,
+}
+
+/// The one move path: the modal's status form, a card menu's "Move" rows
+/// and the drop handler in `card_menu_script` all post here.
+#[route(POST "/api/move_card")]
+async fn move_card(cx: &Cx, Form(input): Form<MoveCardForm>) -> Redirect {
+    match move_card_shared(
+        cx,
+        &input.task_id,
+        &input.from_column_id,
+        &input.to_column_id,
+    )
+    .await?
+    {
+        Some(refusal) => redirect_refused(cx, "move_card", refusal),
+        None => redirect(cx),
+    }
+}
+
+/// `deadline`, `created` or `title` — the "Sort" control in the filter bar.
+/// Anything else (a hand-edited or stale query string) falls back to
+/// `deadline` silently.
+const SORT_KEYS: [&str; 3] = ["deadline", "created", "title"];
+
+fn valid_sort(sort: Option<&str>) -> &'static str {
+    match sort {
+        Some("created") => "created",
+        Some("title") => "title",
+        _ => "deadline",
+    }
+}
+/// The `?tag=` filter: an id only counts while it names a tag on this
+/// board — a stale or hand-edited query string falls back to all.
+fn valid_tag(tag: Option<&str>, tags: &[iz_core::store::Tag]) -> Option<String> {
+    tag.and_then(|id| tags.iter().find(|t| t.id == id).map(|t| t.id.clone()))
+}
+
+/// The assignee filter keeps a member id of this workspace or the literal
+/// `none` — a stale or hand-edited query string falls back to all.
+fn valid_assigned(assigned: Option<&str>, members: &[User]) -> Option<String> {
+    match assigned {
+        None | Some("") => None,
+        Some("none") => Some("none".to_string()),
+        Some(id) => members.iter().find(|m| m.id == id).map(|m| m.id.clone()),
+    }
+}
+
+/// The `?q=` search: the box's text trimmed, and an empty box is no search
+/// at all — clearing it restores the whole board.
+fn searched(query: Option<&str>) -> Option<String> {
+    query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_string)
+}
+
+/// `deadline` is the order [`iz_core::board::load`] already hands back
+/// (soonest first); the other two re-order in place here so core stays free
+/// of a UI sort preference. `created` reads the task id, a ULID, which sorts
+/// lexically by the moment it was minted — newest first.
+fn sort_column_cards(cards: &mut [TaskCard], sort: &str) {
+    match sort {
+        "created" => cards.sort_by(|a, b| b.id.cmp(&a.id)),
+        "title" => cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        _ => {}
+    }
+}
+
+/// The whole column list.
+async fn board_columns(
+    cx: &Cx,
+    sort: String,
+    tag_filter: Option<String>,
+    assigned: Option<String>,
+    search: Option<String>,
+    default_tag_id: Option<&str>,
+) -> Result {
+    let user = match require_user(cx).await {
+        Ok(user) => user,
+        Err(refusal) => {
+            // No session to read a language off of — English, same as an
+            // auth screen with no user yet.
+            return view! {
+                cx =>
+                <div class="scaffold-note"><p>(refusal.message())</p></div>
+            };
+        }
+    };
+    let lang = Lang::from_code(&user.language);
+    let store = accounts(cx).store().clone();
+    let Some(mut view_data) = iz_core::board::load(store.as_ref(), &user.workspace_id).await?
+    else {
+        return view! {
+            cx =>
+            <div class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></div>
+        };
+    };
+    if let Some(needle) = &search {
+        view_data.searching(needle);
+    }
+    view_data.tagged(tag_filter.as_deref());
+    view_data.assigned(assigned.as_deref());
+    for column in &mut view_data.columns {
+        column.column.name = crate::i18n::column_name(lang, &column.column.name);
+        sort_column_cards(&mut column.cards, &sort);
+    }
+    let today = OffsetDateTime::now_utc().date();
+    let may_write = user.role.can_write_tasks();
+    let zone = iz_core::detail::parse_zone(&user.timezone);
+
+    let all_columns: Vec<(String, String)> = view_data
+        .columns
+        .iter()
+        .map(|column| (column.column.id.clone(), column.column.name.clone()))
+        .collect();
+    let mut columns = Vec::new();
+    for column in view_data.columns {
+        columns.push(render_column(cx, column, today, zone, may_write, &all_columns, default_tag_id, lang).await?);
+    }
+
+    view! {
+        cx =>
+        for column in columns { (column) }
+    }
+}
+
+async fn render_column(
+    cx: &Cx,
+    column: iz_core::board::ColumnView,
+    today: Date,
+    zone: time::UtcOffset,
+    may_write: bool,
+    all_columns: &[(String, String)],
+    default_tag_id: Option<&str>,
+    lang: Lang,
+) -> Result {
+    let column_id = column.column.id;
+    let name = column.column.name;
+    let is_done_column = column.column.is_done;
+    let count = column.cards.len();
+    let is_empty = column.cards.is_empty();
+    let mut cards = Vec::new();
+    for card in column.cards {
+        cards.push(
+            render_card(
+                cx,
+                card,
+                today,
+                is_done_column,
+                zone,
+                &column_id,
+                may_write,
+                all_columns,
+                default_tag_id,
+                lang,
+            )
+            .await?,
+        );
+    }
+
+    view! {
+        cx =>
+        <section class="column">
+            <header class="column-head">
+                <span class="column-name">(name)</span>
+                <span class="column-count">(count)</span>
+            </header>
+            <div class="column-cards" id=(column_id.clone())>
+                if is_empty { <div class="column-empty">(t(lang, Key::NoTasks))</div> }
+                for card in cards { (card) }
+            </div>
+        </section>
+    }
+}
+
+// Drag and the context menu are delegated document listeners in
+// `card_menu_script`, reading the card's `data-task-id`/`data-from-column`
+// — per-element handlers would die when a soft submit swaps the board in.
+async fn render_card(
+    cx: &Cx,
+    card: TaskCard,
+    today: Date,
+    done_column: bool,
+    zone: time::UtcOffset,
+    column_id: &str,
+    may_write: bool,
+    all_columns: &[(String, String)],
+    default_tag_id: Option<&str>,
+    lang: Lang,
+) -> Result {
+    let blocks = card.blocks.join(", ");
+    let blocked_by = card.blocked_by.join(", ");
+    let overdue = card.is_overdue(today);
+    let deadline_parts = card.deadline_parts(today);
+    // A clock is the meeting's exact instant, read in the viewer's own zone;
+    // when it exists it is the whole chip — the day-grain deadline keeps its
+    // own state machinery out of the way rather than standing next to it.
+    let clock = card.clock_at.map(|at| {
+        let at = at.to_offset(zone);
+        format!(
+            "{} · {:02}:{:02}",
+            day_label(at.date()),
+            at.hour(),
+            at.minute()
+        )
+    });
+    let has_clock = clock.is_some();
+    let dated = deadline_parts.is_some() || has_clock;
+    let deadline = match clock {
+        Some(label) => label,
+        None => match deadline_parts {
+            Some(parts) => match parts.state {
+                DeadlineState::Overdue => format!("{} · {}", parts.date, t(lang, Key::Overdue)),
+                DeadlineState::Done => format!("{}{}", t(lang, Key::DonePrefix), parts.date),
+                DeadlineState::OnTime => parts.date,
+            },
+            None => t(lang, Key::NoDeadline).to_string(),
+        },
+    };
+    let comments = card.comment_count;
+    let subtasks = card.subtask_label();
+    let subtasks_open = card.holds_on_subtasks();
+    let mut assignees = Vec::new();
+    for person in card.assignees.iter() {
+        assignees.push(crate::layout::avatar(cx, person, "").await?);
+    }
+    let has_assignees = !card.assignees.is_empty();
+    let task_id = card.id.clone();
+    let from_column = column_id.to_string();
+    let href = format!("/?task={}", card.id);
+    let menu_id = format!("card-menu-{}", card.id);
+    let move_targets: Vec<(String, String)> = all_columns
+        .iter()
+        .filter(|(id, _)| id != column_id)
+        .cloned()
+        .collect();
+    view! {
+        cx =>
+        <a class=(class!("card", "card-done" if done_column)) href=(href.clone())
+            draggable=(if may_write { "true" } else { "false" })
+            data-task-id=(task_id.clone())
+            data-from-column=(from_column.clone())
+            data-menu-id=(menu_id.clone())
+        >
+            <div class="card-keys">
+                <span class="card-key">(card.task_key.clone())</span>
+                if !blocks.is_empty() { <span class="card-blocks">(format!("{} {blocks}", t(lang, Key::Blocks)))</span> }
+                if !blocked_by.is_empty() {
+                    <span class="card-blocked-by">(format!("{} {blocked_by}", t(lang, Key::BlockedBy)))</span>
+                }
+            </div>
+            <div class="card-title">(card.title.clone())</div>
+            <div class="card-foot">
+                // Overdue is a comparison against today, so a tab left open
+                // over midnight is wrong until something re-renders it.
+                <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue && !has_clock, "card-deadline-none" if !dated))>
+                    (deadline)
+                </span>
+                if let Some(tag) = &card.tag {
+                    if Some(tag.id.as_str()) != default_tag_id {
+                        <span class="card-tag">(tag.name.clone())</span>
+                    }
+                }
+                if let Some(parts) = subtasks.clone() {
+                    <span class=(class!("card-subtasks", "card-subtasks-open" if subtasks_open))>(format!("{parts} \u{2630}"))</span>
+                }
+                if comments > 0 { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
+                <div class="spacer"></div>
+                <div class="avatars">
+                    for person in assignees { (person) }
+                    if !has_assignees {
+                        <span class="avatar avatar-none" role="img" aria-label=(t(lang, Key::NobodyAssignedAria)) data-name=(t(lang, Key::NobodyAssignedTitle))></span>
+                    }
+                </div>
+            </div>
+        </a>
+        <div class="card-menu pop-panel" id=(menu_id.clone())>
+            <div class="pop-list">
+                <a class="pop-row" href=(href.clone())>(t(lang, Key::Open))</a>
+                if may_write && !move_targets.is_empty() {
+                    <div class="card-menu-move">
+                        <button class="pop-row card-menu-move-trigger" type="button">(t(lang, Key::Move))</button>
+                        <div class="card-menu-submenu pop-panel">
+                            <div class="pop-list">
+                                for target in move_targets.iter() {
+                                    <form class="pop-row-form" method="post" action="/api/move_card">
+                                        <input type="hidden" name="task_id" value=(task_id.clone())>
+                                        <input type="hidden" name="from_column_id" value=(from_column.clone())>
+                                        <input type="hidden" name="to_column_id" value=(target.0.clone())>
+                                        <button class="pop-row" type="submit">(target.1.clone())</button>
+                                    </form>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+                if may_write {
+                    <a class="pop-row card-menu-danger" href=(format!("/?task={}&confirm=delete", task_id))>(t(lang, Key::Delete))</a>
+                }
+            </div>
+        </div>
+    }
+}
+
+/// Opens a card's context menu at the cursor and closes whichever one was
+/// open; a plain document click closes it again. Rendered once — every
+/// card's `@contextmenu` calls into this same global, by the menu's id.
+///
+/// Also registers the board page's own `Escape` resolvers on
+/// `window.__izEsc`: the datepicker panel (priority 20 — below the
+/// dropdown panel and the user-menu, above only the card menu; the modal
+/// chain steps aside on its own (its resolver returns false while a
+/// datepick is open), which is how the datepicker still closes before the
+/// modal) and the card menu (priority 10). Viewer, delete confirm, open
+/// edit popovers and the modal itself stay `detail::escape_closes`'s at
+/// priority 90; the whole order lives in the table on `layout.rs`'s
+/// `escape_manager_script`.
+async fn card_menu_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+        if (window.__izCardMenu) { return; } \
+        window.__izCardMenu = true; \
+        function closeCardMenus() { document.querySelectorAll('.card-menu-open').forEach(function (el) { el.classList.remove('card-menu-open'); }); } \
+        window.__izOpenCardMenu = function (e, id) { \
+            closeCardMenus(); \
+            var menu = document.getElementById(id); \
+            if (!menu) { return; } \
+            menu.style.left = e.clientX + 'px'; \
+            menu.style.top = e.clientY + 'px'; \
+            window.__izOwn(menu, ['card-menu-open'], ['style']); \
+        }; \
+        document.addEventListener('click', closeCardMenus); \
+        window.__izEsc.register(20, function () { \
+            var datepick = document.querySelector('.datepick-pop > .edit-toggle:checked'); \
+            if (!datepick) { return false; } \
+            datepick.checked = false; \
+            return true; \
+        }); \
+        window.__izEsc.register(10, function () { \
+            var menu = document.querySelector('.card-menu-open'); \
+            if (!menu) { return false; } \
+            closeCardMenus(); \
+            return true; \
+        }); \
+        document.addEventListener('contextmenu', function (e) { \
+            var card = e.target.closest ? e.target.closest('.card[data-menu-id]') : null; \
+            if (!card) { return; } \
+            e.preventDefault(); \
+            window.__izOpenCardMenu(e, card.dataset.menuId); \
+        }); \
+        document.addEventListener('dragstart', function (e) { \
+            var card = e.target.closest ? e.target.closest('.card[data-task-id]') : null; \
+            if (!card) { return; } \
+            e.dataTransfer.setData('iz-task', card.dataset.taskId); \
+            e.dataTransfer.setData('iz-from', card.dataset.fromColumn); \
+        }); \
+        document.addEventListener('dragover', function (e) { \
+            if (e.target.closest && e.target.closest('.board-columns')) { e.preventDefault(); } \
+        }); \
+        document.addEventListener('drop', function (e) { \
+            var column = e.target.closest ? e.target.closest('.column-cards') : null; \
+            if (!column) { return; } \
+            e.preventDefault(); \
+            var task = e.dataTransfer.getData('iz-task'); \
+            var from = e.dataTransfer.getData('iz-from'); \
+            if (task && window.__izPost) { \
+                window.__izPost('/api/move_card', { task_id: task, from_column_id: from, to_column_id: column.id }); \
+            } \
+        }); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+
+/// Live search: the filter bar's `q` input fetches the board as the user
+/// types — debounced, URL rewritten in place without a history entry per
+/// keystroke. The listener is delegated on `document`, so the morph cannot
+/// orphan it, and the value is deduped against the last one fetched, so an
+/// unchanged box never refetches. Enter still submits through the shared
+/// soft-nav handler.
+async fn search_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+        if (window.__izBoardSearch) { return; } \
+        window.__izBoardSearch = true; \
+        var timer = null; \
+        var last = (document.querySelector('.field-box-search input[name=q]') || {}).value || ''; \
+        function fire() { \
+            var el = document.querySelector('.field-box-search input[name=q]'); \
+            if (!el || !el.form || !window.__izQuery || el.value === last) { return; } \
+            last = el.value; \
+            window.__izKeep = true; \
+            window.__izQuery((el.form.getAttribute('action') || window.location.pathname) + '?' + new URLSearchParams(new FormData(el.form)).toString()); \
+        } \
+        document.addEventListener('input', function (e) { \
+            var el = e.target; \
+            if (!el || el.name !== 'q' || !el.closest || !el.closest('.field-box-search')) { return; } \
+            if (timer) { clearTimeout(timer); } \
+            timer = setTimeout(function () { timer = null; fire(); }, 200); \
+        }); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+
+/// Which task, if any, `/` renders the detail modal open on, and the refusal
+/// (if any) a create or move landed back here with. `file` opens the viewer
+/// over that task's modal, the same nested query-param convention `confirm`
+/// already uses.
+#[query_params(error = redirect("/"))]
+struct BoardQuery {
+    task: Option<String>,
+    tab: Option<String>,
+    file: Option<String>,
+    sheet: Option<String>,
+    rows: Option<String>,
+    cols: Option<String>,
+    refusal: Option<String>,
+    on: Option<String>,
+    sort: Option<String>,
+    confirm: Option<String>,
+    new: Option<String>,
+    tag: Option<String>,
+    assigned: Option<String>,
+    q: Option<String>,
+}
+
+/// The noun a sort key shows in the `<select>` — terse, no explainer.
+fn sort_label(sort: &str, lang: Lang) -> &'static str {
+    match sort {
+        "created" => t(lang, Key::SortCreated),
+        "title" => t(lang, Key::SortTitle),
+        _ => t(lang, Key::SortDeadline),
+    }
+}
+
+/// The signed-in board: the topbar, the filter chips and the shard that owns
+/// every column and card.
+#[allow(unused_variables)]
+pub async fn board_page(cx: &Cx, user: &User) -> Result {
+    let view_data = {
+        let store = accounts(cx).store().clone();
+        iz_core::board::load(store.as_ref(), &user.workspace_id).await?
+    };
+    let lang = Lang::from_code(&user.language);
+    let Some(mut view_data) = view_data else {
+        return view! {
+            cx =>
+            <main class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></main>
+        };
+    };
+    // Column names are stored data; the viewer reads them in their own
+    // language, and every name this page derives — headers, the card move
+    // menus — inherits the translated ones.
+    for column in &mut view_data.columns {
+        column.column.name = crate::i18n::column_name(lang, &column.column.name);
+    }
+    let query = query_params::<BoardQuery>(cx)?;
+    let tags = {
+        let store = accounts(cx).store().clone();
+        store.tags(&view_data.board.id).await?
+    };
+    let members = {
+        let store = accounts(cx).store().clone();
+        store.users(&user.workspace_id).await?
+    };
+    // The whole filter pipeline narrows the board before anything counts or
+    // renders it, so the chips, the columns and the empty state all describe
+    // the same set.
+    let search = searched(query.q.as_deref());
+    let tag_filter = valid_tag(query.tag.as_deref(), &tags);
+    let assigned_filter = valid_assigned(query.assigned.as_deref(), &members);
+    if let Some(needle) = &search {
+        view_data.searching(needle);
+    }
+    view_data.tagged(tag_filter.as_deref());
+    view_data.assigned(assigned_filter.as_deref());
+    let today = OffsetDateTime::now_utc().date();
+    let overdue = view_data.overdue_count(today);
+    let blocked = view_data.blocked_count();
+    let may_write = user.role.can_write_tasks();
+    let all_columns: Vec<(String, String)> = view_data
+        .columns
+        .iter()
+        .map(|column| (column.column.id.clone(), column.column.name.clone()))
+        .collect();
+    let open_task = query.task.clone();
+    let open_tab = crate::detail::Tab::from_query(query.tab.as_deref());
+    // Which sheet of an open workbook is drawn. Anything that is not a number
+    // — a stale or hand-edited query string — is the first sheet.
+    let open_sheet = query
+        .sheet
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    // Which window of it is drawn, in pages of rows and pages of columns.
+    let page_of = |value: Option<&str>| {
+        value
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    let open_rows = page_of(query.rows.as_deref());
+    let open_cols = page_of(query.cols.as_deref());
+    // `?task=X&new=1` together would render both modals at once — two
+    // document-level datepicker listeners double-stepping the month nav — so
+    // an open task wins and `new` is ignored.
+    let open_new = may_write && query.new.is_some() && open_task.is_none();
+    let sort = valid_sort(query.sort.as_deref()).to_string();
+    let default_tag_id = tags.iter().find(|tag| tag.is_default).map(|tag| tag.id.as_str());
+    let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
+        (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
+        _ => None,
+    };
+
+    view! {
+        cx =>
+        <header class="topbar">
+            (crate::layout::mark(cx).await?)
+            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Board, user.role, lang).await?)
+            <div class="spacer"></div>
+            (crate::layout::user_menu(cx, &crate::detail::Me::from(user), lang).await?)
+        </header>
+        <div class="filterbar">
+            <div class="topbar-divider"></div>
+            if may_write {
+                <a class="primary new-task-open" href="/?new=1">(t(lang, Key::NewTask))</a>
+            }
+            <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="sort" value=(sort.clone())>
+                <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <input type="hidden" name="assigned" value=(assigned_filter.clone().unwrap_or_default())>
+                <span class="field-text">(t(lang, Key::Project))</span>
+                <select class="status-select" name="tag" data-autosubmit="" data-search="">
+                    <option value="" selected=(tag_filter.is_none())>(t(lang, Key::AllTags))</option>
+                    for tag in &tags {
+                        <option value=(tag.id.clone()) selected=(tag_filter.as_deref() == Some(tag.id.as_str()))>(tag.name.clone())</option>
+                    }
+                </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
+            </form>
+            <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="sort" value=(sort.clone())>
+                <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <span class="field-text">(t(lang, Key::Assignee))</span>
+                <select class="status-select" name="assigned" data-autosubmit="" data-search="">
+                    <option value="" selected=(assigned_filter.is_none())>(t(lang, Key::All))</option>
+                    <option value="none" selected=(assigned_filter.as_deref() == Some("none"))>(t(lang, Key::Nobody))</option>
+                    for member in &members {
+                        <option value=(member.id.clone()) selected=(assigned_filter.as_deref() == Some(member.id.as_str()))>(member.display_name.clone())</option>
+                    }
+                </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
+            </form>
+            <form class="field-box field-box-sort" method="get" action="/">
+                <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <input type="hidden" name="q" value=(search.as_deref().unwrap_or(""))>
+                <input type="hidden" name="assigned" value=(assigned_filter.clone().unwrap_or_default())>
+                <span class="field-text">(t(lang, Key::Sort))</span>
+                <select class="status-select" name="sort" data-autosubmit="">
+                    for key in SORT_KEYS {
+                        <option value=(key) selected=(key == sort)>(sort_label(key, lang))</option>
+                    }
+                </select>
+                <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4"></path>
+                </svg>
+            </form>
+            <form class="field-box field-box-search" method="get" action="/">
+                <input type="hidden" name="sort" value=(sort.clone())>
+                <input type="hidden" name="tag" value=(tag_filter.clone().unwrap_or_default())>
+                <input type="hidden" name="assigned" value=(assigned_filter.clone().unwrap_or_default())>
+                <span class="field-text">(t(lang, Key::Search))</span>
+                <input class="dd-search" type="text" name="q" value=(search.as_deref().unwrap_or(""))>
+            </form>
+            <div class="spacer"></div>
+            if overdue > 0 { <span class="chip chip-overdue">(format!("{overdue} {}", t(lang, Key::Overdue)))</span> }
+            if blocked > 0 { <span class="chip chip-blocked">(format!("{blocked} {}", t(lang, Key::Blocked)))</span> }
+        </div>
+        if let Some(refusal) = &refusal {
+            <p class="field-error">(refusal.message_in(lang))</p>
+        }
+        <main class="board-stage">
+            if search.is_some() && view_data.is_empty() {
+                <div class="scaffold-note"><p>(t(lang, Key::NoMatches))</p></div>
+            } else {
+                <div class="board-columns">
+                (board_columns(cx, sort.clone(), tag_filter.clone(), assigned_filter.clone(), search.clone(), default_tag_id).await?)
+                </div>
+            }
+        </main>
+        if let Some(task_id) = &open_task {
+            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?)
+            if let Some(file_id) = &query.file {
+                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab, open_sheet, open_rows, open_cols).await?)
+            }
+        }
+        if open_new {
+            (crate::detail::new_task_modal(cx, &all_columns, lang).await?)
+        }
+        (crate::dropdown::dropdown_script(cx).await?)
+        (crate::layout::escape_script(cx).await?)
+        (card_menu_script(cx).await?)
+        (search_script(cx).await?)
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::{TaskCard, sort_column_cards, valid_sort};
+
+    fn card(id: &str, title: &str) -> TaskCard {
+        TaskCard {
+            id: id.to_string(),
+            task_key: id.to_string(),
+            title: title.to_string(),
+            column_id: "col".to_string(),
+            deadline: None,
+            clock_at: None,
+            done_at: None,
+            position: 0.0,
+            assignees: Vec::new(),
+            comment_count: 0,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            subtask_total: 0,
+            subtask_done: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn deadline_is_left_alone() {
+        let mut cards = vec![card("b", "Bravo"), card("a", "Alpha")];
+        sort_column_cards(&mut cards, "deadline");
+        assert_eq!(cards[0].id, "b");
+        assert_eq!(cards[1].id, "a");
+    }
+
+    #[test]
+    fn created_orders_newest_ulid_first() {
+        let mut cards = vec![card("01AAAA", "old"), card("01ZZZZ", "new")];
+        sort_column_cards(&mut cards, "created");
+        assert_eq!(cards[0].id, "01ZZZZ");
+        assert_eq!(cards[1].id, "01AAAA");
+    }
+
+    #[test]
+    fn title_orders_case_insensitively() {
+        let mut cards = vec![card("1", "zebra"), card("2", "Apple")];
+        sort_column_cards(&mut cards, "title");
+        assert_eq!(cards[0].title, "Apple");
+        assert_eq!(cards[1].title, "zebra");
+    }
+
+    #[test]
+    fn invalid_query_param_falls_back_to_deadline() {
+        assert_eq!(valid_sort(Some("bogus")), "deadline");
+        assert_eq!(valid_sort(None), "deadline");
+        assert_eq!(valid_sort(Some("created")), "created");
+    }
+}
