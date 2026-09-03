@@ -186,6 +186,31 @@ if (!failures.length) {
     }
 }
 
+// The everyday path: settings arrives by soft navigation, and by the live
+// refresh's morph after it — not by document load. The swap re-creates the
+// inline scripts and the morph preserves them; either going wrong passes
+// every check above and dies for anyone who simply navigated.
+if (!failures.length) {
+    await page.goto(base + '/', { waitUntil: 'networkidle' });
+    await page.click('a[href="/settings"]');
+    await page
+        .waitForFunction(() => location.pathname === '/settings', { timeout: 5000 })
+        .catch(() => failures.push('the Settings nav click never soft-navigated'));
+    if (!failures.length && (await openViewer('soft-nav'))) {
+        await page.keyboard.press('Escape');
+        await viewerGone('soft-nav');
+    }
+}
+if (!failures.length) {
+    await page.evaluate(() => window.__izRefresh());
+    // Sleeping is the measurement: the refresh lands without an event.
+    await page.waitForTimeout(800);
+    if (await openViewer('post-refresh')) {
+        await page.keyboard.press('Escape');
+        await viewerGone('post-refresh');
+    }
+}
+
 await browser.close();
 
 note(`page errors ${errors.length ? errors.join(' | ') : 'none'}`);
