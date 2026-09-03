@@ -8,7 +8,10 @@ use topcoat::router::{BodyLimit, Router, RouterBuilderDiscoverExt, route};
 
 #[route(GET "/healthz")]
 async fn healthz() -> Result<&'static str> {
-    Ok("ok")
+    // The deploy asserts this against the commit it pushed, so a stale
+    // process still holding the port fails the deploy instead of
+    // answering a green health check.
+    Ok(concat!("ok ", env!("IZ_BUILD_SHA")))
 }
 
 #[tokio::main]

@@ -32,4 +32,13 @@ fn main() {
         hex.push_str(&format!("{byte:02x}"));
     }
     println!("cargo:rustc-env=IZ_STYLE_FINGERPRINT=sha256:{hex}");
+
+    // The commit this binary was built from, served by `/healthz` and
+    // asserted against after the deploy restart, so a stale process
+    // holding the port cannot pass for this deploy. "dev" locally, where
+    // nothing asserts it. The rerun-if-env-changed line is load-bearing:
+    // without it a rust-cache hit would ship last deploy's sha.
+    let sha = std::env::var("IZ_BUILD_SHA").unwrap_or_else(|_| "dev".into());
+    println!("cargo:rustc-env=IZ_BUILD_SHA={sha}");
+    println!("cargo:rerun-if-env-changed=IZ_BUILD_SHA");
 }
