@@ -6231,7 +6231,7 @@ async fn assigning_one_person_mails_that_person_not_every_assignee() {
 #[tokio::test]
 async fn a_time_change_fires_a_deadline_set_rule() {
     let (dir, store, workspace, admin) = shared().await;
-    let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    let _mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
     let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
     let board = store.board(&workspace).await.unwrap().unwrap();
     store

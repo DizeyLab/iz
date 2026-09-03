@@ -7426,7 +7426,7 @@ async fn a_queued_mails_next_try_is_marked_for_the_tick() {
     app.store
         .queue_notice(
             "bo@iz.sh",
-            "Your \u{130}zlek sign-in link",
+            "Your \u{130}z sign-in link",
             "body",
             time::OffsetDateTime::now_utc(),
         )
