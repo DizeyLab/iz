@@ -12,7 +12,7 @@
 //! while the rebuild runs. An extraction failure fails the rebuild, so the
 //! swap never trades the tables' binary for a directory that is not there.
 
-use super::schema::{SCHEMA, declared_fingerprint, diff_report, fingerprint};
+use super::schema::{declared_fingerprint, diff_report, fingerprint, schema_sql};
 use super::{Result, StoreError};
 use turso::{Builder, Connection, params};
 use ulid::Ulid;
@@ -186,7 +186,7 @@ async fn rebuild(
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     new_conn
-        .execute_batch(SCHEMA)
+        .execute_batch(&schema_sql())
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     // The blobs leave the old database before any row is copied: the copy's
@@ -271,6 +271,7 @@ fn build_maps(
     old_has_reminder: bool,
     old_has_feed_seen: bool,
     old_has_tag: bool,
+    old_has_security: bool,
 ) -> Vec<TableMap> {
     let mut maps = Vec::new();
 
@@ -341,6 +342,44 @@ fn build_maps(
                     "old.smtp_check_error".into()
                 } else {
                     "NULL".into()
+                },
+            ),
+            (
+                // The security knobs are the newest workspace columns: a
+                // database old enough to be reconciled has never heard of
+                // them and starts on today's defaults, exactly the numbers
+                // the matching migration's `DEFAULT` clauses backfill. One
+                // probe stands for all four — a database that carries one
+                // carries them all, because they shipped together.
+                "rate_limit_attempts",
+                if old_has_security {
+                    "old.rate_limit_attempts".into()
+                } else {
+                    crate::store::DEFAULT_RATE_LIMIT_ATTEMPTS.to_string()
+                },
+            ),
+            (
+                "rate_window_minutes",
+                if old_has_security {
+                    "old.rate_window_minutes".into()
+                } else {
+                    crate::store::DEFAULT_RATE_WINDOW_MINUTES.to_string()
+                },
+            ),
+            (
+                "session_lifetime_days",
+                if old_has_security {
+                    "old.session_lifetime_days".into()
+                } else {
+                    crate::store::DEFAULT_SESSION_LIFETIME_DAYS.to_string()
+                },
+            ),
+            (
+                "signin_link_lifetime_days",
+                if old_has_security {
+                    "old.signin_link_lifetime_days".into()
+                } else {
+                    crate::store::DEFAULT_SIGNIN_LINK_LIFETIME_DAYS.to_string()
                 },
             ),
             ("public_url", "old.public_url".into()),
@@ -792,6 +831,7 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
     let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
     let has_feed_seen = old_has_column(old_conn, "user", "feed_seen_at").await?;
     let has_tag = old_has_column(old_conn, "tag", "id").await?;
+    let has_security = old_has_column(old_conn, "workspace", "rate_limit_attempts").await?;
     let maps = build_maps(
         has_smtp_check,
         has_batch_window,
@@ -799,6 +839,7 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
         has_reminder,
         has_feed_seen,
         has_tag,
+        has_security,
     );
     validate_maps(new_conn, &maps).await?;
 
@@ -1073,7 +1114,7 @@ mod tests {
     };
     use turso::{Builder, params};
     use ulid::Ulid;
-    use crate::store::schema::SCHEMA;
+    use crate::store::schema::schema_sql;
 
     #[test]
     fn backup_name_has_no_colons_or_spaces() {
@@ -1099,9 +1140,9 @@ mod tests {
         let path = dir.join("iz.db").to_str().unwrap().to_string();
         let db = Builder::new_local(&path).build().await.unwrap();
         let conn = db.connect().unwrap();
-        conn.execute_batch(SCHEMA).await.unwrap();
+        conn.execute_batch(&schema_sql()).await.unwrap();
 
-        let maps = build_maps(false, false, false, false, false, false);
+        let maps = build_maps(false, false, false, false, false, false, false);
         validate_maps(&conn, &maps)
             .await
             .expect("the full map set was refused against the declared schema");
@@ -1131,7 +1172,7 @@ mod tests {
         let photo_bytes = b"face-bytes".to_vec();
         let db = Builder::new_local(path).build().await.unwrap();
         let conn = db.connect().unwrap();
-        conn.execute_batch(SCHEMA).await.unwrap();
+        conn.execute_batch(&schema_sql()).await.unwrap();
         // ALTER keeps the tables' own constraints intact, so this is the
         // shape a live database of the previous generation has.
         conn.execute(

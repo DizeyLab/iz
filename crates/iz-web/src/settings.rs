@@ -44,6 +44,19 @@ pub const WIDEST_PHOTO_MB: u64 = 20;
 /// workflow. Two hours is already far past the point where a mail is news.
 pub const LONGEST_BATCH_MINUTES: u32 = 120;
 
+/// The security knobs' bounds, in the `WIDEST_*` spirit: a floor beneath
+/// which the knob stops meaning anything and a ceiling past which it stops
+/// being a policy and becomes a wish.
+///
+/// A hundred guesses a window is already a flood for a board a few people
+/// share; a window past a day is a ban wearing a rate limit's name; a cookie
+/// that outlives a year is not a session any more; a link that waits three
+/// months is stale news, and resending mints another.
+pub const WIDEST_RATE_LIMIT_ATTEMPTS: u64 = 100;
+pub const LONGEST_RATE_WINDOW_MINUTES: u32 = 24 * 60;
+pub const LONGEST_SESSION_DAYS: u32 = 365;
+pub const LONGEST_LINK_DAYS: u32 = 90;
+
 const MB: u64 = 1024 * 1024;
 
 /// `1.2 s` for anything over a second, `840 ms` below it. A mail server that
@@ -193,6 +206,7 @@ fn section_of_call(call: &str) -> &'static str {
     match call {
         "save_sender" | "send_test_mail" | "check_sender" => "outgoing",
         "save_limits" => "limits",
+        "save_security" => "security",
         "invite_member" | "set_role" | "resend_link" => "members",
         "send_message" => "message",
         _ => "profile",
@@ -358,6 +372,70 @@ async fn save_limits(
         }
     };
     Ok(saved_or_refused("save_limits", refusal))
+}
+
+#[derive(serde::Deserialize)]
+struct SaveSecurityForm {
+    rate_limit_attempts: u64,
+    rate_window_minutes: u32,
+    session_lifetime_days: u32,
+    signin_link_lifetime_days: u32,
+}
+
+/// Writes the workspace's four security knobs. Admin-only, checked here.
+///
+/// The bounds are the form's `min`/`max` backed by this check, because the
+/// form is a courtesy and this is the guard: a posted 0 would turn the rate
+/// limit off outright and a pasted 100000 would turn it into a decoration.
+#[route(POST "/api/save_security")]
+async fn save_security(
+    cx: &Cx,
+    Form(input): Form<SaveSecurityForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    let admin = match require_admin(cx).await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(saved_or_refused("save_security", Some(refusal))),
+    };
+    if input.rate_limit_attempts == 0
+        || input.rate_window_minutes == 0
+        || input.session_lifetime_days == 0
+        || input.signin_link_lifetime_days == 0
+        || input.rate_limit_attempts > WIDEST_RATE_LIMIT_ATTEMPTS
+        || input.rate_window_minutes > LONGEST_RATE_WINDOW_MINUTES
+        || input.session_lifetime_days > LONGEST_SESSION_DAYS
+        || input.signin_link_lifetime_days > LONGEST_LINK_DAYS
+    {
+        return Ok(saved_or_refused("save_security", Some(Refusal::BadPolicy)));
+    }
+    let outcome = accounts(cx)
+        .store()
+        .set_security(
+            &admin.workspace_id,
+            input.rate_limit_attempts,
+            input.rate_window_minutes,
+            input.session_lifetime_days,
+            input.signin_link_lifetime_days,
+        )
+        .await;
+    let refusal = match outcome {
+        Ok(()) => {
+            let _ = accounts(cx)
+                .store()
+                .record_event(
+                    Some(&admin.id),
+                    &ActivityKind::SecuritySaved,
+                    "",
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await;
+            None
+        }
+        Err(problem) => {
+            eprintln!("store error: {problem}");
+            Some(Refusal::Unavailable)
+        }
+    };
+    Ok(saved_or_refused("save_security", refusal))
 }
 
 #[derive(serde::Deserialize)]
@@ -974,6 +1052,22 @@ async fn limits_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u64, Vec<String
     ))
 }
 
+/// The security knobs as the admin's screen shows them.
+async fn security_now(cx: &Cx, workspace_id: &str) -> Result<(u64, u32, u32, u32)> {
+    let workspace = accounts(cx)
+        .store()
+        .workspace()
+        .await?
+        .filter(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| topcoat::Error::from(std::io::Error::other("no workspace")))?;
+    Ok((
+        workspace.rate_limit_attempts,
+        workspace.rate_window_minutes,
+        workspace.session_lifetime_days,
+        workspace.signin_link_lifetime_days,
+    ))
+}
+
 /// What the row under the test button says, once the workspace holds a
 /// `sender_test` to read.
 struct TestResult {
@@ -1169,6 +1263,7 @@ enum Section {
     Profile,
     Outgoing,
     Limits,
+    Security,
     Members,
     Message,
 }
@@ -1205,6 +1300,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let section = match query_value(query, "section") {
         Some("outgoing") if administers => Section::Outgoing,
         Some("limits") if administers => Section::Limits,
+        Some("security") if administers => Section::Security,
         Some("members") if administers => Section::Members,
         Some("message") if administers => Section::Message,
         _ => Section::Profile,
@@ -1225,6 +1321,11 @@ async fn settings_page(cx: &Cx) -> Result {
     } else {
         (None, Vec::new())
     };
+    let security = if administers {
+        Some(security_now(cx, &user.workspace_id).await?)
+    } else {
+        None
+    };
     let members = if administers {
         Some(members_now(cx, &user).await?)
     } else {
@@ -1238,6 +1339,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let (sender_refusal, sender_saved) = call_state(query, "save_sender");
     let (test_refusal, _) = call_state(query, "send_test_mail");
     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
+    let (security_refusal, security_saved) = call_state(query, "save_security");
     let (resend_refusal, _) = call_state(query, "resend_link");
     let (invite_refusal, _) = call_state(query, "invite_member");
     let (role_refusal, _) = call_state(query, "set_role");
@@ -1261,7 +1363,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 if administers {
                     <a class=(rail_class(section, Section::Outgoing)) href="/settings?section=outgoing">(t(lang, Key::OutgoingMail))</a>
                     <a class=(rail_class(section, Section::Limits)) href="/settings?section=limits">(t(lang, Key::WorkspaceLimits))</a>
-                    <a class=(rail_class(section, Section::Members)) href="/settings?section=members">(t(lang, Key::Members))</a>
+                    <a class=(rail_class(section, Section::Security)) href="/settings?section=security">(t(lang, Key::Security))</a>
                     <a class=(rail_class(section, Section::Message)) href="/settings?section=message">(t(lang, Key::Message))</a>
                 }
             </nav>
@@ -1602,6 +1704,80 @@ async fn settings_page(cx: &Cx) -> Result {
                                     <span class="field-error">(refusal.message_in(lang))</span>
                                 }
                                 if limits_saved {
+                                    <span class="field-note">(t(lang, Key::Saved))</span>
+                                }
+                                <button class="primary" type="submit">(t(lang, Key::Save))</button>
+                            </div>
+                        </form>
+                    </section>
+                }
+
+                if section == Section::Security
+                    && let Some((rate_limit_attempts, rate_window_minutes, session_lifetime_days, signin_link_lifetime_days)) = security
+                {
+                    <section class="panel" id="security">
+                        <div class="panel-head">
+                            <h2 class="panel-title">(t(lang, Key::Security))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
+                        </div>
+                        <form method="post" action="/api/save_security" class="panel-body">
+                            <div class="field-row">
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::RateLimitAttemptsLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="number"
+                                        name="rate_limit_attempts"
+                                        min="1"
+                                        max=(WIDEST_RATE_LIMIT_ATTEMPTS.to_string())
+                                        value=(rate_limit_attempts.to_string())
+                                        required=""
+                                    >
+                                </label>
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::RateWindowLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="number"
+                                        name="rate_window_minutes"
+                                        min="1"
+                                        max=(LONGEST_RATE_WINDOW_MINUTES.to_string())
+                                        value=(rate_window_minutes.to_string())
+                                        required=""
+                                    >
+                                </label>
+                            </div>
+                            <div class="field-row">
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::SessionLifetimeLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="number"
+                                        name="session_lifetime_days"
+                                        min="1"
+                                        max=(LONGEST_SESSION_DAYS.to_string())
+                                        value=(session_lifetime_days.to_string())
+                                        required=""
+                                    >
+                                </label>
+                                <label class="field">
+                                    <span class="field-label">(t(lang, Key::LinkLifetimeLabel))</span>
+                                    <input
+                                        class="field-input"
+                                        type="number"
+                                        name="signin_link_lifetime_days"
+                                        min="1"
+                                        max=(LONGEST_LINK_DAYS.to_string())
+                                        value=(signin_link_lifetime_days.to_string())
+                                        required=""
+                                    >
+                                </label>
+                            </div>
+                            <div class="panel-foot">
+                                if let Some(refusal) = &security_refusal {
+                                    <span class="field-error">(refusal.message_in(lang))</span>
+                                }
+                                if security_saved {
                                     <span class="field-note">(t(lang, Key::Saved))</span>
                                 }
                                 <button class="primary" type="submit">(t(lang, Key::Save))</button>

@@ -372,7 +372,7 @@ impl TursoStore {
 
         if empty {
             conn.execute("BEGIN IMMEDIATE", ()).await.map_err(backend)?;
-            if let Err(e) = conn.execute_batch(super::schema::SCHEMA).await {
+            if let Err(e) = conn.execute_batch(&super::schema::schema_sql()).await {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 return Err(backend(e));
             }
@@ -1110,6 +1110,10 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
             }),
             None => None,
         },
+        rate_limit_attempts: row.get::<i64>(21).map_err(backend)?.max(0) as u64,
+        rate_window_minutes: row.get::<i64>(22).map_err(backend)?.max(0) as u32,
+        session_lifetime_days: row.get::<i64>(23).map_err(backend)?.max(0) as u32,
+        signin_link_lifetime_days: row.get::<i64>(24).map_err(backend)?.max(0) as u32,
         public_url: opt_text(row, 15)?,
     })
 }
@@ -1122,7 +1126,8 @@ const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
      smtp_from_name, smtp_from_address, \
      (smtp_password IS NOT NULL AND smtp_password <> ''), \
      smtp_test_at, smtp_test_ms, smtp_test_error, public_url, \
-     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes, reminder_minutes";
+     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes, reminder_minutes, \
+     rate_limit_attempts, rate_window_minutes, session_lifetime_days, signin_link_lifetime_days";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
@@ -1205,8 +1210,18 @@ impl Store for TursoStore {
 
         let claimed = async {
             tx.execute(
-                "INSERT INTO workspace (id, name, created_at) VALUES (?1, ?2, ?3)",
-                params![workspace_id.clone(), workspace_name, now.clone()],
+                "INSERT INTO workspace (id, name, created_at, rate_limit_attempts, \
+                 rate_window_minutes, session_lifetime_days, signin_link_lifetime_days) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    workspace_id.clone(),
+                    workspace_name,
+                    now.clone(),
+                    crate::store::DEFAULT_RATE_LIMIT_ATTEMPTS as i64,
+                    i64::from(crate::store::DEFAULT_RATE_WINDOW_MINUTES),
+                    i64::from(crate::store::DEFAULT_SESSION_LIFETIME_DAYS),
+                    i64::from(crate::store::DEFAULT_SIGNIN_LINK_LIFETIME_DAYS),
+                ],
             )
             .await?;
             tx.execute(
@@ -1449,6 +1464,36 @@ impl Store for TursoStore {
                 workspace_id,
                 i64::from(mail_batch_minutes),
                 i64::from(reminder_minutes)
+            ],
+        )
+        .await
+        .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
+        Ok(())
+    }
+
+    /// Writes the workspace's four security knobs: the sign-in attempt
+    /// allowance, the rate-limit window and the two lifetimes. One write,
+    /// because they are one save — the same rule `set_limits` lives by.
+    async fn set_security(
+        &self,
+        workspace_id: &str,
+        rate_limit_attempts: u64,
+        rate_window_minutes: u32,
+        session_lifetime_days: u32,
+        signin_link_lifetime_days: u32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE workspace SET rate_limit_attempts = ?1, rate_window_minutes = ?2, \
+                 session_lifetime_days = ?3, signin_link_lifetime_days = ?4 WHERE id = ?5",
+            params![
+                rate_limit_attempts as i64,
+                i64::from(rate_window_minutes),
+                i64::from(session_lifetime_days),
+                i64::from(signin_link_lifetime_days),
+                workspace_id
             ],
         )
         .await
@@ -1808,23 +1853,35 @@ impl Store for TursoStore {
         kind: LinkKind,
     ) -> Result<SigninLink> {
         let id = Ulid::new().to_string();
-        self.conn
-            .lock()
-            .await
-            .execute(
-                "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at, kind) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    id.clone(),
-                    user_id,
-                    token_hash,
-                    now_text()?,
-                    stamp(expires_at)?,
-                    kind.as_str(),
-                ],
-            )
+        let now = now_text()?;
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(backend)?;
+        // The newest link of a kind is the only live one: minting retires
+        // every earlier unspent link of the same kind for the account, in the
+        // same transaction as the insert, so a second reset mail cannot leave
+        // the first link working behind it. Retired is spent — the same
+        // stamped `used_at` a redemption writes — so there is no third state
+        // for reconcile or a fixture to know about. The update runs before
+        // the insert: the new row is unspent by definition and must not
+        // retire itself.
+        tx.execute(
+            "UPDATE signin_link SET used_at = ?1 \
+             WHERE user_id = ?2 AND kind = ?3 AND used_at IS NULL",
+            params![now.clone(), user_id, kind.as_str()],
+        )
+        .await
+        .map_err(backend)?;
+        tx.execute(
+            "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at, kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id.clone(), user_id, token_hash, now, stamp(expires_at)?, kind.as_str()],
+        )
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
         self.announce([Topic::Members]);
         match self
             .one_row(

@@ -9,8 +9,25 @@
 use super::{Result, StoreError};
 use turso::Connection;
 
-/// The declared whole schema, applied to an empty database.
-pub(crate) const SCHEMA: &str = include_str!("../../migrations/0001_init.sql");
+/// The declared migrations, in order. An empty database is built by applying
+/// them one after another; each one applies cleanly to what the ones before
+/// it built (`0002` is `ALTER`s), so their concatenation is itself a valid
+/// whole-schema script.
+pub(crate) const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/0001_init.sql"),
+    include_str!("../../migrations/0002_security_knobs.sql"),
+];
+
+/// The whole declared schema — every migration applied in order — as one
+/// batch of SQL.
+pub(crate) fn schema_sql() -> String {
+    let mut sql = String::new();
+    for migration in MIGRATIONS {
+        sql.push_str(migration);
+        sql.push('\n');
+    }
+    sql
+}
 
 /// Reads and normalises the schema of the connected database.
 ///
@@ -54,7 +71,7 @@ pub async fn declared_fingerprint() -> Result<String> {
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     let conn = db.connect().map_err(|e| StoreError::Backend(e.to_string()))?;
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(&schema_sql())
         .await
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     fingerprint(&conn).await

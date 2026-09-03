@@ -2617,6 +2617,161 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
     }
 }
 
+/// The security section, end to end: an admin sees the rail link and the
+/// panel, a member sees neither — including by asking for the section by URL
+/// — a member's post to the save endpoint is refused by the handler, an
+/// out-of-range number is refused by name and stores nothing, and a save in
+/// range lands in the row and renders back into the fields.
+#[tokio::test]
+async fn the_security_section_is_admin_only_and_round_trips() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "deniz@iz.sh", "Deniz", Role::Member).await;
+
+    // The admin gets the rail link, the panel and the defaults in the fields.
+    let page = app
+        .get("/settings?section=security", Some(&admin_cookie))
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(r#"href="/settings?section=security""#),
+        "{html}"
+    );
+    assert!(html.contains(r#"id="security""#), "{html}");
+    assert!(
+        html.contains(r#"name="rate_limit_attempts""#)
+            && html.contains(r#"name="rate_window_minutes""#)
+            && html.contains(r#"name="session_lifetime_days""#)
+            && html.contains(r#"name="signin_link_lifetime_days""#),
+        "{html}"
+    );
+
+    // The member gets neither the link nor the panel, by link or by URL.
+    let page = app.get("/settings", Some(&member)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        !html.contains(r#"href="/settings?section=security""#),
+        "{html}"
+    );
+    assert!(!html.contains(r#"id="security""#), "{html}");
+    let page = app
+        .get("/settings?section=security", Some(&member))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains(r#"id="profile""#), "{html}");
+    assert!(!html.contains(r#"id="security""#), "{html}");
+
+    // And the member's post is refused by the handler, not the markup.
+    let answer = app
+        .post(
+            "/api/save_security",
+            Some(&member),
+            &[
+                ("rate_limit_attempts", "3"),
+                ("rate_window_minutes", "15"),
+                ("session_lifetime_days", "14"),
+                ("signin_link_lifetime_days", "7"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=save_security"),
+        "{:?}",
+        answer.location
+    );
+
+    // An out-of-range knob is refused by name, each bound in turn.
+    for (attempts, window, session, link) in [
+        ("0", "15", "14", "7"),
+        ("10", "0", "14", "7"),
+        ("10", "15", "0", "7"),
+        ("10", "15", "14", "0"),
+        ("101", "15", "14", "7"),
+        ("10", "1441", "14", "7"),
+        ("10", "15", "366", "7"),
+        ("10", "15", "14", "91"),
+    ] {
+        let answer = app
+            .post(
+                "/api/save_security",
+                Some(&admin_cookie),
+                &[
+                    ("rate_limit_attempts", attempts),
+                    ("rate_window_minutes", window),
+                    ("session_lifetime_days", session),
+                    ("signin_link_lifetime_days", link),
+                ],
+            )
+            .await;
+        let location = answer.location.as_deref().unwrap_or_default();
+        assert!(
+            location.contains("refusal=bad-policy&on=save_security"),
+            "{attempts}/{window}/{session}/{link}: {location}"
+        );
+    }
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    assert_eq!(
+        workspace.rate_limit_attempts, 10,
+        "a refused save still changed the row"
+    );
+
+    // A save in range lands on the section with its saved note, the row
+    // agrees, and the fields render the saved values back.
+    let answer = app
+        .post(
+            "/api/save_security",
+            Some(&admin_cookie),
+            &[
+                ("rate_limit_attempts", "3"),
+                ("rate_window_minutes", "60"),
+                ("session_lifetime_days", "30"),
+                ("signin_link_lifetime_days", "2"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_security"),
+        "{:?}",
+        answer.location
+    );
+    let workspace = app.store.workspace().await.unwrap().unwrap();
+    assert_eq!(workspace.rate_limit_attempts, 3);
+    assert_eq!(workspace.rate_window_minutes, 60);
+    assert_eq!(workspace.session_lifetime_days, 30);
+    assert_eq!(workspace.signin_link_lifetime_days, 2);
+
+    let page = app
+        .get("/settings?section=security", Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    for field in [
+        r#"name="rate_limit_attempts"#,
+        r#"name="rate_window_minutes"#,
+        r#"name="session_lifetime_days"#,
+        r#"name="signin_link_lifetime_days"#,
+    ] {
+        let at = html.find(field).expect("the field vanished");
+        let value = &html[at..];
+        assert!(
+            value.contains("value=\"3\"")
+                || value.contains("value=\"60\"")
+                || value.contains("value=\"30\"")
+                || value.contains("value=\"2\""),
+            "field {field} does not render its saved value: {}",
+            &value[..value.len().min(200)]
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_file_type_that_is_not_an_extension_is_refused() {
     let app = App::open().await;
@@ -4637,7 +4792,7 @@ fn moment_for(body: &str, title: &str) -> String {
         .to_string()
 }
 
-/// The hour out of a `moment_label`-shaped stamp like `"Aug 19 11:04"`.
+/// The hour out of a `moment_label`-shaped stamp like `"Aug 19 11:04:07"`.
 fn hour_of(moment: &str) -> u32 {
     moment
         .rsplit(' ')
@@ -9672,22 +9827,32 @@ async fn the_board_search_filters_and_composes_with_the_project_filter() {
 // and the redeem flow over the mailed link.
 // ---------------------------------------------------------------------------
 
-/// The reset token out of the newest notice queued for the address — the mail
-/// is the token's only carrier, so the test reads it like a recipient would.
-async fn queued_reset_token(app: &App, email: &str) -> Option<String> {
+/// Every reset token queued for the address, oldest first. The newest ask
+/// retires the earlier links, so a test that asks twice needs both.
+async fn queued_reset_tokens(app: &App, email: &str) -> Vec<String> {
     let sends = app
         .store
         .mail_queue(50, iz_core::store::FeedPage::Newest)
         .await
         .unwrap();
-    let body = sends
-        .into_iter()
-        .rev()
-        .find(|send| send.kind == SendKind::Notice && send.recipient == email)
-        .and_then(|send| send.body)?;
-    body.rsplit_once("/reset/")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .map(str::to_string)
+    let mut tokens = Vec::new();
+    for send in sends {
+        if send.kind != SendKind::Notice || send.recipient != email {
+            continue;
+        }
+        let Some(body) = send.body else { continue };
+        let Some((_, rest)) = body.rsplit_once("/reset/") else { continue };
+        if let Some(token) = rest.split_whitespace().next() {
+            tokens.push(token.to_string());
+        }
+    }
+    tokens
+}
+
+/// The reset token out of the newest notice queued for the address — the mail
+/// is the token's only carrier, so the test reads it like a recipient would.
+async fn queued_reset_token(app: &App, email: &str) -> Option<String> {
+    queued_reset_tokens(app, email).await.pop()
 }
 
 #[tokio::test]
@@ -9733,9 +9898,19 @@ async fn a_reset_link_redeems_on_its_own_screen() {
     let _admin = admin(&app).await;
     app.post("/api/forgot_password", None, &[("email", "ada@iz.sh")])
         .await;
-    let token = queued_reset_token(&app, "ada@iz.sh")
-        .await
-        .expect("no reset mail queued");
+    // A second ask retires the first link: the newest mail carries the only
+    // working token, and the retired one is dead before the newer is
+    // redeemed.
+    app.post("/api/forgot_password", None, &[("email", "ada@iz.sh")])
+        .await;
+    let mut resets = queued_reset_tokens(&app, "ada@iz.sh").await;
+    assert_eq!(resets.len(), 2, "each ask queued its own mail");
+    let retired = resets.remove(0);
+    let token = resets.remove(0);
+    let page = app.get(&format!("/reset/{retired}"), None).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("no longer works"), "{html}");
+    assert!(!html.contains("Choose a new password"), "{html}");
 
     // The mailed link opens the choose-password card, naming the address it
     // was mailed to.

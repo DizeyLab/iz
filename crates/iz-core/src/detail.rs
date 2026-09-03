@@ -181,6 +181,7 @@ pub enum ActivityKind {
     ProfileSaved,
     SenderSaved,
     LimitsSaved,
+    SecuritySaved,
     TestMailSent,
     RuleCreated,
     RuleEdited,
@@ -213,6 +214,7 @@ impl ActivityKind {
             ActivityKind::ProfileSaved => "profile_saved",
             ActivityKind::SenderSaved => "sender_saved",
             ActivityKind::LimitsSaved => "limits_saved",
+            ActivityKind::SecuritySaved => "security_saved",
             ActivityKind::TestMailSent => "test_mail_sent",
             ActivityKind::RuleCreated => "rule_created",
             ActivityKind::RuleEdited => "rule_edited",
@@ -270,6 +272,7 @@ impl ActivityKind {
             "profile_saved" => ActivityKind::ProfileSaved,
             "sender_saved" => ActivityKind::SenderSaved,
             "limits_saved" => ActivityKind::LimitsSaved,
+            "security_saved" => ActivityKind::SecuritySaved,
             "test_mail_sent" => ActivityKind::TestMailSent,
             "rule_created" => ActivityKind::RuleCreated,
             "rule_edited" => ActivityKind::RuleEdited,
@@ -335,6 +338,7 @@ impl ActivityEntry {
             | ActivityKind::ProfileSaved
             | ActivityKind::SenderSaved
             | ActivityKind::LimitsSaved
+            | ActivityKind::SecuritySaved
             | ActivityKind::TestMailSent
             | ActivityKind::RuleCreated
             | ActivityKind::RuleEdited

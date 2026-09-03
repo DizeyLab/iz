@@ -9,8 +9,10 @@ use std::path::PathBuf;
 use iz_core::Role;
 use iz_core::auth::{Token, hash_password};
 use iz_core::store::{
-    Audience, Event, MailOutcome, MailRule, NewAttachment, NewSender, NewUser, SendKind, SendState,
-    Store, StoreError, Trigger, TursoStore, User,
+    Audience, DEFAULT_RATE_LIMIT_ATTEMPTS, DEFAULT_RATE_WINDOW_MINUTES,
+    DEFAULT_SESSION_LIFETIME_DAYS, DEFAULT_SIGNIN_LINK_LIFETIME_DAYS, Event, MailOutcome,
+    MailRule, NewAttachment, NewSender, NewUser, SendKind, SendState, Store, StoreError, Trigger,
+    TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use ulid::Ulid;
@@ -1087,6 +1089,37 @@ async fn limits_round_trip_including_the_file_type_list() {
     );
 }
 
+/// The security knobs come off the workspace row, not off consts: a fresh
+/// claim starts on the migration's defaults, one save changes all four, and
+/// the save announces itself like every other settings write.
+#[tokio::test]
+async fn the_security_knobs_default_round_trip_and_announce() {
+    let (scratch, ws_id, _) = workspace_with_admin().await;
+    let mut rx = scratch.store.subscribe();
+
+    let ws = scratch.store.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.rate_limit_attempts, DEFAULT_RATE_LIMIT_ATTEMPTS);
+    assert_eq!(ws.rate_window_minutes, DEFAULT_RATE_WINDOW_MINUTES);
+    assert_eq!(ws.session_lifetime_days, DEFAULT_SESSION_LIFETIME_DAYS);
+    assert_eq!(
+        ws.signin_link_lifetime_days,
+        DEFAULT_SIGNIN_LINK_LIFETIME_DAYS
+    );
+
+    scratch
+        .store
+        .set_security(&ws_id, 3, 60, 30, 2)
+        .await
+        .unwrap();
+    let ws = scratch.store.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.rate_limit_attempts, 3);
+    assert_eq!(ws.rate_window_minutes, 60);
+    assert_eq!(ws.session_lifetime_days, 30);
+    assert_eq!(ws.signin_link_lifetime_days, 2);
+
+    assert_eq!(announced(&mut rx), vec!["settings".to_string()]);
+}
+
 #[tokio::test]
 async fn an_invited_member_has_no_password_until_they_choose_one() {
     let (scratch, ws_id, _) = workspace_with_admin().await;
@@ -1694,7 +1727,7 @@ async fn auth_attempts_are_counted_over_a_window() {
 // Account flows.
 // ---------------------------------------------------------------------------
 
-use iz_core::accounts::{AccountError, Accounts, RATE_LIMIT, SIGNIN_LINK_LIFETIME};
+use iz_core::accounts::{AccountError, Accounts};
 use iz_core::auth::PasswordProblem;
 use std::sync::Arc;
 
@@ -1719,6 +1752,18 @@ async fn claimed() -> (Scratch, Accounts, User) {
         .await
         .unwrap();
     (scratch, accounts, signed_in.user)
+}
+
+/// The workspace's configured sign-in attempt allowance, read the way
+/// `Accounts` reads it — off the workspace row, never off a const.
+async fn allowance(accounts: &Accounts) -> u64 {
+    accounts
+        .store()
+        .workspace()
+        .await
+        .unwrap()
+        .expect("the workspace is claimed")
+        .rate_limit_attempts
 }
 
 #[tokio::test]
@@ -1789,7 +1834,9 @@ async fn an_invited_member_chooses_their_own_password() {
     assert!(!invitation.user.has_signed_in(), "no password yet");
     assert!(
         invitation.expires_at
-            > OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME - Duration::minutes(1)
+            > OffsetDateTime::now_utc()
+                + Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS))
+                - Duration::minutes(1)
     );
 
     // The admin cannot sign in as them in the meantime.
@@ -2115,7 +2162,8 @@ async fn an_invited_account_that_has_no_password_cannot_be_signed_into() {
 #[tokio::test]
 async fn sign_in_attempts_are_rate_limited_per_address() {
     let (_scratch, accounts, _admin) = claimed().await;
-    for _ in 0..RATE_LIMIT {
+    let allowance = allowance(&accounts).await;
+    for _ in 0..allowance {
         let _ = accounts
             .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
             .await;
@@ -2137,14 +2185,15 @@ async fn sign_in_attempts_are_rate_limited_per_address() {
 }
 
 /// The lockout question, decided: an address bucket that refuses before the
-/// verify lets anyone who knows a colleague's address keep them out with ten
-/// wrong guesses every fifteen minutes, from anywhere, with no account of their
-/// own. So the address bucket counts but never refuses a correct password.
+/// verify lets anyone who knows a colleague's address keep them out with a
+/// windowful of wrong guesses, from anywhere, with no account of their own.
+/// So the address bucket counts but never refuses a correct password.
 #[tokio::test]
 async fn a_flooded_address_never_locks_the_owner_out() {
     let (_scratch, accounts, _admin) = claimed().await;
+    let allowance = allowance(&accounts).await;
     // Each guess from its own client, so only the address bucket fills.
-    for i in 0..(RATE_LIMIT + 5) {
+    for i in 0..(allowance + 5) {
         let _ = accounts
             .sign_in("ada@iz.sh", "wrong", &format!("203.0.113.{i}"))
             .await;
@@ -2160,7 +2209,8 @@ async fn a_flooded_address_never_locks_the_owner_out() {
 #[tokio::test]
 async fn sign_in_attempts_are_rate_limited_per_client() {
     let (_scratch, accounts, _admin) = claimed().await;
-    for i in 0..RATE_LIMIT {
+    let allowance = allowance(&accounts).await;
+    for i in 0..allowance {
         let _ = accounts
             .sign_in(&format!("nobody{i}@iz.sh"), "wrong", "203.0.113.9")
             .await;
@@ -2180,11 +2230,12 @@ async fn sign_in_attempts_are_rate_limited_per_client() {
 #[tokio::test]
 async fn link_redemption_is_rate_limited_per_client() {
     let (_scratch, accounts, admin) = claimed().await;
+    let allowance = allowance(&accounts).await;
     let invitation = accounts
         .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
         .await
         .unwrap();
-    for i in 0..RATE_LIMIT {
+    for i in 0..allowance {
         let bogus = format!("{i:032x}");
         assert!(matches!(
             accounts
@@ -2220,7 +2271,8 @@ async fn link_redemption_is_rate_limited_per_client() {
 #[tokio::test]
 async fn changing_a_password_is_rate_limited_per_client() {
     let (_scratch, accounts, admin) = claimed().await;
-    for _ in 0..RATE_LIMIT {
+    let allowance = allowance(&accounts).await;
+    for _ in 0..allowance {
         let _ = accounts
             .change_password(&admin.id, "not-it", "chronometer-1761", "203.0.113.9")
             .await;
@@ -2241,7 +2293,8 @@ async fn changing_a_password_is_rate_limited_per_client() {
 #[tokio::test]
 async fn a_successful_sign_in_clears_the_bucket() {
     let (_scratch, accounts, _admin) = claimed().await;
-    for _ in 0..(RATE_LIMIT - 1) {
+    let allowance = allowance(&accounts).await;
+    for _ in 0..(allowance - 1) {
         let _ = accounts
             .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
             .await;
@@ -2257,6 +2310,125 @@ async fn a_successful_sign_in_clears_the_bucket() {
             .await,
         Err(AccountError::Rejected)
     ));
+}
+
+/// The allowance is the workspace's number, not a const's: lowered to three,
+/// the third miss still answers Rejected and the fourth is RateLimited — the
+/// refusal lands exactly at the configured count.
+#[tokio::test]
+async fn the_rate_allowance_is_the_configured_one() {
+    let (scratch, accounts, admin) = claimed().await;
+    scratch
+        .store
+        .set_security(
+            &admin.workspace_id,
+            3,
+            DEFAULT_RATE_WINDOW_MINUTES,
+            DEFAULT_SESSION_LIFETIME_DAYS,
+            DEFAULT_SIGNIN_LINK_LIFETIME_DAYS,
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..3 {
+        assert!(matches!(
+            accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await,
+            Err(AccountError::Rejected)
+        ));
+    }
+    assert!(matches!(
+        accounts
+            .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
+            .await,
+        Err(AccountError::RateLimited)
+    ));
+    // And the stored knob is the one that decided: the save is readable back.
+    assert_eq!(allowance(&accounts).await, 3);
+}
+
+/// The lifetimes are the workspace's too. Nothing here waits them out: what
+/// an admin changes is what the next session row and the next reset link
+/// are written with, read straight back off the store.
+#[tokio::test]
+async fn the_lifetimes_are_the_configured_ones() {
+    let (scratch, accounts, _admin) = claimed().await;
+
+    let signed_in = accounts
+        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
+        .await
+        .unwrap();
+    let expected = OffsetDateTime::now_utc()
+        + Duration::days(i64::from(DEFAULT_SESSION_LIFETIME_DAYS));
+    assert!(
+        (signed_in.session.expires_at - expected).abs() < Duration::minutes(1),
+        "the session was not written with the default lifetime"
+    );
+
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let link_expiry = newest_link_expiry(&scratch).await;
+    let expected = OffsetDateTime::now_utc()
+        + Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS));
+    assert!(
+        (link_expiry - expected).abs() < Duration::minutes(1),
+        "the link was not written with the default lifetime"
+    );
+
+    scratch
+        .store
+        .set_security(
+            &signed_in.user.workspace_id,
+            DEFAULT_RATE_LIMIT_ATTEMPTS,
+            DEFAULT_RATE_WINDOW_MINUTES,
+            30,
+            2,
+        )
+        .await
+        .unwrap();
+
+    let signed_in = accounts
+        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.8")
+        .await
+        .unwrap();
+    let expected = OffsetDateTime::now_utc() + Duration::days(30);
+    assert!(
+        (signed_in.session.expires_at - expected).abs() < Duration::minutes(1),
+        "the session ignored the workspace's session lifetime"
+    );
+
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let link_expiry = newest_link_expiry(&scratch).await;
+    let expected = OffsetDateTime::now_utc() + Duration::days(2);
+    assert!(
+        (link_expiry - expected).abs() < Duration::minutes(1),
+        "the link ignored the workspace's link lifetime"
+    );
+}
+
+/// The `expires_at` of the newest stored sign-in link, read the way it sits
+/// on disk.
+async fn newest_link_expiry(scratch: &Scratch) -> OffsetDateTime {
+    let conn = raw_conn(scratch).await;
+    let mut rows = conn
+        .query(
+            "SELECT expires_at FROM signin_link ORDER BY created_at DESC LIMIT 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let raw: String = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("a reset was asked, so a link exists")
+        .get(0)
+        .unwrap();
+    OffsetDateTime::parse(&raw, &time::format_description::well_known::Rfc3339).unwrap()
 }
 
 #[tokio::test]
@@ -7367,6 +7539,72 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The migration the security knobs exist for: a database of the shape the
+/// first migration builds — everything an install made before
+/// `0002_security_knobs.sql` shipped — comes up through the store's own
+/// repair path, and its workspace lands on the defaults the migration and
+/// the copy map both backfill, accounts and tasks intact.
+#[tokio::test]
+async fn reconcile_backfills_the_security_knobs_on_a_first_migration_database() {
+    let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("iz.db").to_str().unwrap().to_string();
+
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    conn.execute_batch(include_str!("../migrations/0001_init.sql"))
+        .await
+        .unwrap();
+    let now = "2026-09-01T09:00:00Z";
+    conn.execute_batch(&format!(
+        "INSERT INTO workspace (id, name, created_at) VALUES ('W1', 'Dizey', '{now}');
+         INSERT INTO user (id, workspace_id, email, display_name, role, password_hash, created_at) \
+             VALUES ('U1', 'W1', 'ada@iz.sh', 'Ada', 'admin', 'argon2$hash', '{now}');
+         INSERT INTO workspace_owner (singleton, user_id, claimed_at) VALUES (1, 'U1', '{now}');"
+    ))
+    .await
+    .unwrap();
+    drop(conn);
+    drop(db);
+
+    // Opening the store is the boot the upgrade happens on: the stale shape
+    // is reconciled before any handle is kept.
+    let store = TursoStore::open(&path, &dir.join("storage"))
+        .await
+        .expect("the store refused a first-migration database");
+
+    let ws = store.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.rate_limit_attempts, DEFAULT_RATE_LIMIT_ATTEMPTS);
+    assert_eq!(ws.rate_window_minutes, DEFAULT_RATE_WINDOW_MINUTES);
+    assert_eq!(ws.session_lifetime_days, DEFAULT_SESSION_LIFETIME_DAYS);
+    assert_eq!(
+        ws.signin_link_lifetime_days,
+        DEFAULT_SIGNIN_LINK_LIFETIME_DAYS
+    );
+    assert_eq!(ws.name, "Dizey", "the workspace row itself was lost");
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM user").await,
+        1,
+        "the admin account did not come across"
+    );
+
+    // A database already on the new shape is not reconciled again: opening
+    // twice in a row is ordinary, and the knobs keep what a save wrote.
+    store
+        .set_security("W1", 7, 30, 21, 3)
+        .await
+        .unwrap();
+    drop(store);
+    let second = TursoStore::open(&path, &dir.join("storage"))
+        .await
+        .unwrap();
+    let ws = second.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.rate_limit_attempts, 7, "a second boot reset the knobs");
+    assert_eq!(ws.rate_window_minutes, 30);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The rebuild the tag map exists for: a database that already carries user
 /// tags hands every one of them across untouched — same id, same board, same
 /// name, same order, same default mark — and every task still points at the
@@ -9013,21 +9251,31 @@ async fn board_search_matches_keys_and_titles_in_place() {
 // browser out. The address's existence stays the requester's guess.
 // ---------------------------------------------------------------------------
 
-/// The reset token out of the newest notice queued for the address — the mail
-/// is the token's only carrier, so the test reads it like a recipient would.
-async fn queued_reset_token(store: &std::sync::Arc<dyn Store>, email: &str) -> Option<String> {
+/// Every reset token queued for the address, oldest first. The newest ask
+/// retires the earlier links, so a test that asks twice needs both.
+async fn queued_reset_tokens(store: &std::sync::Arc<dyn Store>, email: &str) -> Vec<String> {
     let sends = store
         .mail_queue(50, iz_core::store::FeedPage::Newest)
         .await
         .unwrap();
-    let body = sends
-        .into_iter()
-        .rev()
-        .find(|send| send.kind == iz_core::store::SendKind::Notice && send.recipient == email)
-        .and_then(|send| send.body)?;
-    body.rsplit_once("/reset/")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .map(str::to_string)
+    let mut tokens = Vec::new();
+    for send in sends {
+        if send.kind != SendKind::Notice || send.recipient != email {
+            continue;
+        }
+        let Some(body) = send.body else { continue };
+        let Some((_, rest)) = body.rsplit_once("/reset/") else { continue };
+        if let Some(token) = rest.split_whitespace().next() {
+            tokens.push(token.to_string());
+        }
+    }
+    tokens
+}
+
+/// The reset token out of the newest notice queued for the address — the mail
+/// is the token's only carrier, so the test reads it like a recipient would.
+async fn queued_reset_token(store: &std::sync::Arc<dyn Store>, email: &str) -> Option<String> {
+    queued_reset_tokens(store, email).await.pop()
 }
 
 #[tokio::test]
@@ -9174,7 +9422,8 @@ async fn each_link_redeems_only_on_its_own_screen() {
         .create_signin_link(
             &admin.id,
             &join.hash(),
-            time::OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME,
+            time::OffsetDateTime::now_utc()
+                + time::Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS)),
             iz_core::store::LinkKind::Join,
         )
         .await
@@ -9202,15 +9451,185 @@ async fn each_link_redeems_only_on_its_own_screen() {
 }
 
 #[tokio::test]
+async fn a_second_reset_request_retires_the_first_link() {
+    let (_scratch, accounts, _admin) = claimed().await;
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let tokens = queued_reset_tokens(accounts.store(), "ada@iz.sh").await;
+    assert_eq!(tokens.len(), 2, "each ask queued its own mail");
+
+    // The first link died when the second was minted — before the second was
+    // redeemed — and it is refused like any other dead link.
+    assert!(matches!(
+        accounts
+            .redeem_reset_link(&tokens[0], "chronometer-1761", "203.0.113.10")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+
+    // The newest link is the one that works, and it really changes the
+    // password.
+    accounts
+        .redeem_reset_link(&tokens[1], "chronometer-1761", "203.0.113.10")
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.11")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+    accounts
+        .sign_in("ada@iz.sh", "chronometer-1761", "198.51.100.11")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_second_invitation_retires_the_first_link() {
+    let (_scratch, accounts, admin) = claimed().await;
+    let first = accounts
+        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+    let second = accounts
+        .resend_invitation(&admin, &first.user.id)
+        .await
+        .unwrap();
+    assert_ne!(first.token.expose(), second.token.expose());
+
+    // The first link died when the second was minted.
+    assert!(matches!(
+        accounts
+            .redeem_signin_link(first.token.expose(), "sextant-and-chart", "198.51.100.7")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+    // The second sets the password it was always going to.
+    let signed_in = accounts
+        .redeem_signin_link(second.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .await
+        .unwrap();
+    assert_eq!(signed_in.user.id, first.user.id);
+    accounts
+        .sign_in("grace@iz.sh", "sextant-and-chart", "198.51.100.7")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_retired_link_stays_retired_after_the_newer_one_redeems() {
+    let (_scratch, accounts, admin) = claimed().await;
+
+    // Reset: redeeming the newest mail must not wake the retired one.
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let resets = queued_reset_tokens(accounts.store(), "ada@iz.sh").await;
+    assert_eq!(resets.len(), 2);
+    accounts
+        .redeem_reset_link(&resets[1], "chronometer-1761", "203.0.113.10")
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .redeem_reset_link(&resets[0], "harbor-and-pilot-1812", "203.0.113.10")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+
+    // Join: the same for a resent invitation.
+    let first = accounts
+        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+    let second = accounts
+        .resend_invitation(&admin, &first.user.id)
+        .await
+        .unwrap();
+    accounts
+        .redeem_signin_link(second.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts
+            .redeem_signin_link(first.token.expose(), "harbor-and-pilot-1812", "198.51.100.7")
+            .await,
+        Err(AccountError::Rejected)
+    ));
+}
+
+#[tokio::test]
+async fn a_fresh_link_of_one_kind_leaves_the_other_kinds_link_alone() {
+    let (scratch, accounts, admin) = claimed().await;
+
+    // An invited member who has not signed in can still be mailed a reset:
+    // both links are live, and neither mint retires the other.
+    let invitation = accounts
+        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
+        .await
+        .unwrap();
+    accounts
+        .request_password_reset("grace@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let join = scratch
+        .store
+        .signin_link_by_hash(&invitation.token.hash())
+        .await
+        .unwrap()
+        .expect("the invitation link is stored");
+    assert!(
+        join.is_usable(OffsetDateTime::now_utc()),
+        "the reset mint retired the invitation"
+    );
+
+    // And the other way round: the admin holds a live reset; minting her an
+    // invitation over it leaves the reset spendable, and both links open
+    // their own screens.
+    accounts
+        .request_password_reset("ada@iz.sh", "203.0.113.9")
+        .await
+        .unwrap();
+    let resent = accounts
+        .resend_invitation(&admin, &admin.id)
+        .await
+        .unwrap();
+    let reset = queued_reset_token(accounts.store(), "ada@iz.sh")
+        .await
+        .expect("no reset mail queued");
+    accounts
+        .redeem_reset_link(&reset, "chronometer-1761", "203.0.113.10")
+        .await
+        .unwrap();
+    accounts
+        .redeem_signin_link(resent.token.expose(), "sextant-and-chart", "198.51.100.7")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn reset_asks_are_rate_limited_per_client_and_silenced_per_address() {
     let (dir, store, workspace, _admin) = shared().await;
     let _grace = member(&store, &workspace, "grace@iz.sh", "Grace").await;
     let store = store as std::sync::Arc<dyn Store>;
     let accounts = Accounts::new(store.clone(), "https://iz.sh");
+    let allowance = accounts.store().workspace().await.unwrap().unwrap().rate_limit_attempts;
 
-    // One machine asks RATE_LIMIT times: every ask answers the same, and the
-    // eleventh from that machine is refused by name.
-    for _ in 0..RATE_LIMIT {
+    // One machine asks allowance times: every ask answers the same, and the
+    // next from that machine is refused by name.
+    for _ in 0..allowance {
         accounts
             .request_password_reset("grace@iz.sh", "203.0.113.9")
             .await
@@ -9234,8 +9653,7 @@ async fn reset_asks_are_rate_limited_per_client_and_silenced_per_address() {
         "SELECT COUNT(*) FROM mail_send WHERE kind = 'notice'",
     )
     .await;
-    assert_eq!(queued, RATE_LIMIT as i64, "the flood minted no mail");
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(queued, allowance as i64, "the flood minted no mail");
 }
 
 #[tokio::test]

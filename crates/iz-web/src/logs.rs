@@ -186,6 +186,7 @@ pub(crate) fn activity_sentence(kind: &iz_core::detail::ActivityKind, detail: &s
         ActivityKind::ProfileSaved => t(lang, Key::ActProfileSaved).to_string(),
         ActivityKind::SenderSaved => t(lang, Key::ActSenderSaved).to_string(),
         ActivityKind::LimitsSaved => t(lang, Key::ActLimitsSaved).to_string(),
+        ActivityKind::SecuritySaved => t(lang, Key::ActSecuritySaved).to_string(),
         ActivityKind::TestMailSent => t(lang, Key::ActTestMailSent).to_string(),
         ActivityKind::MessageSent => t(lang, Key::ActMessageSent).to_string(),
         ActivityKind::RoleChanged => crate::i18n::role_changed_label(lang, detail),
@@ -663,7 +664,7 @@ async fn snapshot(
             event_id: decision.event_id,
             task,
             happened,
-            at: iz_core::detail::moment_label_in(decision.at, zone),
+            at: iz_core::detail::moment_label_with_seconds_in(decision.at, zone),
             verdicts: vec![verdict],
         });
     }
@@ -698,7 +699,7 @@ async fn snapshot(
     let activity = raw_activity
         .into_iter()
         .map(|line| ActivityRow {
-            at: iz_core::detail::moment_label_in(line.at, zone),
+            at: iz_core::detail::moment_label_with_seconds_in(line.at, zone),
             actor: line
                 .actor_name
                 .unwrap_or_else(|| t(lang, Key::TheSystem).to_string()),

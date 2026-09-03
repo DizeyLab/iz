@@ -7,10 +7,13 @@
 -- creation, and Crockford-uppercase already, which is what lets a task key
 -- borrow its tail.
 --
--- This file is the whole schema, and it is edited in place: a change to a
--- table is made here, in the table, never appended as an ALTER. An existing
--- database is brought up to it by `iz reconcile`, not by the store, so a
--- change to a table lands in two places — here, and in that tool's copy map.
+-- This file is the first migration, not the whole schema any more. It is the
+-- shape İz was deployed with before workspace settings could be versioned;
+-- everything after it is a numbered `0002_*.sql` beside it, and an empty
+-- database is built by applying them in order. A live database is brought up
+-- by `iz reconcile`, not by re-running the files, so a change to a table
+-- lands in three places — the newest migration, this file's table, and that
+-- tool's copy map.
 
 CREATE TABLE workspace (
     id                     TEXT PRIMARY KEY,

@@ -21,17 +21,47 @@ use crate::store::{
     LinkKind, NewUser, Session, Store, StoreError, User, Workspace,
 };
 
-/// How long a first-sign-in link is good for. The mockups say seven days, and
-/// an expired link is not a dead account: resending opens the same one.
-pub const SIGNIN_LINK_LIFETIME: Duration = Duration::days(7);
+/// The account policy as the workspace row states it, read at use: the admin's
+/// Settings screen is what sets these, and a const here would be a second
+/// opinion the store could not overrule. An unclaimed install has no row to
+/// read and stands on the defaults — its sign-in forms are rate-limited all
+/// the same.
+#[derive(Clone, Copy)]
+struct Policy {
+    rate_limit: u64,
+    rate_window: Duration,
+    session_lifetime: Duration,
+    link_lifetime: Duration,
+}
 
-/// How long a signed-in browser stays signed in.
-pub const SESSION_LIFETIME: Duration = Duration::days(14);
+impl Policy {
+    /// One indexed read of the workspace row. Callers pay it per use; the
+    /// sign-in path already reads the row for other reasons.
+    async fn read(store: &dyn Store) -> Result<Self> {
+        Ok(Self::of(store.workspace().await?.as_ref()))
+    }
 
-/// The rate-limit window and its allowance. Deliberately modest: this exists so
-/// an open form is not an unbounded Argon2 faucet, not to be clever.
-pub const RATE_WINDOW: Duration = Duration::minutes(15);
-pub const RATE_LIMIT: u64 = 10;
+    fn of(workspace: Option<&Workspace>) -> Self {
+        use crate::store::{
+            DEFAULT_RATE_LIMIT_ATTEMPTS, DEFAULT_RATE_WINDOW_MINUTES,
+            DEFAULT_SESSION_LIFETIME_DAYS, DEFAULT_SIGNIN_LINK_LIFETIME_DAYS,
+        };
+        let Some(workspace) = workspace else {
+            return Self {
+                rate_limit: DEFAULT_RATE_LIMIT_ATTEMPTS,
+                rate_window: Duration::minutes(i64::from(DEFAULT_RATE_WINDOW_MINUTES)),
+                session_lifetime: Duration::days(i64::from(DEFAULT_SESSION_LIFETIME_DAYS)),
+                link_lifetime: Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS)),
+            };
+        };
+        Self {
+            rate_limit: workspace.rate_limit_attempts,
+            rate_window: Duration::minutes(i64::from(workspace.rate_window_minutes)),
+            session_lifetime: Duration::days(i64::from(workspace.session_lifetime_days)),
+            link_lifetime: Duration::days(i64::from(workspace.signin_link_lifetime_days)),
+        }
+    }
+}
 
 /// What went wrong, in the vocabulary the caller is allowed to have.
 #[derive(Debug, thiserror::Error)]
@@ -228,16 +258,21 @@ impl Accounts {
             .unwrap_or_else(|| self.fallback_url.clone()))
     }
 
+    /// Mints the invitation link and queues its mail. Minting retires any
+    /// earlier unspent link for the account: the newest link is the only one
+    /// that works.
     async fn mint_link(&self, actor: &User, user: &User) -> Result<Invitation> {
+        let policy = Policy::read(self.store.as_ref()).await?;
         let token = Token::mint();
-        let expires_at = OffsetDateTime::now_utc() + SIGNIN_LINK_LIFETIME;
+        let expires_at = OffsetDateTime::now_utc() + policy.link_lifetime;
         self.store
             .create_signin_link(&user.id, &token.hash(), expires_at, LinkKind::Join)
             .await?;
         let subject = "Your İz sign-in link";
         let body = format!(
-            "{actor} added you to İz.\n\n{base}/join/{token}\n\nThe link works once and expires in 7 days.\n",
+            "{actor} added you to İz.\n\n{base}/join/{token}\n\nThe link works once and expires in {days} days.\n",
             actor = actor.display_name,
+            days = policy.link_lifetime.whole_days(),
             base = self.base().await?,
             token = token.expose(),
         );
@@ -334,7 +369,9 @@ impl Accounts {
     /// account. The answer is the same whether it does or not: the miss path
     /// pays for an Argon2 hash the way sign-in's pays for a verify, and only
     /// the queued mail knows the difference. The token travels in the mail
-    /// and nowhere else — this method hands it to nobody.
+    /// and nowhere else — this method hands it to nobody. A fresh reset
+    /// retires the previous unspent one, so the newest mail carries the only
+    /// working link.
     ///
     /// The client bucket refuses outright, like sign-in's. The address bucket
     /// counts but stays silent: refusing by name would hand anyone who knows
@@ -365,12 +402,18 @@ impl Accounts {
             return Ok(());
         }
 
+        let policy = Policy::read(self.store.as_ref()).await?;
         let token = Token::mint();
-        let expires_at = now + SIGNIN_LINK_LIFETIME;
+        let expires_at = now + policy.link_lifetime;
         self.store
             .create_signin_link(&user.id, &token.hash(), expires_at, LinkKind::Reset)
             .await?;
-        let (subject, body) = reset_mail(&user, self.base().await?, &token.expose());
+        let (subject, body) = reset_mail(
+            &user,
+            self.base().await?,
+            &token.expose(),
+            policy.link_lifetime.whole_days(),
+        );
         self.store
             .queue_notice(&user.email, &subject, &body, now)
             .await?;
@@ -464,7 +507,7 @@ impl Accounts {
         let address_bucket = format!("address:{}", email.trim().to_lowercase());
         // The address bucket counts, but it never refuses on its own: refusing
         // before the verify would let anyone who knows a colleague's address
-        // lock them out with ten wrong guesses every fifteen minutes. A correct
+        // lock them out with a few wrong guesses per window. A correct
         // password always gets in; a wrong one still pays for its Argon2 and
         // still counts. The client bucket is what caps the work.
         let address_over_limit = self.over_limit(&address_bucket).await?;
@@ -589,13 +632,14 @@ impl Accounts {
     }
 
     async fn start_session(&self, user: User) -> Result<SignedIn> {
+        let policy = Policy::read(self.store.as_ref()).await?;
         let token = Token::mint();
         let session = self
             .store
             .create_session(
                 &user.id,
                 &token.hash(),
-                OffsetDateTime::now_utc() + SESSION_LIFETIME,
+                OffsetDateTime::now_utc() + policy.session_lifetime,
             )
             .await?;
         Ok(SignedIn {
@@ -625,21 +669,25 @@ impl Accounts {
     /// The same question without the refusal, for the bucket that counts but
     /// must not lock an account out.
     async fn over_limit(&self, bucket: &str) -> Result<bool> {
-        let since = OffsetDateTime::now_utc() - RATE_WINDOW;
-        Ok(self.store.count_auth_attempts(bucket, since).await? >= RATE_LIMIT)
+        let policy = Policy::read(self.store.as_ref()).await?;
+        let since = OffsetDateTime::now_utc() - policy.rate_window;
+        Ok(self
+            .store
+            .count_auth_attempts(bucket, since)
+            .await? >= policy.rate_limit)
     }
 }
 
-/// The reset mail, in the account's own language. Terse like the invitation's:
-/// what happened, the link, the once-only fact.
-fn reset_mail(user: &User, base: String, token: &str) -> (String, String) {
+/// what happened, the link, the once-only fact. The lifetime it names is the
+/// workspace's own, so the number travels with the mail.
+fn reset_mail(user: &User, base: String, token: &str, days: i64) -> (String, String) {
     if user.language == "tr" {
         (
             "İz parolanı sıfırla".to_string(),
             format!(
                 "Bu adres için bir İz parola sıfırlaması istendi.\n\n\
                  {base}/reset/{token}\n\n\
-                 Bağlantı bir kez çalışır ve 7 gün içinde geçersiz olur.\n"
+                 Bağlantı bir kez çalışır ve {days} gün içinde geçersiz olur.\n"
             ),
         )
     } else {
@@ -648,7 +696,7 @@ fn reset_mail(user: &User, base: String, token: &str) -> (String, String) {
             format!(
                 "A reset was asked for the İz password on this address.\n\n\
                  {base}/reset/{token}\n\n\
-                 The link works once and expires in 7 days.\n"
+                 The link works once and expires in {days} days.\n"
             ),
         )
     }

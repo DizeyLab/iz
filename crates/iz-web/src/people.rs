@@ -46,6 +46,7 @@ fn kind_word(lang: Lang, kind: &ActivityKind) -> String {
         ActivityKind::ProfileSaved => t(lang, Key::ActProfileSaved).into(),
         ActivityKind::SenderSaved => t(lang, Key::ActSenderSaved).into(),
         ActivityKind::LimitsSaved => t(lang, Key::ActLimitsSaved).into(),
+        ActivityKind::SecuritySaved => t(lang, Key::ActSecuritySaved).into(),
         ActivityKind::TestMailSent => t(lang, Key::ActTestMailSent).into(),
         ActivityKind::MessageSent => t(lang, Key::ActMessageSent).into(),
         ActivityKind::Other(raw) if raw == "password_reset_requested" => {

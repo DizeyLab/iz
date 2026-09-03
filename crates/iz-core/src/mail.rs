@@ -924,6 +924,7 @@ impl Engine {
                 | ActivityKind::ProfileSaved
                 | ActivityKind::SenderSaved
                 | ActivityKind::LimitsSaved
+                | ActivityKind::SecuritySaved
                 | ActivityKind::TestMailSent
                 | ActivityKind::RuleCreated
                 | ActivityKind::RuleEdited

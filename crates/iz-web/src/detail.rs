@@ -18,7 +18,8 @@
 
 use iz_core::board::{DeadlineState, Person};
 use iz_core::detail::{
-    Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in, parse_zone,
+    Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in,
+    moment_label_with_seconds_in, parse_zone,
 };
 use iz_core::store::{Store, StoreError, User};
 use serde::{Deserialize, Serialize};
@@ -418,14 +419,14 @@ async fn load_snapshot(
                     state_kind: state_kind.to_string(),
                     attempts: send.attempts,
                     last_error: may_administer.then(|| send.last_error.clone()).flatten(),
-                    sent_at: send.sent_at.map(|at| moment_label_in(at, zone)),
+                    sent_at: send.sent_at.map(|at| moment_label_with_seconds_in(at, zone)),
                 }
             })
             .collect();
         let outcome = crate::logs::outcome_word(decision.outcome, lang).to_string();
         notifications.push(NotificationLine {
             happened,
-            at: moment_label_in(decision.at, zone),
+            at: moment_label_with_seconds_in(decision.at, zone),
             rule_name,
             outcome: if outcome_detail.is_empty() {
                 outcome

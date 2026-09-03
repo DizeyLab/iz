@@ -7,7 +7,7 @@
 //! [`crate::server::carry_refusal_on_redirect`] can carry it onto that
 //! redirect's query.
 
-use iz_core::accounts::SESSION_LIFETIME;
+use iz_core::store::DEFAULT_SESSION_LIFETIME_DAYS;
 use iz_core::detail::ActivityKind;
 use serde::{Deserialize, Serialize};
 use topcoat::Result;
@@ -22,6 +22,19 @@ use crate::server::{
     require_admin, require_user, set_session_cookie,
 };
 use crate::settings::encode_q;
+
+/// The workspace's session lifetime, read the same way every other knob is —
+/// off the workspace row through the account service's store — so an admin's
+/// change in Settings reaches the next cookie without a restart. A workspace
+/// row that is not there yet (nobody has claimed the install) stands on the
+/// default.
+async fn session_lifetime(cx: &Cx) -> time::Duration {
+    let days = match accounts(cx).store().workspace().await {
+        Ok(Some(workspace)) => workspace.session_lifetime_days,
+        _ => DEFAULT_SESSION_LIFETIME_DAYS,
+    };
+    time::Duration::days(i64::from(days))
+}
 
 /// The workspace has exactly one name and no screen that sets it, so it is a
 /// constant rather than a field nobody was shown.
@@ -100,7 +113,7 @@ async fn claim_workspace(cx: &Cx, Form(input): Form<ClaimWorkspaceForm>) -> Redi
         .await
     {
         Ok((_workspace, signed_in)) => {
-            set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            set_session_cookie(cx, signed_in.session_token.expose(), session_lifetime(cx).await);
             let _ = accounts(cx)
                 .store()
                 .record_event(
@@ -131,7 +144,7 @@ async fn sign_in(cx: &Cx, Form(input): Form<SignInForm>) -> Redirect {
         .await
     {
         Ok(signed_in) => {
-            set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            set_session_cookie(cx, signed_in.session_token.expose(), session_lifetime(cx).await);
             let _ = accounts(cx)
                 .store()
                 .record_event(
@@ -198,7 +211,7 @@ async fn redeem_link(cx: &Cx, Form(input): Form<RedeemLinkForm>) -> Redirect {
         .await
     {
         Ok(signed_in) => {
-            set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            set_session_cookie(cx, signed_in.session_token.expose(), session_lifetime(cx).await);
             let _ = accounts(cx)
                 .store()
                 .record_event(
@@ -240,7 +253,7 @@ async fn change_password(cx: &Cx, Form(input): Form<ChangePasswordForm>) -> Redi
         .await
     {
         Ok(signed_in) => {
-            set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            set_session_cookie(cx, signed_in.session_token.expose(), session_lifetime(cx).await);
             let _ = accounts(cx)
                 .store()
                 .record_event(
@@ -422,7 +435,7 @@ async fn redeem_reset(cx: &Cx, Form(input): Form<RedeemResetForm>) -> Redirect {
         .await
     {
         Ok(signed_in) => {
-            set_session_cookie(cx, signed_in.session_token.expose(), SESSION_LIFETIME);
+            set_session_cookie(cx, signed_in.session_token.expose(), session_lifetime(cx).await);
             let _ = accounts(cx)
                 .store()
                 .record_event(

@@ -52,6 +52,16 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// The security knobs a fresh workspace starts on, and what a database older
+/// than `migrations/0002_security_knobs.sql` is backfilled onto — by that
+/// migration's own `DEFAULT` clauses for the rows it meets, and by
+/// `reconcile`'s copy map for every database it carries across. The SQL
+/// literals mirror these numbers; change the two together.
+pub const DEFAULT_RATE_LIMIT_ATTEMPTS: u64 = 10;
+pub const DEFAULT_RATE_WINDOW_MINUTES: u32 = 15;
+pub const DEFAULT_SESSION_LIFETIME_DAYS: u32 = 14;
+pub const DEFAULT_SIGNIN_LINK_LIFETIME_DAYS: u32 = 7;
+
 /// A workspace and the settings that ride on it.
 ///
 /// The sender is here except for its password, which has no field on purpose:
@@ -89,6 +99,14 @@ pub struct Workspace {
     /// How long before a task's clock its reminder mail is queued, in
     /// minutes. `0` turns reminders off.
     pub reminder_minutes: u32,
+    /// The sign-in attempts one client or address may spend per window.
+    pub rate_limit_attempts: u64,
+    /// How far back the attempt count reaches, in minutes.
+    pub rate_window_minutes: u32,
+    /// How long a signed-in browser stays signed in, in days.
+    pub session_lifetime_days: u32,
+    /// How long a first-sign-in or reset link is good for, in days.
+    pub signin_link_lifetime_days: u32,
     /// The origin mail links point at, when an admin has set one. `None`
     /// means the address the process listens on — a box behind a proxy
     /// answers on localhost and is reached on a public name, and only an
@@ -800,6 +818,19 @@ pub trait Store: BoardReads + DetailReads + 'static {
         reminder_minutes: u32,
     ) -> Result<()>;
 
+    /// Writes the workspace's four security knobs — the sign-in attempt
+    /// allowance, the rate-limit window, the session lifetime and the
+    /// sign-in-link lifetime — in one write, because they are one save on
+    /// one form.
+    async fn set_security(
+        &self,
+        workspace_id: &str,
+        rate_limit_attempts: u64,
+        rate_window_minutes: u32,
+        session_lifetime_days: u32,
+        signin_link_lifetime_days: u32,
+    ) -> Result<()>;
+
     // -- users -------------------------------------------------------------
 
     async fn create_user(&self, new: NewUser) -> Result<User>;
@@ -857,6 +888,12 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Stores the hash of a freshly minted link. The caller keeps the plaintext
     /// and shows it once. The kind decides which redeeming flow may spend it.
+    ///
+    /// Minting retires: every earlier unspent link of the same kind for the
+    /// same account is marked spent in the same transaction, so the newest
+    /// link is the only live one. A retired link is refused exactly like a
+    /// spent or expired one — retired *is* spent, the same `used_at` a
+    /// redemption writes.
     async fn create_signin_link(
         &self,
         user_id: &str,

@@ -384,6 +384,10 @@ pub enum Refusal {
     EmptyName,
     /// A limit of nothing, or a limit wider than the disk should promise.
     BadLimit,
+    /// A security number below its floor or past its ceiling. Not `BadLimit`:
+    /// that sentence is about megabytes, and these knobs are counts, minutes
+    /// and days.
+    BadPolicy,
     /// The timezone field was not one of the offsets the form offers.
     BadZone,
     /// The theme field was not one of the values the form offers.
@@ -466,6 +470,7 @@ impl Refusal {
                 "A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."
                     .to_string()
             }
+            Refusal::BadPolicy => "A security number is out of range.".to_string(),
             Refusal::BadZone => "That is not a timezone.".to_string(),
             Refusal::BadTheme => "That is not a theme.".to_string(),
             Refusal::BadUi => "That is not an interface.".to_string(),
@@ -531,6 +536,7 @@ impl Refusal {
                 "Limit en az 1 MB, dosya başına en çok 500 MB, fotoğraf başına en çok 20 MB olabilir."
                     .to_string()
             }
+            Refusal::BadPolicy => "Güvenlik sayısı aralığın dışında.".to_string(),
             Refusal::BadZone => "Bu bir saat dilimi değil.".to_string(),
             Refusal::BadTheme => "Bu bir tema değil.".to_string(),
             Refusal::BadUi => "Bu bir arayüz değil.".to_string(),
@@ -583,6 +589,7 @@ impl Refusal {
             "empty-title" => Refusal::EmptyTitle,
             "empty-name" => Refusal::EmptyName,
             "bad-limit" => Refusal::BadLimit,
+            "bad-policy" => Refusal::BadPolicy,
             "bad-zone" => Refusal::BadZone,
             "bad-theme" => Refusal::BadTheme,
             "bad-ui" => Refusal::BadUi,
@@ -640,6 +647,7 @@ impl Refusal {
             Refusal::EmptyTitle => "empty-title",
             Refusal::EmptyName => "empty-name",
             Refusal::BadLimit => "bad-limit",
+            Refusal::BadPolicy => "bad-policy",
             Refusal::BadZone => "bad-zone",
             Refusal::BadTheme => "bad-theme",
             Refusal::BadUi => "bad-ui",
@@ -1011,6 +1019,8 @@ mod refusal_message_tests {
             Refusal::NotFound,
             Refusal::NoSuchMember,
             Refusal::TagInUse,
+            Refusal::BadLimit,
+            Refusal::BadPolicy,
             Refusal::Unavailable,
         ];
         for refusal in all {
