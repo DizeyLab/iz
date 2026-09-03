@@ -1054,16 +1054,20 @@ img.avatar {
   display: block;
 }
 
-// The avatar leads the profile panel and is itself the upload control: the
-// file input rides its `form` attribute to a hidden sibling form, so nothing
-// nests inside the profile form.
+// The avatar leads the profile panel. Without a photo it is itself the
+// upload control — the file input rides its `form` attribute to a hidden
+// sibling form, so nothing nests inside the profile form. With one, the
+// click opens the photo viewer and a Change button owns the picker instead.
 .identity-row {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
-.avatar-upload {
+// The two faces of the 64px profile picture box: the picker label and, once
+// a photo exists, the viewer trigger.
+.avatar-upload,
+.avatar-view {
   position: relative;
   flex: none;
   cursor: pointer;
@@ -1074,6 +1078,19 @@ img.avatar {
     font-size: 20px;
   }
 
+  // The name tooltip has no job on your own picture.
+  .avatar[data-name]:hover::after { content: none; }
+}
+
+// The trigger is the label's box with a button's chrome stripped.
+.avatar-view {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.avatar-upload {
   // The upload affordance: a veil and a plus over the picture, on hover or
   // keyboard focus only.
   &::after {
@@ -1095,9 +1112,6 @@ img.avatar {
 
   &:hover::after,
   &:has(.file-upload-input:focus-visible)::after { opacity: 1; }
-
-  // The name tooltip has no job on your own picture.
-  .avatar[data-name]:hover::after { content: none; }
 }
 
 // -- the card context menu ---------------------------------------------------

@@ -1149,13 +1149,18 @@ pub(crate) mod glyph {
 /// delete confirm (`confirm=delete` in URL) → open edit popovers → modal
 /// itself — one resolver at priority 90 on `window.__izEsc` (table on
 /// `layout.rs`'s `escape_manager_script`); an open datepick popover returns
-/// false, leaving it to `board.rs`'s priority-100 resolver. Closing never
+/// false, leaving it to `board.rs`'s priority-100 resolver. The settings
+/// page emits it too: its profile photo viewer is a `.viewer-scrim`, and
+/// this is the one resolver that closes one — its other branches find no
+/// confirm, no edit toggles and no modal there and fall through.
+///
+/// Closing never
 /// navigates: `layout.rs`'s `__izCloseViewer`/`__izCloseModal` drop
 /// the overlay's DOM and rewrite the URL, the board underneath is already
 /// rendered. Focused native media controls swallow `Escape` before the page
 /// ever sees the key, so focus landing on the viewer's audio/video is moved
 /// straight back to the panel.
-async fn escape_closes(cx: &Cx) -> Result {
+pub(crate) async fn escape_closes(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \

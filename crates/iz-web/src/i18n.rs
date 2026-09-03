@@ -121,6 +121,7 @@ pub enum Key {
 
     // settings.rs
     YourProfile,
+    Change,
     Remove,
     DisplayNameLabel,
     EmailLabel,
@@ -573,6 +574,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (YourProfile, Tr) => "Profilin",
         (Remove, En) => "Remove",
         (Remove, Tr) => "Kaldır",
+        (Change, En) => "Change",
+        (Change, Tr) => "Değiştir",
         (DisplayNameLabel, En) => "DISPLAY NAME",
         (DisplayNameLabel, Tr) => "GÖRÜNEN AD",
         (EmailLabel, En) => "EMAIL",

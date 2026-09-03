@@ -71,3 +71,7 @@ SHOT_DIR="$shots" node "$repo/crates/iz-web/tests/browser/soft-nav.mjs" "http://
 # workspace, so this one signs the same admin in; it claims too when it
 # runs standalone. Either script failing fails the run.
 SHOT_DIR="$shots" node "$repo/crates/iz-web/tests/browser/moment.mjs" "http://127.0.0.1:$port"
+
+# The profile photo overlay's own pass, same workspace and admin as the
+# moment field. Either script failing fails the run.
+SHOT_DIR="$shots" node "$repo/crates/iz-web/tests/browser/photo.mjs" "http://127.0.0.1:$port"
