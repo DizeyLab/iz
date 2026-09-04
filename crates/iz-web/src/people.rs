@@ -114,7 +114,10 @@ async fn people_page(cx: &Cx) -> Result {
             8,
             FeedPage::Newest,
             Dir::Newest,
-            &ActivityFilter { actor: Some(person.id.clone()), ..Default::default() },
+            &ActivityFilter {
+                actor: Some(person.id.clone()),
+                ..Default::default()
+            },
         )
         .await?;
 
@@ -130,7 +133,13 @@ async fn people_page(cx: &Cx) -> Result {
         <main class="people-shell">
             <section class="panel person-card">
                 <div class="person-head">
-                    (crate::layout::avatar(cx, &who, "avatar-xl").await?)
+                    if person.has_photo {
+                        <button class="avatar-view" type="button" data-close-label=(t(lang, Key::Close))>
+                            (crate::layout::avatar(cx, &who, "avatar-xl").await?)
+                        </button>
+                    } else {
+                        (crate::layout::avatar(cx, &who, "avatar-xl").await?)
+                    }
                     <div class="person-heading">
                         <h2 class="person-name">(person.display_name.clone())</h2>
                         <div class="person-marks">
@@ -216,5 +225,7 @@ async fn people_page(cx: &Cx) -> Result {
         </main>
 
         (crate::layout::escape_script(cx).await?)
+        (crate::detail::escape_closes(cx).await?)
+        (crate::layout::avatar_script(cx).await?)
     }
 }

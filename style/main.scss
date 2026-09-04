@@ -1064,22 +1064,26 @@ img.avatar {
   gap: 14px;
 }
 
-// The two faces of the 64px profile picture box: the picker label and, once
-// a photo exists, the viewer trigger.
+// The two faces of the profile picture box: the picker label and, once a
+// photo exists, the viewer trigger. The person page's own card wears the
+// trigger too — the box rules are shared, the size is not.
 .avatar-upload,
 .avatar-view {
   position: relative;
   flex: none;
   cursor: pointer;
 
-  .avatar {
-    width: 64px;
-    height: 64px;
-    font-size: 20px;
-  }
-
   // The name tooltip has no job on your own picture.
   .avatar[data-name]:hover::after { content: none; }
+}
+
+// The settings row's picture is 64px whatever size class the avatar wears;
+// the person card's keeps its xl.
+.identity-row .avatar-upload .avatar,
+.identity-row .avatar-view .avatar {
+  width: 64px;
+  height: 64px;
+  font-size: 20px;
 }
 
 // The trigger is the label's box with a button's chrome stripped.

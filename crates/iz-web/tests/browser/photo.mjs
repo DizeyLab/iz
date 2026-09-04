@@ -211,6 +211,31 @@ if (!failures.length) {
     }
 }
 
+// The person page wears the same trigger: its xl avatar opens the same
+// overlay, at its own size — the settings row's 64px must not follow it.
+if (!failures.length) {
+    const ownId = await page.evaluate(() => {
+        const img = document.querySelector('.identity-row img.avatar');
+        const m = img && (img.getAttribute('src') || '').match(/\/photo\/([^?]+)/);
+        return m ? m[1] : null;
+    });
+    if (!ownId) {
+        failures.push('no own photo id to reach the person page with');
+    } else {
+        await page.goto(`${base}/people/${ownId}`, { waitUntil: 'networkidle' });
+        const wide = await page.evaluate(() => {
+            const img = document.querySelector('.person-head .avatar-view img.avatar');
+            return img ? img.getBoundingClientRect().width : 0;
+        });
+        if (wide <= 64) failures.push(`the person page's avatar shrank to ${wide}px inside the trigger`);
+        if (await openViewer('person-page')) {
+            await page.screenshot({ path: `${shots}/person-photo-viewer.png` });
+            await page.keyboard.press('Escape');
+            await viewerGone('person-page');
+        }
+    }
+}
+
 await browser.close();
 
 note(`page errors ${errors.length ? errors.join(' | ') : 'none'}`);

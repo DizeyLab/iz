@@ -99,6 +99,68 @@ pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
     }
 }
 
+/// The avatar overlay: with a photo set, the avatar click opens the file
+/// viewer's chrome (`detail.rs`'s `file_viewer_modal` — the
+/// `.modal-scrim.viewer-scrim` scrim and the `.modal.viewer` panel around a
+/// `.viewer-media` image) around the same `/photo/{id}?v=` URL the avatar
+/// reads. Built here because the overlay has no server state behind it — no
+/// route, no query parameter, nothing to render — so it is client-built and
+/// `__izAdded`'d. Closing is not wired here at all: the stretched
+/// `.viewer-close` anchor and the scrim click are the global handlers in the
+/// soft-nav script above, and Escape is `detail.rs`'s `escape_closes`
+/// (priority 90), which the page emits alongside this script. The picture is
+/// read off the avatar's own `<img>` at click time, stamp included, so a
+/// fresh upload is the fresh bytes. The Change half serves the settings
+/// identity row alone: it hands the click to the hidden file input, whose
+/// change the shared autosubmit listener posts as the photo form. Emitted by
+/// the settings page and the person page — every surface that draws a
+/// clickable `.avatar-view`.
+pub(crate) async fn avatar_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+            if (window.__izAvatar) { return; } \
+            window.__izAvatar = true; \
+            document.addEventListener('click', function (e) { \
+                var view = e.target.closest ? e.target.closest('.avatar-view') : null; \
+                if (view) { \
+                    var img = view.querySelector('img.avatar'); \
+                    if (!img || document.querySelector('.viewer-scrim')) { return; } \
+                    var scrim = document.createElement('div'); \
+                    scrim.className = 'modal-scrim viewer-scrim'; \
+                    var close = document.createElement('a'); \
+                    close.className = 'viewer-close'; \
+                    close.href = window.location.href; \
+                    var label = view.getAttribute('data-close-label'); \
+                    if (label) { close.setAttribute('aria-label', label); } \
+                    var media = document.createElement('img'); \
+                    media.className = 'viewer-media'; \
+                    media.src = img.src; \
+                    media.alt = img.alt; \
+                    var body = document.createElement('div'); \
+                    body.className = 'viewer-body'; \
+                    body.appendChild(media); \
+                    var box = document.createElement('div'); \
+                    box.className = 'modal viewer'; \
+                    box.tabIndex = -1; \
+                    box.appendChild(body); \
+                    scrim.appendChild(close); \
+                    scrim.appendChild(box); \
+                    document.body.appendChild(window.__izAdded(scrim)); \
+                    box.focus(); \
+                    return; \
+                } \
+                var change = e.target.closest ? e.target.closest('[data-avatar-change]') : null; \
+                if (change) { \
+                    var row = change.closest('.identity-row'); \
+                    var input = row ? row.querySelector('.file-upload-input') : null; \
+                    if (input) { input.click(); } \
+                } \
+            }, true); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+}
+
 /// The topbar's signed-in identity: the display name, opening on hover or
 /// focus onto details (name, address, role) and sign-out. Shared by every
 /// signed-in page's topbar (board, settings, mail rules, logs).

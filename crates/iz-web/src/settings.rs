@@ -957,7 +957,10 @@ async fn send_message(
     };
     let subject = input.subject.trim();
     if subject.is_empty() {
-        return Ok(saved_or_refused("send_message", Some(Refusal::EmptySubject)));
+        return Ok(saved_or_refused(
+            "send_message",
+            Some(Refusal::EmptySubject),
+        ));
     }
     let body = input.body.trim();
     if body.is_empty() {
@@ -974,7 +977,12 @@ async fn send_message(
     } else {
         match members.into_iter().find(|member| member.id == input.to) {
             Some(member) => vec![member.email],
-            None => return Ok(saved_or_refused("send_message", Some(Refusal::NoSuchMember))),
+            None => {
+                return Ok(saved_or_refused(
+                    "send_message",
+                    Some(Refusal::NoSuchMember),
+                ));
+            }
         }
     };
     let now = time::OffsetDateTime::now_utc();
@@ -1193,9 +1201,7 @@ fn is_origin(value: &str) -> bool {
         return false;
     };
     let host = rest.split('/').next().unwrap_or_default();
-    !host.is_empty()
-        && !host.contains('@')
-        && !value.chars().any(char::is_whitespace)
+    !host.is_empty() && !host.contains('@') && !value.chars().any(char::is_whitespace)
 }
 
 /// The refusal that landed on this call's redirect, if any, and this call's
@@ -1316,7 +1322,8 @@ async fn settings_page(cx: &Cx) -> Result {
         None
     };
     let (limits, allowed_types) = if administers {
-        let (attachment, photo, types, batch, reminder) = limits_now(cx, &user.workspace_id).await?;
+        let (attachment, photo, types, batch, reminder) =
+            limits_now(cx, &user.workspace_id).await?;
         (Some((attachment, photo, batch, reminder)), types)
     } else {
         (None, Vec::new())
@@ -1954,66 +1961,6 @@ async fn settings_page(cx: &Cx) -> Result {
         (crate::dropdown::dropdown_script(cx).await?)
         (crate::layout::escape_script(cx).await?)
         (crate::detail::escape_closes(cx).await?)
-        (avatar_script(cx).await?)
+        (crate::layout::avatar_script(cx).await?)
     }
-}
-
-/// The profile photo's overlay: with a photo set, the avatar click opens the
-/// file viewer's chrome (`detail.rs`'s `file_viewer_modal` — the
-/// `.modal-scrim.viewer-scrim` scrim and the `.modal.viewer` panel around a
-/// `.viewer-media` image) around the same `/photo/{id}?v=` URL the avatar
-/// reads. Built here because the overlay has no server state behind it — no
-/// route, no query parameter, nothing to render — so it is client-built and
-/// `__izAdded`'d. Closing is not wired here at all: the stretched
-/// `.viewer-close` anchor and the scrim click are the global handlers in
-/// `layout.rs`'s soft-nav script, and Escape is `detail.rs`'s
-/// `escape_closes` (priority 90), emitted alongside this script. The picture
-/// is read off the avatar's own `<img>` at click time, stamp included, so a
-/// fresh upload is the fresh bytes. Change hands the click to the hidden
-/// file input, whose change the shared autosubmit listener in `layout.rs`
-/// posts as the photo form.
-async fn avatar_script(cx: &Cx) -> Result {
-    use topcoat::view::Unescaped;
-    const JS: &str = "\
-        (function () { \
-            if (window.__izAvatar) { return; } \
-            window.__izAvatar = true; \
-            document.addEventListener('click', function (e) { \
-                var view = e.target.closest ? e.target.closest('.avatar-view') : null; \
-                if (view) { \
-                    var img = view.querySelector('img.avatar'); \
-                    if (!img || document.querySelector('.viewer-scrim')) { return; } \
-                    var scrim = document.createElement('div'); \
-                    scrim.className = 'modal-scrim viewer-scrim'; \
-                    var close = document.createElement('a'); \
-                    close.className = 'viewer-close'; \
-                    close.href = window.location.href; \
-                    var label = view.getAttribute('data-close-label'); \
-                    if (label) { close.setAttribute('aria-label', label); } \
-                    var media = document.createElement('img'); \
-                    media.className = 'viewer-media'; \
-                    media.src = img.src; \
-                    media.alt = img.alt; \
-                    var body = document.createElement('div'); \
-                    body.className = 'viewer-body'; \
-                    body.appendChild(media); \
-                    var box = document.createElement('div'); \
-                    box.className = 'modal viewer'; \
-                    box.tabIndex = -1; \
-                    box.appendChild(body); \
-                    scrim.appendChild(close); \
-                    scrim.appendChild(box); \
-                    document.body.appendChild(window.__izAdded(scrim)); \
-                    box.focus(); \
-                    return; \
-                } \
-                var change = e.target.closest ? e.target.closest('[data-avatar-change]') : null; \
-                if (change) { \
-                    var row = change.closest('.identity-row'); \
-                    var input = row ? row.querySelector('.file-upload-input') : null; \
-                    if (input) { input.click(); } \
-                } \
-            }, true); \
-        })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
