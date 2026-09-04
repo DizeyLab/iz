@@ -137,6 +137,7 @@ impl TursoStore {
             storage: storage.to_path_buf(),
         };
         store.migrate(path).await?;
+        store.retire_actor_only_decisions().await?;
         store.encrypt_plaintext_passwords().await?;
         store.resniff_generic_attachments().await?;
         store.sweep_orphan_files().await?;
@@ -185,6 +186,25 @@ impl TursoStore {
             .await
             .map_err(backend)?;
         }
+        Ok(())
+    }
+
+    /// The actor-exclusion era's decision rows, reworded to the only
+    /// `no_recipients` detail the logs speak now. A database from before the
+    /// actor joined every audience carries rows whose detail says
+    /// `actor_only` — a token nothing renders any more, and no raw token is
+    /// ever shown. Like the password-sealing pass above, this is a data
+    /// repair no schema migration can express, run once per boot and
+    /// idempotent: a row it rewrites says `empty` and never matches again.
+    async fn retire_actor_only_decisions(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE mail_decision SET detail = 'empty' \
+             WHERE outcome = 'no_recipients' AND detail = 'actor_only'",
+            (),
+        )
+        .await
+        .map_err(backend)?;
         Ok(())
     }
 
@@ -1877,7 +1897,14 @@ impl Store for TursoStore {
         tx.execute(
             "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at, kind) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id.clone(), user_id, token_hash, now, stamp(expires_at)?, kind.as_str()],
+            params![
+                id.clone(),
+                user_id,
+                token_hash,
+                now,
+                stamp(expires_at)?,
+                kind.as_str()
+            ],
         )
         .await
         .map_err(backend)?;

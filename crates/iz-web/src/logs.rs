@@ -152,7 +152,11 @@ pub(crate) fn outcome_word(outcome: iz_core::store::MailOutcome, lang: Lang) -> 
 /// The sentence after a task's name, mirroring `ActivityEntry::sentence` —
 /// the per-task strip on the detail screen — since the workspace feed carries
 /// the same kind and detail but no `Person` to build an `ActivityEntry` from.
-pub(crate) fn activity_sentence(kind: &iz_core::detail::ActivityKind, detail: &str, lang: Lang) -> String {
+pub(crate) fn activity_sentence(
+    kind: &iz_core::detail::ActivityKind,
+    detail: &str,
+    lang: Lang,
+) -> String {
     use iz_core::detail::ActivityKind;
     let detail = detail.trim();
     match kind {
@@ -235,10 +239,7 @@ pub(crate) async fn event_happened(
                 .into_iter()
                 .find(|column| column.id == transition.to_column)
                 .map(|column| {
-                    crate::i18n::moved_to_label(
-                        lang,
-                        &crate::i18n::column_name(lang, &column.name),
-                    )
+                    crate::i18n::moved_to_label(lang, &crate::i18n::column_name(lang, &column.name))
                 }))
         }
         Event::Freed(_) => Ok(Some(t(lang, Key::UnblockedWord).to_string())),
@@ -252,9 +253,9 @@ pub(crate) async fn event_happened(
 ///
 /// New rows carry a machine token (see `store::MailDecision::detail`);
 /// column references in it are IDs, resolved here against the rule's board,
-/// one fetch per board no matter how many decisions share it. A detail that
-/// is empty or does not parse as a known token — including every row a
-/// version before this scheme wrote — is shown exactly as stored.
+/// one fetch per board no matter how many decisions share it. Rows written
+/// before a token existed are reworded at boot by the store
+/// (`retire_actor_only_decisions`), never tolerated here.
 pub(crate) async fn decision_detail(
     store: &std::sync::Arc<dyn iz_core::store::Store>,
     columns_cache: &mut std::collections::HashMap<String, Vec<iz_core::board::Column>>,
@@ -271,9 +272,6 @@ pub(crate) async fn decision_detail(
     }
     match (outcome, detail) {
         (MailOutcome::NoRecipients, "empty") => return Ok(t(lang, Key::AudienceEmpty).to_string()),
-        (MailOutcome::NoRecipients, "actor_only") => {
-            return Ok(t(lang, Key::AudienceActorOnly).to_string());
-        }
         (MailOutcome::NotMatched, "not_status") => {
             return Ok(t(lang, Key::NotAStatusCrossing).to_string());
         }
@@ -389,15 +387,22 @@ fn parse_cursor(raw: &str) -> Option<FeedCursor> {
     let decoded = decode_q(raw);
     let (at, id) = decoded.rsplit_once('~')?;
     let at = OffsetDateTime::parse(at, &Rfc3339).ok()?;
-    Some(FeedCursor { at, id: id.to_string() })
+    Some(FeedCursor {
+        at,
+        id: id.to_string(),
+    })
 }
 
 /// `before=`/`after=` from the query: mutually exclusive, and either one
 /// absent or unparsable falls back to the newest page.
 fn parse_page(query: &str) -> FeedPage {
     match (query_value(query, "before"), query_value(query, "after")) {
-        (Some(raw), None) => parse_cursor(raw).map(FeedPage::Before).unwrap_or(FeedPage::Newest),
-        (None, Some(raw)) => parse_cursor(raw).map(FeedPage::After).unwrap_or(FeedPage::Newest),
+        (Some(raw), None) => parse_cursor(raw)
+            .map(FeedPage::Before)
+            .unwrap_or(FeedPage::Newest),
+        (None, Some(raw)) => parse_cursor(raw)
+            .map(FeedPage::After)
+            .unwrap_or(FeedPage::Newest),
         _ => FeedPage::Newest,
     }
 }
@@ -416,7 +421,12 @@ fn parse_dir(query: &str) -> Dir {
 fn parse_day_start(raw: &str, zone: time::UtcOffset) -> Option<OffsetDateTime> {
     use time::macros::format_description;
     let day = time::Date::parse(raw, format_description!("[year]-[month]-[day]")).ok()?;
-    Some(day.with_hms(0, 0, 0).ok()?.assume_offset(zone).to_offset(time::UtcOffset::UTC))
+    Some(
+        day.with_hms(0, 0, 0)
+            .ok()?
+            .assume_offset(zone)
+            .to_offset(time::UtcOffset::UTC),
+    )
 }
 
 /// A bound that can never exclude a real row, for the open side of a
@@ -440,10 +450,7 @@ fn far_future() -> OffsetDateTime {
 /// inclusive of its whole day. A backwards range is swapped rather than
 /// read as empty. Unparsable or absent bounds fall back to the open ends,
 /// so garbage input narrows nothing rather than 500ing.
-fn parse_day_range(
-    query: &str,
-    zone: time::UtcOffset,
-) -> Option<(OffsetDateTime, OffsetDateTime)> {
+fn parse_day_range(query: &str, zone: time::UtcOffset) -> Option<(OffsetDateTime, OffsetDateTime)> {
     let (from_raw, to_raw) = match (query_value(query, "from"), query_value(query, "to")) {
         (None, None) => match query_value(query, "on").filter(|v| !v.is_empty()) {
             Some(on) => (Some(on), Some(on)),
@@ -476,8 +483,12 @@ fn parse_day_range(
 /// value narrows nothing.
 fn parse_activity_filter(query: &str, zone: time::UtcOffset) -> ActivityFilter {
     ActivityFilter {
-        actor: query_value(query, "actor").filter(|v| !v.is_empty()).map(str::to_string),
-        kind: query_value(query, "kind").filter(|v| !v.is_empty()).map(str::to_string),
+        actor: query_value(query, "actor")
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+        kind: query_value(query, "kind")
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
         task_key: query_value(query, "task")
             .filter(|v| !v.is_empty())
             .map(|v| v.to_uppercase()),
@@ -544,12 +555,18 @@ async fn snapshot(
         sends.truncate(limit as usize);
     }
     if active == Section::Queue {
-        newer_cursor = sends
-            .first()
-            .and_then(|s| s.next_attempt_at.map(|at| FeedCursor { at, id: s.id.clone() }));
-        older_cursor = sends
-            .last()
-            .and_then(|s| s.next_attempt_at.map(|at| FeedCursor { at, id: s.id.clone() }));
+        newer_cursor = sends.first().and_then(|s| {
+            s.next_attempt_at.map(|at| FeedCursor {
+                at,
+                id: s.id.clone(),
+            })
+        });
+        older_cursor = sends.last().and_then(|s| {
+            s.next_attempt_at.map(|at| FeedCursor {
+                at,
+                id: s.id.clone(),
+            })
+        });
     }
     let queue_shown = sends.len() as u64;
     let mut queue = Vec::with_capacity(sends.len());
@@ -601,11 +618,17 @@ async fn snapshot(
     }
 
     let (decisions_limit, decisions_page) = feed_window(active, Section::Decisions, &page, limit);
-    let mut raw_decisions = store.recent_mail_decisions(decisions_limit, decisions_page).await?;
-    if active == Section::Decisions && matches!(page, FeedPage::After(_)) && raw_decisions.is_empty()
+    let mut raw_decisions = store
+        .recent_mail_decisions(decisions_limit, decisions_page)
+        .await?;
+    if active == Section::Decisions
+        && matches!(page, FeedPage::After(_))
+        && raw_decisions.is_empty()
     {
         effective_page = FeedPage::Newest;
-        raw_decisions = store.recent_mail_decisions(limit + 1, FeedPage::Newest).await?;
+        raw_decisions = store
+            .recent_mail_decisions(limit + 1, FeedPage::Newest)
+            .await?;
     }
     if active == Section::Decisions && raw_decisions.len() as u32 > limit {
         has_more = true;
@@ -615,12 +638,14 @@ async fn snapshot(
     // split across a page boundary is accepted, unchanged from the offset
     // scheme this replaces.
     if active == Section::Decisions {
-        newer_cursor = raw_decisions
-            .first()
-            .map(|d| FeedCursor { at: d.at, id: d.id.clone() });
-        older_cursor = raw_decisions
-            .last()
-            .map(|d| FeedCursor { at: d.at, id: d.id.clone() });
+        newer_cursor = raw_decisions.first().map(|d| FeedCursor {
+            at: d.at,
+            id: d.id.clone(),
+        });
+        older_cursor = raw_decisions.last().map(|d| FeedCursor {
+            at: d.at,
+            id: d.id.clone(),
+        });
     }
     let decisions_shown = raw_decisions.len() as u64;
     let mut decisions: Vec<DecisionGroup> = Vec::new();
@@ -675,25 +700,29 @@ async fn snapshot(
     } else {
         ActivityFilter::default()
     };
-    let mut raw_activity =
-        store.recent_activity(activity_limit, activity_page, dir, &activity_filter).await?;
+    let mut raw_activity = store
+        .recent_activity(activity_limit, activity_page, dir, &activity_filter)
+        .await?;
     if active == Section::Activity && matches!(page, FeedPage::After(_)) && raw_activity.is_empty()
     {
         effective_page = FeedPage::Newest;
-        raw_activity =
-            store.recent_activity(limit + 1, FeedPage::Newest, dir, &activity_filter).await?;
+        raw_activity = store
+            .recent_activity(limit + 1, FeedPage::Newest, dir, &activity_filter)
+            .await?;
     }
     if active == Section::Activity && raw_activity.len() as u32 > limit {
         has_more = true;
         raw_activity.truncate(limit as usize);
     }
     if active == Section::Activity {
-        newer_cursor = raw_activity
-            .first()
-            .map(|line| FeedCursor { at: line.at, id: line.id.clone() });
-        older_cursor = raw_activity
-            .last()
-            .map(|line| FeedCursor { at: line.at, id: line.id.clone() });
+        newer_cursor = raw_activity.first().map(|line| FeedCursor {
+            at: line.at,
+            id: line.id.clone(),
+        });
+        older_cursor = raw_activity.last().map(|line| FeedCursor {
+            at: line.at,
+            id: line.id.clone(),
+        });
     }
     let activity_shown = raw_activity.len() as u64;
     let activity = raw_activity
@@ -716,12 +745,16 @@ async fn snapshot(
     let position = match active {
         Section::Queue if queue_shown > 0 => {
             let total = store.count_mail_queue().await?;
-            let preceding = store.count_mail_queue_preceding(newer_cursor.as_ref()).await?;
+            let preceding = store
+                .count_mail_queue_preceding(newer_cursor.as_ref())
+                .await?;
             Some((preceding + 1, preceding + queue_shown, total))
         }
         Section::Decisions if decisions_shown > 0 => {
             let total = store.count_mail_decisions().await?;
-            let preceding = store.count_mail_decisions_preceding(newer_cursor.as_ref()).await?;
+            let preceding = store
+                .count_mail_decisions_preceding(newer_cursor.as_ref())
+                .await?;
             Some((preceding + 1, preceding + decisions_shown, total))
         }
         Section::Activity if activity_shown > 0 => {
@@ -842,7 +875,10 @@ fn rail_class(current: Section, target: Section) -> &'static str {
 #[page("/logs")]
 async fn logs_page(cx: &Cx) -> Result {
     let lang = Lang::En;
-    let query = topcoat::router::request::uri(cx).query().unwrap_or("").to_string();
+    let query = topcoat::router::request::uri(cx)
+        .query()
+        .unwrap_or("")
+        .to_string();
     let section = match query_value(&query, "section") {
         Some("queue") => Section::Queue,
         Some("decisions") => Section::Decisions,
@@ -905,7 +941,11 @@ async fn logs_screen(
     let decisions_empty = decisions.is_empty();
     let activity_empty = activity.is_empty();
     let slug = section_slug(section);
-    let extra = if section == Section::Activity { activity_query_suffix(query) } else { String::new() };
+    let extra = if section == Section::Activity {
+        activity_query_suffix(query)
+    } else {
+        String::new()
+    };
     let newer_href = links
         .newer_q
         .filter(|_| links.show_newer)
@@ -914,7 +954,9 @@ async fn logs_screen(
         .older_q
         .filter(|_| links.show_older)
         .map(|q| format!("/logs?section={slug}&{q}{extra}"));
-    let position_note = links.position.map(|(x, y, n)| format!("{x}\u{2013}{y} / {n}"));
+    let position_note = links
+        .position
+        .map(|(x, y, n)| format!("{x}\u{2013}{y} / {n}"));
 
     let (filter_actor, filter_kind, filter_task, filter_dir) = (
         query_value(query, "actor").unwrap_or("").to_string(),

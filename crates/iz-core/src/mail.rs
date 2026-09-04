@@ -7,10 +7,9 @@
 //! including the moment the card moved: a send retried on Thursday still says
 //! Tuesday.
 //!
-//! Nobody is ever mailed about their own action. A rule's audience is resolved
-//! and the person who did the thing is taken off it, on every audience, always:
-//! three people on one board do not need İz telling each of them what they
-//! themselves just did. A rule whose audience is only the actor sends nothing
+//! The actor is part of the audience like anyone else: a person who moves a
+//! card they are assigned to gets the mail the move owes, the same as the
+//! other people on it. A rule whose audience resolves to nobody sends nothing
 //! and owes nothing — that is not a failure and does not appear as one.
 //!
 //! None of that silence is undocumented any more: every rule an event touches
@@ -499,10 +498,10 @@ impl Engine {
 
     /// Claims one mail per recipient and tries each one it owns.
     ///
-    /// The person who caused the event is taken off the audience before
-    /// anything is claimed: an empty audience leaves no ledger row at all, so
-    /// a rule that only ever resolves to the actor is silent rather than being
-    /// a row the admin has to read as a failure.
+    /// An empty audience leaves no ledger row at all, so a rule that resolves
+    /// to nobody is silent rather than being a row the admin has to read as a
+    /// failure. The actor stays on the audience: doing the thing does not
+    /// take a person off the list the thing is about.
     ///
     /// A line that is about one person narrows the audience to that person:
     /// an Assigned rule is for the one just assigned, not for everybody
@@ -533,25 +532,15 @@ impl Engine {
             (Audience::Board, _) => self.store.recipients_for_board(&rule.board_id).await?,
             (Audience::Creator, _) => self.store.recipients_for_task_creator(task_id).await?,
         };
-        let resolved_nobody = recipients.is_empty();
         let now = OffsetDateTime::now_utc();
-        let audience: Vec<_> = recipients
-            .into_iter()
-            .filter(|recipient| recipient.user_id != event.actor_id())
-            .collect();
-        if audience.is_empty() {
-            let detail = if resolved_nobody {
-                "empty"
-            } else {
-                "actor_only"
-            };
+        if recipients.is_empty() {
             self.store
                 .record_mail_decision(
                     &rule.id,
                     event.id(),
                     task_id,
                     MailOutcome::NoRecipients,
-                    detail,
+                    "empty",
                     now,
                 )
                 .await?;
@@ -566,7 +555,7 @@ impl Engine {
             .map(|workspace| i64::from(workspace.mail_batch_minutes))
             .unwrap_or(0);
         let hold = Duration::minutes(window);
-        for recipient in audience {
+        for recipient in recipients {
             // A held row comes due when the window closes rather than when the
             // lease does; with no window it keeps the lease it always had,
             // which is what stops the pass that queued it from grabbing it

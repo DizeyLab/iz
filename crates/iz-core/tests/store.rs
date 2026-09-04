@@ -10,9 +10,9 @@ use iz_core::Role;
 use iz_core::auth::{Token, hash_password};
 use iz_core::store::{
     Audience, DEFAULT_RATE_LIMIT_ATTEMPTS, DEFAULT_RATE_WINDOW_MINUTES,
-    DEFAULT_SESSION_LIFETIME_DAYS, DEFAULT_SIGNIN_LINK_LIFETIME_DAYS, Event, MailOutcome,
-    MailRule, NewAttachment, NewSender, NewUser, SendKind, SendState, Store, StoreError, Trigger,
-    TursoStore, User,
+    DEFAULT_SESSION_LIFETIME_DAYS, DEFAULT_SIGNIN_LINK_LIFETIME_DAYS, Event, MailOutcome, MailRule,
+    NewAttachment, NewSender, NewUser, SendKind, SendState, Store, StoreError, Trigger, TursoStore,
+    User,
 };
 use time::{Duration, OffsetDateTime};
 use ulid::Ulid;
@@ -33,7 +33,11 @@ impl Scratch {
         let store = TursoStore::open(dir.join("iz.db").to_str().unwrap(), &storage)
             .await
             .unwrap();
-        Self { dir, storage, store }
+        Self {
+            dir,
+            storage,
+            store,
+        }
     }
 }
 
@@ -681,10 +685,7 @@ async fn a_second_claim_loses_and_changes_nothing() {
     assert!(matches!(second, Err(StoreError::AlreadyClaimed)));
 
     // The loser must not have joined as anything at all.
-    assert_eq!(
-        scratch.store.workspace().await.unwrap().unwrap().name,
-        "İz"
-    );
+    assert_eq!(scratch.store.workspace().await.unwrap().unwrap().name, "İz");
     assert_eq!(scratch.store.count_users("").await.unwrap(), 0);
     let ws_id = scratch.store.workspace().await.unwrap().unwrap().id;
     assert_eq!(scratch.store.count_users(&ws_id).await.unwrap(), 1);
@@ -2164,15 +2165,11 @@ async fn sign_in_attempts_are_rate_limited_per_address() {
     let (_scratch, accounts, _admin) = claimed().await;
     let allowance = allowance(&accounts).await;
     for _ in 0..allowance {
-        let _ = accounts
-            .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
-            .await;
+        let _ = accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await;
     }
     // The next attempt is refused before any Argon2 work happens.
     assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "wrong", "203.0.113.9")
-            .await,
+        accounts.sign_in("ada@iz.sh", "wrong", "203.0.113.9").await,
         Err(AccountError::RateLimited)
     ));
     // A different address from a fresh client is unaffected.
@@ -2295,9 +2292,7 @@ async fn a_successful_sign_in_clears_the_bucket() {
     let (_scratch, accounts, _admin) = claimed().await;
     let allowance = allowance(&accounts).await;
     for _ in 0..(allowance - 1) {
-        let _ = accounts
-            .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
-            .await;
+        let _ = accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await;
     }
     accounts
         .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
@@ -2305,9 +2300,7 @@ async fn a_successful_sign_in_clears_the_bucket() {
         .unwrap();
     // Someone who mistypes and then gets it right is not left at the edge.
     assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
-            .await,
+        accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await,
         Err(AccountError::Rejected)
     ));
 }
@@ -2337,9 +2330,7 @@ async fn the_rate_allowance_is_the_configured_one() {
         ));
     }
     assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "wrong", "198.51.100.7")
-            .await,
+        accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await,
         Err(AccountError::RateLimited)
     ));
     // And the stored knob is the one that decided: the save is readable back.
@@ -2357,8 +2348,8 @@ async fn the_lifetimes_are_the_configured_ones() {
         .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
         .await
         .unwrap();
-    let expected = OffsetDateTime::now_utc()
-        + Duration::days(i64::from(DEFAULT_SESSION_LIFETIME_DAYS));
+    let expected =
+        OffsetDateTime::now_utc() + Duration::days(i64::from(DEFAULT_SESSION_LIFETIME_DAYS));
     assert!(
         (signed_in.session.expires_at - expected).abs() < Duration::minutes(1),
         "the session was not written with the default lifetime"
@@ -2369,8 +2360,8 @@ async fn the_lifetimes_are_the_configured_ones() {
         .await
         .unwrap();
     let link_expiry = newest_link_expiry(&scratch).await;
-    let expected = OffsetDateTime::now_utc()
-        + Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS));
+    let expected =
+        OffsetDateTime::now_utc() + Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS));
     assert!(
         (link_expiry - expected).abs() < Duration::minutes(1),
         "the link was not written with the default lifetime"
@@ -3158,10 +3149,7 @@ fn tag_order(tags: &[iz_core::store::Tag]) -> Vec<&str> {
     tags.iter().map(|t| t.name.as_str()).collect()
 }
 
-fn card_of<'a>(
-    view: &'a iz_core::board::BoardView,
-    task: &str,
-) -> &'a iz_core::board::TaskCard {
+fn card_of<'a>(view: &'a iz_core::board::BoardView, task: &str) -> &'a iz_core::board::TaskCard {
     view.columns
         .iter()
         .flat_map(|column| column.cards.iter())
@@ -3430,10 +3418,7 @@ impl DetailReads for CountingDetail<'_> {
         self.inner.task(task_id).await
     }
 
-    async fn columns_for_board(
-        &self,
-        board_id: &str,
-    ) -> Result<Vec<iz_core::Column>, StoreError> {
+    async fn columns_for_board(&self, board_id: &str) -> Result<Vec<iz_core::Column>, StoreError> {
         self.tick();
         self.inner.columns_for_board(board_id).await
     }
@@ -4375,6 +4360,59 @@ async fn a_decision_is_written_once_per_rule_and_event() {
 }
 
 #[tokio::test]
+async fn an_actor_only_decision_is_reworded_at_boot() {
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("iz.db").to_string_lossy().into_owned();
+
+    let rule_id;
+    {
+        let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+        let (workspace, admin) = claim(&store).await;
+        let task = add_task(
+            &store,
+            &workspace,
+            "Backlog",
+            "CLI install script",
+            None,
+            &admin,
+        )
+        .await;
+        let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+        let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+        // The actor-exclusion era's row, written the way that era wrote it.
+        store
+            .record_mail_decision(
+                &rule.id,
+                &transition.id,
+                &task,
+                MailOutcome::NoRecipients,
+                "actor_only",
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        rule_id = rule.id.clone();
+    }
+
+    let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+    let decisions = reopened
+        .recent_mail_decisions(10, iz_core::store::FeedPage::Newest)
+        .await
+        .unwrap();
+    let row = decisions
+        .iter()
+        .find(|d| d.rule_id == rule_id)
+        .expect("the decision survived the reopen");
+    assert_eq!(
+        row.detail, "empty",
+        "the old token was reworded, not shown raw"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn the_index_decides_who_owns_a_send() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let task = add_task(
@@ -5292,7 +5330,7 @@ async fn a_mail_owed_by_a_delete_is_rebuilt_from_the_delete_on_a_retry() {
 }
 
 #[tokio::test]
-async fn nobody_is_mailed_about_what_they_did_themselves() {
+async fn the_actor_is_mailed_about_what_they_did_themselves() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
     let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
@@ -5302,30 +5340,31 @@ async fn nobody_is_mailed_about_what_they_did_themselves() {
     let mailer = Remembering::taking_everything();
     let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
 
-    // Emre is the only assignee and Emre moved the card. Telling him what he
-    // just did is how a person learns to filter İz's mail away.
+    // Emre is the only assignee and Emre moved the card. The mail is his all
+    // the same: doing the thing does not take a person off the audience.
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
     let report = engine.on_transition(&transition).await.unwrap();
-    assert_eq!(report, Default::default());
-    assert!(mailer.sent().is_empty());
-    // And nothing is owed: an audience that empties out leaves no ledger row,
-    // so the admin's trail does not show a send that never was.
-    assert!(store.sends_for_rule(&rule.id, 10).await.unwrap().is_empty());
+    assert_eq!(report.sent, 1);
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@iz.sh");
+    assert_eq!(store.sends_for_rule(&rule.id, 10).await.unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn a_rule_that_owed_nobody_still_says_so() {
     let (dir, store, workspace, admin) = shared().await;
-    let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
     let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
-    store.assign_task(&task, &mate).await.unwrap();
     let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
 
     let mailer = Remembering::taking_everything();
     let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
-    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
+    // The card points at nobody: the assignees audience is empty whoever
+    // moves it, and the ledger says so instead of looking silent.
+    let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
     engine.on_transition(&transition).await.unwrap();
+    assert!(mailer.sent().is_empty());
 
     let decisions = store
         .recent_mail_decisions(10, iz_core::store::FeedPage::Newest)
@@ -5336,6 +5375,7 @@ async fn a_rule_that_owed_nobody_still_says_so() {
         .find(|d| d.rule_id == rule.id && d.task_id == task)
         .expect("the empty audience left a row");
     assert_eq!(row.outcome, MailOutcome::NoRecipients);
+    assert_eq!(row.detail, "empty");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5400,7 +5440,7 @@ async fn a_deleted_task_still_leaves_a_task_gone_row() {
 }
 
 #[tokio::test]
-async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() {
+async fn the_board_audience_mails_the_actor_too() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
     let board = store.board(&workspace).await.unwrap().unwrap();
@@ -5421,11 +5461,12 @@ async fn the_actor_comes_off_the_board_audience_too_and_the_rest_still_get_it() 
     let mailer = Remembering::taking_everything();
     let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
     let transition = moved_to(&store, &workspace, &task, "Backlog", "Done", &mate).await;
-    assert_eq!(engine.on_transition(&transition).await.unwrap().sent, 1);
+    assert_eq!(engine.on_transition(&transition).await.unwrap().sent, 2);
 
     let sent = mailer.sent();
-    assert_eq!(sent.len(), 1, "the board minus the person who moved it");
-    assert_eq!(sent[0].to, "ada@iz.sh");
+    let mut to: Vec<_> = sent.iter().map(|mail| mail.to.as_str()).collect();
+    to.sort();
+    assert_eq!(to, ["ada@iz.sh", "emre@iz.sh"], "the mover included");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -5698,11 +5739,12 @@ async fn a_file_name_that_is_a_path_is_stored_as_the_label_it_is() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(files, vec![id.clone()], "the tree holds exactly the row's file");
     assert_eq!(
-        std::fs::read(attachments.join(&id)).unwrap(),
-        b"root:x:0:0"
+        files,
+        vec![id.clone()],
+        "the tree holds exactly the row's file"
     );
+    assert_eq!(std::fs::read(attachments.join(&id)).unwrap(), b"root:x:0:0");
     let written: Vec<String> = std::fs::read_dir(&scratch.dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -5826,14 +5868,7 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     let now = OffsetDateTime::now_utc();
 
     let pending = store
-        .claim_send(
-            &rule.id,
-            &transition.id,
-            &task,
-            "pending@iz.sh",
-            now,
-            now,
-        )
+        .claim_send(&rule.id, &transition.id, &task, "pending@iz.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -5856,14 +5891,7 @@ async fn the_queue_shows_what_is_owed_and_not_what_is_done() {
     store.record_send_accepted(&sent.id, now).await.unwrap();
 
     let abandoned = store
-        .claim_send(
-            &rule.id,
-            &transition.id,
-            &task,
-            "abandoned@iz.sh",
-            now,
-            now,
-        )
+        .claim_send(&rule.id, &transition.id, &task, "abandoned@iz.sh", now, now)
         .await
         .unwrap()
         .unwrap();
@@ -6301,7 +6329,7 @@ async fn activity_event(store: &TursoStore, activity_id: &str) -> iz_core::store
 }
 
 #[tokio::test]
-async fn an_assignment_mails_the_assignees_minus_the_actor() {
+async fn an_assignment_mails_the_person_just_assigned() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
     let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
@@ -6321,8 +6349,8 @@ async fn an_assignment_mails_the_assignees_minus_the_actor() {
 
     let mailer = Remembering::taking_everything();
     let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
-    // Ada assigned Emre; Ada is not on the assignee list to begin with, so
-    // the audience is Emre alone.
+    // Ada assigned Emre: an Assigned line is about the one person, so the
+    // audience narrows to Emre alone.
     let activity_id = store
         .record_activity(
             &task,
@@ -6421,8 +6449,7 @@ async fn a_time_change_fires_a_deadline_set_rule() {
     let mailer = Remembering::taking_everything();
     let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
     // Ada sets the time on her own card — a ClockSet activity, no deadline
-    // in sight — and the only person the board audience can mail is Emre,
-    // the board minus the actor.
+    // in sight — and the board audience is both writers, Ada included.
     let activity_id = store
         .record_activity(
             &task,
@@ -6437,15 +6464,18 @@ async fn a_time_change_fires_a_deadline_set_rule() {
     let event = activity_event(&store, &activity_id).await;
 
     let report = engine.on_activity(&event).await.unwrap();
-    assert_eq!(report.sent, 1, "the time change mails the board");
+    assert_eq!(report.sent, 2, "the time change mails the board");
     let sent = mailer.sent();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].to, "emre@iz.sh");
-    assert!(
-        sent[0].body.contains("set the time to"),
-        "the body says the honest per-kind sentence: {}",
-        sent[0].body
-    );
+    let mut to: Vec<_> = sent.iter().map(|mail| mail.to.as_str()).collect();
+    to.sort();
+    assert_eq!(to, ["ada@iz.sh", "emre@iz.sh"]);
+    for mail in &sent {
+        assert!(
+            mail.body.contains("set the time to"),
+            "the body says the honest per-kind sentence: {}",
+            mail.body
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6490,10 +6520,7 @@ async fn an_unassignment_mails_the_person_removed_not_the_rest() {
     assert_eq!(report.sent, 1, "one removal, one mail");
     let sent = mailer.sent();
     assert_eq!(sent.len(), 1);
-    assert_eq!(
-        sent[0].to, "emre@iz.sh",
-        "the mail is for the one removed"
-    );
+    assert_eq!(sent[0].to, "emre@iz.sh", "the mail is for the one removed");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6521,7 +6548,7 @@ async fn a_rule_whose_line_has_no_subject_still_mails_every_assignee() {
     let mailer = Remembering::taking_everything();
     let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
     // A comment has no subject: the audience stays the whole assignee list,
-    // minus the actor, exactly as before the subject column existed.
+    // exactly as before the subject column existed.
     let activity_id = store
         .record_activity(
             &task,
@@ -6544,7 +6571,7 @@ async fn a_rule_whose_line_has_no_subject_still_mails_every_assignee() {
 }
 
 #[tokio::test]
-async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_commented() {
+async fn a_creator_audience_rule_mails_the_creator_even_when_the_creator_commented() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
     let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
@@ -6583,8 +6610,8 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].to, "ada@iz.sh");
 
-    // Ada comments on her own task: the audience is only the actor, so
-    // nobody is mailed and the ledger says why rather than looking silent.
+    // Ada comments on her own task: the creator audience is Ada, and being
+    // the actor does not take her off it.
     let commented_by_creator = store
         .record_activity(
             &task,
@@ -6598,19 +6625,10 @@ async fn a_creator_audience_rule_mails_the_creator_and_nobody_when_the_creator_c
         .unwrap();
     let event = activity_event(&store, &commented_by_creator).await;
     let report = engine.on_activity(&event).await.unwrap();
-    assert_eq!(report, Default::default());
-    assert_eq!(mailer.sent().len(), 1, "no second mail went out");
-
-    let decisions = store
-        .recent_mail_decisions(10, iz_core::store::FeedPage::Newest)
-        .await
-        .unwrap();
-    let row = decisions
-        .iter()
-        .find(|d| d.event_id == commented_by_creator)
-        .expect("the creator-only audience left a row");
-    assert_eq!(row.outcome, MailOutcome::NoRecipients);
-    assert_eq!(row.detail, "actor_only");
+    assert_eq!(report.sent, 1);
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].to, "ada@iz.sh");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -7162,12 +7180,7 @@ async fn the_next_due_moment_is_the_earliest_one() {
         .await
         .unwrap();
     store
-        .queue_notice(
-            "soon@iz.sh",
-            "Sooner",
-            "body",
-            now + Duration::minutes(5),
-        )
+        .queue_notice("soon@iz.sh", "Sooner", "body", now + Duration::minutes(5))
         .await
         .unwrap();
 
@@ -7454,12 +7467,8 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
     // under the storage tree the rebuild was handed, with the row still
     // agreeing with it. (The database has no bytes column any more; the
     // fingerprint check above already fails if one came back.)
-    let stored = std::fs::read(
-        dir.join("storage")
-            .join("attachments")
-            .join("F1"),
-    )
-    .expect("the attachment's file did not survive the rebuild");
+    let stored = std::fs::read(dir.join("storage").join("attachments").join("F1"))
+        .expect("the attachment's file did not survive the rebuild");
     assert_eq!(stored.len(), 5000);
     assert_eq!(
         &stored[..4],
@@ -7467,11 +7476,7 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
         "the attachment's bytes changed in the rebuild"
     );
     assert_eq!(
-        scalar(
-            &path,
-            "SELECT size_bytes FROM attachment WHERE id = 'F1'"
-        )
-        .await,
+        scalar(&path, "SELECT size_bytes FROM attachment WHERE id = 'F1'").await,
         5000,
         "the row no longer agrees with its file"
     );
@@ -7591,14 +7596,9 @@ async fn reconcile_backfills_the_security_knobs_on_a_first_migration_database() 
 
     // A database already on the new shape is not reconciled again: opening
     // twice in a row is ordinary, and the knobs keep what a save wrote.
-    store
-        .set_security("W1", 7, 30, 21, 3)
-        .await
-        .unwrap();
+    store.set_security("W1", 7, 30, 21, 3).await.unwrap();
     drop(store);
-    let second = TursoStore::open(&path, &dir.join("storage"))
-        .await
-        .unwrap();
+    let second = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let ws = second.workspace().await.unwrap().unwrap();
     assert_eq!(ws.rate_limit_attempts, 7, "a second boot reset the knobs");
     assert_eq!(ws.rate_window_minutes, 30);
@@ -7829,7 +7829,9 @@ async fn two_repairs_leave_two_backups() {
         auto: true,
     };
 
-    iz_core::store::reconcile(&path, Some(&dir.join("storage")), opts()).await.unwrap();
+    iz_core::store::reconcile(&path, Some(&dir.join("storage")), opts())
+        .await
+        .unwrap();
     assert_eq!(backups_beside(&dir).len(), 1);
 
     // Put the database back to the old shape and repair it again: the first
@@ -7843,7 +7845,9 @@ async fn two_repairs_leave_two_backups() {
     drop(conn);
     drop(db);
 
-    iz_core::store::reconcile(&path, Some(&dir.join("storage")), opts()).await.unwrap();
+    iz_core::store::reconcile(&path, Some(&dir.join("storage")), opts())
+        .await
+        .unwrap();
     let backups = backups_beside(&dir);
     assert_eq!(
         backups.len(),
@@ -8037,8 +8041,9 @@ async fn tell_the_engine(store: &TursoStore, engine: &Engine, ids: &[String]) ->
 }
 
 /// His scenario: create a card, assign it, give it a deadline. Three rules,
-/// three triggers, one uninterrupted minute of work — and the person who has
-/// to read it gets one mail saying where the card ended up.
+/// three triggers, one uninterrupted minute of work — and each person who has
+/// to read it gets one mail saying where the card ended up, the one who did
+/// the work included.
 #[tokio::test]
 async fn a_whole_workflow_inside_the_window_is_one_mail() {
     use time::macros::date;
@@ -8101,8 +8106,8 @@ async fn a_whole_workflow_inside_the_window_is_one_mail() {
     );
     assert_eq!(
         first.batched + second.batched + third.batched,
-        3,
-        "three triggers, three rows waiting on one another",
+        5,
+        "three triggers, five rows: both board rules owe both writers, the mover included",
     );
     assert!(mailer.sent().is_empty());
 
@@ -8111,29 +8116,36 @@ async fn a_whole_workflow_inside_the_window_is_one_mail() {
         .deliver_owed(OffsetDateTime::now_utc() + Duration::minutes(6), 10)
         .await
         .unwrap();
-    assert_eq!(report.sent, 1, "one envelope for the whole workflow");
-    let sent = mailer.sent();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].to, "emre@iz.sh");
     assert_eq!(
-        sent[0].subject, "Deadline set",
-        "the newest thing that happened names the mail",
+        report.sent, 2,
+        "one envelope per reader for the whole workflow"
     );
-    assert!(
-        sent[0].body.contains("Column: Backlog"),
-        "the mail states where the card is now: {}",
-        sent[0].body,
-    );
-    assert!(
-        sent[0].body.contains("Deadline: 2026-09-30"),
-        "and the deadline it ended up with: {}",
-        sent[0].body,
-    );
-    assert!(
-        sent[0].body.contains("Assignees: Emre"),
-        "and who is on it: {}",
-        sent[0].body,
-    );
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 2);
+    let mut readers: Vec<_> = sent.iter().map(|mail| mail.to.as_str()).collect();
+    readers.sort();
+    assert_eq!(readers, ["ada@iz.sh", "emre@iz.sh"]);
+    for mail in &sent {
+        assert_eq!(
+            mail.subject, "Deadline set",
+            "the newest thing that happened names the mail",
+        );
+        assert!(
+            mail.body.contains("Column: Backlog"),
+            "the mail states where the card is now: {}",
+            mail.body,
+        );
+        assert!(
+            mail.body.contains("Deadline: 2026-09-30"),
+            "and the deadline it ended up with: {}",
+            mail.body,
+        );
+        assert!(
+            mail.body.contains("Assignees: Emre"),
+            "and who is on it: {}",
+            mail.body,
+        );
+    }
 
     // Nothing is left owed, and a second pass has nothing to send.
     let again = engine
@@ -8141,7 +8153,7 @@ async fn a_whole_workflow_inside_the_window_is_one_mail() {
         .await
         .unwrap();
     assert_eq!(again.sent, 0);
-    assert_eq!(mailer.sent().len(), 1);
+    assert_eq!(mailer.sent().len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -8286,11 +8298,7 @@ async fn a_hold_never_pulls_a_leased_row_back_under_the_pass_that_took_it() {
         .expect("a fresh row is claimed");
     // A delivery pass takes it: the lease is five minutes out.
     let taken = store
-        .claim_sends_owed(
-            now + Duration::seconds(1),
-            now + iz_core::mail::LEASE,
-            10,
-        )
+        .claim_sends_owed(now + Duration::seconds(1), now + iz_core::mail::LEASE, 10)
         .await
         .unwrap();
     assert_eq!(taken.len(), 1, "the pass did not take the row");
@@ -9069,10 +9077,7 @@ async fn a_reminder_failing_on_retries_is_not_minted_twice() {
     store.assign_task(&task, &emre).await.unwrap();
     let rows = reminders(&store, &task).await;
     assert_eq!(rows.len(), 2, "one row per person: {rows:?}");
-    let grace_row = rows
-        .iter()
-        .find(|r| r.recipient == "grace@iz.sh")
-        .unwrap();
+    let grace_row = rows.iter().find(|r| r.recipient == "grace@iz.sh").unwrap();
     assert_eq!(grace_row.state, SendState::Failed);
     assert_eq!(grace_row.attempts, 1);
 
@@ -9264,7 +9269,9 @@ async fn queued_reset_tokens(store: &std::sync::Arc<dyn Store>, email: &str) -> 
             continue;
         }
         let Some(body) = send.body else { continue };
-        let Some((_, rest)) = body.rsplit_once("/reset/") else { continue };
+        let Some((_, rest)) = body.rsplit_once("/reset/") else {
+            continue;
+        };
         if let Some(token) = rest.split_whitespace().next() {
             tokens.push(token.to_string());
         }
@@ -9307,9 +9314,7 @@ async fn a_reset_link_is_mailed_only_to_a_known_address() {
         "the known address was mailed a reset link"
     );
     assert!(
-        queued_reset_token(&store, "nobody@iz.sh")
-            .await
-            .is_none(),
+        queued_reset_token(&store, "nobody@iz.sh").await.is_none(),
         "the unknown address was mailed nothing"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -9564,7 +9569,11 @@ async fn a_retired_link_stays_retired_after_the_newer_one_redeems() {
         .unwrap();
     assert!(matches!(
         accounts
-            .redeem_signin_link(first.token.expose(), "harbor-and-pilot-1812", "198.51.100.7")
+            .redeem_signin_link(
+                first.token.expose(),
+                "harbor-and-pilot-1812",
+                "198.51.100.7"
+            )
             .await,
         Err(AccountError::Rejected)
     ));
@@ -9602,10 +9611,7 @@ async fn a_fresh_link_of_one_kind_leaves_the_other_kinds_link_alone() {
         .request_password_reset("ada@iz.sh", "203.0.113.9")
         .await
         .unwrap();
-    let resent = accounts
-        .resend_invitation(&admin, &admin.id)
-        .await
-        .unwrap();
+    let resent = accounts.resend_invitation(&admin, &admin.id).await.unwrap();
     let reset = queued_reset_token(accounts.store(), "ada@iz.sh")
         .await
         .expect("no reset mail queued");
@@ -9625,7 +9631,13 @@ async fn reset_asks_are_rate_limited_per_client_and_silenced_per_address() {
     let _grace = member(&store, &workspace, "grace@iz.sh", "Grace").await;
     let store = store as std::sync::Arc<dyn Store>;
     let accounts = Accounts::new(store.clone(), "https://iz.sh");
-    let allowance = accounts.store().workspace().await.unwrap().unwrap().rate_limit_attempts;
+    let allowance = accounts
+        .store()
+        .workspace()
+        .await
+        .unwrap()
+        .unwrap()
+        .rate_limit_attempts;
 
     // One machine asks allowance times: every ask answers the same, and the
     // next from that machine is refused by name.
@@ -9875,7 +9887,9 @@ fn deep_zip(before: usize, after: usize) -> Vec<u8> {
 /// zip's test stands on, checked rather than assumed.
 fn windows_hold(bytes: &[u8], marker: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(iz_core::store::sniff::HEAD_WINDOW as usize)];
-    let tail = &bytes[bytes.len().saturating_sub(iz_core::store::sniff::TAIL_WINDOW as usize)..];
+    let tail = &bytes[bytes
+        .len()
+        .saturating_sub(iz_core::store::sniff::TAIL_WINDOW as usize)..];
     head.windows(marker.len()).any(|w| w == marker)
         || tail.windows(marker.len()).any(|w| w == marker)
 }
@@ -9977,12 +9991,7 @@ async fn a_zip_mime_workbook_becomes_the_sheet_mime_on_the_next_boot() {
 
 #[tokio::test]
 async fn an_ole_container_without_a_workbook_stream_stays_as_stored() {
-    let planted = Planted::plant(&[(
-        "FC",
-        "application/x-ole-storage",
-        ole_bytes(false),
-    )])
-    .await;
+    let planted = Planted::plant(&[("FC", "application/x-ole-storage", ole_bytes(false))]).await;
     let store = planted.open().await;
     assert_eq!(
         store.attachment("FC").await.unwrap().unwrap().mime_type,
@@ -9992,12 +10001,7 @@ async fn an_ole_container_without_a_workbook_stream_stays_as_stored() {
 
 #[tokio::test]
 async fn an_ole_container_with_a_workbook_stream_becomes_ms_excel() {
-    let planted = Planted::plant(&[(
-        "FD",
-        "application/x-ole-storage",
-        ole_bytes(true),
-    )])
-    .await;
+    let planted = Planted::plant(&[("FD", "application/x-ole-storage", ole_bytes(true))]).await;
     let store = planted.open().await;
     assert_eq!(
         store.attachment("FD").await.unwrap().unwrap().mime_type,
@@ -10022,9 +10026,18 @@ async fn specific_mimes_survive_a_boot_pass_that_has_nothing_to_do() {
     ])
     .await;
     let store = planted.open().await;
-    assert_eq!(store.attachment("FE").await.unwrap().unwrap().mime_type, "image/png");
-    assert_eq!(store.attachment("FF").await.unwrap().unwrap().mime_type, "application/pdf");
-    assert_eq!(store.attachment("FG").await.unwrap().unwrap().mime_type, "text/plain");
+    assert_eq!(
+        store.attachment("FE").await.unwrap().unwrap().mime_type,
+        "image/png"
+    );
+    assert_eq!(
+        store.attachment("FF").await.unwrap().unwrap().mime_type,
+        "application/pdf"
+    );
+    assert_eq!(
+        store.attachment("FG").await.unwrap().unwrap().mime_type,
+        "text/plain"
+    );
 }
 
 #[tokio::test]

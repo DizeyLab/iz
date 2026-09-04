@@ -2007,8 +2007,7 @@ async fn the_morph_keeps_what_the_client_owns_and_names_none_of_it() {
         "the select's hidden state is no longer declared as the client's"
     );
     assert!(
-        page.contains("window.__izAdded(trigger)")
-            && page.contains("window.__izAdded(panel)"),
+        page.contains("window.__izAdded(trigger)") && page.contains("window.__izAdded(panel)"),
         "the trigger and panel no longer say they are the client's"
     );
 }
@@ -2655,9 +2654,7 @@ async fn the_security_section_is_admin_only_and_round_trips() {
         "{html}"
     );
     assert!(!html.contains(r#"id="security""#), "{html}");
-    let page = app
-        .get("/settings?section=security", Some(&member))
-        .await;
+    let page = app.get("/settings?section=security", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
     assert!(html.contains(r#"id="profile""#), "{html}");
     assert!(!html.contains(r#"id="security""#), "{html}");
@@ -3978,14 +3975,7 @@ async fn a_viewer_who_posts_an_upload_anyway_is_refused() {
 async fn a_member_uploads_a_file_and_the_chip_comes_back() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let member = invited(
-        &app,
-        &admin_cookie,
-        "mo@iz.sh",
-        "Mo Dubois",
-        Role::Member,
-    )
-    .await;
+    let member = invited(&app, &admin_cookie, "mo@iz.sh", "Mo Dubois", Role::Member).await;
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Attach the spec").await;
 
@@ -4716,9 +4706,9 @@ async fn an_admin_reads_the_logs() {
     assert_eq!(assigned.body, "null", "{}", assigned.body);
     assert!(rule_written(&app, &admin_cookie, &columns[1], "Task completed").await);
 
-    // Emre is the only assignee and Emre moves the card himself: the audience
-    // empties out to nobody, and the decision says so rather than owing a
-    // mail that would only tell him what he just did.
+    // Emre is the only assignee and Emre moves the card himself: the rule
+    // owes him the mail all the same. With no sender configured the send is
+    // not a failure — it waits in the queue, held with nothing spent.
     let moved = app
         .post(
             "/api/move_card",
@@ -4732,47 +4722,12 @@ async fn an_admin_reads_the_logs() {
         .await;
     assert_eq!(moved.body, "");
 
-    let snapshot = until_logs_contains(&app, &admin_cookie, "\"outcome\":\"nobody to mail\"").await;
-    // The queue still carries Emre's invite mail — unrelated to this rule —
-    // so the check is that the rule itself queued nothing, not an empty queue.
+    let snapshot = until_logs_contains(&app, &admin_cookie, "\"subject\":\"Task completed\"").await;
     assert!(
-        !snapshot.contains("\"subject\":\"Task completed\""),
+        snapshot.contains("\"recipient\":\"emre@iz.sh\""),
         "{}",
         snapshot
     );
-
-    // The admin drops it back and moves it again: this time the mover is not
-    // the assignee, so the rule owes Emre a mail. With no sender configured
-    // the send is not a failure — it waits in the queue.
-    let back = app
-        .post(
-            "/api/move_card",
-            Some(&admin_cookie),
-            &[
-                ("task_id", &task),
-                ("from_column_id", &columns[1]),
-                ("to_column_id", &columns[0]),
-            ],
-        )
-        .await;
-    assert_eq!(back.body, "");
-    let forward = app
-        .post(
-            "/api/move_card",
-            Some(&admin_cookie),
-            &[
-                ("task_id", &task),
-                ("from_column_id", &columns[0]),
-                ("to_column_id", &columns[1]),
-            ],
-        )
-        .await;
-    assert_eq!(forward.body, "");
-
-    // No sender means the send is held, not sent — the ledger stores that as
-    // a failure with nothing spent, and the queue names the truth: held.
-    let snapshot =
-        until_logs_contains(&app, &admin_cookie, "\"recipient\":\"emre@iz.sh\"").await;
     assert!(snapshot.contains("\"state\":\"held\""), "{}", snapshot);
     assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
 }
@@ -5095,8 +5050,8 @@ async fn creating_a_task_into_a_ruled_column_owes_mail() {
     assert_eq!(written.body, "null", "{}", written.body);
     let rule = only_rule(&app, &admin_cookie).await;
 
-    // Deniz creates the card, so the board audience (which excludes the
-    // actor) resolves to the admin — the only other person on the board.
+    // Deniz creates the card; the board audience is everyone who can write
+    // on it, so both the admin and Deniz himself are owed a mail.
     let created = app
         .post(
             "/api/create_task",
@@ -5108,6 +5063,8 @@ async fn creating_a_task_into_a_ruled_column_owes_mail() {
 
     let send = until_rule_send_to(&app, &rule, "ada@iz.sh", 0).await;
     assert_eq!(send.recipient, "ada@iz.sh");
+    let own = until_rule_send_to(&app, &rule, "deniz@iz.sh", 0).await;
+    assert_eq!(own.recipient, "deniz@iz.sh");
 }
 
 #[tokio::test]
@@ -5403,7 +5360,7 @@ async fn a_rule_rides_every_event_and_can_be_rewritten() {
                     && send.rule_id.as_deref() == Some(rule.as_str())
                     && send.recipient == "deniz@iz.sh")
             }),
-        "the renamer was mailed instead of being excluded as the actor"
+        "the renamer was mailed though the audience is the assignees"
     );
 
     let logs = until_logs_contains(&app, &admin_cookie, "\"subject\":\"Renamed\"").await;
@@ -7812,14 +7769,7 @@ async fn a_non_admin_cannot_create_rename_delete_or_move_a_tag() {
 async fn a_viewer_cannot_set_a_task_tag() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let viewer = invited(
-        &app,
-        &admin_cookie,
-        "hush@iz.sh",
-        "Hush Rao",
-        Role::Viewer,
-    )
-    .await;
+    let viewer = invited(&app, &admin_cookie, "hush@iz.sh", "Hush Rao", Role::Viewer).await;
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Label me not").await;
     let aurora = a_tag(&app, &admin_cookie, "Aurora").await;
@@ -8217,14 +8167,7 @@ async fn a_member_may_read_another_members_profile_name_address_and_counts() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     invited(&app, &admin_cookie, "mem@iz.sh", "Mem Ber", Role::Member).await;
-    let reader = invited(
-        &app,
-        &admin_cookie,
-        "ivy@iz.sh",
-        "Ivy Lear",
-        Role::Member,
-    )
-    .await;
+    let reader = invited(&app, &admin_cookie, "ivy@iz.sh", "Ivy Lear", Role::Member).await;
     let mem_id = user_id(&app, "mem@iz.sh").await;
     let admin_id = app
         .store
@@ -8381,14 +8324,7 @@ async fn only_your_own_profile_offers_the_edit_link() {
     let admin_cookie = admin(&app).await;
     invited(&app, &admin_cookie, "mem@iz.sh", "Mem Ber", Role::Member).await;
     let mem_id = user_id(&app, "mem@iz.sh").await;
-    let ivy = invited(
-        &app,
-        &admin_cookie,
-        "ivy@iz.sh",
-        "Ivy Lear",
-        Role::Member,
-    )
-    .await;
+    let ivy = invited(&app, &admin_cookie, "ivy@iz.sh", "Ivy Lear", Role::Member).await;
     let ivy_id = user_id(&app, "ivy@iz.sh").await;
 
     let own = app.get(&format!("/people/{ivy_id}"), Some(&ivy)).await;
@@ -9138,8 +9074,7 @@ async fn a_time_change_fires_the_deadline_rule_and_round_trips() {
     );
 
     // Deniz sets the time and nothing else — a `ClockSet` activity — and
-    // the deadline rule owes the admin (the board audience excludes the
-    // actor) mail for it.
+    // the deadline rule owes the board, Deniz included, mail for it.
     let answer = app
         .post(
             "/api/save_task",
@@ -9841,7 +9776,9 @@ async fn queued_reset_tokens(app: &App, email: &str) -> Vec<String> {
             continue;
         }
         let Some(body) = send.body else { continue };
-        let Some((_, rest)) = body.rsplit_once("/reset/") else { continue };
+        let Some((_, rest)) = body.rsplit_once("/reset/") else {
+            continue;
+        };
         if let Some(token) = rest.split_whitespace().next() {
             tokens.push(token.to_string());
         }
@@ -10093,10 +10030,8 @@ async fn the_board_assignee_filter_narrows_and_a_bogus_id_falls_back_to_all() {
         "the unassigned card did not filter out: {filtered}"
     );
 
-    let nobody = String::from_utf8(
-        app.get("/?assigned=none", Some(&admin_cookie)).await.bytes,
-    )
-    .unwrap();
+    let nobody =
+        String::from_utf8(app.get("/?assigned=none", Some(&admin_cookie)).await.bytes).unwrap();
     assert!(
         nobody.contains("Loose work"),
         "the unassigned card is gone: {nobody}"
