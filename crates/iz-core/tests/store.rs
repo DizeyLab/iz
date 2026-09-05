@@ -8069,7 +8069,10 @@ async fn an_added_member_waits_unclaimed_until_their_first_sign_in() {
         .into_iter()
         .map(|user| user.email)
         .collect();
-    assert_eq!(names, vec!["ada@iz.sh".to_string(), "mert@iz.sh".to_string()]);
+    assert_eq!(
+        names,
+        vec!["ada@iz.sh".to_string(), "mert@iz.sh".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -8252,4 +8255,111 @@ async fn set_user_disabled_round_trips() {
             .await,
         Err(StoreError::NotFound)
     ));
+}
+
+#[tokio::test]
+async fn a_synced_member_is_born_linked_and_never_signed_in() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let sync = scratch
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false)
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Inserted);
+    let row = scratch
+        .store
+        .user_by_email(&workspace, "mert@iz.sh")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.oidc_sub.as_deref(), Some("sub-mert"));
+    assert_eq!(row.role, Role::Member);
+    assert!(row.last_signed_in_at.is_none());
+    // An im admin the workspace has never met is Admin from the first beat.
+    scratch
+        .store
+        .sync_member("sub-boss", "boss@iz.sh", "Boss", true)
+        .await
+        .unwrap();
+    let boss = scratch
+        .store
+        .user_by_email(&workspace, "boss@iz.sh")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(boss.role, Role::Admin);
+}
+
+#[tokio::test]
+async fn a_sync_claims_an_unclaimed_row_without_touching_its_sign_in_fact() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let added = scratch
+        .store
+        .add_member(&workspace, "mert@iz.sh", "Mert", Role::Viewer)
+        .await
+        .unwrap();
+    let sync = scratch
+        .store
+        .sync_member("sub-mert", "MERT@iz.sh", "Mert Yılmaz", false)
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Claimed);
+    let row = scratch.store.user(&added.id).await.unwrap().unwrap();
+    assert_eq!(row.oidc_sub.as_deref(), Some("sub-mert"));
+    assert_eq!(row.display_name, "Mert Yılmaz");
+    assert_eq!(
+        row.role,
+        Role::Viewer,
+        "a local role is not the directory's"
+    );
+    assert!(row.last_signed_in_at.is_none(), "a sync is not a sign-in");
+}
+
+#[tokio::test]
+async fn a_sync_follows_provider_drift_but_not_the_sign_in_fact() {
+    let (scratch, workspace, admin_id) = workspace_with_admin().await;
+    let before = scratch.store.user(&admin_id).await.unwrap().unwrap();
+    let seen = before.last_signed_in_at.clone();
+    let sync = scratch
+        .store
+        .sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", true)
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Refreshed);
+    let after = scratch.store.user(&admin_id).await.unwrap().unwrap();
+    assert_eq!(after.display_name, "Ada Lovelace");
+    assert_eq!(after.last_signed_in_at, seen);
+    // Losing the flag in the directory drops an Admin to Member.
+    scratch
+        .store
+        .sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", false)
+        .await
+        .unwrap();
+    let demoted = scratch.store.user(&admin_id).await.unwrap().unwrap();
+    assert_eq!(demoted.role, Role::Member);
+}
+
+#[tokio::test]
+async fn an_agreeing_sync_is_untouched_and_silent() {
+    let (scratch, _, _) = workspace_with_admin().await;
+    let mut rx = scratch.store.subscribe();
+    let sync = scratch
+        .store
+        .sync_member("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Untouched);
+    assert!(announced(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn a_sync_without_a_workspace_skips_and_writes_nothing() {
+    let scratch = Scratch::open().await;
+    let sync = scratch
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false)
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Skipped);
+    assert!(scratch.store.workspace().await.unwrap().is_none());
 }

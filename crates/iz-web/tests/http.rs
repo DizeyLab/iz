@@ -120,20 +120,21 @@ impl FakeIm {
                         let len = content_length(&head);
                         let body: Vec<u8> = req[body_start..body_start + len].to_vec();
                         req.drain(..body_start + len);
-                        let (status, content_type, payload) = match photo_answer(&pmap, &head, &first) {
-                            Some(photo) => photo,
-                            None => match answer_for(&map, &first, &body) {
-                                Some(answer) => (
-                                    "200 OK",
-                                    "application/json".to_string(),
-                                    serde_json::to_vec(&answer).unwrap(),
-                                ),
-                                // Anything but the introspection route is
-                                // nothing at all, the way the real im 404s
-                                // unknown paths rather than answering them.
-                                None => ("404 Not Found", "text/plain".to_string(), Vec::new()),
-                            },
-                        };
+                        let (status, content_type, payload) =
+                            match photo_answer(&pmap, &head, &first) {
+                                Some(photo) => photo,
+                                None => match answer_for(&map, &first, &body) {
+                                    Some(answer) => (
+                                        "200 OK",
+                                        "application/json".to_string(),
+                                        serde_json::to_vec(&answer).unwrap(),
+                                    ),
+                                    // Anything but the introspection route is
+                                    // nothing at all, the way the real im 404s
+                                    // unknown paths rather than answering them.
+                                    None => ("404 Not Found", "text/plain".to_string(), Vec::new()),
+                                },
+                            };
                         let response = format!(
                             "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n",
                             payload.len()
@@ -148,7 +149,11 @@ impl FakeIm {
                 });
             }
         });
-        Self { addr, tokens, photos }
+        Self {
+            addr,
+            tokens,
+            photos,
+        }
     }
 
     fn url(&self) -> String {
@@ -180,7 +185,10 @@ fn photo_answer(
         return None;
     }
     let target = parts.next().unwrap_or("");
-    let path = target.split_once('?').map(|(path, _)| path).unwrap_or(target);
+    let path = target
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(target);
     let id = path.strip_prefix("/photo/")?;
     if id.is_empty() || id.contains('/') {
         return None;
@@ -240,7 +248,8 @@ fn answer_for(
     body: &[u8],
 ) -> Option<serde_json::Value> {
     let mut head = request_line.split_whitespace();
-    let is_introspect = head.next() == Some("POST") && head.next() == Some(iz_client::introspect_path());
+    let is_introspect =
+        head.next() == Some("POST") && head.next() == Some(iz_client::introspect_path());
     if !is_introspect {
         return None;
     }
@@ -785,7 +794,11 @@ async fn admin(app: &App) -> String {
         .provision_user(sub, "ada@iz.sh", "Ada Lovelace", true)
         .await
         .unwrap();
-    assert_eq!(user.role, Role::Admin, "the first im admin did not claim admin");
+    assert_eq!(
+        user.role,
+        Role::Admin,
+        "the first im admin did not claim admin"
+    );
     app.mint(sub, "ada@iz.sh", "Ada Lovelace", true)
 }
 
@@ -1915,7 +1928,6 @@ async fn a_parents_own_part_is_not_offered_as_a_blocker() {
     );
 }
 
-
 #[tokio::test]
 async fn the_whole_control_box_opens_its_dropdown() {
     // A status control is a box holding a dot, the trigger and a chevron.
@@ -2280,7 +2292,6 @@ async fn the_soft_swap_rewrites_the_url_before_the_new_pages_scripts_run() {
         "the log-fit reload is gone: {logs_html}"
     );
 }
-
 
 #[tokio::test]
 async fn a_member_who_posts_new_limits_anyway_is_refused() {
@@ -2813,8 +2824,6 @@ async fn a_non_admin_may_not_set_roles_over_http() {
         "role change was not really refused"
     );
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Settings visibility: the sender and the member list are the admin's
@@ -4200,7 +4209,12 @@ async fn a_stamp_shifts_with_the_viewers_stored_timezone() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC+03:00"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert!(
@@ -4255,7 +4269,12 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC+03:00"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert!(
@@ -4292,7 +4311,10 @@ async fn an_unlisted_timezone_is_refused() {
             "/api/save_profile",
             Some(&admin_cookie),
             &[
-                ("timezone", "Mars/Olympus_Mons"), ("theme", "light"), ("language", "en"), ("ui", "instrument"),
+                ("timezone", "Mars/Olympus_Mons"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "instrument"),
             ],
         )
         .await;
@@ -4312,7 +4334,12 @@ async fn the_dark_theme_is_saved_and_marks_the_page() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC"), ("theme", "dark"), ("language", "en"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC"),
+                ("theme", "dark"),
+                ("language", "en"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert!(
@@ -4339,7 +4366,12 @@ async fn turkish_is_saved_and_the_board_renders_in_turkish() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC"), ("theme", "light"), ("language", "tr"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC"),
+                ("theme", "light"),
+                ("language", "tr"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert!(
@@ -4375,7 +4407,12 @@ async fn an_unlisted_language_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC"), ("theme", "light"), ("language", "fr"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC"),
+                ("theme", "light"),
+                ("language", "fr"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert_eq!(
@@ -4393,7 +4430,12 @@ async fn an_unlisted_theme_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC"), ("theme", "neon"), ("language", "en"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC"),
+                ("theme", "neon"),
+                ("language", "en"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
@@ -4412,7 +4454,12 @@ async fn the_ledger_ui_is_saved_and_marks_the_page() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC"), ("theme", "light"), ("language", "en"), ("ui", "ledger")],
+            &[
+                ("timezone", "UTC"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "ledger"),
+            ],
         )
         .await;
     assert!(
@@ -4439,7 +4486,12 @@ async fn an_unlisted_ui_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC"), ("theme", "light"), ("language", "en"), ("ui", "neon")],
+            &[
+                ("timezone", "UTC"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "neon"),
+            ],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
@@ -4594,7 +4646,11 @@ async fn the_im_admin_flag_makes_an_admin() {
         .await
         .unwrap()
         .expect("no local row after the first login");
-    assert_eq!(user.role, Role::Admin, "the im admin flag did not make an admin");
+    assert_eq!(
+        user.role,
+        Role::Admin,
+        "the im admin flag did not make an admin"
+    );
 }
 
 /// A first SSO login claims the legacy row by address: the `sub` is stamped
@@ -4608,10 +4664,7 @@ async fn a_first_sso_login_claims_the_legacy_row_by_address() {
         .provision_user("im-old", "ada@iz.sh", "Ada Lovelace", false)
         .await
         .unwrap();
-    app.store
-        .set_role(&legacy.id, Role::Viewer)
-        .await
-        .unwrap();
+    app.store.set_role(&legacy.id, Role::Viewer).await.unwrap();
 
     let cookie = app.mint("im-new", "ada@iz.sh", "Ada Lovelace", false);
     let page = app.get("/", Some(&cookie)).await;
@@ -4623,7 +4676,10 @@ async fn a_first_sso_login_claims_the_legacy_row_by_address() {
         .await
         .unwrap()
         .expect("the address has no row after claiming");
-    assert_eq!(claimed.id, legacy.id, "the login did not claim the legacy row");
+    assert_eq!(
+        claimed.id, legacy.id,
+        "the login did not claim the legacy row"
+    );
     assert_eq!(
         claimed.role,
         Role::Viewer,
@@ -4641,10 +4697,7 @@ async fn a_disabled_member_reads_as_signed_out() {
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
     let member_id = user_id(&app, "emre@iz.sh").await;
-    app.store
-        .set_user_disabled(&member_id, true)
-        .await
-        .unwrap();
+    app.store.set_user_disabled(&member_id, true).await.unwrap();
 
     let page = app.get("/", Some(&member)).await;
     let html = String::from_utf8_lossy(&page.bytes);
@@ -4730,11 +4783,7 @@ async fn set_role_cannot_make_an_admin() {
     );
 
     let reloaded = app.store.user(&member_id).await.unwrap().unwrap();
-    assert_eq!(
-        reloaded.role,
-        Role::Member,
-        "set_role made an admin anyway"
-    );
+    assert_eq!(reloaded.role, Role::Member, "set_role made an admin anyway");
 }
 
 /// An admin may add a member who has never signed in, and the row is a
@@ -4770,6 +4819,43 @@ async fn an_admin_may_add_a_member_before_their_first_sign_in() {
     let row = app.store.user(&member_id).await.unwrap().unwrap();
     assert_eq!(row.oidc_sub, None, "an unclaimed row carries no sub");
     assert_eq!(row.role, Role::Member);
+
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Onboard Mert").await;
+    app.store.assign_task(&task, &member_id).await.unwrap();
+}
+
+/// A member the directory beat mirrored — born linked, never signed in —
+/// is a member like any other: in the picker list and assignable straight
+/// away. Catches a sync that writes rows the board cannot see.
+#[tokio::test]
+async fn a_synced_member_is_listed_and_assignable_before_their_first_sign_in() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let admin_row = app
+        .store
+        .user(&user_id(&app, "ada@iz.sh").await)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let sync = app
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false)
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Inserted);
+
+    let member_id = user_id(&app, "mert@iz.sh").await;
+    let row = app.store.user(&member_id).await.unwrap().unwrap();
+    assert_eq!(row.oidc_sub.as_deref(), Some("sub-mert"));
+    assert!(row.last_signed_in_at.is_none());
+
+    let listed = app.store.users(&admin_row.workspace_id).await.unwrap();
+    assert!(
+        listed.iter().any(|user| user.id == member_id),
+        "the picker's source does not list the synced member"
+    );
 
     let column = first_column(&app).await;
     let task = a_task(&app, &admin_cookie, &column, "Onboard Mert").await;
@@ -5031,7 +5117,9 @@ async fn the_avatar_is_not_found_without_an_im_photo() {
     let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
     let member_id = user_id(&app, "emre@iz.sh").await;
 
-    let photo = app.get(&format!("/avatar/{member_id}"), Some(&member)).await;
+    let photo = app
+        .get(&format!("/avatar/{member_id}"), Some(&member))
+        .await;
     assert_eq!(photo.status, StatusCode::NOT_FOUND);
 }
 /// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`
@@ -5328,7 +5416,6 @@ async fn user_id(app: &App, email: &str) -> String {
         .expect("no such user")
         .id
 }
-
 
 /// The nav shows a page only to a role that can act on it: an admin's board
 /// carries all four links, a member's carries neither Rules nor Logs.
@@ -7962,7 +8049,12 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC+03:00"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert!(
@@ -8321,7 +8413,12 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
+            &[
+                ("timezone", "UTC+03:00"),
+                ("theme", "light"),
+                ("language", "en"),
+                ("ui", "instrument"),
+            ],
         )
         .await;
     assert!(
@@ -9008,7 +9105,6 @@ async fn checking_the_sender_records_an_event() {
     assert_eq!(lines[0].actor_name.as_deref(), Some("Ada Lovelace"));
 }
 
-
 /// A card's dependency summary names both directions with keys: what the card
 /// blocks and what blocks it, the same list shape either way.
 #[tokio::test]
@@ -9057,11 +9153,9 @@ async fn a_card_lists_both_dependency_directions_as_keys() {
         )),
         "the blocker's card did not name what it blocks: {html}"
     );
-    assert!(
-        html.contains(&format!(
-            r#"class="card-blocked-by">blocked by {first_key}</span>"#
-        )),
-    );
+    assert!(html.contains(&format!(
+        r#"class="card-blocked-by">blocked by {first_key}</span>"#
+    )),);
 }
 
 /// The board search filters server-side by key and title, composes with the

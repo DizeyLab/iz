@@ -149,6 +149,40 @@ pub async fn photo_for(cx: &Cx, user_id: &str) -> Option<(Vec<u8>, String)> {
     Some((bytes, mime))
 }
 
+/// One entry of im's directory: the stable subject, the address, the
+/// display name, and whether im calls the person an admin — exactly what
+/// mirroring the directory into local member rows needs.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DirectoryMember {
+    pub sub: String,
+    pub email: String,
+    pub name: String,
+    #[serde(default)]
+    pub admin: bool,
+}
+
+impl IzClient {
+    /// The family phonebook: every non-disabled user im knows, fetched as
+    /// the app (`Authorization: Basic` with the client pair, the same
+    /// credentials the photo route takes). `None` on anything that is not a
+    /// readable list — a refused pair, a dropped connection, a body that is
+    /// not the array — because a missed beat must never look like an empty
+    /// directory: the caller keeps the rows it has and asks again next beat.
+    pub async fn directory(&self) -> Option<Vec<DirectoryMember>> {
+        let reply = self
+            .http
+            .get(format!("{}/directory", self.config.issuer))
+            .basic_auth(&self.config.client_id, Some(&self.config.client_secret))
+            .send()
+            .await
+            .ok()?;
+        if !reply.status().is_success() {
+            return None;
+        }
+        reply.json().await.ok()
+    }
+}
+
 /// Path of im's RFC 7662 introspection endpoint, relative to the issuer.
 const INTROSPECT_PATH: &str = "/introspect";
 
@@ -573,7 +607,9 @@ async fn exchange_code(state: &IzClient, code: &str, flight: &InFlight) -> Resul
     let (_user, exp) = match introspect(state, &app_session).await {
         Introspected::Active(user, exp) => (user, exp),
         Introspected::Revoked | Introspected::Unanswered => {
-            return Err(Error::Refused("fresh app session does not introspect".into()));
+            return Err(Error::Refused(
+                "fresh app session does not introspect".into(),
+            ));
         }
     };
     Ok(Session { app_session, exp })
@@ -709,9 +745,9 @@ mod tests {
     use super::*;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::traits::PublicKeyParts;
+    use std::sync::{Arc, OnceLock};
     use topcoat::cookie::RouterBuilderCookieExt;
     use topcoat::router::{Body, Router, to_bytes};
-    use std::sync::{Arc, OnceLock};
 
     fn keypair() -> (rsa::RsaPrivateKey, rsa::RsaPublicKey) {
         // 2048-bit generation is slow for a unit test; 1024 is the smallest
@@ -847,7 +883,10 @@ mod tests {
     fn next_allows_plain_local_paths() {
         assert_eq!(safe_next("/"), "/");
         assert_eq!(safe_next("/drive/folder/a"), "/drive/folder/a");
-        assert_eq!(safe_next("/?auth_error=exchange_failed"), "/?auth_error=exchange_failed");
+        assert_eq!(
+            safe_next("/?auth_error=exchange_failed"),
+            "/?auth_error=exchange_failed"
+        );
     }
 
     #[test]
@@ -879,7 +918,10 @@ mod tests {
         // `HeaderValue` refuses the injected bytes; the redirect must land
         // on `/` rather than panic its handler.
         assert!(HeaderValue::from_str("/\r\nX-evil:1").is_err());
-        assert_eq!(location_value("/\r\nX-evil:1"), HeaderValue::from_static("/"));
+        assert_eq!(
+            location_value("/\r\nX-evil:1"),
+            HeaderValue::from_static("/")
+        );
         assert_eq!(
             location_value("/drive"),
             HeaderValue::from_str("/drive").unwrap()
@@ -1012,8 +1054,7 @@ mod tests {
                                 }
                                 req.extend_from_slice(&buf[..n]);
                                 if let Some(end) = headers_end(&req) {
-                                    let head =
-                                        String::from_utf8_lossy(&req[..end]).to_string();
+                                    let head = String::from_utf8_lossy(&req[..end]).to_string();
                                     let len = content_length(&head);
                                     if req.len() >= end + len {
                                         break end;
@@ -1023,8 +1064,7 @@ mod tests {
                                     return;
                                 }
                             };
-                            let head =
-                                String::from_utf8_lossy(&req[..body_start]).to_string();
+                            let head = String::from_utf8_lossy(&req[..body_start]).to_string();
                             let first = head.lines().next().unwrap_or("").to_string();
                             let len = content_length(&head);
                             req.drain(..body_start + len);
@@ -1131,23 +1171,23 @@ mod tests {
         let _ = canned
             .jwks
             .set(serde_json::json!({"keys": [jwk_of(&public, "test")]}).to_string());
-        let _ = canned
-            .token
-            .set(serde_json::json!({
+        let _ = canned.token.set(
+            serde_json::json!({
                 "id_token": id_token,
                 "app_session": "tok-1",
             })
-            .to_string());
-        let _ = canned
-            .introspect
-            .set(serde_json::json!({
+            .to_string(),
+        );
+        let _ = canned.introspect.set(
+            serde_json::json!({
                 "active": true,
                 "sub": "user-1",
                 "email": "ann@example.com",
                 "name": "Ann",
                 "exp": now + 3600,
             })
-            .to_string());
+            .to_string(),
+        );
 
         let router = test_router(test_config(fake.url()));
         let callback = TestResponse::of(
@@ -1194,23 +1234,23 @@ mod tests {
         let _ = canned
             .jwks
             .set(serde_json::json!({"keys": [jwk_of(&public, "test")]}).to_string());
-        let _ = canned
-            .token
-            .set(serde_json::json!({
+        let _ = canned.token.set(
+            serde_json::json!({
                 "id_token": id_token,
                 "app_session": "tok-1",
             })
-            .to_string());
-        let _ = canned
-            .introspect
-            .set(serde_json::json!({
+            .to_string(),
+        );
+        let _ = canned.introspect.set(
+            serde_json::json!({
                 "active": true,
                 "sub": "user-1",
                 "email": "ann@example.com",
                 "name": "Ann",
                 "exp": now + 3600,
             })
-            .to_string());
+            .to_string(),
+        );
 
         let router = test_router(test_config(fake.url()));
         let callback = TestResponse::of(
@@ -1317,16 +1357,16 @@ mod tests {
     async fn current_user_serves_the_introspected_user() {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let canned = CannedIm::default();
-        let _ = canned
-            .introspect
-            .set(serde_json::json!({
+        let _ = canned.introspect.set(
+            serde_json::json!({
                 "active": true,
                 "sub": "user-1",
                 "email": "ann@example.com",
                 "name": "Ann",
                 "exp": now + 3600,
             })
-            .to_string());
+            .to_string(),
+        );
         let fake = FakeIm::spawn(canned).await;
         let router = test_router(test_config(fake.url()));
         let res = TestResponse::of(

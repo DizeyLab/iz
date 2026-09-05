@@ -13,18 +13,18 @@ use crate::board::{BoardReads, Moved, TaskRow, Transition};
 use crate::detail::{ActivityKind, DeletionCost, DetailReads};
 
 #[cfg(feature = "server")]
-pub mod secret;
-#[cfg(feature = "server")]
 pub mod reconcile;
 #[cfg(feature = "server")]
-pub mod sniff;
-#[cfg(feature = "server")]
 pub mod schema;
+#[cfg(feature = "server")]
+pub mod secret;
+#[cfg(feature = "server")]
+pub mod sniff;
 pub mod turso_store;
 
-pub use turso_store::TursoStore;
 #[cfg(feature = "server")]
-pub use reconcile::{reconcile, ReconcileOptions};
+pub use reconcile::{ReconcileOptions, reconcile};
+pub use turso_store::TursoStore;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum StoreError {
@@ -51,7 +51,6 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
-
 
 /// A workspace and the settings that ride on it.
 ///
@@ -217,6 +216,22 @@ pub struct UserStats {
     pub comments: u32,
 }
 
+/// What one directory sync did to a member row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberSync {
+    /// No row carried the person: one was born, linked to their subject.
+    Inserted,
+    /// An unclaimed row's address matched: the subject landed on it.
+    Claimed,
+    /// The provider's facts (address, name, admin flag) drifted; the row
+    /// followed, or an unclaimed owner was claimed.
+    Refreshed,
+    /// The row already said what the directory says.
+    Untouched,
+    /// A new row had no workspace to live in: the first sign-in builds it,
+    /// and the next beat mirrors everyone.
+    Skipped,
+}
 
 /// A task as it is written. The key (`DZ-14`) is not here: the store hands it
 /// out from the board's counter, so two tasks created at once cannot collide.
@@ -664,7 +679,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::live::Change>;
     // -- workspace ---------------------------------------------------------
 
-
     /// The account that claimed the workspace, if it has been claimed.
     async fn owner(&self) -> Result<Option<User>>;
 
@@ -705,7 +719,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
         mail_batch_minutes: u32,
         reminder_minutes: u32,
     ) -> Result<()>;
-
 
     // -- users -------------------------------------------------------------
 
@@ -748,6 +761,26 @@ pub trait Store: BoardReads + DetailReads + 'static {
         role: Role,
     ) -> Result<User>;
 
+    /// Mirrors one entry of im's directory into the member list.
+    ///
+    /// The directory vouches the subject, so a person nobody has ever seen
+    /// gets a row born linked — assignable, mailable and avatar-able before
+    /// their first visit. An unclaimed row with a matching address is
+    /// claimed (sub stamped, id/role/preferences/history kept), a known row
+    /// follows the provider's address, name and admin flag, and a row that
+    /// already agrees is left alone. Unlike [`Store::provision_user`] this
+    /// is not a sign-in: `last_signed_in_at` is never stamped, and an empty
+    /// database grows no workspace (the first sign-in builds it; the next
+    /// beat mirrors everyone). The admin flag claims an unclaimed owner the
+    /// same way provision does. Says what happened through [`MemberSync`].
+    async fn sync_member(
+        &self,
+        sub: &str,
+        email: &str,
+        display_name: &str,
+        im_admin: bool,
+    ) -> Result<MemberSync>;
+
     async fn user(&self, id: &str) -> Result<Option<User>>;
 
     /// Lookup by address. Callers must not turn a `None` into a different
@@ -765,7 +798,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// This is a read, for looking: nothing announces.
     async fn user_stats(&self, user_id: &str) -> Result<UserStats>;
 
-
     /// Display-only preferences: stored data stays UTC/neutral, these only
     /// change how a browser renders it for this one person.
     async fn set_preferences(
@@ -781,8 +813,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// Disables an account. A disabled account signs in to nothing: the web
     /// layer reads this and treats the person as signed out.
     async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> Result<()>;
-
-
 
     // -- board -------------------------------------------------------------
 

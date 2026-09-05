@@ -17,9 +17,9 @@ use super::secret;
 use super::{
     ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, ClaimedSend, CommentWritten,
     Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
-    MailSend, NewAttachment, NewSender, NewTask, Recipient, Result, SendKind, SendState,
-    SenderCheck, SenderTest, Store, StoreError, Tag, TaskCreated, Trigger, User, UserStats,
-    Workspace,
+    MailSend, MemberSync, NewAttachment, NewSender, NewTask, Recipient, Result, SendKind,
+    SendState, SenderCheck, SenderTest, Store, StoreError, Tag, TaskCreated, Trigger, User,
+    UserStats, Workspace,
 };
 use super::{ReconcileOptions, reconcile, schema, sniff};
 use crate::Role;
@@ -1369,6 +1369,146 @@ impl Store for TursoStore {
         self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
+    async fn sync_member(
+        &self,
+        sub: &str,
+        email: &str,
+        display_name: &str,
+        im_admin: bool,
+    ) -> Result<MemberSync> {
+        let email = fold_email(email);
+        // IMMEDIATE like provision_user: a beat racing a first sign-in over
+        // the same address must not double the row, and two admin sightings
+        // must not both claim the owner.
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let now = now_text()?;
+        let by_sub = format!("SELECT {USER_COLUMNS} FROM user WHERE oidc_sub = ?1");
+        let mut rows = tx.query(&by_sub, params![sub]).await.map_err(backend)?;
+        let seen = match rows.next().await.map_err(backend)? {
+            Some(row) => Some(user_from(&row)?),
+            None => None,
+        };
+        drop(rows);
+        let outcome = if let Some(user) = seen {
+            let role = synced_role(user.role, im_admin);
+            // A sync is not a sign-in: last_signed_in_at is the person's own
+            // fact, and the directory says nothing about it.
+            if user.email == email && user.display_name == display_name && role == user.role {
+                Some((user.id, MemberSync::Untouched))
+            } else {
+                tx.execute(
+                    "UPDATE user SET email = ?1, display_name = ?2, role = ?3 WHERE id = ?4",
+                    params![email.clone(), display_name, role.as_str(), user.id.clone()],
+                )
+                .await
+                .map_err(backend)?;
+                Some((user.id, MemberSync::Refreshed))
+            }
+        } else {
+            let by_email =
+                format!("SELECT {USER_COLUMNS} FROM user WHERE email = ?1 COLLATE NOCASE");
+            let mut rows = tx
+                .query(&by_email, params![email.clone()])
+                .await
+                .map_err(backend)?;
+            let seen = match rows.next().await.map_err(backend)? {
+                Some(row) => Some(user_from(&row)?),
+                None => None,
+            };
+            drop(rows);
+            if let Some(user) = seen {
+                let role = synced_role(user.role, im_admin);
+                tx.execute(
+                    "UPDATE user SET oidc_sub = ?1, email = ?2, display_name = ?3, role = ?4 \
+                     WHERE id = ?5",
+                    params![
+                        sub,
+                        email.clone(),
+                        display_name,
+                        role.as_str(),
+                        user.id.clone()
+                    ],
+                )
+                .await
+                .map_err(backend)?;
+                Some((user.id, MemberSync::Claimed))
+            } else {
+                let known = {
+                    let mut rows = tx
+                        .query("SELECT id FROM workspace LIMIT 1", ())
+                        .await
+                        .map_err(backend)?;
+                    let known = match rows.next().await.map_err(backend)? {
+                        Some(row) => Some(text(&row, 0)?),
+                        None => None,
+                    };
+                    drop(rows);
+                    known
+                };
+                match known {
+                    None => None,
+                    Some(workspace_id) => {
+                        // Born linked: the directory vouches the subject, so
+                        // the row never waits unclaimed — assignment, mail
+                        // and the avatar proxy work before the first visit.
+                        let id = Ulid::new().to_string();
+                        let role = if im_admin { Role::Admin } else { Role::Member };
+                        tx.execute(
+                            "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, \
+                             role, disabled, created_at, last_signed_in_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, NULL)",
+                            params![
+                                id.clone(),
+                                workspace_id,
+                                sub,
+                                email.clone(),
+                                display_name,
+                                role.as_str(),
+                                now.clone()
+                            ],
+                        )
+                        .await
+                        .map_err(backend)?;
+                        Some((id, MemberSync::Inserted))
+                    }
+                }
+            }
+        };
+        let Some((id, mut sync)) = outcome else {
+            // No workspace to put a new row in: the first sign-in builds it,
+            // and the next beat mirrors everyone. Nothing was written.
+            drop(tx);
+            drop(conn);
+            return Ok(MemberSync::Skipped);
+        };
+        if im_admin {
+            // Same conditional claim as provision_user: the provider's first
+            // admin owns the workspace, a later one never steals it.
+            let claimed = tx
+                .execute(
+                    "INSERT INTO workspace_owner (singleton, user_id, claimed_at) \
+                     SELECT 1, ?1, ?2 WHERE NOT EXISTS \
+                     (SELECT 1 FROM workspace_owner WHERE singleton = 1)",
+                    params![id.clone(), now.clone()],
+                )
+                .await
+                .map_err(backend)?;
+            if claimed > 0 && sync == MemberSync::Untouched {
+                sync = MemberSync::Refreshed;
+            }
+        }
+        tx.commit().await.map_err(backend)?;
+        drop(conn);
+        if sync != MemberSync::Untouched {
+            self.announce([Topic::Members]);
+        }
+        Ok(sync)
+    }
+
     async fn add_member(
         &self,
         workspace_id: &str,
@@ -1393,7 +1533,9 @@ impl Store for TursoStore {
         // unique index below means what the case-insensitive check here
         // says even for rows the password era left unfolded.
         let seen = {
-            let sql = format!("SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 AND email = ?2 COLLATE NOCASE");
+            let sql = format!(
+                "SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 AND email = ?2 COLLATE NOCASE"
+            );
             self.one_row(&sql, params![workspace_id, email.clone()])
                 .await?
         };

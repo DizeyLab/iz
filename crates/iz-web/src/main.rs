@@ -137,6 +137,14 @@ async fn main() {
     ));
     tokio::spawn(sweep(engine.clone(), store.clone()));
 
+    // The member list mirrors im's directory: people are assignable and
+    // mailable before their first visit, and the provider's renames and
+    // admin flips follow on their own. Runs beside the sweep, first pass
+    // right away so a fresh deploy sees everyone at boot.
+    tokio::spawn(directory_sync(
+        store.clone(),
+        iz_client::IzClient::new(oidc.clone()),
+    ));
     // Told when the process is stopping, so the live streams end instead of
     // being waited out. See `iz_web::live::Shutdown`.
     let (stop, stopping) = tokio::sync::watch::channel(false);
@@ -293,6 +301,35 @@ async fn sweep(engine: std::sync::Arc<iz_core::MailEngine>, store: Arc<dyn iz_co
                 }
             }
         }
+    }
+}
+
+/// How often the member list is re-mirrored from im. Short enough that a
+/// person invited to im shows up here before anyone goes looking for them,
+/// long enough that the two services are not talking about it constantly.
+const DIRECTORY_SECONDS: u64 = 300;
+
+/// Keeps the member list a mirror of im's directory, first pass at boot and
+/// then on the beat. Every pass is a full read of a short list, so the
+/// store hears one entry at a time and announces only what changed. An im
+/// that does not answer — down, restarting, mid-deploy — costs one log line
+/// and nothing else: the rows stay, and the next beat asks again.
+async fn directory_sync(store: Arc<dyn iz_core::store::Store>, client: iz_client::IzClient) {
+    loop {
+        match client.directory().await {
+            Some(members) => {
+                for member in members {
+                    if let Err(problem) = store
+                        .sync_member(&member.sub, &member.email, &member.name, member.admin)
+                        .await
+                    {
+                        eprintln!("directory sync: {}: {problem}", member.email);
+                    }
+                }
+            }
+            None => eprintln!("directory sync: im did not answer; keeping the rows there are"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(DIRECTORY_SECONDS)).await;
     }
 }
 
