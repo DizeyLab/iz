@@ -26,7 +26,7 @@ pub use turso_store::TursoStore;
 #[cfg(feature = "server")]
 pub use reconcile::{reconcile, ReconcileOptions};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum StoreError {
     #[error("this workspace already has an owner")]
     AlreadyClaimed,
@@ -52,15 +52,6 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// The security knobs a fresh workspace starts on, and what a database older
-/// than `migrations/0002_security_knobs.sql` is backfilled onto — by that
-/// migration's own `DEFAULT` clauses for the rows it meets, and by
-/// `reconcile`'s copy map for every database it carries across. The SQL
-/// literals mirror these numbers; change the two together.
-pub const DEFAULT_RATE_LIMIT_ATTEMPTS: u64 = 10;
-pub const DEFAULT_RATE_WINDOW_MINUTES: u32 = 15;
-pub const DEFAULT_SESSION_LIFETIME_DAYS: u32 = 14;
-pub const DEFAULT_SIGNIN_LINK_LIFETIME_DAYS: u32 = 7;
 
 /// A workspace and the settings that ride on it.
 ///
@@ -91,7 +82,6 @@ pub struct Workspace {
     /// not the same thing as `sender_test`.
     pub sender_check: Option<SenderCheck>,
     pub attachment_limit_bytes: u64,
-    pub photo_limit_bytes: u64,
     pub allowed_file_types: Vec<String>,
     /// The quiet window a notification waits out before it is sent, in
     /// minutes. `0` sends every trigger the moment it is owed.
@@ -99,14 +89,6 @@ pub struct Workspace {
     /// How long before a task's clock its reminder mail is queued, in
     /// minutes. `0` turns reminders off.
     pub reminder_minutes: u32,
-    /// The sign-in attempts one client or address may spend per window.
-    pub rate_limit_attempts: u64,
-    /// How far back the attempt count reaches, in minutes.
-    pub rate_window_minutes: u32,
-    /// How long a signed-in browser stays signed in, in days.
-    pub session_lifetime_days: u32,
-    /// How long a first-sign-in or reset link is good for, in days.
-    pub signin_link_lifetime_days: u32,
     /// The origin mail links point at, when an admin has set one. `None`
     /// means the address the process listens on — a box behind a proxy
     /// answers on localhost and is reached on a public name, and only an
@@ -195,23 +177,21 @@ pub struct NewSender {
     pub from_address: String,
 }
 
-/// An account. `password_hash` is `None` for an invited member who has not
-/// signed in yet — the admin creates the account with a name and an address and
-/// can never read or set the password.
+/// An account. Identity lives with the provider: `oidc_sub` is who im says
+/// this person is, stamped on first sight and matched on every sight after.
+/// The address and the display name follow the provider too; the role, the
+/// preferences and the history are ours.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub workspace_id: String,
+    pub oidc_sub: Option<String>,
     pub email: String,
     pub display_name: String,
     pub role: Role,
-    pub password_hash: Option<String>,
-    pub has_photo: bool,
+    pub disabled: bool,
     pub created_at: OffsetDateTime,
     pub last_signed_in_at: Option<OffsetDateTime>,
-    /// Who made this account. Null for the first account, which nobody
-    /// invited.
-    pub invited_by: Option<String>,
     /// Display-only. Stored data stays UTC/neutral; this only changes how a
     /// browser renders it for this one person.
     pub timezone: String,
@@ -221,22 +201,6 @@ pub struct User {
     pub language: String,
     /// Display-only, as [`Self::timezone`].
     pub ui: String,
-}
-
-impl User {
-    /// True once the person has chosen their own password.
-    pub fn has_signed_in(&self) -> bool {
-        self.password_hash.is_some()
-    }
-}
-
-pub struct NewUser {
-    pub workspace_id: String,
-    pub email: String,
-    pub display_name: String,
-    pub role: Role,
-    /// The admin who is making this account, or none for the first one.
-    pub invited_by: Option<String>,
 }
 
 /// The profile page's totals for one person: what is on their plate, what
@@ -253,68 +217,6 @@ pub struct UserStats {
     pub comments: u32,
 }
 
-/// What a link is for. The same table and the same token machinery carry
-/// both; the kind decides which redeeming flow may spend it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkKind {
-    /// An invited person's first sign-in.
-    Join,
-    /// A self-serve password reset, mailed to the account's own address.
-    Reset,
-}
-
-impl LinkKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            LinkKind::Join => "join",
-            LinkKind::Reset => "reset",
-        }
-    }
-
-    pub fn from_str(raw: &str) -> Option<LinkKind> {
-        match raw {
-            "join" => Some(LinkKind::Join),
-            "reset" => Some(LinkKind::Reset),
-            _ => None,
-        }
-    }
-}
-
-/// A mailed link — an invitation or a password reset. Only the hash of the
-/// token is ever stored; the plaintext is shown once, when the link is
-/// created or mailed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SigninLink {
-    pub id: String,
-    pub user_id: String,
-    pub created_at: OffsetDateTime,
-    pub expires_at: OffsetDateTime,
-    pub used_at: Option<OffsetDateTime>,
-    pub kind: LinkKind,
-}
-
-impl SigninLink {
-    pub fn is_usable(&self, now: OffsetDateTime) -> bool {
-        self.used_at.is_none() && now < self.expires_at
-    }
-}
-
-/// A signed-in browser. As with every other token, only the hash of the cookie
-/// value is stored.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Session {
-    pub id: String,
-    pub user_id: String,
-    pub created_at: OffsetDateTime,
-    pub expires_at: OffsetDateTime,
-    pub revoked_at: Option<OffsetDateTime>,
-}
-
-impl Session {
-    pub fn is_live(&self, now: OffsetDateTime) -> bool {
-        self.revoked_at.is_none() && now < self.expires_at
-    }
-}
 
 /// A task as it is written. The key (`DZ-14`) is not here: the store hands it
 /// out from the board's counter, so two tasks created at once cannot collide.
@@ -762,19 +664,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::live::Change>;
     // -- workspace ---------------------------------------------------------
 
-    /// Claims an empty database: writes the workspace, its first account and
-    /// the single owner row in one transaction.
-    ///
-    /// The owner row has a fixed primary key, so two requests racing to claim
-    /// the same empty workspace cannot both win, and the loser gets
-    /// [`StoreError::AlreadyClaimed`] rather than quietly joining as a member.
-    async fn claim_workspace(
-        &self,
-        workspace_name: &str,
-        email: &str,
-        display_name: &str,
-        password_hash: &str,
-    ) -> Result<(Workspace, User)>;
 
     /// The account that claimed the workspace, if it has been claimed.
     async fn owner(&self) -> Result<Option<User>>;
@@ -804,7 +693,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
     async fn set_public_url(&self, workspace_id: &str, public_url: Option<&str>) -> Result<()>;
 
     /// Writes every workspace knob the settings page saves in one form: the
-    /// two attachment ceilings, the allowed file types, the notification
+    /// attachment ceiling, the allowed file types, the notification
     /// quiet window and the reminder lead. One write, because they are one
     /// save — a second way to write the same row would let the knobs
     /// disagree about what the admin last chose.
@@ -812,28 +701,34 @@ pub trait Store: BoardReads + DetailReads + 'static {
         &self,
         workspace_id: &str,
         attachment_limit_bytes: u64,
-        photo_limit_bytes: u64,
         allowed_file_types: &[String],
         mail_batch_minutes: u32,
         reminder_minutes: u32,
     ) -> Result<()>;
 
-    /// Writes the workspace's four security knobs — the sign-in attempt
-    /// allowance, the rate-limit window, the session lifetime and the
-    /// sign-in-link lifetime — in one write, because they are one save on
-    /// one form.
-    async fn set_security(
-        &self,
-        workspace_id: &str,
-        rate_limit_attempts: u64,
-        rate_window_minutes: u32,
-        session_lifetime_days: u32,
-        signin_link_lifetime_days: u32,
-    ) -> Result<()>;
 
     // -- users -------------------------------------------------------------
 
-    async fn create_user(&self, new: NewUser) -> Result<User>;
+    /// Upserts the account for a person who just proved who they are to im.
+    ///
+    /// A row already carrying `sub` is refreshed — the address and the
+    /// display name follow the provider — and returned. Else a row with a
+    /// matching address (case-insensitive) is claimed: `sub` is stamped
+    /// onto it, preserving its id, role, preferences and history. Else a
+    /// row is inserted, `Admin` when im calls them admin and `Member`
+    /// otherwise. Every path stamps `last_signed_in_at` and syncs the role
+    /// (the admin flag makes `Admin`; losing it drops an `Admin` to
+    /// `Member` and never touches `Member`/`Viewer`), and a provision that
+    /// arrives with the flag claims the workspace owner while it is
+    /// unclaimed. An empty database grows its workspace, board, columns
+    /// and default tag first, so the first sign-in is the whole setup.
+    async fn provision_user(
+        &self,
+        sub: &str,
+        email: &str,
+        display_name: &str,
+        im_admin: bool,
+    ) -> Result<User>;
 
     async fn user(&self, id: &str) -> Result<Option<User>>;
 
@@ -852,22 +747,6 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// This is a read, for looking: nothing announces.
     async fn user_stats(&self, user_id: &str) -> Result<UserStats>;
 
-    async fn set_password_hash(&self, user_id: &str, hash: &str) -> Result<()>;
-
-    async fn set_profile(&self, user_id: &str, display_name: &str) -> Result<()>;
-
-    /// Stores the profile photo's bytes and mime type, replacing any previous one.
-    async fn set_photo(&self, user_id: &str, bytes: &[u8], mime: &str) -> Result<()>;
-
-    async fn clear_photo(&self, user_id: &str) -> Result<()>;
-
-    /// The photo's bytes and mime type, or `None` when none is set.
-    async fn photo(&self, user_id: &str) -> Result<Option<(Vec<u8>, String)>>;
-
-    /// Changes the sign-in address. Refuses with [`StoreError::Conflict`] if
-    /// another account in the same workspace already holds it — the same
-    /// wording `create_user` refuses a duplicate invite with.
-    async fn set_email(&self, user_id: &str, workspace_id: &str, email: &str) -> Result<()>;
 
     /// Display-only preferences: stored data stays UTC/neutral, these only
     /// change how a browser renders it for this one person.
@@ -881,77 +760,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     ) -> Result<()>;
 
     async fn set_role(&self, user_id: &str, role: Role) -> Result<()>;
+    /// Disables an account. A disabled account signs in to nothing: the web
+    /// layer reads this and treats the person as signed out.
+    async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> Result<()>;
 
-    async fn mark_signed_in(&self, user_id: &str, at: OffsetDateTime) -> Result<()>;
 
-    // -- sign-in links -----------------------------------------------------
-
-    /// Stores the hash of a freshly minted link. The caller keeps the plaintext
-    /// and shows it once. The kind decides which redeeming flow may spend it.
-    ///
-    /// Minting retires: every earlier unspent link of the same kind for the
-    /// same account is marked spent in the same transaction, so the newest
-    /// link is the only live one. A retired link is refused exactly like a
-    /// spent or expired one — retired *is* spent, the same `used_at` a
-    /// redemption writes.
-    async fn create_signin_link(
-        &self,
-        user_id: &str,
-        token_hash: &str,
-        expires_at: OffsetDateTime,
-        kind: LinkKind,
-    ) -> Result<SigninLink>;
-
-    /// Looks a link up by the hash of the presented token. Returns the link
-    /// whether or not it is still usable, so the caller can tell an expired
-    /// link apart from a wrong one — an expired link is not a dead account.
-    async fn signin_link_by_hash(&self, token_hash: &str) -> Result<Option<SigninLink>>;
-
-    /// Marks the link used, in a transaction, conditional on it still being
-    /// unused, and reports whether this call is the one that consumed it.
-    ///
-    /// Mail clients prefetch links, so two redemptions of the same link is
-    /// ordinary traffic rather than an attack: exactly one of them must win.
-    async fn consume_signin_link(&self, id: &str, at: OffsetDateTime) -> Result<bool>;
-
-    // -- sessions ----------------------------------------------------------
-
-    async fn create_session(
-        &self,
-        user_id: &str,
-        token_hash: &str,
-        expires_at: OffsetDateTime,
-    ) -> Result<Session>;
-
-    /// Looks a session up by the hash of the cookie value. Returns it whether
-    /// or not it is still live; the caller decides.
-    async fn session_by_hash(&self, token_hash: &str) -> Result<Option<Session>>;
-
-    /// The stored digest for a session, so the caller can compare it in
-    /// constant time rather than trusting the index lookup alone.
-    async fn session_token_hash(&self, id: &str) -> Result<Option<String>>;
-
-    async fn revoke_session(&self, id: &str, at: OffsetDateTime) -> Result<()>;
-
-    /// Signs out every browser this account has. This is what the change-
-    /// password pane promises.
-    async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64>;
-
-    // -- rate limiting -----------------------------------------------------
-
-    /// Records one attempt against a bucket — an address, or a client address.
-    async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()>;
-
-    /// How many attempts that bucket has made since `since`.
-    async fn count_auth_attempts(&self, bucket: &str, since: OffsetDateTime) -> Result<u64>;
-
-    /// Forgets a bucket's attempts. Called on a success, so a person who
-    /// mistypes twice and then gets it right is not left near the limit.
-    async fn clear_auth_attempts(&self, bucket: &str) -> Result<()>;
-
-    /// Drops attempt rows older than `before`, so the ledger does not grow
-    /// without bound.
-    async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64>;
 
     // -- board -------------------------------------------------------------
 

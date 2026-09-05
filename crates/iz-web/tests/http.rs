@@ -18,19 +18,25 @@
 //! `const` items below so a rename shows up once.
 #![cfg(test)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
 use http::{HeaderValue, Request, StatusCode, header};
 use iz_core::Role;
-use iz_core::accounts::Accounts;
 use iz_core::board::Moved;
 use iz_core::store::{Audience, MailOutcome, SendKind, SendState, Store, Trigger, TursoStore};
-use iz_web::server::{Mail, SESSION_COOKIE};
+use iz_web::server::Mail;
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
 use topcoat::router::{Body, BodyLimit, Router, RouterBuilderDiscoverExt, to_bytes};
 use ulid::Ulid;
+
+/// The session cookie iz-client seals: the tests mint it directly instead of
+/// driving a browser through the OIDC round-trip.
+const SESSION_COOKIE: &str = "iz_session";
 
 /// The bundle `cargo build -p iz-web` + `topcoat asset bundle --bin
 /// iz-web` write next to the crate's own `target/debug`, not next to the
@@ -52,54 +58,284 @@ fn asset_dir() -> PathBuf {
 const TEST_LIVE_WINDOW: iz_web::live::LiveWindow =
     iz_web::live::LiveWindow(std::time::Duration::from_secs(10));
 
-/// A throwaway workspace: its own database file and its own router.
+/// A fake im: answers `POST /introspect` from its token map, `{"active":
+/// false}` for anything it does not know. Bare TCP + hand-rolled HTTP/1.1 —
+/// just enough for the client's form post.
+struct FakeIm {
+    addr: std::net::SocketAddr,
+    tokens: Arc<Mutex<HashMap<String, serde_json::Value>>>,
+    photos: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+}
+
+impl FakeIm {
+    async fn spawn() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let tokens: Arc<Mutex<HashMap<String, serde_json::Value>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let photos: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let map = tokens.clone();
+        let pmap = photos.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let map = map.clone();
+                let pmap = pmap.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut socket = socket;
+                    let mut buf = vec![0u8; 8192];
+                    let mut req = Vec::new();
+                    // One request after another on the same connection:
+                    // closing it after every answer races the client's
+                    // pool, which may hand out the dead socket for the
+                    // next introspection and read that as signed-out.
+                    loop {
+                        let body_start = loop {
+                            let Ok(n) = socket.read(&mut buf).await else {
+                                return;
+                            };
+                            if n == 0 {
+                                return;
+                            }
+                            req.extend_from_slice(&buf[..n]);
+                            if let Some(end) = headers_end(&req) {
+                                let head = String::from_utf8_lossy(&req[..end]).to_string();
+                                let len = content_length(&head);
+                                if req.len() >= end + len {
+                                    break end;
+                                }
+                            }
+                            if req.len() > 1_000_000 {
+                                return;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&req[..body_start]).to_string();
+                        let first = head.lines().next().unwrap_or("").to_string();
+                        // The body may already hold the next pipelined
+                        // request's first bytes; take exactly this one.
+                        let len = content_length(&head);
+                        let body: Vec<u8> = req[body_start..body_start + len].to_vec();
+                        req.drain(..body_start + len);
+                        let (status, content_type, payload) = match photo_answer(&pmap, &head, &first) {
+                            Some(photo) => photo,
+                            None => match answer_for(&map, &first, &body) {
+                                Some(answer) => (
+                                    "200 OK",
+                                    "application/json".to_string(),
+                                    serde_json::to_vec(&answer).unwrap(),
+                                ),
+                                // Anything but the introspection route is
+                                // nothing at all, the way the real im 404s
+                                // unknown paths rather than answering them.
+                                None => ("404 Not Found", "text/plain".to_string(), Vec::new()),
+                            },
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n",
+                            payload.len()
+                        );
+                        if socket.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        if socket.write_all(&payload).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self { addr, tokens, photos }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Stores the photo `GET /photo/{user_id}` answers with — the bytes and
+    /// the mime im would serve for this account.
+    fn set_photo(&self, user_id: &str, bytes: Vec<u8>, mime: &str) {
+        self.photos
+            .lock()
+            .insert(user_id.to_string(), (bytes, mime.to_string()));
+    }
+}
+
+/// The Basic credential the app presents for `GET /photo/*`: `iz-test:s3cr3t`.
+const PHOTO_BASIC: &str = "Basic aXotdGVzdDpzM2NyM3Q=";
+
+/// Answers `GET /photo/{id}` from the photo map — the app's Basic credential
+/// or nothing, a missing photo exactly like a missing person. `None` for
+/// anything else, which stays the introspection JSON.
+fn photo_answer(
+    photos: &Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    head: &str,
+    request_line: &str,
+) -> Option<(&'static str, String, Vec<u8>)> {
+    let mut parts = request_line.split_whitespace();
+    if parts.next() != Some("GET") {
+        return None;
+    }
+    let target = parts.next().unwrap_or("");
+    let path = target.split_once('?').map(|(path, _)| path).unwrap_or(target);
+    let id = path.strip_prefix("/photo/")?;
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
+    let authed = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("authorization") && value.trim() == PHOTO_BASIC
+        });
+    if !authed {
+        return Some(("404 Not Found", "text/plain".to_string(), Vec::new()));
+    }
+    match photos.lock().get(id) {
+        Some((bytes, mime)) => Some(("200 OK", mime.clone(), bytes.clone())),
+        None => Some(("404 Not Found", "text/plain".to_string(), Vec::new())),
+    }
+}
+
+fn headers_end(req: &[u8]) -> Option<usize> {
+    req.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|pos| pos + 4)
+}
+
+fn content_length(head: &str) -> usize {
+    head.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            (name.trim().eq_ignore_ascii_case("content-length"))
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0)
+}
+
+/// Percent-decoding, enough for the opaque tokens these tests mint.
+fn decode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut bytes = raw.as_bytes().iter();
+    while let Some(&b) = bytes.next() {
+        if b == b'+' {
+            out.push(' ');
+        } else if b == b'%' {
+            let hi = bytes.next().copied().unwrap_or(b'0');
+            let lo = bytes.next().copied().unwrap_or(b'0');
+            let hex = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+            out.push((hex(hi) * 16 + hex(lo)) as char);
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+fn answer_for(
+    map: &Arc<Mutex<HashMap<String, serde_json::Value>>>,
+    request_line: &str,
+    body: &[u8],
+) -> Option<serde_json::Value> {
+    let mut head = request_line.split_whitespace();
+    let is_introspect = head.next() == Some("POST") && head.next() == Some(iz_client::introspect_path());
+    if !is_introspect {
+        return None;
+    }
+    let text = String::from_utf8_lossy(body).to_string();
+    let token = text
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == "token")
+        .map(|(_, value)| decode(value));
+    match token.and_then(|token| map.lock().get(&token).cloned()) {
+        Some(claims) => Some(claims),
+        None => Some(serde_json::json!({"active": false})),
+    }
+}
+
+/// A throwaway workspace: its own database file, its own fake im, its own
+/// router.
 struct App {
     dir: PathBuf,
     router: Router,
     store: Arc<dyn Store>,
+    client: iz_client::Config,
+    fake: FakeIm,
     /// Stands in for Ctrl+C. Held so a test can stop this router the way the
     /// process stops the real one.
     stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl App {
-    async fn build(base_url: &str, mail: Mail) -> Self {
+    async fn build(mail: Mail) -> Self {
         let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("iz.db");
+        let storage = dir.join("storage");
         let store: Arc<dyn Store> = Arc::new(
-            TursoStore::open(dir.join("iz.db").to_str().unwrap(), &dir.join("storage"))
+            TursoStore::open(db.to_str().unwrap(), storage.as_path())
                 .await
                 .unwrap(),
         );
-        let accounts = Accounts::new(store.clone(), base_url);
-        let (stop, _) = tokio::sync::watch::channel(false);
-        let router = Router::builder()
-            .discover()
-            .layer(
-                BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
-                    .at("/files"),
-            )
-            .cookies()
-            .assets(
-                AssetBundle::load_dir(asset_dir())
-                    .expect("run `topcoat asset bundle` before the http suite"),
-            )
-            .app_context(accounts)
-            .app_context(iz_web::photo::PhotoStamps::default())
-            .app_context(TEST_LIVE_WINDOW)
-            .app_context(iz_web::live::Shutdown(stop.subscribe()))
-            .app_context(mail)
-            .build();
+        let fake = FakeIm::spawn().await;
+        let client = iz_client::Config {
+            issuer: fake.url(),
+            client_id: "iz-test".to_string(),
+            client_secret: "s3cr3t".to_string(),
+            redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            cookie_name: "iz_session".to_string(),
+            cookie_key: [7u8; 32],
+        };
+        let config = iz_core::Config {
+            database: db,
+            storage,
+            listen: "127.0.0.1:7655".parse().unwrap(),
+            live_seconds: 300,
+            oidc: iz_core::config::OidcConfig {
+                issuer: fake.url(),
+                client_id: "iz-test".to_string(),
+                client_secret: "s3cr3t".to_string(),
+                redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            },
+            ignored: Vec::new(),
+            defaulted: false,
+        };
+        let (stop, stopping) = tokio::sync::watch::channel(false);
+        let router = iz_client::mount(
+            Router::builder()
+                .discover()
+                .layer(
+                    BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
+                        .at("/files"),
+                )
+                .cookies()
+                .assets(
+                    AssetBundle::load_dir(asset_dir())
+                        .expect("run `topcoat asset bundle` before the http suite"),
+                ),
+            client.clone(),
+        )
+        .app_context(store.clone())
+        .app_context(config.clone())
+        .app_context(TEST_LIVE_WINDOW)
+        .app_context(iz_web::live::Shutdown(stopping))
+        .app_context(mail)
+        .build();
         Self {
             dir,
             router,
             store,
+            client,
+            fake,
             stop,
         }
     }
 
     async fn open() -> Self {
-        Self::build("http://127.0.0.1:3000", Mail::silent()).await
+        Self::build(Mail::silent()).await
     }
 
     /// Like `open`, but with a live mail engine reading the workspace's SMTP
@@ -108,8 +344,10 @@ impl App {
     async fn open_with_mail() -> Self {
         let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("iz.db");
+        let storage = dir.join("storage");
         let store: Arc<dyn Store> = Arc::new(
-            TursoStore::open(dir.join("iz.db").to_str().unwrap(), &dir.join("storage"))
+            TursoStore::open(db.to_str().unwrap(), storage.as_path())
                 .await
                 .unwrap(),
         );
@@ -118,31 +356,79 @@ impl App {
             Arc::new(iz_web::smtp::WorkspaceSmtp::new(store.clone())),
             "https://iz.sh",
         ));
-        let accounts = Accounts::new(store.clone(), "https://iz.sh");
-        let (stop, _) = tokio::sync::watch::channel(false);
-        let router = Router::builder()
-            .discover()
-            .layer(
-                BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
-                    .at("/files"),
-            )
-            .cookies()
-            .assets(
-                AssetBundle::load_dir(asset_dir())
-                    .expect("run `topcoat asset bundle` before the http suite"),
-            )
-            .app_context(accounts)
-            .app_context(iz_web::photo::PhotoStamps::default())
-            .app_context(TEST_LIVE_WINDOW)
-            .app_context(iz_web::live::Shutdown(stop.subscribe()))
-            .app_context(Mail::sending(engine))
-            .build();
+        let fake = FakeIm::spawn().await;
+        let client = iz_client::Config {
+            issuer: fake.url(),
+            client_id: "iz-test".to_string(),
+            client_secret: "s3cr3t".to_string(),
+            redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            cookie_name: "iz_session".to_string(),
+            cookie_key: [7u8; 32],
+        };
+        let config = iz_core::Config {
+            database: db,
+            storage,
+            listen: "127.0.0.1:7655".parse().unwrap(),
+            live_seconds: 300,
+            oidc: iz_core::config::OidcConfig {
+                issuer: fake.url(),
+                client_id: "iz-test".to_string(),
+                client_secret: "s3cr3t".to_string(),
+                redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            },
+            ignored: Vec::new(),
+            defaulted: false,
+        };
+        let (stop, stopping) = tokio::sync::watch::channel(false);
+        let router = iz_client::mount(
+            Router::builder()
+                .discover()
+                .layer(
+                    BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
+                        .at("/files"),
+                )
+                .cookies()
+                .assets(
+                    AssetBundle::load_dir(asset_dir())
+                        .expect("run `topcoat asset bundle` before the http suite"),
+                ),
+            client.clone(),
+        )
+        .app_context(store.clone())
+        .app_context(config.clone())
+        .app_context(TEST_LIVE_WINDOW)
+        .app_context(iz_web::live::Shutdown(stopping))
+        .app_context(Mail::sending(engine))
+        .build();
         Self {
             dir,
             router,
             store,
+            client,
+            fake,
             stop,
         }
+    }
+
+    /// Mints a session cookie for an im identity, registering its claims on
+    /// the fake — exactly what `/auth/callback` seals, without the browser
+    /// dance. The local row is provisioned on the next request, the way a
+    /// real first login provisions it.
+    fn mint(&self, sub: &str, email: &str, name: &str, im_admin: bool) -> String {
+        let token = format!("tok-{}", Ulid::new());
+        let exp = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+        self.fake.tokens.lock().insert(
+            token.clone(),
+            serde_json::json!({
+                "active": true,
+                "sub": sub,
+                "email": email,
+                "name": name,
+                "admin": im_admin,
+                "exp": exp.unix_timestamp(),
+            }),
+        );
+        iz_client::mint_session_cookie(&self.client, &token, exp)
     }
 
     /// Opens `/api/live`. The response is returned as soon as the handler has
@@ -248,9 +534,7 @@ impl App {
             .router
             .handle(request.body(Body::from(body)).unwrap())
             .await;
-        let mut answer = Answer::from_response(response).await;
-        answer.session = None;
-        answer
+        Answer::from_response(response).await
     }
 
     /// Posts a multipart form the way a browser's
@@ -301,9 +585,7 @@ impl App {
             .router
             .handle(request.body(Body::from(body)).unwrap())
             .await;
-        let mut answer = Answer::from_response(response).await;
-        answer.session = None;
-        answer
+        Answer::from_response(response).await
     }
 
     /// Gets a page or a download the way a browser does: no `Accept` header
@@ -422,7 +704,6 @@ struct Raw {
 
 struct Answer {
     status: StatusCode,
-    session: Option<String>,
     body: String,
     /// Where a browser without script is sent next. The only place such a
     /// browser can be told anything.
@@ -437,30 +718,17 @@ impl Answer {
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let session = response
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .find_map(session_from);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         Answer {
             status,
-            session,
             body: String::from_utf8(bytes.to_vec()).unwrap(),
             location,
         }
     }
 }
 
-/// The `Set-Cookie` value's session token, if that header carries a live one.
-fn session_from(raw: &str) -> Option<String> {
-    let value = raw.strip_prefix(SESSION_COOKIE)?.strip_prefix('=')?;
-    let value = value.split(';').next()?.trim();
-    (!value.is_empty()).then(|| value.to_string())
-}
+/// Form encoding, enough for the addresses these tests send.
 
-/// Form encoding, enough for the addresses and passphrases these tests send.
 fn encode(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
@@ -507,201 +775,59 @@ async fn sender_saved(app: &App, admin: &str) -> bool {
             .is_some_and(|location| !location.contains("refusal="))
 }
 
-/// Claims the workspace and returns the admin's session cookie.
+/// Signs in the workspace's first im-admin identity and returns its cookie.
+/// The first sight of her provisions the local row and claims the workspace
+/// owner, the way a real first login sets the workspace up.
 async fn admin(app: &App) -> String {
-    let answer = app
-        .post(
-            "/api/claim_workspace",
-            None,
-            &[
-                ("display_name", "Ada Lovelace"),
-                ("email", "ada@iz.sh"),
-                ("password", "correct horse battery staple"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert_eq!(answer.body, "null", "claiming was refused");
-    answer.session.expect("claiming set no session cookie")
-}
-
-/// The join token no longer rides the server function's answer — only the
-/// invitee's address does. It rides the invite mail this function digs out of
-/// the outbox instead: the newest pending invite queued for that address.
-async fn queued_join_token(app: &App, email: &str) -> String {
-    let sends = app
+    let sub = "im-ada";
+    let user = app
         .store
-        .mail_queue(10, iz_core::store::FeedPage::Newest)
+        .provision_user(sub, "ada@iz.sh", "Ada Lovelace", true)
         .await
         .unwrap();
-    let body = sends
-        .into_iter()
-        .rev()
-        .find(|send| {
-            send.kind == SendKind::Invite && send.rule_id.is_none() && send.recipient == email
-        })
-        .and_then(|send| send.body)
-        .expect("no invite mail queued for {email}");
-    body.rsplit_once("/join/")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .expect("no invitation link in the mail body")
-        .to_string()
+    assert_eq!(user.role, Role::Admin, "the first im admin did not claim admin");
+    app.mint(sub, "ada@iz.sh", "Ada Lovelace", true)
 }
 
-/// Invites someone in the given role and signs them in, returning their cookie.
-#[tokio::test]
-async fn an_admin_can_send_a_signin_link_to_somebody_who_already_has_a_password() {
-    // Somebody who forgets their password is the person who needs a fresh
-    // link, and they were the one person the button was hidden from: it was
-    // drawn only while `!has_password`. There was no other way back into the
-    // workspace — no reset anywhere — so a forgotten password was the end of
-    // that account.
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    // `invited` redeems the link, so this member has a password.
-    let _member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let page = app
-        .get("/settings?section=members", Some(&admin_cookie))
-        .await;
-    let page = String::from_utf8_lossy(&page.bytes);
-    assert!(
-        page.contains("Send a sign-in link"),
-        "no way to send a link to a member who has a password: {page}"
-    );
-
-    // And the link it sends actually works: a new password, set on the
-    // strength of it.
-    let workspace_id = app.workspace_id().await;
-    let member_id = app
-        .store
-        .user_by_email(&workspace_id, "emre@iz.sh")
+/// Signs in an im identity as a plain member and returns its cookie.
+async fn member(app: &App, email: &str, name: &str) -> String {
+    let sub = format!("im-{email}");
+    app.store
+        .provision_user(&sub, email, name, false)
         .await
-        .unwrap()
-        .expect("the member is not in the store")
-        .id;
-    let answer = app
-        .post(
-            "/api/resend_link",
-            Some(&admin_cookie),
-            &[("user_id", &member_id)],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-
-    let token = queued_join_token(&app, "emre@iz.sh").await;
-    let answer = app
-        .post(
-            "/api/redeem_link",
-            None,
-            &[
-                ("token", &token),
-                ("password", "second thoughts about oats"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert_eq!(answer.body, "null", "the reissued link was refused");
-
-    let back = app
-        .post(
-            "/api/sign_in",
-            None,
-            &[
-                ("email", "emre@iz.sh"),
-                ("password", "second thoughts about oats"),
-            ],
-        )
-        .await;
-    assert!(
-        back.session.is_some(),
-        "the new password does not sign in: {}",
-        back.body
-    );
+        .unwrap();
+    app.mint(&sub, email, name, false)
 }
 
-#[tokio::test]
-async fn a_password_may_be_made_of_punctuation() {
-    // An invited member reported "it would not accept the *". Nothing in the
-    // rules mentions characters, so if one is refused it is the wire eating
-    // it, not the policy: a form body is url-encoded, where `+` means space
-    // and `%` starts an escape, and a password that survives the round trip
-    // in a test is a password that survives it in a browser.
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let email = "punct@iz.sh";
-    let answer = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", email),
-                ("display_name", "Pat"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    let token = queued_join_token(&app, email).await;
-
-    let password = "*+&%= ?#/\\ tulip 42";
-    let answer = app
-        .post(
-            "/api/redeem_link",
-            None,
-            &[("token", &token), ("password", password)],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert_eq!(answer.body, "null", "the punctuation password was refused");
-
-    // And it is the same password on the way back in — an encoding that ate a
-    // character on the way in would let them set one thing and sign in with
-    // another.
-    let back = app
-        .post(
-            "/api/sign_in",
-            None,
-            &[("email", email), ("password", password)],
-        )
-        .await;
-    assert_eq!(back.status, StatusCode::SEE_OTHER, "{}", back.body);
-    assert!(
-        back.session.is_some(),
-        "the password that was set does not sign in: {}",
-        back.body
-    );
+/// Signs in an im identity as a viewer and returns its cookie: provisioned a
+/// member by default, then cut down to viewer the way an admin would.
+async fn viewer(app: &App, email: &str, name: &str) -> String {
+    let sub = format!("im-{email}");
+    let user = app
+        .store
+        .provision_user(&sub, email, name, false)
+        .await
+        .unwrap();
+    app.store.set_role(&user.id, Role::Viewer).await.unwrap();
+    app.mint(&sub, email, name, false)
 }
-
-async fn invited(app: &App, admin: &str, email: &str, name: &str, role: Role) -> String {
-    let role = match role {
-        Role::Admin => "admin",
-        Role::Member => "member",
-        Role::Viewer => "viewer",
-    };
-    let answer = app
-        .post(
-            "/api/invite_member",
-            Some(admin),
-            &[("email", email), ("display_name", name), ("role", role)],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    let token = queued_join_token(app, email).await;
-
-    let answer = app
-        .post(
-            "/api/redeem_link",
-            None,
-            &[
-                ("token", &token),
-                ("password", "lantern gravel spoon meadow"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert_eq!(answer.body, "null", "first sign-in was refused");
-    answer.session.expect("first sign-in set no session cookie")
+/// Signs in an im identity in the given role and returns its cookie — the
+/// old invite-and-redeem flow's replacement at the call sites that only ever
+/// needed "a member" or "a viewer". An admin comes from im's flag, never
+/// from this file.
+async fn invited(app: &App, _admin: &str, email: &str, name: &str, role: Role) -> String {
+    match role {
+        Role::Admin => {
+            let sub = format!("im-{email}");
+            app.store
+                .provision_user(&sub, email, name, true)
+                .await
+                .unwrap();
+            app.mint(&sub, email, name, true)
+        }
+        Role::Member => member(app, email, name).await,
+        Role::Viewer => viewer(app, email, name).await,
+    }
 }
 
 /// The id of the board's first column, read straight off the store: there is
@@ -761,122 +887,6 @@ async fn a_task(app: &App, cookie: &str, column: &str, title: &str) -> String {
         .expect("the new task is not on the board")
         .id
         .clone()
-}
-
-#[tokio::test]
-async fn adding_a_member_mails_them_the_link() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-
-    let answer = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "nour@iz.sh"),
-                ("display_name", "Nour"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    assert!(answer.body.contains("nour@iz.sh"), "{}", answer.body);
-    assert!(!answer.body.contains("/join/"), "{}", answer.body);
-
-    let sends = app
-        .store
-        .mail_queue(10, iz_core::store::FeedPage::Newest)
-        .await
-        .unwrap();
-    let invites: Vec<_> = sends
-        .iter()
-        .filter(|send| {
-            send.kind == SendKind::Invite
-                && send.rule_id.is_none()
-                && send.recipient == "nour@iz.sh"
-        })
-        .collect();
-    assert_eq!(invites.len(), 1, "{invites:?}");
-    assert!(
-        invites[0]
-            .body
-            .as_deref()
-            .unwrap_or_default()
-            .contains("/join/"),
-        "{:?}",
-        invites[0]
-    );
-}
-
-/// A resend queues a second invite mail rather than replacing the first —
-/// the outbox keeps both attempts.
-#[tokio::test]
-async fn a_resend_queues_another_mail() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-
-    let invitation = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "sena@iz.sh"),
-                ("display_name", "Sena"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(invitation.status, StatusCode::OK, "{}", invitation.body);
-
-    let workspace_id = app.workspace_id().await;
-    let sena_id = app
-        .store
-        .users(&workspace_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|user| user.email == "sena@iz.sh")
-        .expect("no member row for sena")
-        .id;
-
-    let count = |sends: &[iz_core::store::MailSend]| {
-        sends
-            .iter()
-            .filter(|send| {
-                send.kind == SendKind::Invite
-                    && send.rule_id.is_none()
-                    && send.recipient == "sena@iz.sh"
-            })
-            .count()
-    };
-    let before = count(
-        &app.store
-            .mail_queue(10, iz_core::store::FeedPage::Newest)
-            .await
-            .unwrap(),
-    );
-    assert_eq!(before, 1);
-
-    // `resend_link` has no hydrated action to answer with a value here: the
-    // mailed address rides the redirect's query instead of a JSON body.
-    let resent = app
-        .post(
-            "/api/resend_link",
-            Some(&admin_cookie),
-            &[("user_id", &sena_id)],
-        )
-        .await;
-    assert_eq!(resent.status, StatusCode::SEE_OTHER, "{}", resent.body);
-    let location = resent.location.expect("resend did not redirect");
-    assert!(location.contains("mailed=sena%40iz.sh"), "{location}");
-
-    let after = count(
-        &app.store
-            .mail_queue(10, iz_core::store::FeedPage::Newest)
-            .await
-            .unwrap(),
-    );
-    assert_eq!(after, 2);
 }
 
 #[tokio::test]
@@ -1905,31 +1915,6 @@ async fn a_parents_own_part_is_not_offered_as_a_blocker() {
     );
 }
 
-#[tokio::test]
-async fn a_file_input_without_a_name_label_still_submits() {
-    // The shared change handler used to read `.file-upload-name` out of the
-    // input's label and set its text. The profile photo's label holds an
-    // avatar and no such span, so the read threw and the submit that came
-    // after it never ran — the photo silently never uploaded. The handler
-    // tolerates a missing name now; this holds both halves of that.
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let page = app.get("/settings", Some(&admin)).await;
-    let page = String::from_utf8_lossy(&page.bytes);
-
-    assert!(
-        page.contains("avatar-upload"),
-        "the profile photo control is gone"
-    );
-    assert!(
-        page.contains("var name = label ? label.querySelector('.file-upload-name') : null"),
-        "the file-input handler assumes a name label again"
-    );
-    assert!(
-        page.contains("if (name && control.files && control.files[0])"),
-        "the name write is unguarded again"
-    );
-}
 
 #[tokio::test]
 async fn the_whole_control_box_opens_its_dropdown() {
@@ -2296,223 +2281,6 @@ async fn the_soft_swap_rewrites_the_url_before_the_new_pages_scripts_run() {
     );
 }
 
-#[tokio::test]
-async fn signing_out_stops_the_session_being_worth_anything() {
-    let app = App::open().await;
-    let cookie = admin(&app).await;
-
-    let before = app.get("/settings", Some(&cookie)).await;
-    let html = String::from_utf8_lossy(&before.bytes);
-    assert!(html.contains("Sign out"), "{html}");
-
-    let out = app.post("/api/sign_out", Some(&cookie), &[]).await;
-    assert_eq!(out.status, StatusCode::SEE_OTHER, "{}", out.body);
-
-    // The same cookie, replayed. The server has to be the one refusing.
-    let after = app.get("/settings", Some(&cookie)).await;
-    let html = String::from_utf8_lossy(&after.bytes);
-    assert!(
-        !html.contains("Sign out"),
-        "the session outlived signing out: {html}"
-    );
-}
-
-#[tokio::test]
-async fn signing_out_without_script_lands_on_the_sign_in_page() {
-    let app = App::open().await;
-    let cookie = admin(&app).await;
-
-    let out = app
-        .post_without_script(
-            "/api/sign_out",
-            Some(&cookie),
-            "http://iz.test/settings",
-            &[],
-        )
-        .await;
-
-    assert_eq!(out.status, StatusCode::SEE_OTHER, "{}", out.body);
-    assert_eq!(out.location.as_deref(), Some("/"), "{:?}", out.location);
-}
-
-#[tokio::test]
-async fn signing_out_leaves_every_other_session_alone() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let out = app.post("/api/sign_out", Some(&member), &[]).await;
-    assert_eq!(out.status, StatusCode::SEE_OTHER, "{}", out.body);
-
-    let still = app.get("/settings", Some(&admin_cookie)).await;
-    let html = String::from_utf8_lossy(&still.bytes);
-    assert!(html.contains("Sign out"), "{html}");
-}
-
-#[tokio::test]
-async fn saving_a_profile_renames_the_person_asking_and_nobody_else() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let answer = app
-        .post(
-            "/api/save_profile",
-            Some(&member),
-            &[("display_name", "Emre Y")],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert!(
-        !answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        answer.location
-    );
-
-    let mine = app.get("/settings", Some(&member)).await;
-    let html = String::from_utf8_lossy(&mine.bytes);
-    assert!(html.contains("Emre Y"), "{html}");
-
-    let theirs = app.get("/settings", Some(&admin_cookie)).await;
-    let html = String::from_utf8_lossy(&theirs.bytes);
-    assert!(html.contains("Ada Lovelace"), "{html}");
-}
-
-#[tokio::test]
-async fn a_profile_cannot_be_saved_without_a_name() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-
-    let answer = app
-        .post(
-            "/api/save_profile",
-            Some(&admin_cookie),
-            &[("display_name", "   ")],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    let location = answer.location.as_deref().unwrap_or_default();
-    assert!(
-        location.contains("refusal=empty-name&on=save_profile"),
-        "{location}"
-    );
-
-    let page = app.get(location, Some(&admin_cookie)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("Give yourself a name."), "{html}");
-}
-
-#[tokio::test]
-async fn a_profile_can_change_its_own_email_and_stays_signed_in() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let answer = app
-        .post(
-            "/api/save_profile",
-            Some(&member),
-            &[("display_name", "Emre Y"), ("email", "emre.new@iz.sh")],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert!(
-        !answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        answer.location
-    );
-
-    // Same cookie still works: the session is keyed by user id, not address.
-    let mine = app.get("/settings", Some(&member)).await;
-    assert_eq!(mine.status, StatusCode::OK, "{}", mine.status);
-    let html = String::from_utf8_lossy(&mine.bytes);
-    assert!(html.contains("emre.new@iz.sh"), "{html}");
-}
-
-#[tokio::test]
-async fn a_profile_email_cannot_take_somebody_elses_address() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let answer = app
-        .post(
-            "/api/save_profile",
-            Some(&member),
-            &[("display_name", "Emre"), ("email", "ada@iz.sh")],
-        )
-        .await;
-    let location = answer.location.as_deref().unwrap_or_default();
-    assert!(
-        location.contains("refusal=address-taken&on=save_profile"),
-        "{location}"
-    );
-
-    let page = app.get(location, Some(&member)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("already has an account"), "{html}");
-}
-
-// A taken email used to refuse only the email while the name/theme/language/
-// timezone in the same form still got written — a half-applied save.
-#[tokio::test]
-async fn a_taken_email_refuses_the_whole_save_not_only_the_email() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let answer = app
-        .post(
-            "/api/save_profile",
-            Some(&member),
-            &[
-                ("display_name", "Emre Renamed"),
-                ("email", "ada@iz.sh"),
-                ("theme", "dark"),
-            ],
-        )
-        .await;
-    let location = answer.location.as_deref().unwrap_or_default();
-    assert!(
-        location.contains("refusal=address-taken&on=save_profile"),
-        "{location}"
-    );
-
-    let mine = app.get("/settings", Some(&member)).await;
-    let html = String::from_utf8_lossy(&mine.bytes);
-    assert!(
-        html.contains("value=\"Emre\""),
-        "the name changed anyway: {html}"
-    );
-}
-
-#[tokio::test]
-async fn a_signed_out_browser_cannot_rename_anybody() {
-    let app = App::open().await;
-    let _ = admin(&app).await;
-
-    let answer = app
-        .post("/api/save_profile", None, &[("display_name", "Whoever")])
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert!(
-        answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal=sign-in-first&on=save_profile"),
-        "{:?}",
-        answer.location
-    );
-}
 
 #[tokio::test]
 async fn a_member_who_posts_new_limits_anyway_is_refused() {
@@ -2526,7 +2294,6 @@ async fn a_member_who_posts_new_limits_anyway_is_refused() {
             Some(&member),
             &[
                 ("attachment_limit_mb", "400"),
-                ("photo_limit_mb", "19"),
                 ("allowed_file_types", "png"),
                 ("mail_batch_minutes", "5"),
             ],
@@ -2558,7 +2325,6 @@ async fn an_admin_changes_the_limits_and_they_stay_changed() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "10"),
-                ("photo_limit_mb", "1"),
                 ("allowed_file_types", ".PNG, png, pdf"),
                 ("mail_batch_minutes", "5"),
             ],
@@ -2576,7 +2342,6 @@ async fn an_admin_changes_the_limits_and_they_stay_changed() {
 
     let workspace = app.store.workspace().await.unwrap().unwrap();
     assert_eq!(workspace.attachment_limit_bytes, 10 * 1024 * 1024);
-    assert_eq!(workspace.photo_limit_bytes, 1024 * 1024);
     assert_eq!(
         workspace.allowed_file_types,
         vec!["png".to_string(), "pdf".to_string()]
@@ -2588,14 +2353,13 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    for (attachment, photo) in [("5000", "2"), ("0", "2"), ("25", "0"), ("25", "200")] {
+    for attachment in ["5000", "0"] {
         let answer = app
             .post(
                 "/api/save_limits",
                 Some(&admin_cookie),
                 &[
                     ("attachment_limit_mb", attachment),
-                    ("photo_limit_mb", photo),
                     ("allowed_file_types", ""),
                     ("mail_batch_minutes", "5"),
                 ],
@@ -2604,14 +2368,14 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
         let location = answer.location.as_deref().unwrap_or_default();
         assert!(
             location.contains("refusal=bad-limit&on=save_limits"),
-            "{attachment}/{photo}: {location}"
+            "{attachment}: {location}"
         );
 
         let page = app.get(location, Some(&admin_cookie)).await;
         let html = String::from_utf8_lossy(&page.bytes);
         assert!(
-            html.contains("A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."),
-            "{attachment}/{photo}: {html}"
+            html.contains("A limit has to be at least 1 MB, and no wider than 500 MB per file."),
+            "{attachment}: {html}"
         );
     }
 }
@@ -2621,153 +2385,6 @@ async fn a_limit_outside_what_the_disk_should_promise_is_refused() {
 /// — a member's post to the save endpoint is refused by the handler, an
 /// out-of-range number is refused by name and stores nothing, and a save in
 /// range lands in the row and renders back into the fields.
-#[tokio::test]
-async fn the_security_section_is_admin_only_and_round_trips() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "deniz@iz.sh", "Deniz", Role::Member).await;
-
-    // The admin gets the rail link, the panel and the defaults in the fields.
-    let page = app
-        .get("/settings?section=security", Some(&admin_cookie))
-        .await;
-    assert_eq!(page.status, StatusCode::OK);
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(
-        html.contains(r#"href="/settings?section=security""#),
-        "{html}"
-    );
-    assert!(html.contains(r#"id="security""#), "{html}");
-    assert!(
-        html.contains(r#"name="rate_limit_attempts""#)
-            && html.contains(r#"name="rate_window_minutes""#)
-            && html.contains(r#"name="session_lifetime_days""#)
-            && html.contains(r#"name="signin_link_lifetime_days""#),
-        "{html}"
-    );
-
-    // The member gets neither the link nor the panel, by link or by URL.
-    let page = app.get("/settings", Some(&member)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(
-        !html.contains(r#"href="/settings?section=security""#),
-        "{html}"
-    );
-    assert!(!html.contains(r#"id="security""#), "{html}");
-    let page = app.get("/settings?section=security", Some(&member)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains(r#"id="profile""#), "{html}");
-    assert!(!html.contains(r#"id="security""#), "{html}");
-
-    // And the member's post is refused by the handler, not the markup.
-    let answer = app
-        .post(
-            "/api/save_security",
-            Some(&member),
-            &[
-                ("rate_limit_attempts", "3"),
-                ("rate_window_minutes", "15"),
-                ("session_lifetime_days", "14"),
-                ("signin_link_lifetime_days", "7"),
-            ],
-        )
-        .await;
-    assert!(
-        answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal=forbidden&on=save_security"),
-        "{:?}",
-        answer.location
-    );
-
-    // An out-of-range knob is refused by name, each bound in turn.
-    for (attempts, window, session, link) in [
-        ("0", "15", "14", "7"),
-        ("10", "0", "14", "7"),
-        ("10", "15", "0", "7"),
-        ("10", "15", "14", "0"),
-        ("101", "15", "14", "7"),
-        ("10", "1441", "14", "7"),
-        ("10", "15", "366", "7"),
-        ("10", "15", "14", "91"),
-    ] {
-        let answer = app
-            .post(
-                "/api/save_security",
-                Some(&admin_cookie),
-                &[
-                    ("rate_limit_attempts", attempts),
-                    ("rate_window_minutes", window),
-                    ("session_lifetime_days", session),
-                    ("signin_link_lifetime_days", link),
-                ],
-            )
-            .await;
-        let location = answer.location.as_deref().unwrap_or_default();
-        assert!(
-            location.contains("refusal=bad-policy&on=save_security"),
-            "{attempts}/{window}/{session}/{link}: {location}"
-        );
-    }
-    let workspace = app.store.workspace().await.unwrap().unwrap();
-    assert_eq!(
-        workspace.rate_limit_attempts, 10,
-        "a refused save still changed the row"
-    );
-
-    // A save in range lands on the section with its saved note, the row
-    // agrees, and the fields render the saved values back.
-    let answer = app
-        .post(
-            "/api/save_security",
-            Some(&admin_cookie),
-            &[
-                ("rate_limit_attempts", "3"),
-                ("rate_window_minutes", "60"),
-                ("session_lifetime_days", "30"),
-                ("signin_link_lifetime_days", "2"),
-            ],
-        )
-        .await;
-    assert!(
-        answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("saved=save_security"),
-        "{:?}",
-        answer.location
-    );
-    let workspace = app.store.workspace().await.unwrap().unwrap();
-    assert_eq!(workspace.rate_limit_attempts, 3);
-    assert_eq!(workspace.rate_window_minutes, 60);
-    assert_eq!(workspace.session_lifetime_days, 30);
-    assert_eq!(workspace.signin_link_lifetime_days, 2);
-
-    let page = app
-        .get("/settings?section=security", Some(&admin_cookie))
-        .await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    for field in [
-        r#"name="rate_limit_attempts"#,
-        r#"name="rate_window_minutes"#,
-        r#"name="session_lifetime_days"#,
-        r#"name="signin_link_lifetime_days"#,
-    ] {
-        let at = html.find(field).expect("the field vanished");
-        let value = &html[at..];
-        assert!(
-            value.contains("value=\"3\"")
-                || value.contains("value=\"60\"")
-                || value.contains("value=\"30\"")
-                || value.contains("value=\"2\""),
-            "field {field} does not render its saved value: {}",
-            &value[..value.len().min(200)]
-        );
-    }
-}
 
 #[tokio::test]
 async fn a_file_type_that_is_not_an_extension_is_refused() {
@@ -2780,7 +2397,6 @@ async fn a_file_type_that_is_not_an_extension_is_refused() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "25"),
-                ("photo_limit_mb", "2"),
                 ("allowed_file_types", "../etc/passwd"),
                 ("mail_batch_minutes", "5"),
             ],
@@ -3083,135 +2699,10 @@ async fn testing_a_sender_that_was_never_filled_in_says_so_rather_than_sending()
 }
 
 #[tokio::test]
-async fn a_member_who_posts_a_resend_anyway_is_refused() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-    let mert = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "mert@iz.sh"),
-                ("display_name", "Mert"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
-    let workspace_id = app.workspace_id().await;
-    let mert_id = app
-        .store
-        .users(&workspace_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|user| user.email == "mert@iz.sh")
-        .expect("no member row for mert")
-        .id;
-
-    let answer = app
-        .post("/api/resend_link", Some(&member), &[("user_id", &mert_id)])
-        .await;
-    assert!(
-        answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal=forbidden&on=resend_link"),
-        "{:?}",
-        answer.location
-    );
-    assert!(
-        !answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("mailed="),
-        "{:?}",
-        answer.location
-    );
-}
-
-#[tokio::test]
-async fn a_resent_link_opens_the_same_account() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let invitation = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "mert@iz.sh"),
-                ("display_name", "Mert"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(invitation.status, StatusCode::OK, "{}", invitation.body);
-    let workspace_id = app.workspace_id().await;
-    let mert_id = app
-        .store
-        .users(&workspace_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|user| user.email == "mert@iz.sh")
-        .expect("no member row for mert")
-        .id;
-
-    let answer = app
-        .post(
-            "/api/resend_link",
-            Some(&admin_cookie),
-            &[("user_id", &mert_id)],
-        )
-        .await;
-    assert!(
-        answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("mailed=mert%40iz.sh"),
-        "{:?}",
-        answer.location
-    );
-    let token = queued_join_token(&app, "mert@iz.sh").await;
-
-    let redeemed = app
-        .post(
-            "/api/redeem_link",
-            None,
-            &[
-                ("token", &token),
-                ("password", "lantern gravel spoon meadow"),
-            ],
-        )
-        .await;
-    assert_eq!(redeemed.status, StatusCode::SEE_OTHER, "{}", redeemed.body);
-    assert_eq!(redeemed.body, "null", "{}", redeemed.body);
-    assert!(
-        redeemed.session.is_some(),
-        "the resent link signed nobody in"
-    );
-}
-
-#[tokio::test]
 async fn an_admin_may_change_a_members_role_over_http() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let mert = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "mert@iz.sh"),
-                ("display_name", "Mert"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
+    let _ = invited(&app, &admin_cookie, "mert@iz.sh", "Mert", Role::Member).await;
     let workspace_id = app.workspace_id().await;
     let mert_id = app
         .store
@@ -3286,18 +2777,7 @@ async fn a_non_admin_may_not_set_roles_over_http() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-    let mert = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "mert@iz.sh"),
-                ("display_name", "Mert"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(mert.status, StatusCode::OK, "{}", mert.body);
+    let _ = invited(&app, &admin_cookie, "mert@iz.sh", "Mert", Role::Member).await;
     let workspace_id = app.workspace_id().await;
     let mert_id = app
         .store
@@ -3334,75 +2814,7 @@ async fn a_non_admin_may_not_set_roles_over_http() {
     );
 }
 
-#[tokio::test]
-async fn redeeming_a_link_lands_on_the_board_not_the_spent_join_page() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    app.post(
-        "/api/invite_member",
-        Some(&admin_cookie),
-        &[
-            ("email", "asli@iz.sh"),
-            ("display_name", "Asli"),
-            ("role", "member"),
-        ],
-    )
-    .await;
-    let token = queued_join_token(&app, "asli@iz.sh").await;
 
-    let answer = app
-        .post_without_script(
-            "/api/redeem_link",
-            None,
-            &format!("http://iz.test/join/{token}"),
-            &[
-                ("token", &token),
-                ("password", "lantern gravel spoon meadow"),
-            ],
-        )
-        .await;
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/"),
-        "{:?}",
-        answer.location
-    );
-}
-
-#[tokio::test]
-async fn an_invitation_names_the_admin_who_made_it_and_not_the_invitee() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-
-    let answer = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "grace@iz.sh"),
-                ("display_name", "Grace Hopper"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    let token = queued_join_token(&app, "grace@iz.sh").await;
-
-    let answer = app
-        .post("/api/invitation", None, &[("token", token.as_str())])
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    assert!(
-        answer.body.contains(r#""invited_by":"Ada Lovelace""#),
-        "the invitation does not name the admin: {}",
-        answer.body
-    );
-    assert!(
-        answer.body.contains(r#""display_name":"Grace Hopper""#),
-        "the invitation lost the invitee: {}",
-        answer.body
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Settings visibility: the sender and the member list are the admin's
@@ -3473,34 +2885,24 @@ async fn a_member_is_not_sent_the_member_list() {
 }
 
 #[tokio::test]
-async fn an_admin_sees_who_has_a_password_and_never_a_hash() {
+async fn an_admin_sees_the_member_list_with_roles_and_a_disable_control() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let _ = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-    // Invited and never signed in: the account exists, the password does not.
-    let answer = app
-        .post(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            &[
-                ("email", "mert@iz.sh"),
-                ("display_name", "Mert"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
 
     let page = app
         .get("/settings?section=members", Some(&admin_cookie))
         .await;
+    assert_eq!(page.status, StatusCode::OK);
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("mert@iz.sh"), "{html}");
-    assert!(
-        html.contains("Resend mail"),
-        "the un-signed-in member has no resend control: {html}"
-    );
-    assert!(!html.contains("$argon2"), "a hash reached the page: {html}");
+    assert!(html.contains("member-table"), "{html}");
+    assert!(html.contains("emre@iz.sh"), "{html}");
+    assert!(html.contains("Ada Lovelace"), "{html}");
+    // The admin role is im's to grant: the admin's own row wears its badge
+    // instead of a role form.
+    assert!(html.contains("chip-role"), "{html}");
+    // ...and every other row carries the disable control.
+    assert!(html.contains("/api/set_disabled"), "{html}");
 }
 
 // ---------------------------------------------------------------------------
@@ -4315,7 +3717,6 @@ async fn a_file_past_the_workspace_limit_is_refused_before_it_is_kept() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "1"),
-                ("photo_limit_mb", "2"),
                 ("allowed_file_types", ""),
                 ("mail_batch_minutes", "5"),
             ],
@@ -4369,7 +3770,6 @@ async fn a_file_type_off_the_list_is_refused() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "25"),
-                ("photo_limit_mb", "2"),
                 ("allowed_file_types", "png"),
                 ("mail_batch_minutes", "5"),
             ],
@@ -4705,6 +4105,28 @@ async fn an_admin_reads_the_logs() {
         .await;
     assert_eq!(assigned.body, "null", "{}", assigned.body);
     assert!(rule_written(&app, &admin_cookie, &columns[1], "Task completed").await);
+    // No batch window: the rule's send falls due the moment it is owed, so
+    // the engine attempts it right away instead of holding it pending.
+    let limits = app
+        .post(
+            "/api/save_limits",
+            Some(&admin_cookie),
+            &[
+                ("attachment_limit_mb", "10"),
+                ("allowed_file_types", ""),
+                ("mail_batch_minutes", "0"),
+            ],
+        )
+        .await;
+    assert!(
+        limits
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_limits"),
+        "{:?}",
+        limits.location
+    );
 
     // Emre is the only assignee and Emre moves the card himself: the rule
     // owes him the mail all the same. With no sender configured the send is
@@ -4722,13 +4144,20 @@ async fn an_admin_reads_the_logs() {
         .await;
     assert_eq!(moved.body, "");
 
-    let snapshot = until_logs_contains(&app, &admin_cookie, "\"subject\":\"Task completed\"").await;
+    // The queue row shows up claimed-but-unattempted first; poll for the
+    // settled "held" verdict instead of the subject alone, or the first
+    // sighting catches the send mid-attempt.
+    let snapshot = until_logs_contains(&app, &admin_cookie, "\"state_kind\":\"held\"").await;
+    assert!(
+        snapshot.contains("\"subject\":\"Task completed\""),
+        "{}",
+        snapshot
+    );
     assert!(
         snapshot.contains("\"recipient\":\"emre@iz.sh\""),
         "{}",
         snapshot
     );
-    assert!(snapshot.contains("\"state\":\"held\""), "{}", snapshot);
     assert!(snapshot.contains("\"attempts\":0"), "{}", snapshot);
 }
 
@@ -4771,7 +4200,7 @@ async fn a_stamp_shifts_with_the_viewers_stored_timezone() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
         )
         .await;
     assert!(
@@ -4826,7 +4255,7 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
         )
         .await;
     assert!(
@@ -4863,8 +4292,7 @@ async fn an_unlisted_timezone_is_refused() {
             "/api/save_profile",
             Some(&admin_cookie),
             &[
-                ("display_name", "Ada Lovelace"),
-                ("timezone", "Mars/Olympus_Mons"),
+                ("timezone", "Mars/Olympus_Mons"), ("theme", "light"), ("language", "en"), ("ui", "instrument"),
             ],
         )
         .await;
@@ -4884,7 +4312,7 @@ async fn the_dark_theme_is_saved_and_marks_the_page() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("theme", "dark")],
+            &[("timezone", "UTC"), ("theme", "dark"), ("language", "en"), ("ui", "instrument")],
         )
         .await;
     assert!(
@@ -4911,7 +4339,7 @@ async fn turkish_is_saved_and_the_board_renders_in_turkish() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("language", "tr")],
+            &[("timezone", "UTC"), ("theme", "light"), ("language", "tr"), ("ui", "instrument")],
         )
         .await;
     assert!(
@@ -4947,7 +4375,7 @@ async fn an_unlisted_language_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("language", "fr")],
+            &[("timezone", "UTC"), ("theme", "light"), ("language", "fr"), ("ui", "instrument")],
         )
         .await;
     assert_eq!(
@@ -4965,7 +4393,7 @@ async fn an_unlisted_theme_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("theme", "neon")],
+            &[("timezone", "UTC"), ("theme", "neon"), ("language", "en"), ("ui", "instrument")],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
@@ -4984,7 +4412,7 @@ async fn the_ledger_ui_is_saved_and_marks_the_page() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("ui", "ledger")],
+            &[("timezone", "UTC"), ("theme", "light"), ("language", "en"), ("ui", "ledger")],
         )
         .await;
     assert!(
@@ -5011,7 +4439,7 @@ async fn an_unlisted_ui_is_refused() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("ui", "neon")],
+            &[("timezone", "UTC"), ("theme", "light"), ("language", "en"), ("ui", "neon")],
         )
         .await;
     let location = answer.location.as_deref().unwrap_or_default();
@@ -5121,57 +4549,331 @@ async fn the_topbar_nav_marks_the_active_page() {
     assert!(!html.contains(r#"id="limits""#), "{html}");
 }
 
-/// A wrong current password lands back on the rail section it was posted
-/// from with a refusal; a right one lands with the pane's own `saved=` note —
-/// the user asked the pane to say what happened, other devices included.
+// ---------------------------------------------------------------------------
+// SSO identity: provisioning, roles from im, and the sign-in card
+// ---------------------------------------------------------------------------
+
+/// The first SSO login provisions a member by default — open provisioning,
+/// no invite needed. Catches a provision that defaults to viewer (or admin).
 #[tokio::test]
-async fn a_password_change_carries_its_own_refusal_and_a_saved_note() {
+async fn a_first_sso_login_provisions_a_member() {
+    let app = App::open().await;
+    let cookie = app.mint("im-new", "new@iz.sh", "New Person", false);
+
+    let page = app.get("/", Some(&cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("board-stage"), "{html}");
+
+    let user = app
+        .store
+        .user_by_email(&app.workspace_id().await, "new@iz.sh")
+        .await
+        .unwrap()
+        .expect("no local row after the first login");
+    assert_eq!(user.role, Role::Member, "a first login was not a member");
+    assert_eq!(user.oidc_sub.as_deref(), Some("im-new"));
+}
+
+/// im's admin flag makes the local admin. Catches a provision that ignores
+/// the flag — every im admin would land a member with no way up.
+#[tokio::test]
+async fn the_im_admin_flag_makes_an_admin() {
+    let app = App::open().await;
+    let cookie = app.mint("im-boss", "boss@iz.sh", "Boss", true);
+
+    // A role-gated route is the proof, not the row alone: only an admin's
+    // board carries the admin surfaces.
+    let page = app.get("/", Some(&cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("href=\"/rules\""), "{html}");
+
+    let user = app
+        .store
+        .user_by_email(&app.workspace_id().await, "boss@iz.sh")
+        .await
+        .unwrap()
+        .expect("no local row after the first login");
+    assert_eq!(user.role, Role::Admin, "the im admin flag did not make an admin");
+}
+
+/// A first SSO login claims the legacy row by address: the `sub` is stamped
+/// onto it, keeping its id and its role. Catches a provision that inserts a
+/// second row and strands the person's history on the old one.
+#[tokio::test]
+async fn a_first_sso_login_claims_the_legacy_row_by_address() {
+    let app = App::open().await;
+    let legacy = app
+        .store
+        .provision_user("im-old", "ada@iz.sh", "Ada Lovelace", false)
+        .await
+        .unwrap();
+    app.store
+        .set_role(&legacy.id, Role::Viewer)
+        .await
+        .unwrap();
+
+    let cookie = app.mint("im-new", "ada@iz.sh", "Ada Lovelace", false);
+    let page = app.get("/", Some(&cookie)).await;
+    assert_eq!(page.status, StatusCode::OK);
+
+    let claimed = app
+        .store
+        .user_by_email(&app.workspace_id().await, "ada@iz.sh")
+        .await
+        .unwrap()
+        .expect("the address has no row after claiming");
+    assert_eq!(claimed.id, legacy.id, "the login did not claim the legacy row");
+    assert_eq!(
+        claimed.role,
+        Role::Viewer,
+        "claiming did not preserve the role"
+    );
+    assert_eq!(claimed.oidc_sub.as_deref(), Some("im-new"));
+}
+
+/// A disabled member reads as signed out everywhere: the board is gone and a
+/// mutation is refused as if there were no session. Catches a guard that
+/// checks the cookie but not the flag.
+#[tokio::test]
+async fn a_disabled_member_reads_as_signed_out() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+    let member_id = user_id(&app, "emre@iz.sh").await;
+    app.store
+        .set_user_disabled(&member_id, true)
+        .await
+        .unwrap();
 
-    let wrong = app
-        .post_without_script(
-            "/api/change_password",
-            Some(&admin_cookie),
-            "http://iz.test/settings?section=profile",
-            &[
-                ("current", "not the password"),
-                ("new", "a whole new passphrase"),
-            ],
-        )
-        .await;
+    let page = app.get("/", Some(&member)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
     assert!(
-        wrong.location.as_deref().is_some_and(|location| {
-            location.contains("refusal=")
-                && location.contains("on=change_password")
-                && location.contains("section=profile")
-        }),
-        "{:?}",
-        wrong.location
+        !html.contains("board-stage"),
+        "a disabled member was shown the board: {html}"
     );
+    assert!(html.contains("/auth/login"), "{html}");
 
-    let right = app
-        .post_without_script(
-            "/api/change_password",
-            Some(&admin_cookie),
-            "http://iz.test/settings?section=profile",
-            &[
-                ("current", "correct horse battery staple"),
-                ("new", "a whole new passphrase"),
-            ],
+    let column = first_column(&app).await;
+    let answer = app
+        .post(
+            "/api/create_task",
+            Some(&member),
+            &[("title", "Ghost task"), ("column_id", &column)],
         )
         .await;
-    assert_eq!(right.status, StatusCode::SEE_OTHER);
     assert!(
-        right
+        answer
             .location
             .as_deref()
-            .is_some_and(|location| location.contains("saved=change_password")),
+            .unwrap_or_default()
+            .contains("refusal=sign-in-first&on=create_task"),
         "{:?}",
-        right.location
+        answer.location
     );
 }
 
+/// Disabling yourself is refused — the workspace must never be left with no
+/// way back in through its only admin. Catches a missing self-check.
+#[tokio::test]
+async fn an_admin_cannot_disable_their_own_sign_in() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let admin_id = user_id(&app, "ada@iz.sh").await;
+
+    let answer = app
+        .post(
+            "/api/set_disabled",
+            Some(&admin_cookie),
+            &[("user_id", &admin_id)],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=set_disabled"),
+        "{:?}",
+        answer.location
+    );
+
+    let page = app.get("/", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("board-stage"), "{html}");
+}
+
+/// `set_role` can move between member and viewer only: admin comes from im,
+/// never from this route. Catches a role write that trusts the form.
+#[tokio::test]
+async fn set_role_cannot_make_an_admin() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let _ = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+    let member_id = user_id(&app, "emre@iz.sh").await;
+
+    let answer = app
+        .post(
+            "/api/set_role",
+            Some(&admin_cookie),
+            &[("user_id", &member_id), ("role", "admin")],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=set_role"),
+        "{:?}",
+        answer.location
+    );
+
+    let reloaded = app.store.user(&member_id).await.unwrap().unwrap();
+    assert_eq!(
+        reloaded.role,
+        Role::Member,
+        "set_role made an admin anyway"
+    );
+}
+
+/// Losing im's admin flag drops the role to member on the very next request.
+/// Catches a provision that grants admin once and never syncs it back down —
+/// a demoted admin would keep administering forever.
+#[tokio::test]
+async fn losing_the_im_admin_flag_drops_the_role_to_member() {
+    let app = App::open().await;
+    let token = format!("tok-{}", Ulid::new());
+    let exp = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    app.fake.tokens.lock().insert(
+        token.clone(),
+        serde_json::json!({
+            "active": true,
+            "sub": "im-fickle",
+            "email": "fickle@iz.sh",
+            "name": "Fickle",
+            "admin": true,
+            "exp": exp.unix_timestamp(),
+        }),
+    );
+    let cookie = iz_client::mint_session_cookie(&app.client, &token, exp);
+
+    let page = app.get("/", Some(&cookie)).await;
+    assert!(String::from_utf8_lossy(&page.bytes).contains("href=\"/rules\""));
+
+    // im demotes them; the next request syncs the role down.
+    app.fake.tokens.lock().insert(
+        token.clone(),
+        serde_json::json!({
+            "active": true,
+            "sub": "im-fickle",
+            "email": "fickle@iz.sh",
+            "name": "Fickle",
+            "admin": false,
+            "exp": exp.unix_timestamp(),
+        }),
+    );
+    let answer = app.post("/api/current_rules", Some(&cookie), &[]).await;
+    assert!(
+        answer.body.contains("Forbidden"),
+        "a demoted admin still reads the rules: {}",
+        answer.body
+    );
+    let user = app
+        .store
+        .user_by_email(&app.workspace_id().await, "fickle@iz.sh")
+        .await
+        .unwrap()
+        .expect("no local row");
+    assert_eq!(user.role, Role::Member, "the demotion did not sync down");
+}
+
+/// Signed out, `/` is the sign-in card: one link starting the OIDC
+/// round-trip, and a failed round-trip names the one-line fact. Catches a
+/// landing that leaks the board, or swallows the failure it was told about.
+#[tokio::test]
+async fn the_sign_in_card_links_the_login_and_names_a_failed_round_trip() {
+    let app = App::open().await;
+    let _ = admin(&app).await;
+
+    let plain = app.get("/", None).await;
+    assert_eq!(plain.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&plain.bytes);
+    assert!(html.contains("href=\"/auth/login\""), "{html}");
+    assert!(!html.contains("board-stage"), "{html}");
+
+    let failed = app.get("/?auth_error=1", None).await;
+    assert_eq!(failed.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&failed.bytes);
+    assert!(html.contains("href=\"/auth/login\""), "{html}");
+    assert!(html.contains("auth-problem"), "{html}");
+}
+
+// ---------------------------------------------------------------------------
+// Avatar: the signed-in person's face, proxied from im
+// ---------------------------------------------------------------------------
+
+/// One's own avatar proxies im's photo bytes with the app's credential.
+/// Catches a proxy that drops the auth or mangles the bytes.
+#[tokio::test]
+async fn ones_own_avatar_proxies_the_im_photo() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let admin_id = user_id(&app, "ada@iz.sh").await;
+    app.fake.set_photo("im-ada", PNG.to_vec(), "image/png");
+
+    let photo = app.get(&format!("/avatar/{admin_id}"), Some(&admin)).await;
+    assert_eq!(photo.status, StatusCode::OK);
+    assert_eq!(photo.content_type.as_deref(), Some("image/png"));
+    assert_eq!(photo.bytes, PNG);
+
+    let etag = photo.etag.clone().expect("no ETag on the served avatar");
+    let cached = app
+        .get_with_if_none_match(&format!("/avatar/{admin_id}"), Some(&admin), &etag)
+        .await;
+    assert_eq!(cached.status, StatusCode::NOT_MODIFIED);
+    assert!(cached.bytes.is_empty());
+}
+
+/// Another account's id reads exactly like no photo — never a glimpse across
+/// the fence. Catches a proxy that serves any id to any session.
+#[tokio::test]
+async fn another_accounts_avatar_is_not_found() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let admin_id = user_id(&app, "ada@iz.sh").await;
+    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+    app.fake.set_photo("im-ada", PNG.to_vec(), "image/png");
+
+    let photo = app.get(&format!("/avatar/{admin_id}"), Some(&member)).await;
+    assert_eq!(photo.status, StatusCode::NOT_FOUND);
+}
+
+/// Without a session the avatar names the fix: 401, the way the live channel
+/// refuses. Catches a proxy that 404s strangers into probing ids.
+#[tokio::test]
+async fn the_avatar_refuses_a_signed_out_browser() {
+    let app = App::open().await;
+    let _ = admin(&app).await;
+    let admin_id = user_id(&app, "ada@iz.sh").await;
+    app.fake.set_photo("im-ada", PNG.to_vec(), "image/png");
+
+    let photo = app.get(&format!("/avatar/{admin_id}"), None).await;
+    assert_eq!(photo.status, StatusCode::UNAUTHORIZED);
+}
+
+/// im has no photo for this account: 404, and the page falls back to
+/// initials. Catches a proxy that fails the page around a missing face.
+#[tokio::test]
+async fn the_avatar_is_not_found_without_an_im_photo() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+    let member_id = user_id(&app, "emre@iz.sh").await;
+
+    let photo = app.get(&format!("/avatar/{member_id}"), Some(&member)).await;
+    assert_eq!(photo.status, StatusCode::NOT_FOUND);
+}
 /// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`
 /// exists beyond the `already` count — the engine runs off the request in a
 /// spawned task, so the row is not there yet when the triggering call
@@ -5467,230 +5169,6 @@ async fn user_id(app: &App, email: &str) -> String {
         .id
 }
 
-/// A profile photo uploads, and `GET /photo/{id}` serves those exact bytes
-/// back as `image/png`.
-#[tokio::test]
-async fn a_profile_photo_round_trips_back_as_the_same_bytes() {
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-
-    let answer = app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin),
-            &[],
-            Some(("me.png", "image/png", &PNG)),
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/settings?saved=profile_photo&section=profile")
-    );
-
-    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
-    assert_eq!(photo.status, StatusCode::OK);
-    assert_eq!(photo.content_type.as_deref(), Some("image/png"));
-    assert_eq!(photo.bytes, PNG);
-}
-
-/// Text bytes wearing a `.png` name do not sniff as an image: refused on the
-/// redirect, and nothing stored to serve.
-#[tokio::test]
-async fn text_uploaded_as_a_photo_is_refused_and_stores_nothing() {
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-
-    let answer = app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin),
-            &[],
-            Some(("note.png", "image/png", b"just some words")),
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/settings?refusal=not-an-image&on=profile_photo&section=profile")
-    );
-
-    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
-    assert_eq!(photo.status, StatusCode::NOT_FOUND);
-}
-
-/// The workspace's photo cap is enforced on the way in, and an over-cap upload
-/// stores nothing.
-#[tokio::test]
-async fn a_photo_over_the_workspace_limit_is_refused_and_stores_nothing() {
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-    // The transport caps request bodies at 2 MiB (topcoat's default body
-    // limit), exactly a fresh workspace's photo limit, so against the shipped
-    // defaults the handler's own check can never fire. The admin lowers the
-    // limit first, the way the /files oversize test does, and the upload is
-    // sized just past that.
-    let answer = app
-        .post(
-            "/api/save_limits",
-            Some(&admin),
-            &[
-                ("attachment_limit_mb", "25"),
-                ("photo_limit_mb", "1"),
-                ("allowed_file_types", ""),
-                ("mail_batch_minutes", "5"),
-            ],
-        )
-        .await;
-    assert!(
-        !answer
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        answer.location
-    );
-
-    let limit = app
-        .store
-        .workspace()
-        .await
-        .unwrap()
-        .expect("no workspace after claiming")
-        .photo_limit_bytes as usize;
-    let big = vec![0u8; limit + 1];
-
-    let answer = app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin),
-            &[],
-            Some(("big.png", "image/png", &big)),
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/settings?refusal=file-too-big&on=profile_photo&section=profile")
-    );
-
-    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
-    assert_eq!(photo.status, StatusCode::NOT_FOUND);
-}
-
-/// A photo belongs to its person, not to the uploader: everyone in the same
-/// workspace can see it.
-#[tokio::test]
-async fn a_photo_is_visible_to_other_workspace_members() {
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-    let member = invited(&app, &admin, "deniz@iz.sh", "Deniz", Role::Member).await;
-
-    let answer = app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin),
-            &[],
-            Some(("me.png", "image/png", &PNG)),
-        )
-        .await;
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/settings?saved=profile_photo&section=profile")
-    );
-
-    let photo = app.get(&format!("/photo/{admin_id}"), Some(&member)).await;
-    assert_eq!(photo.status, StatusCode::OK);
-    assert_eq!(photo.content_type.as_deref(), Some("image/png"));
-    assert_eq!(photo.bytes, PNG);
-}
-
-/// No such person, no photo: a stranger id is the not-found a person without a
-/// photo would see. A known photo carries an `ETag`, and a matching
-/// `If-None-Match` gets the empty 304.
-#[tokio::test]
-async fn an_unknown_photo_id_is_not_found_and_the_photo_revalidates_by_etag() {
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-
-    let answer = app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin),
-            &[],
-            Some(("me.png", "image/png", &PNG)),
-        )
-        .await;
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/settings?saved=profile_photo&section=profile")
-    );
-
-    let stranger = app.get("/photo/does-not-exist", Some(&admin)).await;
-    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
-
-    let photo = app.get(&format!("/photo/{admin_id}"), Some(&admin)).await;
-    assert_eq!(photo.status, StatusCode::OK);
-    let etag = photo.etag.clone().expect("no ETag on the served photo");
-
-    let cached = app
-        .get_with_if_none_match(&format!("/photo/{admin_id}"), Some(&admin), &etag)
-        .await;
-    assert_eq!(cached.status, StatusCode::NOT_MODIFIED);
-    assert!(cached.bytes.is_empty());
-}
-
-/// The whole point of a versioned photo URL: replacing the photo must move
-/// the stamp the avatar renders, or the browser keeps serving the bytes it
-/// cached under the old URL and the replacement never shows.
-#[tokio::test]
-async fn a_replaced_photo_moves_the_avatar_url_stamp() {
-    let app = App::open().await;
-    let admin = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-
-    app.post_multipart(
-        "/api/profile_photo",
-        Some(&admin),
-        &[],
-        Some(("me.png", "image/png", &PNG)),
-    )
-    .await;
-    let page = app.get("/settings", Some(&admin)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    let first = avatar_stamp(&html, &admin_id).expect("avatar photo URL on the settings page");
-
-    let mut replaced = PNG;
-    replaced[11] ^= 0xff;
-    app.post_multipart(
-        "/api/profile_photo",
-        Some(&admin),
-        &[],
-        Some(("me.png", "image/png", &replaced)),
-    )
-    .await;
-    let page = app.get("/settings", Some(&admin)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    let second = avatar_stamp(&html, &admin_id).expect("avatar photo URL after replace");
-
-    assert!(second > first, "stamp must move: {first} -> {second}");
-}
-
-/// The `?v=` on an avatar's `/photo/{id}` src, parsed out of a rendered page.
-fn avatar_stamp(html: &str, user_id: &str) -> Option<i64> {
-    let marker = format!("/photo/{user_id}?v=");
-    let rest = &html[html.find(&marker)? + marker.len()..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
 
 /// The nav shows a page only to a role that can act on it: an admin's board
 /// carries all four links, a member's carries neither Rules nor Logs.
@@ -5712,32 +5190,42 @@ async fn the_nav_hides_rules_and_logs_from_a_member() {
     assert!(!member_html.contains("href=\"/logs\""));
 }
 
-/// Account events ride the same feed as task events: the admin's own
-/// sign-in and an invite show up beside a created task, each on its actor.
+/// Account events ride the same feed as task events: a role change and a
+/// profile save show up beside a created task, each on its actor.
 #[tokio::test]
 async fn account_events_ride_the_activity_feed() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
     let columns = columns_of(&app).await;
     a_task(&app, &admin_cookie, &columns[0], "Ship it").await;
 
-    let fresh = app
+    let member_id = user_id(&app, "emre@iz.sh").await;
+    let answer = app
         .post(
-            "/api/sign_in",
-            None,
+            "/api/set_role",
+            Some(&admin_cookie),
+            &[("user_id", &member_id), ("role", "viewer")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+
+    let prefs = app
+        .post(
+            "/api/save_profile",
+            Some(&member),
             &[
-                ("email", "ada@iz.sh"),
-                ("password", "correct horse battery staple"),
+                ("timezone", "UTC+03:00"),
+                ("theme", "dark"),
+                ("language", "en"),
+                ("ui", "instrument"),
             ],
         )
         .await;
-    let admin_cookie = fresh.session.expect("signing in set no session cookie");
+    assert_eq!(prefs.status, StatusCode::SEE_OTHER, "{}", prefs.body);
 
-    let body = until_logs_contains(&app, &admin_cookie, "invited emre@iz.sh").await;
-    assert!(body.contains("signed in"), "{body}");
-    assert!(body.contains("claimed the workspace"), "{body}");
-    assert!(body.contains("\"sentence\":\"joined\""), "{body}");
+    let body = until_logs_contains(&app, &admin_cookie, "made Emre -> viewer").await;
+    assert!(body.contains("saved the profile"), "{body}");
     assert!(body.contains("Ship it"), "{body}");
 }
 
@@ -6313,63 +5801,6 @@ async fn current_logs_json_ignores_the_rows_cookie() {
         activity_rows,
         answer.body
     );
-}
-
-/// A photo needs a session: signed out gets the same 404 an unknown id
-/// gets, and a second workspace's admin cannot see across the fence.
-#[tokio::test]
-async fn a_photo_hides_from_the_signed_out_and_the_foreign() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-
-    let answer = app
-        .post_multipart(
-            "/api/profile_photo",
-            Some(&admin_cookie),
-            &[],
-            Some(("me.png", "image/png", &PNG)),
-        )
-        .await;
-    assert_eq!(
-        answer.location.as_deref(),
-        Some("/settings?saved=profile_photo&section=profile")
-    );
-
-    let signed_out = app.get(&format!("/photo/{admin_id}"), None).await;
-    assert_eq!(signed_out.status, StatusCode::NOT_FOUND);
-}
-
-/// An invite refusal reopens the Members section, where the message shows;
-/// so does the mailed note on success.
-#[tokio::test]
-async fn an_invite_refusal_lands_on_the_members_section() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
-
-    let dup = app
-        .post_without_script(
-            "/api/invite_member",
-            Some(&admin_cookie),
-            "http://localhost/settings?section=members",
-            &[
-                ("email", "emre@iz.sh"),
-                ("display_name", "Emre"),
-                ("role", "member"),
-            ],
-        )
-        .await;
-    let location = dup.location.expect("no redirect");
-    assert!(
-        location.contains("on=invite_member") && location.contains("section=members"),
-        "{location}"
-    );
-
-    let page = app.get(&location, Some(&admin_cookie)).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("field-error"), "{html}");
-    assert!(html.contains("emre@iz.sh"), "{html}");
 }
 
 /// Seeds one decision and one accepted send directly on the store — the
@@ -8194,51 +7625,30 @@ async fn a_member_may_read_another_members_profile_name_address_and_counts() {
     }
 }
 
-/// Every fact on a profile sits in a named cell, and the person who let this
-/// member in is a link to their own page rather than a name in prose.
+/// Every fact on a profile sits in a named cell.
 #[tokio::test]
-async fn a_profile_names_its_fields_and_links_the_person_who_invited_them() {
+async fn a_profile_names_its_fields() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     invited(&app, &admin_cookie, "mem@iz.sh", "Mem Ber", Role::Member).await;
     let mem_id = user_id(&app, "mem@iz.sh").await;
-    let admin_id = app
-        .store
-        .users(&app.workspace_id().await)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|user| user.role == Role::Admin)
-        .unwrap()
-        .id;
 
     let page = app
         .get(&format!("/people/{mem_id}"), Some(&admin_cookie))
         .await;
+    assert_eq!(page.status.as_u16(), 200);
     let html = String::from_utf8(page.bytes).unwrap();
-    for label in ["EMAIL", "JOINED", "LAST SEEN", "INVITED BY"] {
+    for label in ["EMAIL", "JOINED", "LAST SEEN"] {
         assert!(
             html.contains(label),
             "the {label} field is not on the page: {html}"
         );
     }
-    assert!(
-        html.contains(&format!(r#"href="/people/{admin_id}""#)),
-        "the inviter is not a way to their own page: {html}"
-    );
+    assert!(html.contains("Mem Ber"), "{html}");
+    assert!(html.contains("mem@iz.sh"), "{html}");
     assert!(
         html.contains("avatar-xl"),
         "the profile picture is not the page's own size: {html}"
-    );
-
-    // The first account was invited by nobody, so it carries no such cell.
-    let owner = app
-        .get(&format!("/people/{admin_id}"), Some(&admin_cookie))
-        .await;
-    let owner_html = String::from_utf8(owner.bytes).unwrap();
-    assert!(
-        !owner_html.contains("INVITED BY"),
-        "the owner was invited by somebody: {owner_html}"
     );
 }
 
@@ -8392,7 +7802,7 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
         )
         .await;
     assert!(
@@ -8751,7 +8161,7 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
-            &[("display_name", "Ada Lovelace"), ("timezone", "UTC+03:00")],
+            &[("timezone", "UTC+03:00"), ("theme", "light"), ("language", "en"), ("ui", "instrument")],
         )
         .await;
     assert!(
@@ -8907,7 +8317,6 @@ async fn the_reminder_knob_saves_renders_and_keeps_when_absent() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "10"),
-                ("photo_limit_mb", "1"),
                 ("allowed_file_types", "png, pdf"),
                 ("mail_batch_minutes", "5"),
                 ("reminder_minutes", "30"),
@@ -8944,7 +8353,6 @@ async fn the_reminder_knob_saves_renders_and_keeps_when_absent() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "10"),
-                ("photo_limit_mb", "1"),
                 ("allowed_file_types", "png, pdf"),
                 ("mail_batch_minutes", "5"),
             ],
@@ -8969,7 +8377,6 @@ async fn the_reminder_knob_saves_renders_and_keeps_when_absent() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "10"),
-                ("photo_limit_mb", "1"),
                 ("allowed_file_types", "png, pdf"),
                 ("mail_batch_minutes", "5"),
                 ("reminder_minutes", "later"),
@@ -8991,7 +8398,6 @@ async fn the_reminder_knob_saves_renders_and_keeps_when_absent() {
             Some(&admin_cookie),
             &[
                 ("attachment_limit_mb", "10"),
-                ("photo_limit_mb", "1"),
                 ("allowed_file_types", "png, pdf"),
                 ("mail_batch_minutes", "5"),
                 ("reminder_minutes", "0"),
@@ -9261,11 +8667,18 @@ async fn a_page_revalidates_and_an_asset_caches_forever() {
     assert_eq!(directive, Some("public, max-age=31536000, immutable"));
 
     // A redirect carries no directive at all: nothing cached, nothing stale.
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
     let redirected = Request::builder()
         .method("POST")
-        .uri("/api/sign_out")
+        .uri("/api/create_task")
         .header(header::ACCEPT, "application/json")
-        .body(Body::empty())
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={admin}")).unwrap(),
+        )
+        .body(Body::from(format!("title=&column_id={column}")))
         .unwrap();
     let redirected = app.router.handle(redirected).await;
     assert_eq!(redirected.status(), StatusCode::SEE_OTHER);
@@ -9406,45 +8819,6 @@ async fn tagging_a_task_records_a_trail_line() {
     assert_eq!(lines[0].actor_name.as_deref(), Some("Ada Lovelace"));
 }
 
-/// A profile photo set and cleared both land on the workspace trail, and the
-/// person whose photo it is is the actor on both lines.
-#[tokio::test]
-async fn profile_photo_changes_record_their_events() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-
-    app.post_multipart(
-        "/api/profile_photo",
-        Some(&admin_cookie),
-        &[],
-        Some(("me.png", "image/png", &PNG)),
-    )
-    .await;
-    app.post("/api/delete_profile_photo", Some(&admin_cookie), &[])
-        .await;
-
-    let lines = app
-        .store
-        .recent_activity(
-            20,
-            iz_core::store::FeedPage::Newest,
-            iz_core::store::Dir::Newest,
-            &iz_core::store::ActivityFilter::default(),
-        )
-        .await
-        .unwrap();
-    let saved = lines
-        .iter()
-        .find(|line| line.kind.as_str() == "photo_saved")
-        .expect("no photo_saved line");
-    assert_eq!(saved.actor_name.as_deref(), Some("Ada Lovelace"));
-    let removed = lines
-        .iter()
-        .find(|line| line.kind.as_str() == "photo_removed")
-        .expect("no photo_removed line");
-    assert_eq!(removed.actor_name.as_deref(), Some("Ada Lovelace"));
-}
-
 /// Asking for a mail-server check rides the trail too — it writes a check
 /// row, so the trail says who asked.
 #[tokio::test]
@@ -9474,165 +8848,6 @@ async fn checking_the_sender_records_an_event() {
     assert_eq!(lines[0].actor_name.as_deref(), Some("Ada Lovelace"));
 }
 
-/// The settings pane for a given feedback query, as HTML — every assertion
-/// below reads the words the pane itself would show.
-async fn password_pane(app: &App, cookie: &str, query: &str) -> String {
-    let page = app
-        .get(&format!("/settings?section=profile&{query}"), Some(cookie))
-        .await;
-    String::from_utf8_lossy(&page.bytes).into_owned()
-}
-
-/// The password pane names each failure — wrong current, same as current,
-/// too short, looks-like-you — each with its own refusal code and its own
-/// one-line message in either language; a successful change lands with the
-/// pane's saved note about the other devices.
-#[tokio::test]
-async fn the_password_pane_names_each_failure() {
-    let app = App::open().await;
-    let admin_cookie = admin(&app).await;
-    let referer = "http://iz.test/settings?section=profile";
-
-    // The current password is wrong.
-    let wrong = app
-        .post_without_script(
-            "/api/change_password",
-            Some(&admin_cookie),
-            referer,
-            &[
-                ("current", "not the password"),
-                ("new", "a whole new passphrase"),
-            ],
-        )
-        .await;
-    let location = wrong.location.expect("a redirect location");
-    assert!(
-        location.contains("refusal=rejected") && location.contains("on=change_password"),
-        "{location}"
-    );
-    assert!(
-        password_pane(&app, &admin_cookie, "refusal=rejected&on=change_password")
-            .await
-            .contains("The current password is wrong.")
-    );
-
-    // The new password is the one already in force.
-    let same = app
-        .post_without_script(
-            "/api/change_password",
-            Some(&admin_cookie),
-            referer,
-            &[
-                ("current", "correct horse battery staple"),
-                ("new", "correct horse battery staple"),
-            ],
-        )
-        .await;
-    let location = same.location.expect("a redirect location");
-    assert!(location.contains("refusal=password-current"), "{location}");
-    assert!(
-        password_pane(
-            &app,
-            &admin_cookie,
-            "refusal=password-current&on=change_password"
-        )
-        .await
-        .contains("That's your current password.")
-    );
-
-    // Too short.
-    let short = app
-        .post_without_script(
-            "/api/change_password",
-            Some(&admin_cookie),
-            referer,
-            &[
-                ("current", "correct horse battery staple"),
-                ("new", "short"),
-            ],
-        )
-        .await;
-    let location = short.location.expect("a redirect location");
-    assert!(location.contains("refusal=password-short"), "{location}");
-    assert!(
-        password_pane(
-            &app,
-            &admin_cookie,
-            "refusal=password-short&on=change_password"
-        )
-        .await
-        .contains("At least 10 characters.")
-    );
-
-    // Looks like the address the account wears.
-    let you = app
-        .post_without_script(
-            "/api/change_password",
-            Some(&admin_cookie),
-            referer,
-            &[
-                ("current", "correct horse battery staple"),
-                ("new", "ada@iz.sh!!"),
-            ],
-        )
-        .await;
-    let location = you.location.expect("a redirect location");
-    assert!(location.contains("refusal=password-you"), "{location}");
-    assert!(
-        password_pane(
-            &app,
-            &admin_cookie,
-            "refusal=password-you&on=change_password"
-        )
-        .await
-        .contains("Not your address or your name.")
-    );
-
-    // A change that works lands with the pane's own note, and the fresh
-    // cookie the answer carries is the session that reads it. (`post`
-    // keeps the answer's cookie; `post_without_script` models a browser
-    // that only follows the redirect and hands none back.)
-    let right = app
-        .post(
-            "/api/change_password",
-            Some(&admin_cookie),
-            &[
-                ("current", "correct horse battery staple"),
-                ("new", "brand-new-pass-99"),
-            ],
-        )
-        .await;
-    let location = right.location.clone().expect("a redirect location");
-    assert!(location.contains("saved=change_password"), "{location}");
-    let fresh = right.session.clone().expect("a fresh session cookie");
-    let page = app
-        .get(
-            "/settings?section=profile&saved=change_password",
-            Some(&fresh),
-        )
-        .await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(
-        html.contains("Password changed. Your other devices were signed out."),
-        "{html}"
-    );
-
-    // The same pane in Turkish names the same failures in Turkish.
-    app.post(
-        "/api/save_profile",
-        Some(&fresh),
-        &[("display_name", "Ada Lovelace"), ("language", "tr")],
-    )
-    .await;
-    let tr = app
-        .get(
-            "/settings?section=profile&refusal=password-current&on=change_password",
-            Some(&fresh),
-        )
-        .await;
-    let tr_html = String::from_utf8_lossy(&tr.bytes);
-    assert!(tr_html.contains("Bu zaten mevcut parolan."), "{tr_html}");
-}
 
 /// A card's dependency summary names both directions with keys: what the card
 /// blocks and what blocks it, the same list shape either way.
@@ -9686,7 +8901,6 @@ async fn a_card_lists_both_dependency_directions_as_keys() {
         html.contains(&format!(
             r#"class="card-blocked-by">blocked by {first_key}</span>"#
         )),
-        "the blocked card did not name its blocker: {html}"
     );
 }
 
@@ -9756,170 +8970,6 @@ async fn the_board_search_filters_and_composes_with_the_project_filter() {
         html.contains("Panel polish") && html.contains("Wire the exporter"),
         "{html}"
     );
-}
-// ---------------------------------------------------------------------------
-// Self-serve password reset: the forgot form, the indistinguishable answer,
-// and the redeem flow over the mailed link.
-// ---------------------------------------------------------------------------
-
-/// Every reset token queued for the address, oldest first. The newest ask
-/// retires the earlier links, so a test that asks twice needs both.
-async fn queued_reset_tokens(app: &App, email: &str) -> Vec<String> {
-    let sends = app
-        .store
-        .mail_queue(50, iz_core::store::FeedPage::Newest)
-        .await
-        .unwrap();
-    let mut tokens = Vec::new();
-    for send in sends {
-        if send.kind != SendKind::Notice || send.recipient != email {
-            continue;
-        }
-        let Some(body) = send.body else { continue };
-        let Some((_, rest)) = body.rsplit_once("/reset/") else {
-            continue;
-        };
-        if let Some(token) = rest.split_whitespace().next() {
-            tokens.push(token.to_string());
-        }
-    }
-    tokens
-}
-
-/// The reset token out of the newest notice queued for the address — the mail
-/// is the token's only carrier, so the test reads it like a recipient would.
-async fn queued_reset_token(app: &App, email: &str) -> Option<String> {
-    queued_reset_tokens(app, email).await.pop()
-}
-
-#[tokio::test]
-async fn forgot_password_answers_the_same_whatever_the_address() {
-    let app = App::open().await;
-    let _admin = admin(&app).await;
-
-    let known = app
-        .post("/api/forgot_password", None, &[("email", "ada@iz.sh")])
-        .await;
-    let unknown = app
-        .post("/api/forgot_password", None, &[("email", "ghost@iz.sh")])
-        .await;
-
-    assert_eq!(known.status, StatusCode::SEE_OTHER, "{}", known.body);
-    assert_eq!(unknown.status, StatusCode::SEE_OTHER, "{}", unknown.body);
-    assert_eq!(known.body, "null", "{}", known.body);
-    // The two answers are word for word the same, and both land back on the
-    // forgot form, which says its one sentence either way.
-    assert_eq!(known.body, unknown.body);
-    assert_eq!(
-        known.location.as_deref().map(str::to_string),
-        Some("/forgot?sent=forgot_password".to_string()),
-        "{:?}",
-        known.location
-    );
-
-    // The ledger keeps the difference the surface refuses to show: one reset
-    // mail, for the address that has an account.
-    let token = queued_reset_token(&app, "ada@iz.sh")
-        .await
-        .expect("no reset mail queued for the admin");
-    assert!(
-        queued_reset_token(&app, "ghost@iz.sh").await.is_none(),
-        "the unknown address was mailed a reset link"
-    );
-    assert!(!token.is_empty());
-}
-
-#[tokio::test]
-async fn a_reset_link_redeems_on_its_own_screen() {
-    let app = App::open().await;
-    let _admin = admin(&app).await;
-    app.post("/api/forgot_password", None, &[("email", "ada@iz.sh")])
-        .await;
-    // A second ask retires the first link: the newest mail carries the only
-    // working token, and the retired one is dead before the newer is
-    // redeemed.
-    app.post("/api/forgot_password", None, &[("email", "ada@iz.sh")])
-        .await;
-    let mut resets = queued_reset_tokens(&app, "ada@iz.sh").await;
-    assert_eq!(resets.len(), 2, "each ask queued its own mail");
-    let retired = resets.remove(0);
-    let token = resets.remove(0);
-    let page = app.get(&format!("/reset/{retired}"), None).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("no longer works"), "{html}");
-    assert!(!html.contains("Choose a new password"), "{html}");
-
-    // The mailed link opens the choose-password card, naming the address it
-    // was mailed to.
-    let page = app.get(&format!("/reset/{token}"), None).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("Choose a new password"), "{html}");
-    assert!(html.contains("ada@iz.sh"), "{html}");
-
-    // Redeeming signs this browser in and lands on the board.
-    let answer = app
-        .post(
-            "/api/redeem_reset",
-            None,
-            &[("token", token.as_str()), ("password", "chronometer-1761")],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
-    assert_eq!(answer.body, "null", "{}", answer.body);
-    assert_eq!(answer.location.as_deref(), Some("/"));
-    let cookie = answer.session.expect("redeeming set no session cookie");
-
-    // The old password is refused, the new one signs in.
-    let old = app
-        .post(
-            "/api/sign_in",
-            None,
-            &[
-                ("email", "ada@iz.sh"),
-                ("password", "correct horse battery staple"),
-            ],
-        )
-        .await;
-    assert_ne!(old.body, "null", "the old password still signed in");
-    assert!(old.session.is_none(), "the old password set a session");
-    let new = app
-        .post(
-            "/api/sign_in",
-            None,
-            &[("email", "ada@iz.sh"), ("password", "chronometer-1761")],
-        )
-        .await;
-    assert_eq!(new.body, "null", "{}", new.body);
-    assert!(new.session.is_some(), "the new password signed nobody in");
-    let _ = cookie;
-
-    // The spent link shows the dead card, not the password form.
-    let page = app.get(&format!("/reset/{token}"), None).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("no longer works"), "{html}");
-    assert!(!html.contains("Choose a new password"), "{html}");
-}
-
-#[tokio::test]
-async fn a_used_or_wrong_token_shows_the_dead_card() {
-    let app = App::open().await;
-    let _admin = admin(&app).await;
-
-    let page = app.get("/reset/not-a-token", None).await;
-    let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("no longer works"), "{html}");
-
-    // Redeeming over a bogus token is refused, and nothing signs in.
-    let answer = app
-        .post(
-            "/api/redeem_reset",
-            None,
-            &[("token", "not-a-token"), ("password", "chronometer-1761")],
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::SEE_OTHER);
-    assert_ne!(answer.body, "null", "a bogus token redeemed");
-    assert!(answer.session.is_none());
 }
 
 // A `multiple` picker posts several `file` parts in one form; every part

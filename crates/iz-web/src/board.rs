@@ -17,12 +17,12 @@ use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
 use topcoat::view::{class, view};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, mail, require_user, require_writer};
+use crate::server::{Refusal, store, mail, require_user, require_writer};
 
 /// The board a task belongs to, checked against this person's workspace
 /// before anything trusts an id the browser sent.
 async fn task_board_id(cx: &Cx, user: &User, task_id: &str) -> Result<Option<String>> {
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     match store.task(task_id).await? {
         Some(facts) if facts.workspace_id == user.workspace_id => Ok(Some(facts.board_id)),
         _ => Ok(None),
@@ -44,7 +44,7 @@ async fn move_card_shared(
     let Some(board_id) = task_board_id(cx, &user, task_id).await? else {
         return Ok(Some(Refusal::NotFound));
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let columns = store.columns(&board_id).await?;
     if !columns.iter().any(|column| column.id == to_column_id) {
         return Ok(Some(Refusal::Forbidden));
@@ -107,7 +107,7 @@ async fn create_task_shared(
         Ok(pair) => pair,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let Some(board) = store.board(&user.workspace_id).await? else {
         return Ok(Some(Refusal::Unavailable));
     };
@@ -287,7 +287,7 @@ async fn board_columns(
         }
     };
     let lang = Lang::from_code(&user.language);
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let Some(mut view_data) = iz_core::board::load(store.as_ref(), &user.workspace_id).await?
     else {
         return view! {
@@ -422,7 +422,7 @@ async fn render_card(
     let subtasks_open = card.holds_on_subtasks();
     let mut assignees = Vec::new();
     for person in card.assignees.iter() {
-        assignees.push(crate::layout::avatar(cx, person, "").await?);
+        assignees.push(crate::layout::avatar(cx, &person.id, &person.display_name, "").await?);
     }
     let has_assignees = !card.assignees.is_empty();
     let task_id = card.id.clone();
@@ -639,7 +639,7 @@ fn sort_label(sort: &str, lang: Lang) -> &'static str {
 #[allow(unused_variables)]
 pub async fn board_page(cx: &Cx, user: &User) -> Result {
     let view_data = {
-        let store = accounts(cx).store().clone();
+        let store = store(cx).clone();
         iz_core::board::load(store.as_ref(), &user.workspace_id).await?
     };
     let lang = Lang::from_code(&user.language);
@@ -657,11 +657,11 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     }
     let query = query_params::<BoardQuery>(cx)?;
     let tags = {
-        let store = accounts(cx).store().clone();
+        let store = store(cx).clone();
         store.tags(&view_data.board.id).await?
     };
     let members = {
-        let store = accounts(cx).store().clone();
+        let store = store(cx).clone();
         store.users(&user.workspace_id).await?
     };
     // The whole filter pipeline narrows the board before anything counts or

@@ -1,5 +1,5 @@
 //! Integration tests for iz-core: the storage boundary driven through the
-//! Turso implementation, and the account flows on top of it.
+//! Turso implementation, and the SSO provisioning on top of it.
 //!
 //! New integration tests belong in this file rather than a new `tests/*.rs`:
 //! one test binary links and runs once.
@@ -7,12 +7,9 @@
 use std::path::PathBuf;
 
 use iz_core::Role;
-use iz_core::auth::{Token, hash_password};
 use iz_core::store::{
-    Audience, DEFAULT_RATE_LIMIT_ATTEMPTS, DEFAULT_RATE_WINDOW_MINUTES,
-    DEFAULT_SESSION_LIFETIME_DAYS, DEFAULT_SIGNIN_LINK_LIFETIME_DAYS, Event, MailOutcome, MailRule,
-    NewAttachment, NewSender, NewUser, SendKind, SendState, Store, StoreError, Trigger, TursoStore,
-    User,
+    Audience, Event, MailOutcome, MailRule, NewAttachment, NewSender, SendKind, SendState, Store,
+    StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use ulid::Ulid;
@@ -60,46 +57,47 @@ impl Drop for Scratch {
 
 async fn workspace_with_admin() -> (Scratch, String, String) {
     let scratch = Scratch::open().await;
-    let (ws, admin) = scratch
+    let admin = scratch
         .store
-        .claim_workspace(
-            "İz",
-            "ada@iz.sh",
-            "Ada",
-            &hash_password("tide-tables-1892").unwrap(),
-        )
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
         .await
         .unwrap();
-    (scratch, ws.id, admin.id)
+    (scratch, admin.workspace_id.clone(), admin.id)
 }
 
-/// Claims a workspace on an arbitrary store, for the tests that need one
-/// without the `Scratch` wrapper.
+/// Provisions the first admin on an arbitrary store, for the tests that need
+/// one without the `Scratch` wrapper.
 async fn claim(store: &TursoStore) -> (String, String) {
-    let (ws, admin) = store
-        .claim_workspace(
-            "İz",
-            "ada@iz.sh",
-            "Ada",
-            &hash_password("tide-tables-1892").unwrap(),
-        )
+    let admin = store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
         .await
         .unwrap();
-    (ws.id, admin.id)
+    (admin.workspace_id.clone(), admin.id)
 }
 
-async fn member(store: &TursoStore, workspace_id: &str, email: &str, name: &str) -> String {
+async fn member(store: &TursoStore, _workspace_id: &str, email: &str, name: &str) -> String {
     store
-        .create_user(NewUser {
-            workspace_id: workspace_id.to_string(),
-            email: email.into(),
-            display_name: name.into(),
-            role: Role::Member,
-            invited_by: None,
-        })
+        .provision_user(&format!("sub-{email}"), email, name, false)
         .await
         .unwrap()
         .id
+}
+
+/// A provisioned user as a row, with the role asked for: the call sites that
+/// used to create accounts with a name, an address and a role keep reading
+/// the row back, whatever flow wrote it.
+async fn member_user(
+    store: &TursoStore,
+    workspace_id: &str,
+    email: &str,
+    name: &str,
+    role: Role,
+) -> User {
+    let id = member(store, workspace_id, email, name).await;
+    if role != Role::Member {
+        store.set_role(&id, role).await.unwrap();
+    }
+    store.user(&id).await.unwrap().unwrap()
 }
 
 #[tokio::test]
@@ -656,153 +654,16 @@ async fn deleting_a_subtask_leaves_its_parent_standing() {
 }
 
 #[tokio::test]
-async fn the_first_account_owns_the_workspace() {
-    let scratch = Scratch::open().await;
-    assert!(scratch.store.workspace().await.unwrap().is_none());
-    assert!(scratch.store.owner().await.unwrap().is_none());
-
-    let (_, admin_id) = claim(&scratch.store).await;
-    let owner = scratch.store.owner().await.unwrap().unwrap();
-    assert_eq!(owner.id, admin_id);
-    assert_eq!(owner.role, Role::Admin);
-    assert!(owner.has_signed_in(), "the admin sets their own password");
-}
-
-#[tokio::test]
-async fn a_second_claim_loses_and_changes_nothing() {
-    let scratch = Scratch::open().await;
-    claim(&scratch.store).await;
-
-    let second = scratch
-        .store
-        .claim_workspace(
-            "Someone else's",
-            "mallory@elsewhere.example",
-            "Mallory",
-            &hash_password("tide-tables-1892").unwrap(),
-        )
-        .await;
-    assert!(matches!(second, Err(StoreError::AlreadyClaimed)));
-
-    // The loser must not have joined as anything at all.
-    assert_eq!(scratch.store.workspace().await.unwrap().unwrap().name, "İz");
-    assert_eq!(scratch.store.count_users("").await.unwrap(), 0);
-    let ws_id = scratch.store.workspace().await.unwrap().unwrap().id;
-    assert_eq!(scratch.store.count_users(&ws_id).await.unwrap(), 1);
-    assert!(
-        scratch
-            .store
-            .user_by_email(&ws_id, "mallory@elsewhere.example")
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_claims_produce_exactly_one_admin() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("iz.db").to_string_lossy().into_owned();
-    let store = std::sync::Arc::new(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
-
-    let hash = hash_password("tide-tables-1892").unwrap();
-    let mut claims = Vec::new();
-    for i in 0..4 {
-        let store = store.clone();
-        let hash = hash.clone();
-        claims.push(tokio::spawn(async move {
-            store
-                .claim_workspace(
-                    "İz",
-                    &format!("claimant{i}@iz.sh"),
-                    &format!("Claimant {i}"),
-                    &hash,
-                )
-                .await
-                .map(|(_, admin)| admin.email)
-        }));
-    }
-
-    let mut winners = Vec::new();
-    for claim in claims {
-        match claim.await.unwrap() {
-            Ok(email) => winners.push(email),
-            Err(StoreError::AlreadyClaimed) => {}
-            Err(other) => panic!("unexpected claim failure: {other}"),
-        }
-    }
-    assert_eq!(winners.len(), 1, "exactly one claim wins: {winners:?}");
-
-    let ws_id = store.workspace().await.unwrap().unwrap().id;
-    assert_eq!(
-        store.count_users(&ws_id).await.unwrap(),
-        1,
-        "no half-written losers"
-    );
-    let owner = store.owner().await.unwrap().unwrap();
-    assert_eq!(owner.email, winners[0]);
-
-    drop(store);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The store's connection is not concurrent-safe on its own (turso's
-/// `TursoError::Misuse("concurrent use forbidden")` fires the moment two
-/// queries overlap on it); this drives reads and writes against one shared
-/// [`TursoStore`] from many tasks at once and expects every one of them to
-/// come back `Ok`, never that error.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn many_concurrent_callers_never_see_concurrent_use_forbidden() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("iz.db").to_string_lossy().into_owned();
-    let store = std::sync::Arc::new(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
-    let (workspace_id, _) = claim(&store).await;
-
-    let mut tasks = Vec::new();
-    for i in 0..16 {
-        let store = store.clone();
-        let workspace_id = workspace_id.clone();
-        tasks.push(tokio::spawn(async move {
-            if i % 2 == 0 {
-                // A write: inserts into auth_attempt on the shared connection.
-                store
-                    .record_auth_attempt(&format!("bucket-{i}"), OffsetDateTime::now_utc())
-                    .await
-                    .map(|_| ())
-            } else {
-                // A multi-row read that steps a statement in a loop.
-                store.users(&workspace_id).await.map(|_| ())
-            }
-        }));
-    }
-
-    for task in tasks {
-        task.await.unwrap().expect(
-            "concurrent store access must never surface Misuse(\"concurrent use forbidden\")",
-        );
-    }
-
-    drop(store);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
 async fn workspace_defaults_match_the_settings_screen() {
     let scratch = Scratch::open().await;
-    let (ws, _) = scratch
+    let admin = scratch
         .store
-        .claim_workspace(
-            "İz",
-            "ada@iz.sh",
-            "Ada",
-            &hash_password("tide-tables-1892").unwrap(),
-        )
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
         .await
         .unwrap();
+    let ws = scratch.store.workspace().await.unwrap().unwrap();
+    assert_eq!(ws.id, admin.workspace_id);
     assert_eq!(ws.attachment_limit_bytes, 25 * 1024 * 1024);
-    assert_eq!(ws.photo_limit_bytes, 2 * 1024 * 1024);
     assert!(
         ws.allowed_file_types.is_empty(),
         "every type until narrowed"
@@ -1076,12 +937,11 @@ async fn limits_round_trip_including_the_file_type_list() {
     let types = vec!["png".to_string(), "pdf".to_string()];
     scratch
         .store
-        .set_limits(&ws_id, 10 * 1024 * 1024, 512 * 1024, &types, 5, 15)
+        .set_limits(&ws_id, 10 * 1024 * 1024, &types, 5, 15)
         .await
         .unwrap();
     let ws = scratch.store.workspace().await.unwrap().unwrap();
     assert_eq!(ws.attachment_limit_bytes, 10 * 1024 * 1024);
-    assert_eq!(ws.photo_limit_bytes, 512 * 1024);
     assert_eq!(ws.allowed_file_types, types);
     assert_eq!(ws.mail_batch_minutes, 5);
     assert_eq!(
@@ -1094,227 +954,19 @@ async fn limits_round_trip_including_the_file_type_list() {
 /// claim starts on the migration's defaults, one save changes all four, and
 /// the save announces itself like every other settings write.
 #[tokio::test]
-async fn the_security_knobs_default_round_trip_and_announce() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let mut rx = scratch.store.subscribe();
-
-    let ws = scratch.store.workspace().await.unwrap().unwrap();
-    assert_eq!(ws.rate_limit_attempts, DEFAULT_RATE_LIMIT_ATTEMPTS);
-    assert_eq!(ws.rate_window_minutes, DEFAULT_RATE_WINDOW_MINUTES);
-    assert_eq!(ws.session_lifetime_days, DEFAULT_SESSION_LIFETIME_DAYS);
-    assert_eq!(
-        ws.signin_link_lifetime_days,
-        DEFAULT_SIGNIN_LINK_LIFETIME_DAYS
-    );
-
-    scratch
-        .store
-        .set_security(&ws_id, 3, 60, 30, 2)
-        .await
-        .unwrap();
-    let ws = scratch.store.workspace().await.unwrap().unwrap();
-    assert_eq!(ws.rate_limit_attempts, 3);
-    assert_eq!(ws.rate_window_minutes, 60);
-    assert_eq!(ws.session_lifetime_days, 30);
-    assert_eq!(ws.signin_link_lifetime_days, 2);
-
-    assert_eq!(announced(&mut rx), vec!["settings".to_string()]);
-}
-
-#[tokio::test]
-async fn an_invited_member_has_no_password_until_they_choose_one() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let member = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: ws_id.clone(),
-            email: "grace@iz.sh".into(),
-            display_name: "Grace".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
-    assert!(member.password_hash.is_none());
-    assert!(!member.has_signed_in());
-
-    scratch
-        .store
-        .set_password_hash(&member.id, "$argon2id$fake")
-        .await
-        .unwrap();
-    let member = scratch.store.user(&member.id).await.unwrap().unwrap();
-    assert!(member.has_signed_in());
-}
-
-#[tokio::test]
-async fn addresses_are_unique_and_case_insensitive() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let dup = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: ws_id.clone(),
-            email: "  ADA@Iz.sh ".into(),
-            display_name: "Ada again".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await;
-    assert!(matches!(dup, Err(StoreError::Conflict("account"))));
-    assert!(
-        scratch
-            .store
-            .user_by_email(&ws_id, "Ada@IZ.sh")
-            .await
-            .unwrap()
-            .is_some()
-    );
-}
-
-#[tokio::test]
-async fn an_unknown_address_is_a_plain_none() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    // The sign-in surface builds its uniform response on this; the store must
-    // not distinguish "no such account" from anything else by erroring.
-    assert!(
-        scratch
-            .store
-            .user_by_email(&ws_id, "nobody@iz.sh")
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn members_list_and_count_for_the_admin_screen() {
     let (scratch, ws_id, admin_id) = workspace_with_admin().await;
     for (email, name, role) in [
         ("grace@iz.sh", "Grace", Role::Member),
         ("linus@iz.sh", "Linus", Role::Viewer),
     ] {
-        scratch
-            .store
-            .create_user(NewUser {
-                workspace_id: ws_id.clone(),
-                email: email.into(),
-                display_name: name.into(),
-                role,
-                invited_by: None,
-            })
-            .await
-            .unwrap();
+        let id = member(&scratch.store, &ws_id, email, name).await;
+        scratch.store.set_role(&id, role).await.unwrap();
     }
     assert_eq!(scratch.store.count_users(&ws_id).await.unwrap(), 3);
     let users = scratch.store.users(&ws_id).await.unwrap();
     assert_eq!(users[0].id, admin_id);
     assert_eq!(users.iter().filter(|u| u.role == Role::Viewer).count(), 1);
-}
-
-#[tokio::test]
-async fn profile_and_role_updates_stick() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let user = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: ws_id,
-            email: "grace@iz.sh".into(),
-            display_name: "Grace".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
-
-    scratch
-        .store
-        .set_profile(&user.id, "Grace H.")
-        .await
-        .unwrap();
-    scratch
-        .store
-        .set_photo(&user.id, b"grace-bytes", "image/png")
-        .await
-        .unwrap();
-    scratch
-        .store
-        .set_role(&user.id, Role::Viewer)
-        .await
-        .unwrap();
-    let at = OffsetDateTime::now_utc();
-    scratch.store.mark_signed_in(&user.id, at).await.unwrap();
-
-    let photo = scratch.store.photo(&user.id).await.unwrap().unwrap();
-    assert_eq!(photo.0, b"grace-bytes".to_vec());
-    assert_eq!(photo.1, "image/png");
-    // The bytes are the file the row's id names, not anything in the
-    // database.
-    let photo_file = scratch.storage.join("photos").join(&user.id);
-    assert_eq!(std::fs::read(&photo_file).unwrap(), b"grace-bytes");
-    let user = scratch.store.user(&user.id).await.unwrap().unwrap();
-    assert_eq!(user.display_name, "Grace H.");
-    assert!(user.has_photo);
-    assert_eq!(user.role, Role::Viewer);
-    // Stored as RFC 3339 text, so equality holds to the second.
-    assert_eq!(
-        user.last_signed_in_at.unwrap().unix_timestamp(),
-        at.unix_timestamp()
-    );
-
-    // Clearing the photo is a real update, not a no-op — the file goes
-    // with the marker.
-    scratch.store.clear_photo(&user.id).await.unwrap();
-    let user = scratch.store.user(&user.id).await.unwrap().unwrap();
-    assert!(!user.has_photo);
-    assert!(scratch.store.photo(&user.id).await.unwrap().is_none());
-    assert!(!photo_file.exists());
-}
-
-#[tokio::test]
-async fn email_change_persists_and_refuses_a_taken_address() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("iz.db").to_str().unwrap().to_string();
-
-    let user_id = {
-        let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
-        let (ws_id, _admin_id) = claim(&store).await;
-        let user_id = member(&store, &ws_id, "grace@iz.sh", "Grace").await;
-        store
-            .set_email(&user_id, &ws_id, "Grace.New@Iz.sh")
-            .await
-            .unwrap();
-        // Case-folded the same way sign-in matches an address.
-        assert!(
-            store
-                .user_by_email(&ws_id, "grace.new@iz.sh")
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            store
-                .user_by_email(&ws_id, "grace@iz.sh")
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        // Taken by the admin already claimed above.
-        let err = store
-            .set_email(&user_id, &ws_id, "ada@iz.sh")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Conflict("account")));
-        user_id
-    };
-
-    // Persists across a reopen, and the refused attempt did not stick.
-    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
-    let user = store.user(&user_id).await.unwrap().unwrap();
-    assert_eq!(user.email, "grace.new@iz.sh");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -1354,127 +1006,20 @@ async fn updates_to_a_missing_user_are_not_found() {
     let scratch = Scratch::open().await;
     let missing = Ulid::new().to_string();
     assert!(matches!(
-        scratch.store.set_password_hash(&missing, "x").await,
-        Err(StoreError::NotFound)
-    ));
-    assert!(matches!(
         scratch.store.set_role(&missing, Role::Member).await,
         Err(StoreError::NotFound)
     ));
-}
-
-#[tokio::test]
-async fn a_signin_link_stores_only_the_hash_and_is_used_once() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let user = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: ws_id,
-            email: "grace@iz.sh".into(),
-            display_name: "Grace".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
-
-    let now = OffsetDateTime::now_utc();
-    let link = scratch
-        .store
-        .create_signin_link(
-            &user.id,
-            "hash-of-the-token",
-            now + Duration::days(7),
-            iz_core::store::LinkKind::Join,
-        )
-        .await
-        .unwrap();
-    assert!(link.is_usable(now));
-
-    // Lookup is by hash: the plaintext never reaches the database.
-    assert!(
+    assert!(matches!(
+        scratch.store.set_user_disabled(&missing, true).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
         scratch
             .store
-            .signin_link_by_hash("hash-of-the-token")
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        scratch
-            .store
-            .signin_link_by_hash("some-other-hash")
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    assert!(
-        scratch
-            .store
-            .consume_signin_link(&link.id, now)
-            .await
-            .unwrap()
-    );
-    let used = scratch
-        .store
-        .signin_link_by_hash("hash-of-the-token")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!used.is_usable(now));
-    // A second use finds nothing left to consume.
-    assert!(
-        !scratch
-            .store
-            .consume_signin_link(&link.id, now)
-            .await
-            .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn an_expired_link_is_still_a_live_account() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let user = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: ws_id,
-            email: "grace@iz.sh".into(),
-            display_name: "Grace".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
-
-    let now = OffsetDateTime::now_utc();
-    let stale = scratch
-        .store
-        .create_signin_link(
-            &user.id,
-            "stale-hash",
-            now - Duration::hours(1),
-            iz_core::store::LinkKind::Join,
-        )
-        .await
-        .unwrap();
-    assert!(!stale.is_usable(now));
-
-    // Resending opens the same account rather than making a new one.
-    let fresh = scratch
-        .store
-        .create_signin_link(
-            &user.id,
-            "fresh-hash",
-            now + Duration::days(7),
-            iz_core::store::LinkKind::Join,
-        )
-        .await
-        .unwrap();
-    assert_eq!(fresh.user_id, stale.user_id);
-    assert!(fresh.is_usable(now));
-    assert!(scratch.store.user(&user.id).await.unwrap().is_some());
+            .set_preferences(&missing, "UTC", "light", "en", "instrument")
+            .await,
+        Err(StoreError::NotFound)
+    ));
 }
 
 #[tokio::test]
@@ -1482,1126 +1027,20 @@ async fn the_store_is_usable_behind_a_trait_object() {
     let scratch = Scratch::open().await;
     let store: &dyn Store = &scratch.store;
     store
-        .claim_workspace("İz", "ada@iz.sh", "Ada", "$argon2id$fake")
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
         .await
         .unwrap();
     assert!(store.workspace().await.unwrap().is_some());
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_prefetched_link_is_consumed_exactly_once() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("iz.db").to_string_lossy().into_owned();
-    let store = std::sync::Arc::new(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
-    let (ws_id, _) = claim(&store).await;
-    let user_id = member(&store, &ws_id, "grace@iz.sh", "Grace").await;
-
-    let token = Token::mint();
-    let now = OffsetDateTime::now_utc();
-    let link = store
-        .create_signin_link(
-            &user_id,
-            &token.hash(),
-            now + Duration::days(7),
-            iz_core::store::LinkKind::Join,
-        )
-        .await
-        .unwrap();
-
-    // The mail client prefetches while the person clicks.
-    let mut redemptions = Vec::new();
-    for _ in 0..4 {
-        let store = store.clone();
-        let id = link.id.clone();
-        redemptions.push(tokio::spawn(async move {
-            store.consume_signin_link(&id, now).await.unwrap()
-        }));
-    }
-    let mut winners = 0;
-    for redemption in redemptions {
-        if redemption.await.unwrap() {
-            winners += 1;
-        }
-    }
-    assert_eq!(winners, 1, "exactly one redemption may win");
-
-    drop(store);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn a_session_lives_until_it_expires_or_is_revoked() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let user_id = member(&scratch.store, &ws_id, "grace@iz.sh", "Grace").await;
-
-    let token = Token::mint();
-    let now = OffsetDateTime::now_utc();
-    let session = scratch
-        .store
-        .create_session(&user_id, &token.hash(), now + Duration::days(14))
-        .await
-        .unwrap();
-    assert!(session.is_live(now));
-
-    // The cookie value is the only way in, and it is not what is stored.
-    let found = scratch
-        .store
-        .session_by_hash(&token.hash())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(found.id, session.id);
-    assert!(
-        scratch
-            .store
-            .session_by_hash(token.expose())
-            .await
-            .unwrap()
-            .is_none(),
-        "the plaintext must not be stored"
-    );
-    assert_eq!(
-        scratch.store.session_token_hash(&session.id).await.unwrap(),
-        Some(token.hash())
-    );
-
-    scratch
-        .store
-        .revoke_session(&session.id, now)
-        .await
-        .unwrap();
-    let revoked = scratch
-        .store
-        .session_by_hash(&token.hash())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!revoked.is_live(now), "a revoked session is dead at once");
-    // Revoking twice is not an error the caller has to think about.
-    assert!(matches!(
-        scratch.store.revoke_session(&session.id, now).await,
-        Err(StoreError::NotFound)
-    ));
-}
-
-#[tokio::test]
-async fn an_expired_session_is_not_live() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let user_id = member(&scratch.store, &ws_id, "grace@iz.sh", "Grace").await;
-    let now = OffsetDateTime::now_utc();
-    let session = scratch
-        .store
-        .create_session(&user_id, &Token::mint().hash(), now - Duration::minutes(1))
-        .await
-        .unwrap();
-    assert!(!session.is_live(now));
-}
-
-#[tokio::test]
-async fn changing_a_password_can_sign_out_every_other_device() {
-    let (scratch, ws_id, _) = workspace_with_admin().await;
-    let user_id = member(&scratch.store, &ws_id, "grace@iz.sh", "Grace").await;
-    let other_id = member(&scratch.store, &ws_id, "linus@iz.sh", "Linus").await;
-    let now = OffsetDateTime::now_utc();
-
-    let mut hashes = Vec::new();
-    for _ in 0..3 {
-        let token = Token::mint();
-        scratch
-            .store
-            .create_session(&user_id, &token.hash(), now + Duration::days(14))
-            .await
-            .unwrap();
-        hashes.push(token.hash());
-    }
-    let bystander = Token::mint();
-    scratch
-        .store
-        .create_session(&other_id, &bystander.hash(), now + Duration::days(14))
-        .await
-        .unwrap();
-
-    let revoked = scratch
-        .store
-        .revoke_sessions_for_user(&user_id, now)
-        .await
-        .unwrap();
-    assert_eq!(revoked, 3);
-    for hash in &hashes {
-        let session = scratch.store.session_by_hash(hash).await.unwrap().unwrap();
-        assert!(!session.is_live(now));
-    }
-    // Someone else's browser is untouched.
-    let bystander = scratch
-        .store
-        .session_by_hash(&bystander.hash())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(bystander.is_live(now));
-}
-
-#[tokio::test]
-async fn auth_attempts_are_counted_over_a_window() {
-    let scratch = Scratch::open().await;
-    let now = OffsetDateTime::now_utc();
-    let window = now - Duration::minutes(15);
-
-    for minutes_ago in [30, 20, 10, 5, 1] {
-        scratch
-            .store
-            .record_auth_attempt("grace@iz.sh", now - Duration::minutes(minutes_ago))
-            .await
-            .unwrap();
-    }
-    scratch
-        .store
-        .record_auth_attempt("198.51.100.7", now)
-        .await
-        .unwrap();
-
-    // Only the three inside the window count, and buckets do not bleed.
-    assert_eq!(
-        scratch
-            .store
-            .count_auth_attempts("grace@iz.sh", window)
-            .await
-            .unwrap(),
-        3
-    );
-    assert_eq!(
-        scratch
-            .store
-            .count_auth_attempts("198.51.100.7", window)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        scratch
-            .store
-            .count_auth_attempts("nobody@iz.sh", window)
-            .await
-            .unwrap(),
-        0
-    );
-
-    // A success clears the bucket that succeeded, and only that one.
-    scratch
-        .store
-        .clear_auth_attempts("grace@iz.sh")
-        .await
-        .unwrap();
-    assert_eq!(
-        scratch
-            .store
-            .count_auth_attempts("grace@iz.sh", window)
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        scratch
-            .store
-            .count_auth_attempts("198.51.100.7", window)
-            .await
-            .unwrap(),
-        1
-    );
-
-    // Pruning drops what is out of every window.
-    scratch
-        .store
-        .record_auth_attempt("grace@iz.sh", now - Duration::hours(2))
-        .await
-        .unwrap();
-    let pruned = scratch
-        .store
-        .prune_auth_attempts(now - Duration::hours(1))
-        .await
-        .unwrap();
-    assert_eq!(pruned, 1);
-}
-
-// ---------------------------------------------------------------------------
-// Account flows.
-// ---------------------------------------------------------------------------
-
-use iz_core::accounts::{AccountError, Accounts};
-use iz_core::auth::PasswordProblem;
-use std::sync::Arc;
-
-/// An accounts service over a throwaway database. The directory is kept alive
-/// by the returned guard.
-async fn accounts() -> (Scratch, Accounts) {
-    let scratch = Scratch::open().await;
-    let store = TursoStore::open(
-        scratch.dir.join("iz.db").to_str().unwrap(),
-        &scratch.dir.join("storage"),
-    )
-    .await
-    .unwrap();
-    let accounts = Accounts::new(Arc::new(store) as Arc<dyn Store>, "https://iz.sh");
-    (scratch, accounts)
-}
-
-async fn claimed() -> (Scratch, Accounts, User) {
-    let (scratch, accounts) = accounts().await;
-    let (_, signed_in) = accounts
-        .claim_workspace("İz", "ada@iz.sh", "Ada", "tide-tables-1892")
-        .await
-        .unwrap();
-    (scratch, accounts, signed_in.user)
-}
-
-/// The workspace's configured sign-in attempt allowance, read the way
-/// `Accounts` reads it — off the workspace row, never off a const.
-async fn allowance(accounts: &Accounts) -> u64 {
-    accounts
-        .store()
-        .workspace()
-        .await
-        .unwrap()
-        .expect("the workspace is claimed")
-        .rate_limit_attempts
-}
-
-#[tokio::test]
-async fn claiming_makes_an_admin_and_signs_them_in() {
-    let (_scratch, accounts) = accounts().await;
-    let (workspace, signed_in) = accounts
-        .claim_workspace("İz", "ada@iz.sh", "Ada", "tide-tables-1892")
-        .await
-        .unwrap();
-    assert_eq!(workspace.name, "İz");
-    assert_eq!(signed_in.user.role, Role::Admin);
-    assert!(
-        signed_in.user.last_signed_in_at.is_some(),
-        "the claim is their first arrival"
-    );
-
-    // The cookie value works and is not what is stored.
-    let who = accounts
-        .authenticate(signed_in.session_token.expose())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(who.id, signed_in.user.id);
-    assert!(
-        accounts
-            .authenticate(&signed_in.session.id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn the_claim_screen_enforces_its_own_password_rules() {
-    let (_scratch, accounts) = accounts().await;
-    let too_short = accounts
-        .claim_workspace("İz", "ada@iz.sh", "Ada", "short")
-        .await;
-    assert!(matches!(
-        too_short,
-        Err(AccountError::Password(PasswordProblem::TooShort))
-    ));
-    // A rejected password must not have claimed anything.
-    assert!(accounts.store().workspace().await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn a_second_claim_is_refused() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let second = accounts
-        .claim_workspace(
-            "Theirs",
-            "mallory@elsewhere.example",
-            "Mallory",
-            "tide-tables-1892",
-        )
-        .await;
-    assert!(matches!(second, Err(AccountError::AlreadyClaimed)));
-}
-
-#[tokio::test]
-async fn an_invited_member_chooses_their_own_password() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    assert!(!invitation.user.has_signed_in(), "no password yet");
-    assert!(
-        invitation.expires_at
-            > OffsetDateTime::now_utc()
-                + Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS))
-                - Duration::minutes(1)
-    );
-
-    // The admin cannot sign in as them in the meantime.
-    let as_them = accounts
-        .sign_in("grace@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await;
-    assert!(matches!(as_them, Err(AccountError::Rejected)));
-
-    let signed_in = accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap();
-    assert_eq!(signed_in.user.id, invitation.user.id);
-    assert!(signed_in.user.has_signed_in());
-    assert!(
-        signed_in.user.last_signed_in_at.is_some(),
-        "redeeming the link is their first arrival"
-    );
-
-    // And now the password they chose works, and only that one.
-    accounts
-        .sign_in("grace@iz.sh", "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn adding_a_member_queues_the_mail_that_carries_the_link() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-
-    let queue = accounts
-        .store()
-        .mail_queue(10, iz_core::store::FeedPage::Newest)
-        .await
-        .unwrap();
-    let queued = queue
-        .iter()
-        .find(|s| s.recipient == "grace@iz.sh")
-        .expect("the invite mail is on the outbox");
-    assert_eq!(queued.kind, SendKind::Invite);
-    let body = queued.body.as_deref().unwrap();
-    let link = format!("https://iz.sh/join/{}", invitation.token.expose());
-    assert!(body.contains(&link), "body was: {body}");
-}
-
-#[tokio::test]
-async fn only_an_admin_may_invite() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    let member = accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap()
-        .user;
-
-    // Server-side, not merely hidden: a member calling the flow is refused.
-    let attempt = accounts
-        .invite(&member, "linus@iz.sh", "Linus", Role::Member)
-        .await;
-    assert!(matches!(attempt, Err(AccountError::Forbidden)));
-
-    let mut viewer = member.clone();
-    viewer.role = Role::Viewer;
-    assert!(matches!(
-        accounts
-            .invite(&viewer, "linus@iz.sh", "Linus", Role::Viewer)
-            .await,
-        Err(AccountError::Forbidden)
-    ));
-}
-
-#[tokio::test]
-async fn an_admin_may_change_a_members_role() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-
-    accounts
-        .set_role(&admin, &invitation.user.id, Role::Viewer)
-        .await
-        .unwrap();
-
-    let reloaded = accounts
-        .store()
-        .user(&invitation.user.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reloaded.role, Role::Viewer);
-}
-
-#[tokio::test]
-async fn the_owner_may_not_have_their_role_changed_even_by_another_admin() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Admin)
-        .await
-        .unwrap();
-    let other_admin = accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap()
-        .user;
-
-    let attempt = accounts
-        .set_role(&other_admin, &admin.id, Role::Member)
-        .await;
-    assert!(matches!(attempt, Err(AccountError::Forbidden)));
-
-    let reloaded = accounts.store().user(&admin.id).await.unwrap().unwrap();
-    assert_eq!(reloaded.role, Role::Admin);
-}
-
-#[tokio::test]
-async fn nobody_may_change_their_own_role() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    let member = accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap()
-        .user;
-
-    let attempt = accounts.set_role(&member, &member.id, Role::Admin).await;
-    assert!(matches!(attempt, Err(AccountError::Forbidden)));
-}
-
-#[tokio::test]
-async fn a_link_works_once_and_a_wrong_one_never_does() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-
-    accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap();
-    let again = accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "another-password",
-            "198.51.100.7",
-        )
-        .await;
-    assert!(matches!(again, Err(AccountError::Rejected)));
-
-    let invented = accounts
-        .redeem_signin_link(&"0".repeat(32), "another-password", "198.51.100.7")
-        .await;
-    assert!(matches!(invented, Err(AccountError::Rejected)));
-
-    // The password they actually set is untouched by either failure.
-    accounts
-        .sign_in("grace@iz.sh", "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn a_rejected_password_does_not_burn_the_invitation() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(invitation.token.expose(), "grace!!", "198.51.100.7")
-            .await,
-        Err(AccountError::Password(PasswordProblem::TooShort))
-    ));
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(
-                invitation.token.expose(),
-                "grace-hopper-1906",
-                "198.51.100.7"
-            )
-            .await,
-        Err(AccountError::Password(PasswordProblem::LooksLikeYou))
-    ));
-    // Still redeemable with a password that passes.
-    accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn an_expired_link_is_refused_and_resending_opens_the_same_account() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-
-    // Age the link past its expiry by writing a fresh one with a past date.
-    let stale = Token::mint();
-    accounts
-        .store()
-        .create_signin_link(
-            &invitation.user.id,
-            &stale.hash(),
-            OffsetDateTime::now_utc() - Duration::minutes(1),
-            iz_core::store::LinkKind::Join,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(stale.expose(), "sextant-and-chart", "198.51.100.7")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-
-    let resent = accounts
-        .resend_invitation(&admin, &invitation.user.id)
-        .await
-        .unwrap();
-    assert_eq!(resent.user.id, invitation.user.id, "same account, new link");
-    let signed_in = accounts
-        .redeem_signin_link(resent.token.expose(), "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-    assert_eq!(signed_in.user.id, invitation.user.id);
-}
-
-#[tokio::test]
-async fn an_unknown_address_and_a_wrong_password_are_indistinguishable() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let unknown = accounts
-        .sign_in("nobody@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await;
-    let wrong = accounts
-        .sign_in("ada@iz.sh", "not-her-password", "198.51.100.8")
-        .await;
-    assert!(matches!(unknown, Err(AccountError::Rejected)));
-    assert!(matches!(wrong, Err(AccountError::Rejected)));
-    assert_eq!(
-        unknown.unwrap_err().to_string(),
-        wrong.unwrap_err().to_string(),
-        "the wording must not distinguish them either"
-    );
-}
-
-#[tokio::test]
-async fn the_miss_path_costs_what_the_hit_path_costs() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    // Not a timing assertion — those are flaky. This asserts the work happens:
-    // a miss takes at least as long as one Argon2 verify at our parameters,
-    // which a skipped verify could not.
-    let baseline = std::time::Instant::now();
-    let _ = accounts
-        .sign_in("ada@iz.sh", "not-her-password", "198.51.100.7")
-        .await;
-    let hit_cost = baseline.elapsed();
-
-    let started = std::time::Instant::now();
-    let _ = accounts
-        .sign_in("nobody@iz.sh", "not-a-password", "198.51.100.8")
-        .await;
-    let miss_cost = started.elapsed();
-
-    assert!(
-        miss_cost * 4 > hit_cost,
-        "miss {miss_cost:?} is suspiciously cheaper than hit {hit_cost:?}"
-    );
-}
-
-#[tokio::test]
-async fn an_invited_account_that_has_no_password_cannot_be_signed_into() {
-    let (_scratch, accounts, admin) = claimed().await;
-    accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    // Not "set your password first" — that would confirm the address exists.
-    assert!(matches!(
-        accounts.sign_in("grace@iz.sh", "", "198.51.100.7").await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-#[tokio::test]
-async fn sign_in_attempts_are_rate_limited_per_address() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let allowance = allowance(&accounts).await;
-    for _ in 0..allowance {
-        let _ = accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await;
-    }
-    // The next attempt is refused before any Argon2 work happens.
-    assert!(matches!(
-        accounts.sign_in("ada@iz.sh", "wrong", "203.0.113.9").await,
-        Err(AccountError::RateLimited)
-    ));
-    // A different address from a fresh client is unaffected.
-    assert!(matches!(
-        accounts
-            .sign_in("someone@iz.sh", "wrong", "203.0.113.9")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-/// The lockout question, decided: an address bucket that refuses before the
-/// verify lets anyone who knows a colleague's address keep them out with a
-/// windowful of wrong guesses, from anywhere, with no account of their own.
-/// So the address bucket counts but never refuses a correct password.
-#[tokio::test]
-async fn a_flooded_address_never_locks_the_owner_out() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let allowance = allowance(&accounts).await;
-    // Each guess from its own client, so only the address bucket fills.
-    for i in 0..(allowance + 5) {
-        let _ = accounts
-            .sign_in("ada@iz.sh", "wrong", &format!("203.0.113.{i}"))
-            .await;
-    }
-    // The owner, from a client of their own, still gets in.
-    accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-/// The client bucket is the one that caps the Argon2 work, and it does refuse.
-#[tokio::test]
-async fn sign_in_attempts_are_rate_limited_per_client() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let allowance = allowance(&accounts).await;
-    for i in 0..allowance {
-        let _ = accounts
-            .sign_in(&format!("nobody{i}@iz.sh"), "wrong", "203.0.113.9")
-            .await;
-    }
-    // Refused before any Argon2 work, whatever address it asks about.
-    assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "tide-tables-1892", "203.0.113.9")
-            .await,
-        Err(AccountError::RateLimited)
-    ));
-}
-
-/// `/join/<token>` runs a full Argon2 hash on every miss, so the guess rate has
-/// to be capped on the client — a bucket keyed on the presented token would be
-/// fresh for every guess and would never fire.
-#[tokio::test]
-async fn link_redemption_is_rate_limited_per_client() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let allowance = allowance(&accounts).await;
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    for i in 0..allowance {
-        let bogus = format!("{i:032x}");
-        assert!(matches!(
-            accounts
-                .redeem_signin_link(&bogus, "sextant-and-chart", "203.0.113.9")
-                .await,
-            Err(AccountError::Rejected)
-        ));
-    }
-    // Even the real link is refused now, from that client.
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(
-                invitation.token.expose(),
-                "sextant-and-chart",
-                "203.0.113.9"
-            )
-            .await,
-        Err(AccountError::RateLimited)
-    ));
-    // And the person on another machine is unaffected.
-    accounts
-        .redeem_signin_link(
-            invitation.token.expose(),
-            "sextant-and-chart",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap();
-}
-
-/// A signed-in browser left unattended is still a guessing oracle on the
-/// current password, and still 19 MiB of hashing per try.
-#[tokio::test]
-async fn changing_a_password_is_rate_limited_per_client() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let allowance = allowance(&accounts).await;
-    for _ in 0..allowance {
-        let _ = accounts
-            .change_password(&admin.id, "not-it", "chronometer-1761", "203.0.113.9")
-            .await;
-    }
-    assert!(matches!(
-        accounts
-            .change_password(
-                &admin.id,
-                "tide-tables-1892",
-                "chronometer-1761",
-                "203.0.113.9"
-            )
-            .await,
-        Err(AccountError::RateLimited)
-    ));
-}
-
-#[tokio::test]
-async fn a_successful_sign_in_clears_the_bucket() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let allowance = allowance(&accounts).await;
-    for _ in 0..(allowance - 1) {
-        let _ = accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await;
-    }
-    accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-    // Someone who mistypes and then gets it right is not left at the edge.
-    assert!(matches!(
-        accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-/// The allowance is the workspace's number, not a const's: lowered to three,
-/// the third miss still answers Rejected and the fourth is RateLimited — the
-/// refusal lands exactly at the configured count.
-#[tokio::test]
-async fn the_rate_allowance_is_the_configured_one() {
-    let (scratch, accounts, admin) = claimed().await;
-    scratch
-        .store
-        .set_security(
-            &admin.workspace_id,
-            3,
-            DEFAULT_RATE_WINDOW_MINUTES,
-            DEFAULT_SESSION_LIFETIME_DAYS,
-            DEFAULT_SIGNIN_LINK_LIFETIME_DAYS,
-        )
-        .await
-        .unwrap();
-
-    for _ in 0..3 {
-        assert!(matches!(
-            accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await,
-            Err(AccountError::Rejected)
-        ));
-    }
-    assert!(matches!(
-        accounts.sign_in("ada@iz.sh", "wrong", "198.51.100.7").await,
-        Err(AccountError::RateLimited)
-    ));
-    // And the stored knob is the one that decided: the save is readable back.
-    assert_eq!(allowance(&accounts).await, 3);
-}
-
-/// The lifetimes are the workspace's too. Nothing here waits them out: what
-/// an admin changes is what the next session row and the next reset link
-/// are written with, read straight back off the store.
-#[tokio::test]
-async fn the_lifetimes_are_the_configured_ones() {
-    let (scratch, accounts, _admin) = claimed().await;
-
-    let signed_in = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-    let expected =
-        OffsetDateTime::now_utc() + Duration::days(i64::from(DEFAULT_SESSION_LIFETIME_DAYS));
-    assert!(
-        (signed_in.session.expires_at - expected).abs() < Duration::minutes(1),
-        "the session was not written with the default lifetime"
-    );
-
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let link_expiry = newest_link_expiry(&scratch).await;
-    let expected =
-        OffsetDateTime::now_utc() + Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS));
-    assert!(
-        (link_expiry - expected).abs() < Duration::minutes(1),
-        "the link was not written with the default lifetime"
-    );
-
-    scratch
-        .store
-        .set_security(
-            &signed_in.user.workspace_id,
-            DEFAULT_RATE_LIMIT_ATTEMPTS,
-            DEFAULT_RATE_WINDOW_MINUTES,
-            30,
-            2,
-        )
-        .await
-        .unwrap();
-
-    let signed_in = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.8")
-        .await
-        .unwrap();
-    let expected = OffsetDateTime::now_utc() + Duration::days(30);
-    assert!(
-        (signed_in.session.expires_at - expected).abs() < Duration::minutes(1),
-        "the session ignored the workspace's session lifetime"
-    );
-
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let link_expiry = newest_link_expiry(&scratch).await;
-    let expected = OffsetDateTime::now_utc() + Duration::days(2);
-    assert!(
-        (link_expiry - expected).abs() < Duration::minutes(1),
-        "the link ignored the workspace's link lifetime"
-    );
-}
-
-/// The `expires_at` of the newest stored sign-in link, read the way it sits
-/// on disk.
-async fn newest_link_expiry(scratch: &Scratch) -> OffsetDateTime {
-    let conn = raw_conn(scratch).await;
-    let mut rows = conn
-        .query(
-            "SELECT expires_at FROM signin_link ORDER BY created_at DESC LIMIT 1",
-            (),
-        )
-        .await
-        .unwrap();
-    let raw: String = rows
-        .next()
-        .await
-        .unwrap()
-        .expect("a reset was asked, so a link exists")
-        .get(0)
-        .unwrap();
-    OffsetDateTime::parse(&raw, &time::format_description::well_known::Rfc3339).unwrap()
-}
-
-#[tokio::test]
-async fn changing_a_password_signs_out_every_device() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let first = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-    let second = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.8")
-        .await
-        .unwrap();
-    assert!(
-        accounts
-            .authenticate(first.session_token.expose())
-            .await
-            .unwrap()
-            .is_some()
-    );
-
-    // The baseline is read from the store, not from `second`: sign_in hands
-    // back the user it fetched before marking, one arrival stale.
-    let seen = accounts
-        .store()
-        .user(&admin.id)
-        .await
-        .unwrap()
-        .unwrap()
-        .last_signed_in_at
-        .unwrap();
-    let fresh = accounts
-        .change_password(
-            &admin.id,
-            "tide-tables-1892",
-            "chronometer-1761",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap();
-    assert!(
-        fresh.user.last_signed_in_at.unwrap() > seen,
-        "changing the password is presence"
-    );
-
-    for old in [&first, &second] {
-        assert!(
-            accounts
-                .authenticate(old.session_token.expose())
-                .await
-                .unwrap()
-                .is_none(),
-            "the pane promises this"
-        );
-    }
-    assert!(
-        accounts
-            .authenticate(fresh.session_token.expose())
-            .await
-            .unwrap()
-            .is_some()
-    );
-    accounts
-        .sign_in("ada@iz.sh", "chronometer-1761", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn changing_a_password_needs_the_current_one_and_obeys_the_rules() {
-    let (_scratch, accounts, admin) = claimed().await;
-    assert!(matches!(
-        accounts
-            .change_password(&admin.id, "not-it", "chronometer-1761", "198.51.100.7")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-    assert!(matches!(
-        accounts
-            .change_password(&admin.id, "tide-tables-1892", "short", "198.51.100.7")
-            .await,
-        Err(AccountError::Password(PasswordProblem::TooShort))
-    ));
-    // The old password still works after both refusals.
-    accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn the_old_password_stops_working_after_a_change() {
-    let (_scratch, accounts, admin) = claimed().await;
-    accounts
-        .change_password(
-            &admin.id,
-            "tide-tables-1892",
-            "chronometer-1761",
-            "198.51.100.7",
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-    accounts
-        .sign_in("ada@iz.sh", "chronometer-1761", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn signing_out_ends_that_browser_only() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    let laptop = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-    let phone = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.8")
-        .await
-        .unwrap();
-
-    accounts
-        .sign_out(laptop.session_token.expose())
-        .await
-        .unwrap();
-    assert!(
-        accounts
-            .authenticate(laptop.session_token.expose())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        accounts
-            .authenticate(phone.session_token.expose())
-            .await
-            .unwrap()
-            .is_some()
-    );
-    // Signing out an unknown token is not an error.
-    accounts.sign_out(&"0".repeat(32)).await.unwrap();
-}
-
-#[tokio::test]
-async fn an_address_can_only_be_invited_once() {
-    let (_scratch, accounts, admin) = claimed().await;
-    accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .invite(&admin, "GRACE@iz.sh", "Grace again", Role::Member)
-            .await,
-        Err(AccountError::AddressTaken)
-    ));
-    assert!(matches!(
-        accounts
-            .invite(&admin, "ada@iz.sh", "Ada again", Role::Member)
-            .await,
-        Err(AccountError::AddressTaken)
-    ));
-}
-
-// -- board ------------------------------------------------------------------
-
 use iz_core::board::{BoardReads, BoardView, Moved, Person, load};
 use iz_core::store::NewTask;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use time::Date;
 use time::macros::date;
 
-/// Wraps the real store and counts the round trips a board costs.
-///
-/// This is the whole point of [`BoardReads`] being its own trait: the guard
-/// against N+1 is tested by its effect — the count does not move when the board
-/// gets bigger — rather than by reading the queries and taking their word.
+/// Counts the store reads a board load costs, whatever its size: the sweep
+/// shape is one query per surface, never one per card.
 struct CountingReads<'a> {
     inner: &'a TursoStore,
     calls: AtomicUsize,
@@ -2847,16 +1286,7 @@ async fn tasks_get_key_tails_off_their_own_id_not_a_board_counter() {
 async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
-    let mel = store
-        .create_user(NewUser {
-            workspace_id: workspace.clone(),
-            email: "mel@iz.sh".into(),
-            display_name: "Mel Duarte".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
+    let mel = member_user(store, &workspace, "mel@iz.sh", "Mel Duarte", Role::Member).await;
 
     let blocking = add_task(
         store,
@@ -3507,16 +1937,14 @@ async fn a_task_detail_carries_both_directions_of_its_dependencies() {
 async fn a_viewer_is_never_offered_as_an_assignee() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
     let store = &scratch.store;
-    let quiet = store
-        .create_user(NewUser {
-            workspace_id: workspace.clone(),
-            email: "quiet@iz.sh".into(),
-            display_name: "Quiet Reader".into(),
-            role: Role::Viewer,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
+    let quiet = member_user(
+        store,
+        &workspace,
+        "quiet@iz.sh",
+        "Quiet Reader",
+        Role::Viewer,
+    )
+    .await;
     let task = add_task(store, &workspace, "Backlog", "a task", None, &admin).await;
 
     let detail = load_detail(store, &workspace, &task)
@@ -3801,16 +2229,14 @@ async fn a_task_detail_costs_nine_queries_whatever_it_carries() {
     // out on.
     let heavy = add_task(store, &workspace, "Backlog", "heavy", None, &admin).await;
     for n in 0..20 {
-        let person = store
-            .create_user(NewUser {
-                workspace_id: workspace.clone(),
-                email: format!("member{n}@iz.sh"),
-                display_name: format!("Member {n}"),
-                role: Role::Member,
-                invited_by: None,
-            })
-            .await
-            .unwrap();
+        let person = member_user(
+            store,
+            &workspace,
+            &format!("member{n}@iz.sh"),
+            &format!("Member {n}"),
+            Role::Member,
+        )
+        .await;
         store.assign_task(&heavy, &person.id).await.unwrap();
         store
             .add_comment(&heavy, &person.id, "a note", now)
@@ -4124,21 +2550,9 @@ async fn a_deleted_card_does_not_move() {
 async fn an_orphan_row_is_refused() {
     let (scratch, workspace, _admin) = workspace_with_admin().await;
 
-    // Through the store's own API first: a user needs a workspace that exists.
-    let refused = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: "no-such-workspace".into(),
-            email: "orphan@iz.sh".into(),
-            display_name: "Orphan".into(),
-            role: Role::Member,
-            invited_by: None,
-        })
-        .await;
-    assert!(
-        refused.is_err(),
-        "a user in a workspace that does not exist was accepted"
-    );
+    // Provisioning bootstraps its own workspace, so there is no orphan user
+    // to refuse at the API: the engine half below is what proves the foreign
+    // keys are on.
 
     // And at the engine, where the pragma either fired or did not. Turso is
     // single-writer, so this gets a file of its own rather than a second handle
@@ -4633,17 +3047,14 @@ async fn an_accepted_send_stops_being_owed() {
 #[tokio::test]
 async fn a_viewer_is_never_a_recipient() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
-    let watcher = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: workspace.clone(),
-            email: "viewer@iz.sh".into(),
-            display_name: "Vera".into(),
-            role: Role::Viewer,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
+    let watcher = member_user(
+        &scratch.store,
+        &workspace,
+        "viewer@iz.sh",
+        "Vera",
+        Role::Viewer,
+    )
+    .await;
     let mate = member(&scratch.store, &workspace, "emre@iz.sh", "Emre").await;
     let task = add_task(
         &scratch.store,
@@ -4781,7 +3192,6 @@ async fn waiting(minutes: u32) -> (PathBuf, Arc<TursoStore>, String, String) {
         .set_limits(
             &workspace,
             limits.attachment_limit_bytes,
-            limits.photo_limit_bytes,
             &limits.allowed_file_types,
             minutes,
             15,
@@ -5581,17 +3991,14 @@ async fn updating_a_rule_leaves_its_identity_and_ledger_alone() {
 #[tokio::test]
 async fn a_rules_creator_audience_names_who_opened_the_card() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
-    let watcher = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: workspace.clone(),
-            email: "viewer@iz.sh".into(),
-            display_name: "Vera".into(),
-            role: Role::Viewer,
-            invited_by: None,
-        })
-        .await
-        .unwrap();
+    let watcher = member_user(
+        &scratch.store,
+        &workspace,
+        "viewer@iz.sh",
+        "Vera",
+        Role::Viewer,
+    )
+    .await;
     let task = add_task(
         &scratch.store,
         &workspace,
@@ -5636,32 +4043,6 @@ async fn a_rules_creator_audience_names_who_opened_the_card() {
 
 /// Who made an account is recorded when it is made. The first account was made
 /// by nobody, and says so rather than pointing at itself.
-#[tokio::test]
-async fn an_account_records_the_admin_who_made_it() {
-    let (scratch, ws_id, admin_id) = workspace_with_admin().await;
-
-    let owner = scratch.store.user(&admin_id).await.unwrap().unwrap();
-    assert_eq!(owner.invited_by, None, "the first account named an inviter");
-
-    let member = scratch
-        .store
-        .create_user(NewUser {
-            workspace_id: ws_id,
-            email: "grace@iz.sh".into(),
-            display_name: "Grace".into(),
-            role: Role::Member,
-            invited_by: Some(admin_id.clone()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(member.invited_by.as_deref(), Some(admin_id.as_str()));
-
-    // And it survives a reread, which is the part a column that is only set in
-    // the INSERT would fail.
-    let reread = scratch.store.user(&member.id).await.unwrap().unwrap();
-    assert_eq!(reread.invited_by.as_deref(), Some(admin_id.as_str()));
-}
-
 #[tokio::test]
 async fn a_file_lands_in_the_storage_tree_and_comes_back_byte_for_byte() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
@@ -6228,8 +4609,8 @@ async fn an_account_event_rides_the_feed_without_a_task() {
     store
         .record_event(
             Some(&admin),
-            &ActivityKind::SignedIn,
-            "from 198.51.100.7",
+            &ActivityKind::RoleChanged,
+            "Ada is now a viewer",
             t0 + Duration::seconds(1),
         )
         .await
@@ -6244,13 +4625,13 @@ async fn an_account_event_rides_the_feed_without_a_task() {
         )
         .await
         .unwrap();
-    // The sign-in sits newest with no task on it; the task's own lines below
-    // still name theirs.
-    assert_eq!(feed[0].kind, ActivityKind::SignedIn);
+    // The account moment sits newest with no task on it; the task's own
+    // lines below still name theirs.
+    assert_eq!(feed[0].kind, ActivityKind::RoleChanged);
     assert_eq!(feed[0].task_id, None);
     assert_eq!(feed[0].title, None);
     assert_eq!(feed[0].actor_name.as_deref(), Some("Ada"));
-    assert_eq!(feed[0].detail, "from 198.51.100.7");
+    assert_eq!(feed[0].detail, "Ada is now a viewer");
     assert!(
         feed.iter()
             .any(|line| line.task_id.as_deref() == Some(task.as_str())),
@@ -7111,19 +5492,14 @@ async fn a_write_that_failed_announces_nothing() {
 /// screen that quietly stops updating.
 #[test]
 fn every_writing_method_announces_or_is_named_here() {
-    // Rate-limit bookkeeping. No surface renders an auth attempt, and
-    // announcing one would wake every connected client on every failed
-    // sign-in — traffic bought for a screen that would look identical.
-    const SILENT_ON_PURPOSE: &[&str] = &[
-        "record_auth_attempt",
-        "clear_auth_attempts",
-        "prune_auth_attempts",
-        // A lease is one pass saying "mine" for the length of a send, and the
-        // write that follows it — accepted, refused, held — announces. Saying
-        // so twice would wake every open queue screen on the way past a value
-        // that is about to be overwritten.
-        "claim_sends_owed",
-    ];
+    // The delivery passes' lease on due rows. Claiming pushes
+    // `next_attempt_at` out of the window so a concurrent pass cannot take
+    // the same row — engine bookkeeping, not a surface change — and the
+    // visible transitions (accepted, refused, deferred, requeued) each
+    // announce for themselves when they commit. Announcing the lease as
+    // well would wake every connected client on every sweep for a screen
+    // that would look identical.
+    const SILENT_ON_PURPOSE: &[&str] = &["claim_sends_owed"];
 
     let source = include_str!("../src/store/turso_store.rs");
     let start = source
@@ -7144,6 +5520,7 @@ fn every_writing_method_announces_or_is_named_here() {
             .next()
             .expect("a method with no name");
         let writes = chunk.contains("INSERT INTO")
+            || chunk.contains("INSERT OR ")
             || chunk.contains("UPDATE ")
             || chunk.contains("DELETE FROM");
         if writes && !chunk.contains("announce(") && !SILENT_ON_PURPOSE.contains(&name) {
@@ -7547,67 +5924,6 @@ async fn reconcile_carries_a_live_shaped_database_onto_the_declared_schema() {
 /// The migration the security knobs exist for: a database of the shape the
 /// first migration builds — everything an install made before
 /// `0002_security_knobs.sql` shipped — comes up through the store's own
-/// repair path, and its workspace lands on the defaults the migration and
-/// the copy map both backfill, accounts and tasks intact.
-#[tokio::test]
-async fn reconcile_backfills_the_security_knobs_on_a_first_migration_database() {
-    let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::new()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("iz.db").to_str().unwrap().to_string();
-
-    let db = turso::Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
-    conn.execute_batch(include_str!("../migrations/0001_init.sql"))
-        .await
-        .unwrap();
-    let now = "2026-09-01T09:00:00Z";
-    conn.execute_batch(&format!(
-        "INSERT INTO workspace (id, name, created_at) VALUES ('W1', 'Dizey', '{now}');
-         INSERT INTO user (id, workspace_id, email, display_name, role, password_hash, created_at) \
-             VALUES ('U1', 'W1', 'ada@iz.sh', 'Ada', 'admin', 'argon2$hash', '{now}');
-         INSERT INTO workspace_owner (singleton, user_id, claimed_at) VALUES (1, 'U1', '{now}');"
-    ))
-    .await
-    .unwrap();
-    drop(conn);
-    drop(db);
-
-    // Opening the store is the boot the upgrade happens on: the stale shape
-    // is reconciled before any handle is kept.
-    let store = TursoStore::open(&path, &dir.join("storage"))
-        .await
-        .expect("the store refused a first-migration database");
-
-    let ws = store.workspace().await.unwrap().unwrap();
-    assert_eq!(ws.rate_limit_attempts, DEFAULT_RATE_LIMIT_ATTEMPTS);
-    assert_eq!(ws.rate_window_minutes, DEFAULT_RATE_WINDOW_MINUTES);
-    assert_eq!(ws.session_lifetime_days, DEFAULT_SESSION_LIFETIME_DAYS);
-    assert_eq!(
-        ws.signin_link_lifetime_days,
-        DEFAULT_SIGNIN_LINK_LIFETIME_DAYS
-    );
-    assert_eq!(ws.name, "Dizey", "the workspace row itself was lost");
-    assert_eq!(
-        scalar(&path, "SELECT COUNT(*) FROM user").await,
-        1,
-        "the admin account did not come across"
-    );
-
-    // A database already on the new shape is not reconciled again: opening
-    // twice in a row is ordinary, and the knobs keep what a save wrote.
-    store.set_security("W1", 7, 30, 21, 3).await.unwrap();
-    drop(store);
-    let second = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
-    let ws = second.workspace().await.unwrap().unwrap();
-    assert_eq!(ws.rate_limit_attempts, 7, "a second boot reset the knobs");
-    assert_eq!(ws.rate_window_minutes, 30);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The rebuild the tag map exists for: a database that already carries user
-/// tags hands every one of them across untouched — same id, same board, same
-/// name, same order, same default mark — and every task still points at the
 /// tag it pointed at before. Two real rebuilds wiped exactly this.
 #[tokio::test]
 async fn reconcile_preserves_user_tags_and_the_tasks_that_wear_them() {
@@ -7871,7 +6187,6 @@ async fn a_rebuild_keeps_a_window_the_admin_already_set() {
         .set_limits(
             &workspace,
             limits.attachment_limit_bytes,
-            limits.photo_limit_bytes,
             &limits.allowed_file_types,
             17,
             15,
@@ -8582,7 +6897,6 @@ async fn set_reminder_lead(store: &TursoStore, workspace_id: &str, minutes: u32)
         .set_limits(
             workspace_id,
             limits.attachment_limit_bytes,
-            limits.photo_limit_bytes,
             &limits.allowed_file_types,
             limits.mail_batch_minutes,
             minutes,
@@ -9137,43 +7451,6 @@ async fn the_reminder_never_lands_at_or_after_the_deadline() {
 }
 
 /// Setting the password back to what it already is is refused by name, and a
-/// refused change leaves every session — and the old password — standing.
-#[tokio::test]
-async fn a_change_back_to_the_same_password_is_refused_and_signs_nobody_out() {
-    let (_scratch, accounts, admin) = claimed().await;
-    // A second browser holds a session the refused change must not touch.
-    let other = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.8")
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .change_password(
-                &admin.id,
-                "tide-tables-1892",
-                "tide-tables-1892",
-                "198.51.100.7"
-            )
-            .await,
-        Err(AccountError::Password(PasswordProblem::IsCurrent))
-    ));
-    // The other browser is still signed in, and the old password still works.
-    assert!(
-        accounts
-            .authenticate(other.session_token.expose())
-            .await
-            .unwrap()
-            .is_some()
-    );
-    accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-/// The board search keeps the cards whose key or title answers the query —
-/// case-insensitively, each in the column it already sits in — and drops
-/// the rest.
 #[tokio::test]
 async fn board_search_matches_keys_and_titles_in_place() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
@@ -9257,417 +7534,6 @@ async fn board_search_matches_keys_and_titles_in_place() {
 // ---------------------------------------------------------------------------
 
 /// Every reset token queued for the address, oldest first. The newest ask
-/// retires the earlier links, so a test that asks twice needs both.
-async fn queued_reset_tokens(store: &std::sync::Arc<dyn Store>, email: &str) -> Vec<String> {
-    let sends = store
-        .mail_queue(50, iz_core::store::FeedPage::Newest)
-        .await
-        .unwrap();
-    let mut tokens = Vec::new();
-    for send in sends {
-        if send.kind != SendKind::Notice || send.recipient != email {
-            continue;
-        }
-        let Some(body) = send.body else { continue };
-        let Some((_, rest)) = body.rsplit_once("/reset/") else {
-            continue;
-        };
-        if let Some(token) = rest.split_whitespace().next() {
-            tokens.push(token.to_string());
-        }
-    }
-    tokens
-}
-
-/// The reset token out of the newest notice queued for the address — the mail
-/// is the token's only carrier, so the test reads it like a recipient would.
-async fn queued_reset_token(store: &std::sync::Arc<dyn Store>, email: &str) -> Option<String> {
-    queued_reset_tokens(store, email).await.pop()
-}
-
-#[tokio::test]
-async fn a_reset_link_is_mailed_only_to_a_known_address() {
-    let (dir, store, workspace, _admin) = shared().await;
-    let _grace = member(&store, &workspace, "grace@iz.sh", "Grace").await;
-    let store = store as std::sync::Arc<dyn Store>;
-    let accounts = Accounts::new(store.clone(), "https://iz.sh");
-
-    // One ask for an address with an account, one without: the caller sees
-    // two identical answers.
-    accounts
-        .request_password_reset("grace@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    accounts
-        .request_password_reset("nobody@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-
-    let link = scalar(
-        &dir.join("iz.db").to_string_lossy(),
-        "SELECT COUNT(*) FROM signin_link WHERE kind = 'reset'",
-    )
-    .await;
-    assert_eq!(link, 1, "only the known address gets a link");
-    assert!(
-        queued_reset_token(&store, "grace@iz.sh").await.is_some(),
-        "the known address was mailed a reset link"
-    );
-    assert!(
-        queued_reset_token(&store, "nobody@iz.sh").await.is_none(),
-        "the unknown address was mailed nothing"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn a_reset_redeems_and_signs_the_other_browsers_out() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    // A second browser, signed in before the reset.
-    let before = accounts
-        .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.7")
-        .await
-        .unwrap();
-
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let token = queued_reset_token(accounts.store(), "ada@iz.sh")
-        .await
-        .expect("no reset mail queued");
-
-    let after = accounts
-        .redeem_reset_link(&token, "chronometer-1761", "203.0.113.10")
-        .await
-        .unwrap();
-
-    // The old password is gone, the new one signs in.
-    assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.11")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-    accounts
-        .sign_in("ada@iz.sh", "chronometer-1761", "198.51.100.11")
-        .await
-        .unwrap();
-    // The browser that was signed in before the reset is out; the redeeming
-    // browser's own session is alive.
-    assert!(matches!(
-        accounts
-            .authenticate(&before.session_token.expose())
-            .await
-            .unwrap(),
-        None
-    ));
-    assert!(matches!(
-        accounts
-            .authenticate(&after.session_token.expose())
-            .await
-            .unwrap(),
-        Some(_)
-    ));
-}
-
-#[tokio::test]
-async fn a_reset_link_only_redeems_once() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let token = queued_reset_token(accounts.store(), "ada@iz.sh")
-        .await
-        .expect("no reset mail queued");
-
-    accounts
-        .redeem_reset_link(&token, "chronometer-1761", "203.0.113.10")
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .redeem_reset_link(&token, "chronometer-1761", "203.0.113.10")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-#[tokio::test]
-async fn an_expired_reset_link_is_refused() {
-    let (scratch, accounts, admin) = claimed().await;
-    let token = iz_core::auth::Token::mint();
-    scratch
-        .store
-        .create_signin_link(
-            &admin.id,
-            &token.hash(),
-            time::OffsetDateTime::now_utc() - time::Duration::seconds(1),
-            iz_core::store::LinkKind::Reset,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .redeem_reset_link(token.expose(), "chronometer-1761", "203.0.113.9")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-#[tokio::test]
-async fn each_link_redeems_only_on_its_own_screen() {
-    let (scratch, accounts, admin) = claimed().await;
-    // An invitation is not a reset: it must not spend itself where the other
-    // browsers get signed out.
-    let join = iz_core::auth::Token::mint();
-    scratch
-        .store
-        .create_signin_link(
-            &admin.id,
-            &join.hash(),
-            time::OffsetDateTime::now_utc()
-                + time::Duration::days(i64::from(DEFAULT_SIGNIN_LINK_LIFETIME_DAYS)),
-            iz_core::store::LinkKind::Join,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .redeem_reset_link(&join.expose(), "chronometer-1761", "203.0.113.9")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-    // And a reset link is not an invitation.
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let reset = queued_reset_token(accounts.store(), "ada@iz.sh")
-        .await
-        .expect("no reset mail queued");
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(&reset, "chronometer-1761", "203.0.113.9")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-#[tokio::test]
-async fn a_second_reset_request_retires_the_first_link() {
-    let (_scratch, accounts, _admin) = claimed().await;
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let tokens = queued_reset_tokens(accounts.store(), "ada@iz.sh").await;
-    assert_eq!(tokens.len(), 2, "each ask queued its own mail");
-
-    // The first link died when the second was minted — before the second was
-    // redeemed — and it is refused like any other dead link.
-    assert!(matches!(
-        accounts
-            .redeem_reset_link(&tokens[0], "chronometer-1761", "203.0.113.10")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-
-    // The newest link is the one that works, and it really changes the
-    // password.
-    accounts
-        .redeem_reset_link(&tokens[1], "chronometer-1761", "203.0.113.10")
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .sign_in("ada@iz.sh", "tide-tables-1892", "198.51.100.11")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-    accounts
-        .sign_in("ada@iz.sh", "chronometer-1761", "198.51.100.11")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn a_second_invitation_retires_the_first_link() {
-    let (_scratch, accounts, admin) = claimed().await;
-    let first = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    let second = accounts
-        .resend_invitation(&admin, &first.user.id)
-        .await
-        .unwrap();
-    assert_ne!(first.token.expose(), second.token.expose());
-
-    // The first link died when the second was minted.
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(first.token.expose(), "sextant-and-chart", "198.51.100.7")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-    // The second sets the password it was always going to.
-    let signed_in = accounts
-        .redeem_signin_link(second.token.expose(), "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-    assert_eq!(signed_in.user.id, first.user.id);
-    accounts
-        .sign_in("grace@iz.sh", "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn a_retired_link_stays_retired_after_the_newer_one_redeems() {
-    let (_scratch, accounts, admin) = claimed().await;
-
-    // Reset: redeeming the newest mail must not wake the retired one.
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let resets = queued_reset_tokens(accounts.store(), "ada@iz.sh").await;
-    assert_eq!(resets.len(), 2);
-    accounts
-        .redeem_reset_link(&resets[1], "chronometer-1761", "203.0.113.10")
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .redeem_reset_link(&resets[0], "harbor-and-pilot-1812", "203.0.113.10")
-            .await,
-        Err(AccountError::Rejected)
-    ));
-
-    // Join: the same for a resent invitation.
-    let first = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    let second = accounts
-        .resend_invitation(&admin, &first.user.id)
-        .await
-        .unwrap();
-    accounts
-        .redeem_signin_link(second.token.expose(), "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-    assert!(matches!(
-        accounts
-            .redeem_signin_link(
-                first.token.expose(),
-                "harbor-and-pilot-1812",
-                "198.51.100.7"
-            )
-            .await,
-        Err(AccountError::Rejected)
-    ));
-}
-
-#[tokio::test]
-async fn a_fresh_link_of_one_kind_leaves_the_other_kinds_link_alone() {
-    let (scratch, accounts, admin) = claimed().await;
-
-    // An invited member who has not signed in can still be mailed a reset:
-    // both links are live, and neither mint retires the other.
-    let invitation = accounts
-        .invite(&admin, "grace@iz.sh", "Grace", Role::Member)
-        .await
-        .unwrap();
-    accounts
-        .request_password_reset("grace@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let join = scratch
-        .store
-        .signin_link_by_hash(&invitation.token.hash())
-        .await
-        .unwrap()
-        .expect("the invitation link is stored");
-    assert!(
-        join.is_usable(OffsetDateTime::now_utc()),
-        "the reset mint retired the invitation"
-    );
-
-    // And the other way round: the admin holds a live reset; minting her an
-    // invitation over it leaves the reset spendable, and both links open
-    // their own screens.
-    accounts
-        .request_password_reset("ada@iz.sh", "203.0.113.9")
-        .await
-        .unwrap();
-    let resent = accounts.resend_invitation(&admin, &admin.id).await.unwrap();
-    let reset = queued_reset_token(accounts.store(), "ada@iz.sh")
-        .await
-        .expect("no reset mail queued");
-    accounts
-        .redeem_reset_link(&reset, "chronometer-1761", "203.0.113.10")
-        .await
-        .unwrap();
-    accounts
-        .redeem_signin_link(resent.token.expose(), "sextant-and-chart", "198.51.100.7")
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn reset_asks_are_rate_limited_per_client_and_silenced_per_address() {
-    let (dir, store, workspace, _admin) = shared().await;
-    let _grace = member(&store, &workspace, "grace@iz.sh", "Grace").await;
-    let store = store as std::sync::Arc<dyn Store>;
-    let accounts = Accounts::new(store.clone(), "https://iz.sh");
-    let allowance = accounts
-        .store()
-        .workspace()
-        .await
-        .unwrap()
-        .unwrap()
-        .rate_limit_attempts;
-
-    // One machine asks allowance times: every ask answers the same, and the
-    // next from that machine is refused by name.
-    for _ in 0..allowance {
-        accounts
-            .request_password_reset("grace@iz.sh", "203.0.113.9")
-            .await
-            .unwrap();
-    }
-    assert!(matches!(
-        accounts
-            .request_password_reset("grace@iz.sh", "203.0.113.9")
-            .await,
-        Err(AccountError::RateLimited)
-    ));
-    // A fresh client hammering one address gets the same answer as ever, and
-    // the mailbox stays quiet: the address bucket caps the mail, not the
-    // answer.
-    accounts
-        .request_password_reset("grace@iz.sh", "203.0.113.201")
-        .await
-        .unwrap();
-    let queued = scalar(
-        &dir.join("iz.db").to_string_lossy(),
-        "SELECT COUNT(*) FROM mail_send WHERE kind = 'notice'",
-    )
-    .await;
-    assert_eq!(queued, allowance as i64, "the flood minted no mail");
-}
-
 #[tokio::test]
 async fn a_delivered_reminder_writes_the_reminded_event() {
     let (dir, store, workspace, admin) = shared().await;
@@ -10097,4 +7963,208 @@ async fn a_window_that_cannot_prove_text_keeps_the_octet_stream_bucket() {
         store.attachment("FK").await.unwrap().unwrap().mime_type,
         "application/octet-stream"
     );
+}
+
+/// SSO provisioning: the first sign-in is the whole setup, and every sign-in
+/// after refreshes the row the provider vouches for.
+#[tokio::test]
+async fn a_first_provision_makes_a_member_and_builds_the_workspace() {
+    let scratch = Scratch::open().await;
+    assert!(scratch.store.workspace().await.unwrap().is_none());
+    let user = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", false)
+        .await
+        .unwrap();
+    assert_eq!(user.role, Role::Member);
+    assert!(!user.disabled);
+    assert_eq!(user.oidc_sub.as_deref(), Some("sub-ada"));
+    assert!(user.last_signed_in_at.is_some());
+    assert!(scratch.store.workspace().await.unwrap().is_some());
+    assert!(
+        scratch
+            .store
+            .board(&user.workspace_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // The owner is unclaimed: no admin has signed in.
+    assert!(scratch.store.owner().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_admin_provision_claims_the_owner_once() {
+    let scratch = Scratch::open().await;
+    let first = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    assert_eq!(first.role, Role::Admin);
+    assert_eq!(scratch.store.owner().await.unwrap().unwrap().id, first.id);
+    // A second admin neither steals the owner nor loses their own flag.
+    let second = scratch
+        .store
+        .provision_user("sub-bo", "bo@iz.sh", "Bo", true)
+        .await
+        .unwrap();
+    assert_eq!(second.role, Role::Admin);
+    assert_eq!(scratch.store.owner().await.unwrap().unwrap().id, first.id);
+}
+
+#[tokio::test]
+async fn a_matching_address_claims_its_row_preserving_id_role_and_prefs() {
+    let scratch = Scratch::open().await;
+    let admin = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    // A row from before SSO: no sub, a Viewer role, its own preferences.
+    let conn = raw_conn(&scratch).await;
+    conn.execute(
+        "INSERT INTO user (id, workspace_id, email, display_name, role, disabled, timezone, theme, \
+         language, ui, created_at) \
+         VALUES ('U9', ?1, 'Grace@Iz.Sh', 'Gracie', 'viewer', 0, 'UTC+03:00', 'dark', 'tr', \
+         'ledger', '2026-01-01T00:00:00Z')",
+        turso::params![admin.workspace_id.clone()],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let claimed = scratch
+        .store
+        .provision_user("sub-grace", "grace@iz.sh", "Grace", false)
+        .await
+        .unwrap();
+    assert_eq!(claimed.id, "U9");
+    assert_eq!(claimed.role, Role::Viewer);
+    assert_eq!(claimed.oidc_sub.as_deref(), Some("sub-grace"));
+    assert_eq!(claimed.display_name, "Grace");
+    assert_eq!(claimed.timezone, "UTC+03:00");
+    assert!(claimed.last_signed_in_at.is_some());
+}
+
+#[tokio::test]
+async fn a_returning_sign_in_refreshes_what_the_provider_owns() {
+    let scratch = Scratch::open().await;
+    let first = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    let second = scratch
+        .store
+        .provision_user("sub-ada", "ADA@IZ.SH", "Ada Lovelace", true)
+        .await
+        .unwrap();
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.email, "ada@iz.sh");
+    assert_eq!(second.display_name, "Ada Lovelace");
+    assert!(second.last_signed_in_at.is_some());
+}
+
+#[tokio::test]
+async fn losing_the_admin_flag_drops_an_admin_to_member_and_nothing_else() {
+    let scratch = Scratch::open().await;
+    let admin = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    let demoted = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", false)
+        .await
+        .unwrap();
+    assert_eq!(demoted.id, admin.id);
+    assert_eq!(demoted.role, Role::Member);
+    // A Viewer the provider no longer calls admin keeps the role they have.
+    scratch
+        .store
+        .set_role(&demoted.id, Role::Viewer)
+        .await
+        .unwrap();
+    let still = scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", false)
+        .await
+        .unwrap();
+    assert_eq!(still.role, Role::Viewer);
+}
+#[tokio::test]
+async fn a_provision_announces_only_when_the_row_changes() {
+    let scratch = Scratch::open().await;
+    let mut rx = scratch.store.subscribe();
+    scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    // The first sight is a member change.
+    assert!(announced(&mut rx).iter().any(|k| k == "members"));
+    // The same person again with nothing new is not — provisioning runs on
+    // every request, and a louder Members would re-render every watching tab
+    // on each of them.
+    scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
+        .await
+        .unwrap();
+    assert!(announced(&mut rx).is_empty());
+    // A provider-side rename is a change again.
+    scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada Lovelace", true)
+        .await
+        .unwrap();
+    assert!(announced(&mut rx).iter().any(|k| k == "members"));
+    // And so is losing the admin flag.
+    scratch
+        .store
+        .provision_user("sub-ada", "ada@iz.sh", "Ada Lovelace", false)
+        .await
+        .unwrap();
+    assert!(announced(&mut rx).iter().any(|k| k == "members"));
+}
+
+#[tokio::test]
+async fn set_user_disabled_round_trips() {
+    let (scratch, _, admin_id) = workspace_with_admin().await;
+    scratch
+        .store
+        .set_user_disabled(&admin_id, true)
+        .await
+        .unwrap();
+    assert!(
+        scratch
+            .store
+            .user(&admin_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
+    scratch
+        .store
+        .set_user_disabled(&admin_id, false)
+        .await
+        .unwrap();
+    assert!(
+        !scratch
+            .store
+            .user(&admin_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
+    assert!(matches!(
+        scratch
+            .store
+            .set_user_disabled(&Ulid::new().to_string(), true)
+            .await,
+        Err(StoreError::NotFound)
+    ));
 }

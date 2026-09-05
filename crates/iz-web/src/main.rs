@@ -1,4 +1,3 @@
-use iz_core::accounts::Accounts;
 use iz_core::store::TursoStore;
 use std::sync::Arc;
 use topcoat::Result;
@@ -92,10 +91,9 @@ async fn main() {
     };
     println!("iz    {stylesheet}");
 
-    // Attachments and profile photos are files beside the database now, not
-    // bytes in a table. The tree is made before the store opens, because the
-    // reconcile an old database triggers on the way extracts every blob into
-    // it.
+    // Attachments are files beside the database now, not bytes in a table.
+    // The tree is made before the store opens, because the reconcile an old
+    // database triggers on the way extracts every blob into it.
     ensure_storage_tree(&config.storage);
 
     // One process per database file: Turso is a single-writer engine and a
@@ -106,9 +104,28 @@ async fn main() {
         .await
         .expect("failed to open the database");
     let store: Arc<dyn iz_core::store::Store> = Arc::new(store);
-    // The address mail links carry when no admin has set one in Settings.
-    let accounts = Accounts::new(store.clone(), config.listen_url());
-
+    // The key sealing the OIDC session cookies, kept beside the database as
+    // `iz.key` — one key per deployment, never in the repository.
+    let key_path = config
+        .database
+        .parent()
+        .map(|parent| parent.join("iz.key"))
+        .unwrap_or_else(|| std::path::PathBuf::from("iz.key"));
+    let cookie_key = match iz_core::store::secret::load_or_create_key(&key_path) {
+        Ok(key) => key,
+        Err(problem) => {
+            eprintln!("iz: could not load {}: {problem}", key_path.display());
+            std::process::exit(2);
+        }
+    };
+    let oidc = iz_client::Config {
+        issuer: config.oidc.issuer.clone(),
+        client_id: config.oidc.client_id.clone(),
+        client_secret: config.oidc.client_secret.clone(),
+        redirect_uri: config.oidc.redirect_uri.clone(),
+        cookie_name: "iz_session".to_string(),
+        cookie_key,
+    };
     // The engine is always built, because a sender can appear at any moment:
     // an admin fills the panel in and the next sweep sends what was held. It
     // holds one connection pool, rebuilt only when the settings behind it
@@ -124,26 +141,25 @@ async fn main() {
     // being waited out. See `iz_web::live::Shutdown`.
     let (stop, stopping) = tokio::sync::watch::channel(false);
 
-    let router = Router::builder()
-        .discover()
-        .layer(
-            BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
-                .at("/files"),
-        )
-        .layer(
-            BodyLimit::max(iz_web::settings::WIDEST_PHOTO_MB as usize * 1024 * 1024)
-                .at("/api/profile_photo"),
-        )
-        .cookies()
-        .assets(bundle)
-        .app_context(accounts)
-        .app_context(iz_web::photo::PhotoStamps::default())
-        .app_context(iz_web::live::LiveWindow(std::time::Duration::from_secs(
-            config.live_seconds,
-        )))
-        .app_context(iz_web::live::Shutdown(stopping))
-        .app_context(iz_web::server::Mail::sending(engine.clone()))
-        .build();
+    let router = iz_client::mount(
+        Router::builder()
+            .discover()
+            .layer(
+                BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
+                    .at("/files"),
+            )
+            .cookies()
+            .assets(bundle),
+        oidc,
+    )
+    .app_context(store.clone())
+    .app_context(config.clone())
+    .app_context(iz_web::live::LiveWindow(std::time::Duration::from_secs(
+        config.live_seconds,
+    )))
+    .app_context(iz_web::live::Shutdown(stopping))
+    .app_context(iz_web::server::Mail::sending(engine.clone()))
+    .build();
 
     // `topcoat::start` binds HOST/PORT from the environment; the listen
     // address is a config/iz.toml decision, so the listener is bound
@@ -165,8 +181,8 @@ async fn main() {
 }
 
 /// Makes the storage tree the store keeps binary files in, if it is not
-/// there: `<storage>/attachments` and `<storage>/photos`, private to the user
-/// the process runs as. A directory that exists is left exactly as it is; one
+/// there: `<storage>/attachments`, private to the user the process runs as.
+/// A directory that exists is left exactly as it is; one
 /// that cannot be made stops the boot — the failure this prevents is a
 /// rebuild extracting blobs into a tree that is not there, and it is better
 /// met before anything is opened.
@@ -187,7 +203,7 @@ fn ensure_storage_tree(storage: &std::path::Path) {
         }
     };
     make(storage);
-    for name in ["attachments", "photos"] {
+    for name in ["attachments"] {
         make(&storage.join(name));
     }
 }
@@ -226,10 +242,7 @@ async fn shutdown_signal() {
 /// waiting out somebody else's timer. And an hour is the longest it will sleep
 /// regardless, so a clock jump or a row written by something other than this
 /// process is picked up on its own.
-async fn sweep(
-    engine: std::sync::Arc<iz_core::MailEngine>,
-    store: Arc<dyn iz_core::store::Store>,
-) {
+async fn sweep(engine: std::sync::Arc<iz_core::MailEngine>, store: Arc<dyn iz_core::store::Store>) {
     /// Enough that a morning's backlog clears in a few passes, few enough that
     /// one pass cannot sit on the mail server for minutes.
     const PER_PASS: u32 = 50;

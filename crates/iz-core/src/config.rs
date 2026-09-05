@@ -11,11 +11,11 @@
 //! Development still needs to be one command, so the *absence* of
 //! `config/iz.toml` is the opt-in that takes the development defaults: the
 //! app writes the file itself, with those defaults in it and comments saying
-//! what each key does, and starts. That is opt-in on purpose too — it only
-//! ever happens once, because the second boot finds the file it wrote the
-//! first time and reads it like any other. A real deployment is handed the
-//! same file and edits it; it never writes itself over a deployment's
-//! choices, because it only writes when the file is not there at all.
+//! what each key does, and then stops — the `[oidc]` keys have no default
+//! worth guessing, so the first boot writes the file and says which keys to
+//! fill in rather than starting half-authenticated. That is opt-in on purpose
+//! too — it only ever happens once, because the second boot finds the file
+//! it wrote the first time and reads it like any other.
 //!
 //! Whatever is finally resolved is printed once at startup — the database
 //! path absolute, the address bound, the address mail will fall back to — so
@@ -47,7 +47,7 @@ const FILE_NAME: &str = "config/iz.toml";
 /// defaults, so that a plain `iz` in an empty directory is one command.
 const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One process holds it.
 database = "iz.db"
-# Where attachments and profile photos live as files, created on boot.
+# Where attachments live as files, created on boot.
 storage = "storage"
 # The address the server listens on. Environment variables are ignored —
 # this is the only thing that decides where İz binds. It is also the
@@ -57,6 +57,19 @@ listen = "127.0.0.1:7654"
 # reconnect, in seconds. The reconnect is what re-checks the session, so a
 # revoked sign-in stops receiving within this long.
 live_seconds = 300
+[oidc]
+# The provider that signs people in. Required: no default is guessed.
+issuer = ""
+# The client id İz presents to the provider. Required.
+client_id = ""
+# The client secret İz presents to the provider. Required. The file holds a
+# live credential once this is filled in, so it is created mode 0600.
+client_secret = ""
+# Where the provider sends the browser back after sign-in. Not written here:
+# it defaults from `listen` on every boot, so moving the address never leaves
+# a stale callback behind. Set it only when the public address differs from
+# the bind address (a proxy in front, for instance).
+# redirect_uri = "http://127.0.0.1:7654/auth/callback"
 "#;
 
 /// The default `listen` when the file is silent about it. A file missing this
@@ -102,6 +115,19 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The `[oidc]` table of `config/iz.toml`, before the values are checked.
+/// Anything else the section says lands in `other`, which is read for its key
+/// names only.
+#[derive(Deserialize)]
+struct OidcToml {
+    issuer: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    redirect_uri: Option<String>,
+    #[serde(flatten, default)]
+    other: std::collections::BTreeMap<String, toml::Value>,
+}
+
 /// The shape of `config/iz.toml`, before the values are checked. Anything
 /// else the file says lands in `other`, which is read for its key names only
 /// — enough for the report to say a key was seen and not obeyed.
@@ -111,8 +137,23 @@ struct Toml {
     storage: Option<String>,
     listen: Option<String>,
     live_seconds: Option<u64>,
+    oidc: Option<OidcToml>,
     #[serde(flatten)]
     other: std::collections::BTreeMap<String, toml::Value>,
+}
+
+/// The OIDC provider İz trusts, and how İz presents itself to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OidcConfig {
+    /// The provider's issuer URL. Sign-ins from anywhere else are refused.
+    pub issuer: String,
+    /// The client id İz presents to the provider.
+    pub client_id: String,
+    /// The client secret İz presents to the provider. Never printed.
+    pub client_secret: String,
+    /// Where the provider sends the browser after sign-in. Defaults from
+    /// `listen` when the file is silent about it.
+    pub redirect_uri: String,
 }
 
 /// What the process needs to know before it opens a socket.
@@ -134,6 +175,8 @@ pub struct Config {
     /// asked to reconnect. The reconnect re-authenticates, which is how a
     /// session revoked mid-stream stops being fed.
     pub live_seconds: u64,
+    /// The OIDC provider İz trusts.
+    pub oidc: OidcConfig,
     /// Whether `config/iz.toml` did not exist and was just written with the
     /// development defaults this boot.
     pub defaulted: bool,
@@ -205,8 +248,11 @@ impl Config {
                 std::fs::write(&path, DEVELOPMENT_DEFAULTS).map_err(|err| {
                     ConfigError::Io(format!("could not write {}: {err}", path.display()))
                 })?;
+                // The file will hold a live client secret once the admin
+                // fills it in; close it now, before it does.
+                let _ = crate::store::secret::restrict(&path);
                 println!(
-                    "iz    wrote {FILE_NAME} with development defaults — edit it for a real deployment"
+                    "iz    wrote {FILE_NAME} with development defaults — fill in [oidc] for a real deployment"
                 );
                 Config::parse(DEVELOPMENT_DEFAULTS, dir, true)
             }
@@ -252,12 +298,31 @@ impl Config {
             });
         }
 
+        let oidc_toml = toml.oidc.ok_or(ConfigError::Missing("[oidc]"))?;
+        let issuer = value(oidc_toml.issuer).ok_or(ConfigError::Missing("oidc.issuer"))?;
+        let client_id = value(oidc_toml.client_id).ok_or(ConfigError::Missing("oidc.client_id"))?;
+        let client_secret =
+            value(oidc_toml.client_secret).ok_or(ConfigError::Missing("oidc.client_secret"))?;
+        // Derived from the address bound, on every boot: a deployment behind
+        // a proxy sets this key, and everyone else follows `listen` for free.
+        let redirect_uri = value(oidc_toml.redirect_uri)
+            .unwrap_or_else(|| format!("{}/auth/callback", listen_url_of(&listen)));
+
+        let mut ignored: Vec<String> = toml.other.into_keys().collect();
+        ignored.extend(oidc_toml.other.into_keys().map(|key| format!("oidc.{key}")));
+
         Ok(Config {
             database,
             storage,
             listen,
             live_seconds,
-            ignored: toml.other.into_keys().collect(),
+            oidc: OidcConfig {
+                issuer,
+                client_id,
+                client_secret,
+                redirect_uri,
+            },
+            ignored,
             defaulted,
         })
     }
@@ -271,18 +336,7 @@ impl Config {
     /// puts İz behind a proxy sets the real address in Settings, which is
     /// the only thing this defers to.
     pub fn listen_url(&self) -> String {
-        let ip = self.listen.ip();
-        let host = if ip.is_unspecified() {
-            "127.0.0.1".to_string()
-        } else if self.listen.is_ipv6() {
-            format!("[{ip}]")
-        } else {
-            ip.to_string()
-        };
-        match self.listen.port() {
-            80 => format!("http://{host}"),
-            port => format!("http://{host}:{port}"),
-        }
+        listen_url_of(&self.listen)
     }
 
     /// The lines to print once at startup. Nothing secret is among them.
@@ -291,6 +345,7 @@ impl Config {
             format!("database  {}", self.database.display()),
             format!("storage   {}", self.storage.display()),
             format!("mail url  {} until an admin sets one", self.listen_url()),
+            format!("oidc      {}", self.oidc.issuer),
         ];
         lines.push("mail      the sender is in Settings, not here".to_string());
         if !self.ignored.is_empty() {
@@ -305,6 +360,22 @@ impl Config {
             ));
         }
         lines
+    }
+}
+
+/// The address bound, as a URL — the shape `redirect_uri` defaults from.
+fn listen_url_of(listen: &SocketAddr) -> String {
+    let ip = listen.ip();
+    let host = if ip.is_unspecified() {
+        "127.0.0.1".to_string()
+    } else if listen.is_ipv6() {
+        format!("[{ip}]")
+    } else {
+        ip.to_string()
+    };
+    match listen.port() {
+        80 => format!("http://{host}"),
+        port => format!("http://{host}:{port}"),
     }
 }
 
@@ -341,7 +412,7 @@ fn complete(path: &Path, text: &str, base: &Path) {
         missing.push((
             "storage",
             format!(
-                "# Where attachments and profile photos live as files, created on boot.\n\
+                "# Where attachments live as files, created on boot.\n\
                  storage = {:?}\n",
                 storage.display().to_string()
             ),
@@ -350,18 +421,35 @@ fn complete(path: &Path, text: &str, base: &Path) {
     if missing.is_empty() {
         return;
     }
+    // Top-level keys cannot live past a `[table]` header — TOML reads them
+    // as belonging to the table — so the completed block lands before the
+    // first header, never inside `[oidc]`.
+    let block = missing
+        .iter()
+        .map(|(_, block)| block.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut completed = text.to_string();
-    if !completed.is_empty() && !completed.ends_with('\n') {
-        completed.push('\n');
+    match completed
+        .lines()
+        .position(|line| line.trim_start().starts_with('['))
+    {
+        Some(at) => {
+            let mut lines: Vec<&str> = completed.lines().collect();
+            lines.insert(at, block.as_str());
+            completed = lines.join("\n");
+            if text.ends_with('\n') || completed.is_empty() {
+                completed.push('\n');
+            }
+        }
+        None => {
+            if !completed.is_empty() && !completed.ends_with('\n') {
+                completed.push('\n');
+            }
+            completed.push('\n');
+            completed.push_str(&block);
+        }
     }
-    completed.push('\n');
-    completed.push_str(
-        &missing
-            .iter()
-            .map(|(_, block)| block.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
     match std::fs::write(path, completed) {
         Ok(()) => println!(
             "iz    added {} to {FILE_NAME}, at the default already in use",
@@ -438,32 +526,29 @@ mod tests {
             ^ (std::process::id() as u128) << 64
     }
 
+    /// The `[oidc]` table every other test carries: those tests are about
+    /// other keys, and without it the boot stops on the missing provider.
+    const OIDC: &str = "[oidc]\nissuer = \"https://id.example.com\"\nclient_id = \"iz\"\nclient_secret = \"s3cret\"\n";
+
     #[test]
-    fn an_absent_file_is_written_with_development_defaults_and_taken() {
+    fn an_absent_file_is_written_with_development_defaults_and_then_refuses_oidc() {
         let dir = scratch();
-        let config = Config::load_from(&dir).unwrap();
-        assert!(config.defaulted);
-        assert!(config.database.is_absolute(), "{:?}", config.database);
-        assert!(config.database.ends_with("iz.db"));
-        assert_eq!(config.listen, "127.0.0.1:7654".parse().unwrap());
-        assert_eq!(config.listen_url(), "http://127.0.0.1:7654");
+        // The fresh file has blank [oidc] keys, so the first boot writes and
+        // then stops on the first of them.
+        let err = Config::load_from(&dir).unwrap_err();
+        assert_eq!(err, ConfigError::Missing("oidc.issuer"));
 
         let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert_eq!(written, DEVELOPMENT_DEFAULTS);
 
-        // A second load reads the file it just wrote, identically.
-        let again = Config::load_from(&dir).unwrap();
-        assert!(!again.defaulted);
+        // The file it wrote still has blanks, so a second load stops the
+        // same way rather than starting half-authenticated.
         assert_eq!(
-            again,
-            Config {
-                defaulted: false,
-                ..config
-            }
+            Config::load_from(&dir).unwrap_err(),
+            ConfigError::Missing("oidc.issuer")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
     /// Every key the file can carry is written into a file that was made
     /// without it, so what can be changed is learnt by reading the file
     /// rather than by reading the source.
@@ -473,7 +558,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
             dir.join(FILE_NAME),
-            "# mine\ndatabase = \"state/iz.db\"\n",
+            &format!("# mine\ndatabase = \"state/iz.db\"\n{OIDC}"),
         )
         .unwrap();
 
@@ -507,14 +592,15 @@ mod tests {
     fn completion_leaves_a_key_that_is_already_there() {
         let dir = scratch();
         std::fs::create_dir_all(dir.join("config")).unwrap();
-        let mine = "database = \"iz.db\"\nstorage = \"files\"\n\
-                    listen = \"0.0.0.0:8080\"\nlive_seconds = 30\n";
+        let mine = &format!(
+            "database = \"iz.db\"\nstorage = \"files\"\nlisten = \"0.0.0.0:8080\"\nlive_seconds = 30\n{OIDC}"
+        );
         std::fs::write(dir.join(FILE_NAME), mine).unwrap();
         let config = Config::load_from(&dir).unwrap();
         assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.live_seconds, 30);
         assert!(config.storage.ends_with("files"), "{:?}", config.storage);
-        assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), mine);
+        assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), mine.as_str());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -523,7 +609,7 @@ mod tests {
     #[test]
     fn a_file_without_storage_puts_it_beside_the_database() {
         let config = Config::parse(
-            "database = \"/srv/iz/iz.db\"\n",
+            &format!("database = \"/srv/iz/iz.db\"\n{OIDC}"),
             Path::new("."),
             false,
         )
@@ -536,7 +622,7 @@ mod tests {
     fn a_relative_storage_is_reported_absolute() {
         let dir = scratch();
         let config = Config::parse(
-            "database = \"iz.db\"\nstorage = \"state/files\"\n",
+            &format!("database = \"iz.db\"\nstorage = \"state/files\"\n{OIDC}"),
             &dir,
             false,
         )
@@ -575,7 +661,8 @@ mod tests {
     /// A file that never mentions the key still boots, on the default.
     #[test]
     fn a_file_without_a_live_window_takes_the_default() {
-        let config = Config::parse("database = \"iz.db\"\n", Path::new("."), false).unwrap();
+        let config = Config::parse(&format!("database = \"iz.db\"\n{OIDC}"), Path::new("."), false)
+            .unwrap();
         assert_eq!(config.live_seconds, 300);
     }
 
@@ -609,7 +696,8 @@ mod tests {
     #[test]
     fn a_relative_database_is_reported_absolute() {
         let dir = scratch();
-        let config = Config::parse("database = \"state/iz.db\"\n", &dir, false).unwrap();
+        let config = Config::parse(&format!("database = \"state/iz.db\"\n{OIDC}"), &dir, false)
+            .unwrap();
         assert!(config.database.is_absolute(), "{:?}", config.database);
         assert!(config.database.ends_with("iz.db"));
         let report = config.report().join("\n");
@@ -625,7 +713,8 @@ mod tests {
     #[test]
     fn a_file_without_listen_takes_the_default() {
         let config =
-            Config::parse("database = \"/srv/iz.db\"\n", Path::new("."), false).unwrap();
+            Config::parse(&format!("database = \"/srv/iz.db\"\n{OIDC}"), Path::new("."), false)
+                .unwrap();
         assert_eq!(config.listen, "127.0.0.1:7654".parse().unwrap());
     }
 
@@ -649,7 +738,7 @@ mod tests {
     fn the_mail_fallback_is_the_address_the_server_binds() {
         let url = |listen: &str| {
             Config::parse(
-                &format!("database = \"/srv/iz.db\"\nlisten = \"{listen}\"\n"),
+                &format!("database = \"/srv/iz.db\"\nlisten = \"{listen}\"\n{OIDC}"),
                 Path::new("."),
                 false,
             )
@@ -677,8 +766,10 @@ mod tests {
     #[test]
     fn keys_nothing_reads_are_named_rather_than_obeyed() {
         let config = Config::parse(
-            "database = \"/srv/iz.db\"\nbase_url = \"https://iz.sh\"\n\
-             smtp_password = \"hunter2-and-then-some\"\n",
+            &format!(
+                "database = \"/srv/iz.db\"\nbase_url = \"https://iz.sh\"\n\
+                 smtp_password = \"hunter2-and-then-some\"\n{OIDC}"
+            ),
             Path::new("."),
             false,
         )
@@ -695,5 +786,87 @@ mod tests {
             report.contains("the sender is in Settings"),
             "the report should say where the sender lives: {report}"
         );
+    }
+
+    #[test]
+    fn a_missing_oidc_table_names_itself() {
+        let problem = Config::parse("database = \"iz.db\"\n", Path::new("."), false).unwrap_err();
+        assert_eq!(problem, ConfigError::Missing("[oidc]"));
+    }
+
+    #[test]
+    fn an_oidc_section_with_blanks_stops_on_the_first_blank() {
+        let problem = Config::parse(
+            "database = \"iz.db\"\n[oidc]\nissuer = \"\"\nclient_id = \"iz\"\nclient_secret = \"s3cret\"\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(problem, ConfigError::Missing("oidc.issuer"));
+    }
+
+    #[test]
+    fn redirect_uri_defaults_from_listen() {
+        let config = Config::parse(
+            &format!("database = \"iz.db\"\nlisten = \"0.0.0.0:9000\"\n{OIDC}"),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        // A bind that names no interface is reachable by no name, so the
+        // loopback stands in here too.
+        assert_eq!(
+            config.oidc.redirect_uri,
+            "http://127.0.0.1:9000/auth/callback"
+        );
+        assert_eq!(config.oidc.issuer, "https://id.example.com");
+    }
+
+    #[test]
+    fn an_explicit_redirect_uri_wins() {
+        let config = Config::parse(
+            "database = \"iz.db\"\n[oidc]\nissuer = \"https://id.example.com\"\nclient_id = \"iz\"\n\
+             client_secret = \"s3cret\"\nredirect_uri = \"https://iz.example.com/auth/callback\"\n",
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            config.oidc.redirect_uri,
+            "https://iz.example.com/auth/callback"
+        );
+    }
+
+    #[test]
+    fn a_key_inside_oidc_nothing_reads_is_named_with_its_table() {
+        let config = Config::parse(
+            &format!("database = \"iz.db\"\n{OIDC}oidc_typo = 1\n"),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert!(config.ignored.contains(&"oidc.oidc_typo".to_string()));
+        assert!(config.report().iter().any(|line| line.contains("oidc.oidc_typo")));
+    }
+
+    #[test]
+    fn completed_keys_land_before_the_oidc_table() {
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join(FILE_NAME),
+            &format!("database = \"iz.db\"\n{OIDC}"),
+        )
+        .unwrap();
+        Config::load_from(&dir).unwrap();
+        let completed = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        // Completed top-level keys land before the [oidc] header, never
+        // inside it.
+        let oidc_at = completed.find("[oidc]").unwrap();
+        let listen_at = completed.find("listen = ").unwrap();
+        assert!(listen_at < oidc_at, "{completed}");
+        let reparsed: toml::Value = toml::from_str(&completed).unwrap();
+        assert!(reparsed.get("listen").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

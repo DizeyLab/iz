@@ -421,7 +421,7 @@ a {
     height: 24px;
   }
 
-  // The word without the mark, on the sign-in and setup pages: nothing else
+  // The word without the mark, on the sign-in page: nothing else
   // in that chrome, so it can take the room the topbar version cannot.
   &-lone &-text {
     font-size: 18px;
@@ -488,7 +488,7 @@ a {
   color: var(--muted);
 }
 
-// --- Account screens (FirstLogin artboard) ---------------------------------
+// --- Sign-in card -----------------------------------------------------------
 
 .auth-stage {
   min-height: calc(100vh - var(--topbar-height));
@@ -541,38 +541,6 @@ a {
   line-height: 1.5;
 }
 
-.auth-field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.auth-label {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--muted-soft);
-}
-
-// The address an invited member signs in as: shown, never edited.
-.auth-locked {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 12px;
-  background: var(--panel-sunken);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-}
-
-.auth-locked-value {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--muted);
-  flex-grow: 1;
-}
-
 .auth-submit {
   height: var(--control-h-lg);
   display: flex;
@@ -597,14 +565,6 @@ a {
   font-weight: 600;
 }
 
-.auth-key {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  background: var(--accent-strong);
-  border-radius: var(--radius-sm);
-  padding: 1px 4px;
-}
-
 .auth-problem {
   font-size: 13px;
   color: var(--danger);
@@ -612,24 +572,6 @@ a {
   border: 1px solid var(--danger-border-soft);
   border-radius: var(--radius);
   padding: 10px 12px;
-}
-
-.auth-note {
-  font-size: 13px;
-  color: var(--muted);
-  background: var(--panel-sunken);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-}
-
-.auth-alt {
-  font-size: 12px;
-  color: var(--muted);
-  text-decoration: none;
-  align-self: center;
-
-  &:hover { color: var(--accent-ink); }
 }
 
 // -- the board (Main and EmptyBoard artboards) -------------------------------
@@ -1054,68 +996,40 @@ img.avatar {
   display: block;
 }
 
-// The avatar leads the profile panel. Without a photo it is itself the
-// upload control — the file input rides its `form` attribute to a hidden
-// sibling form, so nothing nests inside the profile form. With one, the
-// click opens the photo viewer and a Change button owns the picker instead.
+// The initials and the im photo in one box: the photo draws over the tone
+// fill, and hides itself when im has none (see `avatar_script`), leaving
+// the initials beneath as the fallback.
+.avatar-stack {
+  display: inline-grid;
+  flex: none;
+
+  > * { grid-area: 1 / 1; }
+  > .avatar + .avatar { margin-left: 0; }
+}
+
+// The avatar leads the profile panel: the face beside the name and
+// address im vouches, neither of which is edited here.
 .identity-row {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
-// The two faces of the profile picture box: the picker label and, once a
-// photo exists, the viewer trigger. The person page's own card wears the
-// trigger too — the box rules are shared, the size is not.
-.avatar-upload,
-.avatar-view {
-  position: relative;
-  flex: none;
-  cursor: pointer;
-
-  // The name tooltip has no job on your own picture.
-  .avatar[data-name]:hover::after { content: none; }
+.identity-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-// The settings row's picture is 64px whatever size class the avatar wears;
-// the person card's keeps its xl.
-.identity-row .avatar-upload .avatar,
-.identity-row .avatar-view .avatar {
-  width: 64px;
-  height: 64px;
-  font-size: 20px;
+.identity-name {
+  font-size: 15px;
+  font-weight: 600;
 }
 
-// The trigger is the label's box with a button's chrome stripped.
-.avatar-view {
-  appearance: none;
-  background: none;
-  border: none;
-  padding: 0;
-}
-
-.avatar-upload {
-  // The upload affordance: a veil and a plus over the picture, on hover or
-  // keyboard focus only.
-  &::after {
-    content: "+";
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgb(0 0 0 / 0.4);
-    border-radius: 50%;
-    color: #fff;
-    font-size: 24px;
-    font-weight: 300;
-    opacity: 0;
-    transition: opacity var(--dur-fast) var(--ease);
-    pointer-events: none;
-  }
-
-  &:hover::after,
-  &:has(.file-upload-input:focus-visible)::after { opacity: 1; }
+.identity-address {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 // -- the card context menu ---------------------------------------------------

@@ -17,7 +17,7 @@ use topcoat::router::{
 use iz_core::store::sniff::sniff;
 use iz_core::store::{NewAttachment, Store, User};
 
-use crate::server::{Refusal, accounts, require_user};
+use crate::server::{Refusal, store, require_user};
 
 path_param!(id);
 
@@ -291,7 +291,7 @@ async fn upload(
     let mut comment_id: Option<String> = None;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
 
     loop {
         let field = match multipart.next_field().await {
@@ -426,7 +426,7 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
         Err(refusal) => return Ok(home(refusal)),
     };
 
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let Ok(Some(row)) = store.attachment(id).await else {
         return Ok(not_found());
     };

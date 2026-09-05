@@ -20,8 +20,42 @@ use topcoat::view::view;
 
 use crate::detail::{Me, datepicker_grid, glyph};
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, back_to, require_admin};
-use crate::settings::{decode_q, encode_q};
+use crate::server::{Refusal, store, back_to, require_admin};
+
+/// A query value survives the round trip to a `Location` header only if it
+/// cannot be mistaken for another pair or break the header outright — a
+/// cursor may hold `+`, `&`, `=`, none of which a hand-built query string
+/// may pass through raw.
+fn encode_q(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn decode_q(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 /// One send still owed or refused, as the queue panel reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,14 +138,6 @@ const ACTIVITY_KINDS: &[&str] = &[
     "unblocked",
     "deleted",
     "commented",
-    "workspace_claimed",
-    "invited",
-    "link_resent",
-    "joined",
-    "signed_in",
-    "signed_out",
-    "sign_in_failed",
-    "password_changed",
     "role_changed",
     "profile_saved",
     "sender_saved",
@@ -179,18 +205,9 @@ pub(crate) fn activity_sentence(
         ActivityKind::Commented => t(lang, Key::ActCommented).to_string(),
         ActivityKind::FileAdded => crate::i18n::file_added_label(lang, detail),
         ActivityKind::FileRemoved => crate::i18n::file_removed_label(lang, detail),
-        ActivityKind::WorkspaceClaimed => t(lang, Key::ActWorkspaceClaimed).to_string(),
-        ActivityKind::Invited => crate::i18n::invited_label(lang, detail),
-        ActivityKind::LinkResent => crate::i18n::link_resent_label(lang, detail),
-        ActivityKind::Joined => t(lang, Key::ActJoined).to_string(),
-        ActivityKind::SignedIn => t(lang, Key::ActSignedIn).to_string(),
-        ActivityKind::SignInFailed => crate::i18n::sign_in_failed_label(lang, detail),
-        ActivityKind::SignedOut => t(lang, Key::ActSignedOut).to_string(),
-        ActivityKind::PasswordChanged => t(lang, Key::ActPasswordChanged).to_string(),
         ActivityKind::ProfileSaved => t(lang, Key::ActProfileSaved).to_string(),
         ActivityKind::SenderSaved => t(lang, Key::ActSenderSaved).to_string(),
         ActivityKind::LimitsSaved => t(lang, Key::ActLimitsSaved).to_string(),
-        ActivityKind::SecuritySaved => t(lang, Key::ActSecuritySaved).to_string(),
         ActivityKind::TestMailSent => t(lang, Key::ActTestMailSent).to_string(),
         ActivityKind::MessageSent => t(lang, Key::ActMessageSent).to_string(),
         ActivityKind::RoleChanged => crate::i18n::role_changed_label(lang, detail),
@@ -534,7 +551,7 @@ async fn snapshot(
     let lang = Lang::from_code(&user.language);
     let zone = iz_core::detail::parse_zone(&user.timezone);
     let now = OffsetDateTime::now_utc();
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
 
     let mut has_more = false;
     // Only the active section can move off `Newest`; a cursor that ran off
@@ -829,7 +846,7 @@ async fn retry_send(cx: &Cx, Form(input): Form<RetrySendForm>) -> Redirect {
         Ok(admin) => admin,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let _ = store
         .requeue_send(&input.send_id, OffsetDateTime::now_utc())
         .await;
@@ -974,7 +991,7 @@ async fn logs_screen(
         (from, to)
     };
     let members: Vec<(String, String)> = if section == Section::Activity {
-        let store = accounts(cx).store().clone();
+        let store = store(cx).clone();
         match store.user(&me.id).await? {
             Some(admin) => store
                 .users(&admin.workspace_id)
@@ -988,7 +1005,7 @@ async fn logs_screen(
         Vec::new()
     };
     let tasks: Vec<(String, String)> = if section == Section::Activity {
-        accounts(cx).store().clone().task_directory().await?
+        store(cx).clone().task_directory().await?
     } else {
         Vec::new()
     };

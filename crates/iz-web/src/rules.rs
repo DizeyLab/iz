@@ -27,7 +27,7 @@ use iz_core::board::Column;
 use iz_core::store::{Audience, Store, Trigger, User, Workspace};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, back_to, refusal_of, require_admin};
+use crate::server::{Refusal, store, back_to, refusal_of, require_admin};
 
 /// One rule as the screen reads it: a sentence, a switch and a stamp.
 ///
@@ -354,7 +354,7 @@ async fn rule_of_this_workspace(
     rule_id: &str,
 ) -> std::result::Result<(Arc<dyn Store>, User, iz_core::store::MailRule), Refusal> {
     let user = require_admin(cx).await?;
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let board = store
         .board(&user.workspace_id)
         .await
@@ -379,7 +379,7 @@ async fn current_rules(cx: &Cx) -> Result<Json<std::result::Result<RulesSnapshot
         Ok(user) => user,
         Err(refusal) => return Ok(Json(Err(refusal))),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     Ok(Json(snapshot_of(&store, &user).await))
 }
 
@@ -426,7 +426,7 @@ async fn create_rule(cx: &Cx, Form(input): Form<CreateRuleForm>) -> Redirect {
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let board = match store.board(&user.workspace_id).await {
         Ok(Some(board)) => board,
         _ => return redirect(cx, Some(Refusal::Unavailable)),
@@ -508,7 +508,7 @@ async fn update_rule(cx: &Cx, Form(input): Form<UpdateRuleForm>) -> Redirect {
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let board = match store.board(&user.workspace_id).await {
         Ok(Some(board)) => board,
         _ => return redirect(cx, Some(Refusal::Unavailable)),
@@ -858,7 +858,7 @@ async fn rules_page(cx: &Cx) -> Result {
         }
     };
     let lang = Lang::from_code(&user.language);
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let snapshot = match snapshot_of(&store, &user).await {
         Ok(snapshot) => snapshot,
         Err(refusal) => {

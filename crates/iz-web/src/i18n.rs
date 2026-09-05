@@ -1,5 +1,5 @@
 //! Per-user UI strings. Part A wires `board.rs`/`detail.rs`; part B appends
-//! `auth.rs`/`rules.rs`/`logs.rs`/`pages.rs`/`settings.rs`'s keys to the same
+//! `rules.rs`/`logs.rs`/`pages.rs`/`settings.rs`'s keys to the same
 //! `Key` enum and `t` match, nothing else to change here. Mail bodies in
 //! `iz-core` stay English — a compose has no viewer to pick a language for.
 
@@ -121,9 +121,6 @@ pub enum Key {
 
     // settings.rs
     YourProfile,
-    Change,
-    Remove,
-    DisplayNameLabel,
     EmailLabel,
     TimezoneLabel,
     ThemeLabel,
@@ -133,6 +130,14 @@ pub enum Key {
     LanguageLabel,
     Saved,
     SignOut,
+    WelcomeBlurb,
+    SignIn,
+    SignInFailed,
+    Profile,
+    IdentityFromIm,
+    DisabledBadge,
+    DisableUser,
+    EnableUser,
     OutgoingMail,
     Connected,
     NotConfiguredChip,
@@ -151,13 +156,7 @@ pub enum Key {
     SendTestMail,
     WorkspaceLimits,
     AttachmentLimitLabel,
-    PhotoLimitLabel,
     AllowedFileTypesLabel,
-    Security,
-    RateLimitAttemptsLabel,
-    RateWindowLabel,
-    SessionLifetimeLabel,
-    LinkLifetimeLabel,
     Members,
     Message,
     Everyone,
@@ -173,12 +172,9 @@ pub enum Key {
     InvitedStatus,
     ActiveStatus,
     You,
-    ResendMail,
-    SendSigninLink,
     RoleMemberOption,
     RoleViewerOption,
     RoleAdminOption,
-    AddMember,
     SmtpHostRequired,
     SmtpHostInvalid,
     PortInvalid,
@@ -190,21 +186,6 @@ pub enum Key {
     SenderNotConfiguredYet,
 
     // pages.rs
-    LinkExpiredTitle,
-    SetupTitle,
-    SetupSub,
-    YourNameLabel,
-    CreateWorkspace,
-    SignInTitle,
-    SignInSub,
-    SignInButton,
-    PickPasswordTitle,
-    AdminMadeYouAnAccount,
-    SigningInAsLabel,
-    NewPasswordLabel,
-    SetPasswordAndSignIn,
-    CurrentPasswordLabel,
-    ChangePassword,
 
     // rules.rs
     MailRules,
@@ -295,26 +276,15 @@ pub enum Key {
     ActClockCleared,
     ActDeleted,
     ActCommented,
-    ActWorkspaceClaimed,
-    ActJoined,
-    ActSignedIn,
-    ActSignedOut,
-    ActPasswordChanged,
     ActProfileSaved,
     ActSenderSaved,
     ActLimitsSaved,
-    ActSecuritySaved,
     ActTestMailSent,
     ActMessageSent,
     ActSendRetried,
     ActPhotoSaved,
     ActPhotoRemoved,
     ActSenderChecked,
-    PWCurrentWrong,
-    PWIsCurrent,
-    PWTooShort,
-    PWLooksLikeYou,
-    PasswordSaved,
     UnblockedWord,
     AColumn,
     AudienceEmpty,
@@ -366,19 +336,12 @@ pub enum Key {
     RecentActivity,
     JoinedLabel,
     LastSeenLabel,
-    InvitedByLabel,
     MailBatchLabel,
     ReminderMinutesLabel,
     ClockHour,
     ClockMinute,
     Search,
     NoMatches,
-    ForgotIt,
-    ForgotTitle,
-    ForgotSend,
-    ForgotSent,
-    ResetTitle,
-    ResetLinkDead,
     ActResetRequested,
     ActResetDone,
     Assignee,
@@ -395,13 +358,6 @@ pub fn take_off_this_task(lang: Lang, name: &str) -> String {
     }
 }
 
-/// Who made an invited member's account, when that is still knowable.
-pub fn made_you_an_account(lang: Lang, admin_name: &str) -> String {
-    match lang {
-        Lang::En => format!("{admin_name} made you an account."),
-        Lang::Tr => format!("{admin_name} senin için hesap oluşturdu."),
-    }
-}
 
 /// The phrase a key names, in a user's language.
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -577,12 +533,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 
         (YourProfile, En) => "Your profile",
         (YourProfile, Tr) => "Profilin",
-        (Remove, En) => "Remove",
-        (Remove, Tr) => "Kaldır",
-        (Change, En) => "Change",
-        (Change, Tr) => "Değiştir",
-        (DisplayNameLabel, En) => "DISPLAY NAME",
-        (DisplayNameLabel, Tr) => "GÖRÜNEN AD",
         (EmailLabel, En) => "EMAIL",
         (EmailLabel, Tr) => "E-POSTA",
         (TimezoneLabel, En) => "TIMEZONE",
@@ -601,6 +551,22 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Saved, Tr) => "Kaydedildi.",
         (SignOut, En) => "Sign out",
         (SignOut, Tr) => "Oturumu kapat",
+        (WelcomeBlurb, En) => "Tasks, and the mail they send.",
+        (WelcomeBlurb, Tr) => "Görevler ve gönderdikleri e-posta.",
+        (SignIn, En) => "Sign in",
+        (SignIn, Tr) => "Oturum aç",
+        (SignInFailed, En) => "Sign-in failed.",
+        (SignInFailed, Tr) => "Oturum açılamadı.",
+        (Profile, En) => "Profile",
+        (Profile, Tr) => "Profil",
+        (IdentityFromIm, En) => "Name and address come from im.",
+        (IdentityFromIm, Tr) => "Ad ve adres im’den gelir.",
+        (DisabledBadge, En) => "disabled",
+        (DisabledBadge, Tr) => "devre dışı",
+        (DisableUser, En) => "Disable",
+        (DisableUser, Tr) => "Devre dışı bırak",
+        (EnableUser, En) => "Enable",
+        (EnableUser, Tr) => "Etkinleştir",
         (OutgoingMail, En) => "Outgoing mail",
         (OutgoingMail, Tr) => "Giden posta",
         (Connected, En) => "Connected",
@@ -637,20 +603,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (WorkspaceLimits, Tr) => "Çalışma alanı limitleri",
         (AttachmentLimitLabel, En) => "ATTACHMENT LIMIT (MB)",
         (AttachmentLimitLabel, Tr) => "EK LİMİTİ (MB)",
-        (PhotoLimitLabel, En) => "PHOTO LIMIT (MB)",
-        (PhotoLimitLabel, Tr) => "FOTOĞRAF LİMİTİ (MB)",
         (AllowedFileTypesLabel, En) => "ALLOWED FILE TYPES",
         (AllowedFileTypesLabel, Tr) => "İZİN VERİLEN DOSYA TÜRLERİ",
-        (Security, En) => "Security",
-        (Security, Tr) => "Güvenlik",
-        (RateLimitAttemptsLabel, En) => "Sign-in attempts",
-        (RateLimitAttemptsLabel, Tr) => "Giriş denemesi",
-        (RateWindowLabel, En) => "Attempt window (minutes)",
-        (RateWindowLabel, Tr) => "Deneme penceresi (dakika)",
-        (SessionLifetimeLabel, En) => "Session lifetime (days)",
-        (SessionLifetimeLabel, Tr) => "Oturum süresi (gün)",
-        (LinkLifetimeLabel, En) => "Link lifetime (days)",
-        (LinkLifetimeLabel, Tr) => "Bağlantı süresi (gün)",
         (Members, En) => "Members",
         (Members, Tr) => "Üyeler",
         (Message, En) => "Message",
@@ -681,18 +635,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActiveStatus, Tr) => "aktif",
         (You, En) => "you",
         (You, Tr) => "sen",
-        (ResendMail, En) => "Resend mail",
-        (ResendMail, Tr) => "Postayı yeniden gönder",
-        (SendSigninLink, En) => "Send a sign-in link",
-        (SendSigninLink, Tr) => "Giriş bağlantısı gönder",
         (RoleMemberOption, En) => "Member",
         (RoleMemberOption, Tr) => "Üye",
         (RoleViewerOption, En) => "Viewer",
         (RoleViewerOption, Tr) => "İzleyici",
         (RoleAdminOption, En) => "Admin",
         (RoleAdminOption, Tr) => "Yönetici",
-        (AddMember, En) => "Add member",
-        (AddMember, Tr) => "Üye ekle",
         (SmtpHostRequired, En) => "Give the SMTP host.",
         (SmtpHostRequired, Tr) => "SMTP sunucusunu ver.",
         (SmtpHostInvalid, En) => "The SMTP host is a host name, not an address or a URL.",
@@ -712,40 +660,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (SenderNotConfiguredYet, En) => "No sender to test.",
         (SenderNotConfiguredYet, Tr) => "Test edilecek gönderen yok.",
 
-        (LinkExpiredTitle, En) => "This link no longer works",
-        (LinkExpiredTitle, Tr) => "Bu bağlantı artık çalışmıyor",
-        (SetupTitle, En) => "Set up İz",
-        (SetupTitle, Tr) => "İz'i kur",
-        (SetupSub, En) => "First account becomes the admin.",
-        (SetupSub, Tr) => "İlk hesap yönetici olur.",
-        (YourNameLabel, En) => "YOUR NAME",
-        (YourNameLabel, Tr) => "ADIN",
-        (CreateWorkspace, En) => "Create workspace",
-        (CreateWorkspace, Tr) => "Çalışma alanı oluştur",
-        (SignInTitle, En) => "Sign in to İz",
-        (SignInTitle, Tr) => "İz'e giriş yap",
-        (SignInSub, En) => {
-            "Accounts are made by the admin. If you were invited, use the link you were sent — it is where you choose your password."
-        }
-        (SignInSub, Tr) => {
-            "Hesaplar yönetici tarafından oluşturulur. Davet edildiysen, sana gönderilen bağlantıyı kullan — parolanı orada seçersin."
-        }
-        (SignInButton, En) => "Sign in",
-        (SignInButton, Tr) => "Giriş yap",
-        (PickPasswordTitle, En) => "Pick a password",
-        (PickPasswordTitle, Tr) => "Bir parola seç",
-        (SigningInAsLabel, En) => "SIGNING IN AS",
-        (SigningInAsLabel, Tr) => "GİRİŞ YAPILAN HESAP",
-        (NewPasswordLabel, En) => "NEW PASSWORD",
-        (NewPasswordLabel, Tr) => "YENİ PAROLA",
-        (SetPasswordAndSignIn, En) => "Set password and sign in",
-        (SetPasswordAndSignIn, Tr) => "Parolayı ayarla ve giriş yap",
-        (CurrentPasswordLabel, En) => "CURRENT PASSWORD",
-        (CurrentPasswordLabel, Tr) => "MEVCUT PAROLA",
-        (ChangePassword, En) => "Change password",
-        (ChangePassword, Tr) => "Parolayı değiştir",
-        (AdminMadeYouAnAccount, En) => "An admin made you an account.",
-        (AdminMadeYouAnAccount, Tr) => "Bir yönetici sana hesap oluşturdu.",
 
         (MailRules, En) => "Mail rules",
         (MailRules, Tr) => "Posta kuralları",
@@ -920,24 +834,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActDeleted, Tr) => "bu görevi sildi",
         (ActCommented, En) => "commented",
         (ActCommented, Tr) => "yorum yaptı",
-        (ActWorkspaceClaimed, En) => "claimed the workspace",
-        (ActWorkspaceClaimed, Tr) => "çalışma alanını kurdu",
-        (ActJoined, En) => "joined",
-        (ActJoined, Tr) => "katıldı",
-        (ActSignedIn, En) => "signed in",
-        (ActSignedIn, Tr) => "oturum açtı",
-        (ActSignedOut, En) => "signed out",
-        (ActSignedOut, Tr) => "oturumu kapattı",
-        (ActPasswordChanged, En) => "changed the password",
-        (ActPasswordChanged, Tr) => "parolasını değiştirdi",
         (ActProfileSaved, En) => "saved the profile",
         (ActProfileSaved, Tr) => "profilini kaydetti",
         (ActSenderSaved, En) => "saved the sender settings",
         (ActSenderSaved, Tr) => "gönderen ayarlarını kaydetti",
         (ActLimitsSaved, En) => "saved the limits",
         (ActLimitsSaved, Tr) => "sınırları kaydetti",
-        (ActSecuritySaved, En) => "saved the security settings",
-        (ActSecuritySaved, Tr) => "güvenlik ayarlarını kaydetti",
         (ActTestMailSent, En) => "sent a test mail",
         (ActTestMailSent, Tr) => "test postası gönderdi",
         (ActMessageSent, En) => "sent a message",
@@ -950,16 +852,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (ActPhotoRemoved, Tr) => "profil fotoğrafını kaldırdı",
         (ActSenderChecked, En) => "checked the mail server",
         (ActSenderChecked, Tr) => "posta sunucusunu denetledi",
-        (PWCurrentWrong, En) => "The current password is wrong.",
-        (PWCurrentWrong, Tr) => "Mevcut parola yanlış.",
-        (PWIsCurrent, En) => "That's your current password.",
-        (PWIsCurrent, Tr) => "Bu zaten mevcut parolan.",
-        (PWTooShort, En) => "At least 10 characters.",
-        (PWTooShort, Tr) => "En az 10 karakter.",
-        (PWLooksLikeYou, En) => "Not your address or your name.",
-        (PWLooksLikeYou, Tr) => "Adresin ya da adın değil.",
-        (PasswordSaved, En) => "Password changed. Your other devices were signed out.",
-        (PasswordSaved, Tr) => "Parola değişti. Diğer cihazlarının oturumu kapatıldı.",
         (UnblockedWord, En) => "unblocked",
         (UnblockedWord, Tr) => "engeli kaldırıldı",
         (AColumn, En) => "a column",
@@ -1060,8 +952,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (JoinedLabel, Tr) => "KATILDI",
         (LastSeenLabel, En) => "LAST SEEN",
         (LastSeenLabel, Tr) => "SON GÖRÜLME",
-        (InvitedByLabel, En) => "INVITED BY",
-        (InvitedByLabel, Tr) => "DAVET EDEN",
         (MailBatchLabel, En) => "Mail delay (minutes)",
         (MailBatchLabel, Tr) => "Posta gecikmesi (dakika)",
         (ReminderMinutesLabel, En) => "Reminder (minutes)",
@@ -1075,18 +965,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Search, Tr) => "Ara",
         (NoMatches, En) => "No matches",
         (NoMatches, Tr) => "Eşleşme yok",
-        (ForgotIt, En) => "Forgot it?",
-        (ForgotIt, Tr) => "Parolamı unuttum",
-        (ForgotTitle, En) => "Reset the password",
-        (ForgotTitle, Tr) => "Parolayı sıfırla",
-        (ForgotSend, En) => "Send the link",
-        (ForgotSend, Tr) => "Bağlantıyı gönder",
-        (ForgotSent, En) => "If the address has an account, a reset link is on its way.",
-        (ForgotSent, Tr) => "Adres bir hesaba aitse sıfırlama bağlantısı yolda.",
-        (ResetTitle, En) => "Choose a new password",
-        (ResetTitle, Tr) => "Yeni parola seç",
-        (ResetLinkDead, En) => "This reset link no longer works",
-        (ResetLinkDead, Tr) => "Bu sıfırlama bağlantısı artık çalışmıyor",
         (ActResetRequested, En) => "asked to reset the password",
         (ActResetRequested, Tr) => "parola sıfırlaması istedi",
         (ActResetDone, En) => "set a new password by reset link",
@@ -1151,13 +1029,6 @@ pub fn last_seen_label(lang: Lang, day: &str) -> String {
     }
 }
 
-/// The invite panel's "Mailed to <address>" note, in a user's language.
-pub fn mailed_to_label(lang: Lang, address: &str) -> String {
-    match lang {
-        Lang::En => format!("Mailed to {address}"),
-        Lang::Tr => format!("{address} adresine postalandı"),
-    }
-}
 
 /// The sender panel's failed-test note, in a user's language.
 pub fn not_delivered_label(lang: Lang, moment: &str, problem: &str) -> String {
@@ -1267,26 +1138,8 @@ pub fn unblocked_label(lang: Lang, detail: &str) -> String {
     }
 }
 
-pub fn invited_label(lang: Lang, detail: &str) -> String {
-    match lang {
-        Lang::En => format!("invited {detail}"),
-        Lang::Tr => format!("{detail} kişisine davet gönderdi"),
-    }
-}
 
-pub fn link_resent_label(lang: Lang, detail: &str) -> String {
-    match lang {
-        Lang::En => format!("resent the link to {detail}"),
-        Lang::Tr => format!("{detail} adresine bağlantıyı yeniden gönderdi"),
-    }
-}
 
-pub fn sign_in_failed_label(lang: Lang, detail: &str) -> String {
-    match lang {
-        Lang::En => format!("failed to sign in as {detail}"),
-        Lang::Tr => format!("{detail} olarak oturum açılamadı"),
-    }
-}
 
 pub fn role_changed_label(lang: Lang, detail: &str) -> String {
     match lang {

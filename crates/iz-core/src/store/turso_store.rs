@@ -16,10 +16,10 @@ use ulid::Ulid;
 use super::secret;
 use super::{
     ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, ClaimedSend, CommentWritten,
-    Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, LinkKind, MailDecision, MailOutcome,
-    MailRule, MailSend, NewAttachment, NewSender, NewTask, NewUser, Recipient, Result, SendKind,
-    SendState, SenderCheck, SenderTest, Session, SigninLink, Store, StoreError, Tag, TaskCreated,
-    Trigger, User, UserStats, Workspace,
+    Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
+    MailSend, NewAttachment, NewSender, NewTask, Recipient, Result, SendKind, SendState,
+    SenderCheck, SenderTest, Store, StoreError, Tag, TaskCreated, Trigger, User, UserStats,
+    Workspace,
 };
 use super::{ReconcileOptions, reconcile, schema, sniff};
 use crate::Role;
@@ -58,10 +58,9 @@ pub struct TursoStore {
     /// by the store itself.
     live: tokio::sync::broadcast::Sender<Change>,
     /// Root of the file tree the binary payloads live under: `attachments/`
-    /// for task files, `photos/` for profile pictures, one raw file per row,
-    /// named by the row's own id. The database keeps the facts and this tree
-    /// keeps the bytes; a boot sweep deletes whichever half outlives the
-    /// other.
+    /// for task files, one raw file per row, named by the row's own id. The
+    /// database keeps the facts and this tree keeps the bytes; a boot sweep
+    /// deletes whichever half outlives the other.
     storage: std::path::PathBuf,
 }
 
@@ -86,7 +85,7 @@ impl TursoStore {
 
     /// Opens (creating if needed) the database at `path` and brings the schema
     /// up to date. `storage` is the root of the file tree the binary payloads
-    /// (attachment bytes, profile photos) live under — created here if
+    /// (attachment bytes) live under — created here if
     /// missing. `:memory:` gives a throwaway database for tests, which still
     /// hand in a storage directory, usually a tempdir, for the files.
     pub async fn open(path: &str, storage: &std::path::Path) -> Result<Self> {
@@ -321,16 +320,12 @@ impl TursoStore {
     async fn sweep_orphan_files(&self) -> Result<()> {
         let conn = self.conn.lock().await;
         let attachments = known_ids(&conn, "SELECT id FROM attachment").await?;
-        let photos = known_ids(&conn, "SELECT id FROM user WHERE photo_mime IS NOT NULL").await?;
         drop(conn);
-        for (dir, known, kind) in [
-            (
-                self.storage.join(ATTACHMENTS_DIR),
-                &attachments,
-                "attachment",
-            ),
-            (self.storage.join(PHOTOS_DIR), &photos, "photo"),
-        ] {
+        for (dir, known, kind) in [(
+            self.storage.join(ATTACHMENTS_DIR),
+            &attachments,
+            "attachment",
+        )] {
             for id in known.iter() {
                 if !dir.join(id).is_file() {
                     eprintln!("{kind} {id} names a file that is not there");
@@ -844,28 +839,19 @@ fn restrict_if_present(path: &std::path::Path) -> Result<()> {
 /// an upload carried, so a path here is always exactly one store-named file
 /// deep and `file_name` stays a label.
 const ATTACHMENTS_DIR: &str = "attachments";
-const PHOTOS_DIR: &str = "photos";
 
 /// Where attachment `id`'s bytes live.
 fn attachment_file(storage: &std::path::Path, id: &str) -> std::path::PathBuf {
     storage.join(ATTACHMENTS_DIR).join(id)
 }
 
-/// Where `user_id`'s photo lives.
-fn photo_file(storage: &std::path::Path, user_id: &str) -> std::path::PathBuf {
-    storage.join(PHOTOS_DIR).join(user_id)
-}
-
-/// Creates the storage tree — the root and its two subdirectories — when it
-/// is missing, private to the process owner. A fresh storage path is a
-/// normal first boot, not a failure, and everything below this point
-/// assumes the directories are there to write into.
+/// Creates the storage tree — the root and its attachments subdirectory —
+/// when it is missing, private to the process owner. A fresh storage path is
+/// a normal first boot, not a failure, and everything below this point
+/// assumes the directories are there to write into. (The legacy rebuild
+/// bridge makes `photos/` itself when an old blob column needs extracting.)
 fn ensure_storage_dirs(storage: &std::path::Path) -> Result<()> {
-    for dir in [
-        storage.to_path_buf(),
-        storage.join(ATTACHMENTS_DIR),
-        storage.join(PHOTOS_DIR),
-    ] {
+    for dir in [storage.to_path_buf(), storage.join(ATTACHMENTS_DIR)] {
         std::fs::create_dir_all(&dir).map_err(|e| {
             StoreError::Backend(format!("creating storage directory {}: {e}", dir.display()))
         })?;
@@ -1105,36 +1091,31 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
         created_at: parse_stamp(&text(row, 2)?)?,
         attachment_limit_bytes: row.get::<i64>(3).map_err(backend)?.max(0) as u64,
         allowed_file_types,
-        photo_limit_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
-        mail_batch_minutes: row.get::<i64>(19).map_err(backend)?.max(0) as u32,
-        reminder_minutes: row.get::<i64>(20).map_err(backend)?.max(0) as u32,
-        smtp_host: opt_text(row, 6)?,
-        smtp_port: row.get::<Option<u32>>(7).map_err(backend)?,
-        smtp_username: opt_text(row, 8)?,
-        smtp_from_name: opt_text(row, 9)?,
-        smtp_from_address: opt_text(row, 10)?,
-        smtp_password_set: row.get::<i64>(11).map_err(backend)? != 0,
-        sender_test: match opt_stamp(row, 12)? {
+        mail_batch_minutes: row.get::<i64>(18).map_err(backend)?.max(0) as u32,
+        reminder_minutes: row.get::<i64>(19).map_err(backend)?.max(0) as u32,
+        smtp_host: opt_text(row, 5)?,
+        smtp_port: row.get::<Option<u32>>(6).map_err(backend)?,
+        smtp_username: opt_text(row, 7)?,
+        smtp_from_name: opt_text(row, 8)?,
+        smtp_from_address: opt_text(row, 9)?,
+        smtp_password_set: row.get::<i64>(10).map_err(backend)? != 0,
+        sender_test: match opt_stamp(row, 11)? {
             Some(at) => Some(SenderTest {
                 at,
-                took_ms: row.get::<i64>(13).map_err(backend)?.max(0) as u64,
-                error: opt_text(row, 14)?,
+                took_ms: row.get::<i64>(12).map_err(backend)?.max(0) as u64,
+                error: opt_text(row, 13)?,
             }),
             None => None,
         },
-        sender_check: match opt_stamp(row, 16)? {
+        sender_check: match opt_stamp(row, 15)? {
             Some(at) => Some(SenderCheck {
                 at,
-                took_ms: row.get::<i64>(17).map_err(backend)?.max(0) as u64,
-                error: opt_text(row, 18)?,
+                took_ms: row.get::<i64>(16).map_err(backend)?.max(0) as u64,
+                error: opt_text(row, 17)?,
             }),
             None => None,
         },
-        rate_limit_attempts: row.get::<i64>(21).map_err(backend)?.max(0) as u64,
-        rate_window_minutes: row.get::<i64>(22).map_err(backend)?.max(0) as u32,
-        session_lifetime_days: row.get::<i64>(23).map_err(backend)?.max(0) as u32,
-        signin_link_lifetime_days: row.get::<i64>(24).map_err(backend)?.max(0) as u32,
-        public_url: opt_text(row, 15)?,
+        public_url: opt_text(row, 14)?,
     })
 }
 
@@ -1142,62 +1123,50 @@ fn workspace_from(row: &Row) -> Result<Workspace> {
 // the database whether a password exists and carries back a 0 or a 1. The value
 // never leaves the row, so no caller can pass it on by accident.
 const WORKSPACE_COLUMNS: &str = "id, name, created_at, attachment_limit_bytes, \
-     allowed_file_types, photo_limit_bytes, smtp_host, smtp_port, smtp_username, \
+     allowed_file_types, smtp_host, smtp_port, smtp_username, \
      smtp_from_name, smtp_from_address, \
      (smtp_password IS NOT NULL AND smtp_password <> ''), \
      smtp_test_at, smtp_test_ms, smtp_test_error, public_url, \
-     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes, reminder_minutes, \
-     rate_limit_attempts, rate_window_minutes, session_lifetime_days, signin_link_lifetime_days";
+     smtp_check_at, smtp_check_ms, smtp_check_error, mail_batch_minutes, reminder_minutes";
 
 fn user_from(row: &Row) -> Result<User> {
     Ok(User {
         id: text(row, 0)?,
         workspace_id: text(row, 1)?,
-        email: text(row, 2)?,
-        display_name: text(row, 3)?,
-        role: Role::parse(&text(row, 4)?).ok_or_else(|| StoreError::Corrupt("role".into()))?,
-        password_hash: opt_text(row, 5)?,
-        has_photo: row.get::<i64>(6).map_err(backend)? != 0,
+        oidc_sub: opt_text(row, 2)?,
+        email: text(row, 3)?,
+        display_name: text(row, 4)?,
+        role: Role::parse(&text(row, 5)?).ok_or_else(|| StoreError::Corrupt("role".into()))?,
+        disabled: row.get::<i64>(6).map_err(backend)? != 0,
         created_at: parse_stamp(&text(row, 7)?)?,
         last_signed_in_at: opt_stamp(row, 8)?,
-        invited_by: opt_text(row, 9)?,
-        timezone: text(row, 10)?,
-        theme: text(row, 11)?,
-        language: text(row, 12)?,
-        ui: text(row, 13)?,
+        timezone: text(row, 9)?,
+        theme: text(row, 10)?,
+        language: text(row, 11)?,
+        ui: text(row, 12)?,
     })
 }
 
-const USER_COLUMNS: &str = "id, workspace_id, email, display_name, role, password_hash, \
-     (photo_mime IS NOT NULL), created_at, last_signed_in_at, invited_by, timezone, theme, language, ui";
-
-fn signin_link_from(row: &Row) -> Result<SigninLink> {
-    Ok(SigninLink {
-        id: text(row, 0)?,
-        user_id: text(row, 1)?,
-        created_at: parse_stamp(&text(row, 2)?)?,
-        expires_at: parse_stamp(&text(row, 3)?)?,
-        used_at: opt_stamp(row, 4)?,
-        kind: LinkKind::from_str(&text(row, 5)?)
-            .ok_or_else(|| StoreError::Corrupt("signin_link kind".into()))?,
-    })
-}
-
-fn session_from(row: &Row) -> Result<Session> {
-    Ok(Session {
-        id: text(row, 0)?,
-        user_id: text(row, 1)?,
-        created_at: parse_stamp(&text(row, 2)?)?,
-        expires_at: parse_stamp(&text(row, 3)?)?,
-        revoked_at: opt_stamp(row, 4)?,
-    })
-}
-
-const SESSION_COLUMNS: &str = "id, user_id, created_at, expires_at, revoked_at";
+const USER_COLUMNS: &str = "id, workspace_id, oidc_sub, email, display_name, role, disabled, \
+     created_at, last_signed_in_at, timezone, theme, language, ui";
 
 /// Addresses are matched case-insensitively; the display form is kept as typed.
 fn fold_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+/// What SSO does to a row's role: the provider's admin flag makes `Admin`;
+/// losing it drops an `Admin` to `Member`. A `Member` or `Viewer` the
+/// provider no longer calls admin keeps the role they have — dropping to
+/// `Viewer` is an admin's explicit act, never a side effect of signing in.
+fn synced_role(current: Role, im_admin: bool) -> Role {
+    if im_admin {
+        Role::Admin
+    } else if current == Role::Admin {
+        Role::Member
+    } else {
+        current
+    }
 }
 
 #[async_trait]
@@ -1206,128 +1175,198 @@ impl Store for TursoStore {
         self.live.subscribe()
     }
 
-    async fn claim_workspace(
+    async fn provision_user(
         &self,
-        workspace_name: &str,
+        sub: &str,
         email: &str,
         display_name: &str,
-        password_hash: &str,
-    ) -> Result<(Workspace, User)> {
-        let workspace_id = Ulid::new().to_string();
-        let admin_id = Ulid::new().to_string();
-        let board_id = Ulid::new().to_string();
-        let now = now_text()?;
+        im_admin: bool,
+    ) -> Result<User> {
         let email = fold_email(email);
-
+        // IMMEDIATE: the first provision builds the workspace, and two
+        // concurrent first sign-ins must not both build one — nor both
+        // claim an unclaimed owner.
         let mut conn = self.tx_conn().await?;
-        // IMMEDIATE: take the write lock at BEGIN, so a second claimant waits
-        // out the busy timeout here instead of doing the whole insert and
-        // discovering the conflict at the end.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(backend)?;
-
-        let claimed = async {
+        let now = now_text()?;
+        let by_sub = format!("SELECT {USER_COLUMNS} FROM user WHERE oidc_sub = ?1");
+        let mut rows = tx.query(&by_sub, params![sub]).await.map_err(backend)?;
+        let seen = match rows.next().await.map_err(backend)? {
+            Some(row) => Some(user_from(&row)?),
+            None => None,
+        };
+        let mut changed;
+        let id = if let Some(user) = seen {
+            // A returning person: the provider may have a new address or a
+            // new name for them, and the row follows the provider — but the
+            // preferences, the history and the disabled flag are ours, and
+            // this write touches none of them.
+            let role = synced_role(user.role, im_admin);
+            changed = user.email != email || user.display_name != display_name || role != user.role;
             tx.execute(
-                "INSERT INTO workspace (id, name, created_at, rate_limit_attempts, \
-                 rate_window_minutes, session_lifetime_days, signin_link_lifetime_days) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "UPDATE user SET email = ?1, display_name = ?2, role = ?3, \
+                 last_signed_in_at = ?4 WHERE id = ?5",
                 params![
-                    workspace_id.clone(),
-                    workspace_name,
-                    now.clone(),
-                    crate::store::DEFAULT_RATE_LIMIT_ATTEMPTS as i64,
-                    i64::from(crate::store::DEFAULT_RATE_WINDOW_MINUTES),
-                    i64::from(crate::store::DEFAULT_SESSION_LIFETIME_DAYS),
-                    i64::from(crate::store::DEFAULT_SIGNIN_LINK_LIFETIME_DAYS),
-                ],
-            )
-            .await?;
-            tx.execute(
-                "INSERT INTO user (id, workspace_id, email, display_name, role, password_hash, \
-                 created_at) VALUES (?1, ?2, ?3, ?4, 'admin', ?5, ?6)",
-                params![
-                    admin_id.clone(),
-                    workspace_id.clone(),
-                    email,
+                    email.clone(),
                     display_name,
-                    password_hash,
-                    now.clone()
-                ],
-            )
-            .await?;
-            // The claim itself. Fixed primary key, so the second writer loses.
-            tx.execute(
-                "INSERT INTO workspace_owner (singleton, user_id, claimed_at) \
-                 VALUES (1, ?1, ?2)",
-                params![admin_id.clone(), now.clone()],
-            )
-            .await?;
-            // A claimed workspace is never boardless: the EmptyBoard screen is
-            // four named columns waiting for a first card, not a setup step.
-            tx.execute(
-                "INSERT INTO board (id, workspace_id, name, task_prefix, created_at) \
-                 VALUES (?1, ?2, ?3, 'DZ', ?4)",
-                params![
-                    board_id.clone(),
-                    workspace_id.clone(),
-                    DEFAULT_BOARD_NAME,
+                    role.as_str(),
                     now.clone(),
+                    user.id.clone()
                 ],
             )
-            .await?;
-            for (position, (name, is_done)) in DEFAULT_COLUMNS.iter().enumerate() {
+            .await
+            .map_err(backend)?;
+            user.id
+        } else {
+            let by_email =
+                format!("SELECT {USER_COLUMNS} FROM user WHERE email = ?1 COLLATE NOCASE");
+            let mut rows = tx
+                .query(&by_email, params![email.clone()])
+                .await
+                .map_err(backend)?;
+            let seen = match rows.next().await.map_err(backend)? {
+                Some(row) => Some(user_from(&row)?),
+                None => None,
+            };
+            drop(rows);
+            if let Some(user) = seen {
+                // An address from before SSO: the sub lands on the row, and
+                // everything the row carries — id, role, preferences, history —
+                // stays where it was. The claim itself is a member change.
+                let role = synced_role(user.role, im_admin);
                 tx.execute(
-                    "INSERT INTO board_column (id, board_id, name, position, is_done) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "UPDATE user SET oidc_sub = ?1, email = ?2, display_name = ?3, role = ?4, \
+                     last_signed_in_at = ?5 WHERE id = ?6",
                     params![
-                        Ulid::new().to_string(),
-                        board_id.clone(),
-                        *name,
-                        position as i64,
-                        i64::from(*is_done)
+                        sub,
+                        email.clone(),
+                        display_name,
+                        role.as_str(),
+                        now.clone(),
+                        user.id.clone()
                     ],
                 )
-                .await?;
+                .await
+                .map_err(backend)?;
+                changed = true;
+                user.id
+            } else {
+                let known = {
+                    let mut rows = tx
+                        .query("SELECT id FROM workspace LIMIT 1", ())
+                        .await
+                        .map_err(backend)?;
+                    let known = match rows.next().await.map_err(backend)? {
+                        Some(row) => Some(text(&row, 0)?),
+                        None => None,
+                    };
+                    drop(rows);
+                    known
+                };
+                let workspace_id = match known {
+                    Some(id) => id,
+                    None => {
+                        // The first sign-in is the whole setup: the workspace
+                        // and the board it is never without, the way the old
+                        // claim screen built them with the first account.
+                        let workspace_id = Ulid::new().to_string();
+                        let board_id = Ulid::new().to_string();
+                        tx.execute(
+                            "INSERT INTO workspace (id, name, created_at) VALUES (?1, 'İz', ?2)",
+                            params![workspace_id.clone(), now.clone()],
+                        )
+                        .await
+                        .map_err(backend)?;
+                        tx.execute(
+                            "INSERT INTO board (id, workspace_id, name, task_prefix, created_at) \
+                             VALUES (?1, ?2, ?3, 'DZ', ?4)",
+                            params![
+                                board_id.clone(),
+                                workspace_id.clone(),
+                                DEFAULT_BOARD_NAME,
+                                now.clone(),
+                            ],
+                        )
+                        .await
+                        .map_err(backend)?;
+                        for (position, (name, is_done)) in DEFAULT_COLUMNS.iter().enumerate() {
+                            tx.execute(
+                                "INSERT INTO board_column (id, board_id, name, position, is_done) \
+                                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                                params![
+                                    Ulid::new().to_string(),
+                                    board_id.clone(),
+                                    *name,
+                                    position as i64,
+                                    i64::from(*is_done)
+                                ],
+                            )
+                            .await
+                            .map_err(backend)?;
+                        }
+                        tx.execute(
+                            "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
+                             VALUES (?1, ?2, 'General', 0, 1, ?3)",
+                            params![Ulid::new().to_string(), board_id.clone(), now.clone()],
+                        )
+                        .await
+                        .map_err(backend)?;
+                        workspace_id
+                    }
+                };
+                let id = Ulid::new().to_string();
+                tx.execute(
+                    "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, role, \
+                     disabled, created_at, last_signed_in_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?7)",
+                    params![
+                        id.clone(),
+                        workspace_id,
+                        sub,
+                        email.clone(),
+                        display_name,
+                        if im_admin {
+                            Role::Admin.as_str()
+                        } else {
+                            Role::Member.as_str()
+                        },
+                        now.clone()
+                    ],
+                )
+                .await
+                .map_err(backend)?;
+                changed = true;
+                id
             }
-            // Every task must wear a tag, so the board comes with the one
-            // that catches whatever loses its own — English, like the
-            // columns beside it.
-            tx.execute(
-                "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
-                 VALUES (?1, ?2, 'General', 0, 1, ?3)",
-                params![Ulid::new().to_string(), board_id.clone(), now.clone()],
-            )
-            .await?;
-            Ok::<_, turso::Error>(())
+        };
+        if im_admin {
+            // The owner is whoever the provider's first admin is; a later
+            // admin never steals it. Conditional on the row still missing, in
+            // the same transaction, so two first sign-ins cannot both win.
+            let claimed = tx
+                .execute(
+                    "INSERT INTO workspace_owner (singleton, user_id, claimed_at) \
+                     SELECT 1, ?1, ?2 WHERE NOT EXISTS \
+                     (SELECT 1 FROM workspace_owner WHERE singleton = 1)",
+                    params![id.clone(), now.clone()],
+                )
+                .await
+                .map_err(backend)?;
+            changed = changed || claimed > 0;
         }
-        .await;
-
-        match claimed {
-            Ok(()) => tx.commit().await.map_err(|e| {
-                if is_constraint_violation(&e) {
-                    StoreError::AlreadyClaimed
-                } else {
-                    backend(e)
-                }
-            })?,
-            Err(e) => {
-                let _ = tx.rollback().await;
-                return Err(if is_constraint_violation(&e) {
-                    StoreError::AlreadyClaimed
-                } else {
-                    backend(e)
-                });
-            }
+        tx.commit().await.map_err(backend)?;
+        drop(conn);
+        // Provisioning runs on every signed-in request, so Members announces
+        // only when the row actually changed: a first sight, a claim, a
+        // provider-side rename or role flip, an owner claim. Anything louder
+        // would re-render every members-watching tab on every request.
+        if changed {
+            self.announce([Topic::Members]);
         }
-        // First write in the database's life: settings, members and the
-        // board all begin here, so a subscriber on any of the three wakes.
-        self.announce([Topic::Settings, Topic::Members, Topic::Board]);
-
-        let workspace = self.workspace().await?.ok_or(StoreError::NotFound)?;
-        let admin = self.user(&admin_id).await?.ok_or(StoreError::NotFound)?;
-        Ok((workspace, admin))
+        self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
     async fn owner(&self) -> Result<Option<User>> {
@@ -1465,7 +1504,6 @@ impl Store for TursoStore {
         &self,
         workspace_id: &str,
         attachment_limit_bytes: u64,
-        photo_limit_bytes: u64,
         allowed_file_types: &[String],
         mail_batch_minutes: u32,
         reminder_minutes: u32,
@@ -1474,12 +1512,11 @@ impl Store for TursoStore {
         let types = serde_json::to_string(allowed_file_types)
             .map_err(|e| StoreError::Corrupt(format!("allowed_file_types: {e}")))?;
         conn.execute(
-            "UPDATE workspace SET attachment_limit_bytes = ?1, photo_limit_bytes = ?2, \
-                 allowed_file_types = ?3, mail_batch_minutes = ?5, reminder_minutes = ?6 \
-                 WHERE id = ?4",
+            "UPDATE workspace SET attachment_limit_bytes = ?1, \
+                 allowed_file_types = ?2, mail_batch_minutes = ?4, reminder_minutes = ?5 \
+                 WHERE id = ?3",
             params![
                 attachment_limit_bytes as i64,
-                photo_limit_bytes as i64,
                 types,
                 workspace_id,
                 i64::from(mail_batch_minutes),
@@ -1491,75 +1528,6 @@ impl Store for TursoStore {
         drop(conn);
         self.announce([Topic::Settings]);
         Ok(())
-    }
-
-    /// Writes the workspace's four security knobs: the sign-in attempt
-    /// allowance, the rate-limit window and the two lifetimes. One write,
-    /// because they are one save — the same rule `set_limits` lives by.
-    async fn set_security(
-        &self,
-        workspace_id: &str,
-        rate_limit_attempts: u64,
-        rate_window_minutes: u32,
-        session_lifetime_days: u32,
-        signin_link_lifetime_days: u32,
-    ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "UPDATE workspace SET rate_limit_attempts = ?1, rate_window_minutes = ?2, \
-                 session_lifetime_days = ?3, signin_link_lifetime_days = ?4 WHERE id = ?5",
-            params![
-                rate_limit_attempts as i64,
-                i64::from(rate_window_minutes),
-                i64::from(session_lifetime_days),
-                i64::from(signin_link_lifetime_days),
-                workspace_id
-            ],
-        )
-        .await
-        .map_err(backend)?;
-        drop(conn);
-        self.announce([Topic::Settings]);
-        Ok(())
-    }
-
-    async fn create_user(&self, new: NewUser) -> Result<User> {
-        let email = fold_email(&new.email);
-        if self
-            .user_by_email(&new.workspace_id, &email)
-            .await?
-            .is_some()
-        {
-            return Err(StoreError::Conflict("account"));
-        }
-        let id = Ulid::new().to_string();
-        self.conn
-            .lock()
-            .await
-            .execute(
-                "INSERT INTO user \
-                 (id, workspace_id, email, display_name, role, created_at, invited_by) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    id.clone(),
-                    new.workspace_id,
-                    email,
-                    new.display_name,
-                    new.role.as_str(),
-                    now_text()?,
-                    new.invited_by
-                ],
-            )
-            .await
-            .map_err(|e| {
-                if is_constraint_violation(&e) {
-                    StoreError::Conflict("account")
-                } else {
-                    backend(e)
-                }
-            })?;
-        self.announce([Topic::Members]);
-        self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
     async fn user(&self, id: &str) -> Result<Option<User>> {
@@ -1650,160 +1618,6 @@ impl Store for TursoStore {
         })
     }
 
-    async fn set_password_hash(&self, user_id: &str, hash: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "UPDATE user SET password_hash = ?1 WHERE id = ?2",
-                params![hash, user_id],
-            )
-            .await
-            .map_err(backend)?;
-        if n == 0 {
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            self.announce([Topic::Members]);
-            Ok(())
-        }
-    }
-
-    async fn set_profile(&self, user_id: &str, display_name: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "UPDATE user SET display_name = ?1 WHERE id = ?2",
-                params![display_name, user_id],
-            )
-            .await
-            .map_err(backend)?;
-        if n == 0 {
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            self.announce([Topic::Members]);
-            Ok(())
-        }
-    }
-
-    async fn set_photo(&self, user_id: &str, bytes: &[u8], mime: &str) -> Result<()> {
-        // The new bytes stage under a name no row wears, the row commits,
-        // and only then does the rename put them over the old photo: a failed
-        // update leaves the committed photo exactly as it was, and a crash
-        // between commit and rename serves the old bytes next to a staged
-        // file the boot sweep collects — stale, never destroyed.
-        let path = photo_file(&self.storage, user_id);
-        let staged = path.with_extension(format!("incoming-{}", Ulid::new()));
-        write_file_atomic(&staged, bytes).map_err(|e| StoreError::Backend(e.to_string()))?;
-        let conn = self.conn.lock().await;
-        let written = conn
-            .execute(
-                "UPDATE user SET photo_mime = ?1 WHERE id = ?2",
-                params![mime, user_id],
-            )
-            .await;
-        let n = match written {
-            Ok(n) => n,
-            Err(e) => {
-                drop(conn);
-                let _ = std::fs::remove_file(&staged);
-                return Err(backend(e));
-            }
-        };
-        if n == 0 {
-            drop(conn);
-            let _ = std::fs::remove_file(&staged);
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            std::fs::rename(&staged, &path).map_err(|e| StoreError::Backend(e.to_string()))?;
-            self.announce([Topic::Members]);
-            Ok(())
-        }
-    }
-
-    async fn clear_photo(&self, user_id: &str) -> Result<()> {
-        // The row goes first: the file may only follow a delete that
-        // committed, or a crash in between would leave a row whose photo is
-        // gone. The unlink is best-effort — a file that survives it is
-        // orphaned bytes the boot sweep collects.
-        let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "UPDATE user SET photo_mime = NULL WHERE id = ?1",
-                params![user_id],
-            )
-            .await
-            .map_err(backend)?;
-        if n == 0 {
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            let _ = std::fs::remove_file(photo_file(&self.storage, user_id));
-            self.announce([Topic::Members]);
-            Ok(())
-        }
-    }
-
-    async fn photo(&self, user_id: &str) -> Result<Option<(Vec<u8>, String)>> {
-        let conn = self.conn.lock().await;
-        let mut rows = conn
-            .query(
-                "SELECT photo_mime FROM user WHERE id = ?1",
-                params![user_id],
-            )
-            .await
-            .map_err(backend)?;
-        let mime = match rows.next().await.map_err(backend)? {
-            Some(row) => opt_text(&row, 0)?,
-            None => return Ok(None),
-        };
-        drop(conn);
-        let Some(mime) = mime else {
-            return Ok(None);
-        };
-        match std::fs::read(photo_file(&self.storage, user_id)) {
-            Ok(bytes) => Ok(Some((bytes, mime))),
-            // A row whose file went missing is reported at boot; the photo
-            // read answers "nothing to serve" rather than failing the page.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(StoreError::Backend(e.to_string())),
-        }
-    }
-
-    async fn set_email(&self, user_id: &str, workspace_id: &str, email: &str) -> Result<()> {
-        let email = fold_email(email);
-        if let Some(existing) = self.user_by_email(workspace_id, &email).await?
-            && existing.id != user_id
-        {
-            return Err(StoreError::Conflict("account"));
-        }
-        let conn = self.conn.lock().await;
-        // The check above and this write are not one transaction: a second
-        // claimant can slip in between them and take the unique index first,
-        // so the write's own failure is read too, not just the pre-check's.
-        let n = conn
-            .execute(
-                "UPDATE user SET email = ?1 WHERE id = ?2",
-                params![email, user_id],
-            )
-            .await
-            .map_err(|e| {
-                if is_constraint_violation(&e) {
-                    StoreError::Conflict("account")
-                } else {
-                    backend(e)
-                }
-            })?;
-        if n == 0 {
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            self.announce([Topic::Members]);
-            Ok(())
-        }
-    }
-
     async fn set_preferences(
         &self,
         user_id: &str,
@@ -1847,12 +1661,12 @@ impl Store for TursoStore {
         }
     }
 
-    async fn mark_signed_in(&self, user_id: &str, at: OffsetDateTime) -> Result<()> {
+    async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> Result<()> {
         let conn = self.conn.lock().await;
         let n = conn
             .execute(
-                "UPDATE user SET last_signed_in_at = ?1 WHERE id = ?2",
-                params![stamp(at)?, user_id],
+                "UPDATE user SET disabled = ?1 WHERE id = ?2",
+                params![if disabled { 1 } else { 0 }, user_id],
             )
             .await
             .map_err(backend)?;
@@ -1863,232 +1677,6 @@ impl Store for TursoStore {
             self.announce([Topic::Members]);
             Ok(())
         }
-    }
-
-    async fn create_signin_link(
-        &self,
-        user_id: &str,
-        token_hash: &str,
-        expires_at: OffsetDateTime,
-        kind: LinkKind,
-    ) -> Result<SigninLink> {
-        let id = Ulid::new().to_string();
-        let now = now_text()?;
-        let mut conn = self.tx_conn().await?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(backend)?;
-        // The newest link of a kind is the only live one: minting retires
-        // every earlier unspent link of the same kind for the account, in the
-        // same transaction as the insert, so a second reset mail cannot leave
-        // the first link working behind it. Retired is spent — the same
-        // stamped `used_at` a redemption writes — so there is no third state
-        // for reconcile or a fixture to know about. The update runs before
-        // the insert: the new row is unspent by definition and must not
-        // retire itself.
-        tx.execute(
-            "UPDATE signin_link SET used_at = ?1 \
-             WHERE user_id = ?2 AND kind = ?3 AND used_at IS NULL",
-            params![now.clone(), user_id, kind.as_str()],
-        )
-        .await
-        .map_err(backend)?;
-        tx.execute(
-            "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at, kind) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                id.clone(),
-                user_id,
-                token_hash,
-                now,
-                stamp(expires_at)?,
-                kind.as_str()
-            ],
-        )
-        .await
-        .map_err(backend)?;
-        tx.commit().await.map_err(backend)?;
-        self.announce([Topic::Members]);
-        match self
-            .one_row(
-                "SELECT id, user_id, created_at, expires_at, used_at, kind \
-                 FROM signin_link WHERE id = ?1",
-                params![id],
-            )
-            .await?
-        {
-            Some(row) => signin_link_from(&row),
-            None => Err(StoreError::NotFound),
-        }
-    }
-
-    async fn signin_link_by_hash(&self, token_hash: &str) -> Result<Option<SigninLink>> {
-        match self
-            .one_row(
-                "SELECT id, user_id, created_at, expires_at, used_at, kind \
-                 FROM signin_link WHERE token_hash = ?1",
-                params![token_hash],
-            )
-            .await?
-        {
-            Some(row) => Ok(Some(signin_link_from(&row)?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn consume_signin_link(&self, id: &str, at: OffsetDateTime) -> Result<bool> {
-        let mut conn = self.tx_conn().await?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(backend)?;
-        // Conditional update plus rows-affected, never read-then-write: the
-        // second redemption of a prefetched link updates nothing.
-        let n = tx
-            .execute(
-                "UPDATE signin_link SET used_at = ?1 WHERE id = ?2 AND used_at IS NULL",
-                params![stamp(at)?, id],
-            )
-            .await
-            .map_err(backend)?;
-        tx.commit().await.map_err(backend)?;
-        if n == 1 {
-            self.announce([Topic::Members]);
-        }
-        Ok(n == 1)
-    }
-
-    async fn create_session(
-        &self,
-        user_id: &str,
-        token_hash: &str,
-        expires_at: OffsetDateTime,
-    ) -> Result<Session> {
-        let id = Ulid::new().to_string();
-        self.conn
-            .lock()
-            .await
-            .execute(
-                "INSERT INTO session (id, user_id, token_hash, created_at, expires_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    id.clone(),
-                    user_id,
-                    token_hash,
-                    now_text()?,
-                    stamp(expires_at)?
-                ],
-            )
-            .await
-            .map_err(backend)?;
-        self.announce([Topic::Members]);
-        let sql = format!("SELECT {SESSION_COLUMNS} FROM session WHERE id = ?1");
-        match self.one_row(&sql, params![id]).await? {
-            Some(row) => session_from(&row),
-            None => Err(StoreError::NotFound),
-        }
-    }
-
-    async fn session_by_hash(&self, token_hash: &str) -> Result<Option<Session>> {
-        let sql = format!("SELECT {SESSION_COLUMNS} FROM session WHERE token_hash = ?1");
-        match self.one_row(&sql, params![token_hash]).await? {
-            Some(row) => Ok(Some(session_from(&row)?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn session_token_hash(&self, id: &str) -> Result<Option<String>> {
-        match self
-            .one_row("SELECT token_hash FROM session WHERE id = ?1", params![id])
-            .await?
-        {
-            Some(row) => Ok(Some(text(&row, 0)?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn revoke_session(&self, id: &str, at: OffsetDateTime) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "UPDATE session SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
-                params![stamp(at)?, id],
-            )
-            .await
-            .map_err(backend)?;
-        if n == 0 {
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            self.announce([Topic::Members]);
-            Ok(())
-        }
-    }
-
-    async fn revoke_sessions_for_user(&self, user_id: &str, at: OffsetDateTime) -> Result<u64> {
-        let conn = self.conn.lock().await;
-        let n = conn
-            .execute(
-                "UPDATE session SET revoked_at = ?1 WHERE user_id = ?2 AND revoked_at IS NULL",
-                params![stamp(at)?, user_id],
-            )
-            .await
-            .map_err(backend)?;
-        drop(conn);
-        self.announce([Topic::Members]);
-        Ok(n)
-    }
-
-    // The three auth-attempt methods below announce nothing, alone among the
-    // writes here. They are rate-limit bookkeeping that no surface renders, and
-    // announcing them would wake every connected client on every failed
-    // sign-in — traffic in exchange for a screen that would look identical.
-    async fn record_auth_attempt(&self, bucket: &str, at: OffsetDateTime) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES (?1, ?2, ?3)",
-            params![Ulid::new().to_string(), bucket, stamp(at)?],
-        )
-        .await
-        .map_err(backend)?;
-        Ok(())
-    }
-
-    async fn count_auth_attempts(&self, bucket: &str, since: OffsetDateTime) -> Result<u64> {
-        // RFC 3339 in UTC sorts lexicographically, which is why the timestamps
-        // are stored in that shape.
-        match self
-            .one_row(
-                "SELECT COUNT(*) FROM auth_attempt WHERE bucket = ?1 AND attempted_at >= ?2",
-                params![bucket, stamp(since)?],
-            )
-            .await?
-        {
-            Some(row) => count_of(&row),
-            None => Ok(0),
-        }
-    }
-
-    async fn clear_auth_attempts(&self, bucket: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM auth_attempt WHERE bucket = ?1",
-            params![bucket],
-        )
-        .await
-        .map_err(backend)?;
-        Ok(())
-    }
-
-    async fn prune_auth_attempts(&self, before: OffsetDateTime) -> Result<u64> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM auth_attempt WHERE attempted_at < ?1",
-            params![stamp(before)?],
-        )
-        .await
-        .map_err(backend)
     }
 
     // -- board -------------------------------------------------------------
@@ -4872,7 +4460,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT u.id, u.display_name, (u.photo_mime IS NOT NULL) FROM task_assignee a \
+                "SELECT u.id, u.display_name, 0 FROM task_assignee a \
                  JOIN user u ON u.id = a.user_id \
                  WHERE a.task_id = ?1 ORDER BY u.display_name",
                 params![task_id],
@@ -4896,7 +4484,7 @@ impl DetailReads for TursoStore {
         // so neither leaves the server for this screen.
         let mut rows = conn
             .query(
-                "SELECT id, display_name, (photo_mime IS NOT NULL) FROM user \
+                "SELECT id, display_name, 0 FROM user \
                  WHERE workspace_id = ?1 AND role <> ?2 ORDER BY display_name",
                 params![workspace_id, Role::Viewer.as_str()],
             )
@@ -4955,7 +4543,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, (u.photo_mime IS NOT NULL) \
+                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, 0 \
                  FROM comment c JOIN user u ON u.id = c.author_id \
                  WHERE c.task_id = ?1 ORDER BY c.created_at, c.rowid",
                 params![task_id],
@@ -5011,7 +4599,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
-                 (u.photo_mime IS NOT NULL) \
+                 0 \
                  FROM activity a LEFT JOIN user u ON u.id = a.actor_id \
                  WHERE a.task_id = ?1 ORDER BY a.created_at DESC, a.rowid DESC",
                 params![task_id],
@@ -5048,7 +4636,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT t.id, t.task_key, t.title, t.column_id, t.done_at, t.parent_id, \
-                 u.id, u.display_name, (u.photo_mime IS NOT NULL) \
+                 u.id, u.display_name, 0 \
                  FROM task t \
                  LEFT JOIN task_assignee a ON a.task_id = t.id \
                  LEFT JOIN user u ON u.id = a.user_id \
@@ -5181,7 +4769,7 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT a.task_id, u.id, u.display_name, (u.photo_mime IS NOT NULL) \
+                "SELECT a.task_id, u.id, u.display_name, 0 \
                  FROM task_assignee a \
                  JOIN task t ON t.id = a.task_id \
                  JOIN user u ON u.id = a.user_id \
@@ -5404,10 +4992,15 @@ mod probe {
             .unwrap();
         use crate::store::Store as _;
 
-        let (ws, _admin) = store
-            .claim_workspace("İz", "ada@iz.sh", "Ada", "hash")
+        let admin = store
+            .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
             .await
             .unwrap();
+        let ws = store.workspace().await.unwrap().unwrap();
+        assert_eq!(
+            ws.id, admin.workspace_id,
+            "the first sign-in builds the workspace"
+        );
         store
             .set_sender(
                 &ws.id,
@@ -5477,16 +5070,16 @@ mod storage_fs {
         fn storage(&self) -> std::path::PathBuf {
             self.dir.path().join("storage")
         }
-
         /// A workspace with its admin, and one task on the default board.
         async fn with_task(&self) -> (String, String, String) {
-            let (ws, admin) = self
+            let admin = self
                 .store
-                .claim_workspace("İz", "ada@iz.sh", "Ada", "hash")
+                .provision_user("sub-ada", "ada@iz.sh", "Ada", true)
                 .await
                 .unwrap();
+            let ws_id = admin.workspace_id.clone();
             let admin = admin.id;
-            let board = self.store.board(&ws.id).await.unwrap().unwrap();
+            let board = self.store.board(&ws_id).await.unwrap().unwrap();
             let column = self
                 .store
                 .columns(&board.id)
@@ -5512,7 +5105,7 @@ mod storage_fs {
                 .unwrap()
                 .row
                 .id;
-            (ws.id, admin, task)
+            (ws_id, admin, task)
         }
     }
 
@@ -5550,23 +5143,6 @@ mod storage_fs {
     }
 
     #[tokio::test]
-    async fn a_photo_round_trips_through_its_file() {
-        let fx = Fixture::open().await;
-        let (_ws, admin, _task) = fx.with_task().await;
-        fx.store
-            .set_photo(&admin, b"grace-bytes", "image/png")
-            .await
-            .unwrap();
-
-        let photo = fx.store.photo(&admin).await.unwrap().unwrap();
-        assert_eq!(photo.0, b"grace-bytes".to_vec());
-        assert_eq!(photo.1, "image/png");
-        let file = photo_file(&fx.storage(), &admin);
-        assert!(file.is_file(), "the photo file exists");
-        assert_eq!(std::fs::read(&file).unwrap(), b"grace-bytes");
-    }
-
-    #[tokio::test]
     async fn deleting_an_attachment_takes_its_file_with_it() {
         let fx = Fixture::open().await;
         let (_ws, admin, task) = fx.with_task().await;
@@ -5594,31 +5170,14 @@ mod storage_fs {
     }
 
     #[tokio::test]
-    async fn clearing_a_photo_takes_its_file_with_it() {
-        let fx = Fixture::open().await;
-        let (_ws, admin, _task) = fx.with_task().await;
-        fx.store
-            .set_photo(&admin, b"grace-bytes", "image/png")
-            .await
-            .unwrap();
-        let file = photo_file(&fx.storage(), &admin);
-
-        fx.store.clear_photo(&admin).await.unwrap();
-        assert!(!file.exists(), "the file went with the marker");
-        assert!(fx.store.photo(&admin).await.unwrap().is_none());
-        assert!(!fx.store.user(&admin).await.unwrap().unwrap().has_photo);
-    }
-
-    #[tokio::test]
     async fn the_boot_sweep_deletes_files_no_row_names() {
         let fx = Fixture::open().await;
         let attachments = fx.storage().join(ATTACHMENTS_DIR);
-        let photos = fx.storage().join(PHOTOS_DIR);
-        // Strays in both subdirs: a file under a made-up id, and the temp
-        // file a crash abandoned mid-write.
+        // Strays in the attachments dir: a file under a made-up id, and the
+        // temp file a crash abandoned mid-write. (Photos left the store with
+        // SSO: whatever lingers under storage/photos/ is nobody's row.)
         std::fs::write(attachments.join("01AAAAAAAAAAAAAAAAAAAAAAAA"), b"x").unwrap();
         std::fs::write(attachments.join("02BBBBBBBBBBBBBBBBBBBBBBBB.tmp"), b"x").unwrap();
-        std::fs::write(photos.join("03CCCCCCCCCCCCCCCCCCCCCCCC"), b"x").unwrap();
 
         // A reopen is a boot; the sweep runs inside it.
         let Fixture { store, dir } = fx;
@@ -5627,7 +5186,6 @@ mod storage_fs {
         let storage = dir.path().join("storage");
         let store = TursoStore::open(&db_path, &storage).await.unwrap();
         assert_eq!(std::fs::read_dir(&attachments).unwrap().count(), 0);
-        assert_eq!(std::fs::read_dir(&photos).unwrap().count(), 0);
         drop(store);
     }
 
@@ -5648,26 +5206,18 @@ mod storage_fs {
             })
             .await
             .unwrap();
-        fx.store
-            .set_photo(&admin, b"grace-bytes", "image/png")
-            .await
-            .unwrap();
-        // The files are lost the way a botched restore loses them: rows on
-        // disk, files gone.
+        // The file is lost the way a botched restore loses it: the row on
+        // disk, the file gone.
         std::fs::remove_file(attachment_file(&fx.storage(), &id)).unwrap();
-        std::fs::remove_file(photo_file(&fx.storage(), &admin)).unwrap();
 
         let Fixture { store, dir } = fx;
         drop(store);
         let db_path = dir.path().join("iz.db").to_str().unwrap().to_string();
         let storage = dir.path().join("storage");
         let store = TursoStore::open(&db_path, &storage).await.unwrap();
-        // Both rows survive the sweep; the reads answer "nothing to serve".
+        // The row survives the sweep; the read answers "nothing to serve".
         assert!(store.attachment(&id).await.unwrap().is_some());
         assert!(store.attachment_bytes(&id).await.unwrap().is_none());
-        let admin_row = store.user(&admin).await.unwrap().unwrap();
-        assert!(admin_row.has_photo, "the row still says a photo is there");
-        assert!(store.photo(&admin).await.unwrap().is_none());
     }
 
     #[tokio::test]

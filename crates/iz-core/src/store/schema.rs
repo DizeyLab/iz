@@ -1,5 +1,5 @@
 //! Schema fingerprinting: compare the database SQLite actually has with the
-//! declared whole schema in `migrations/0001_init.sql`.
+//! declared schema — every file in `migrations/`, applied in order.
 //!
 //! SQLite stores `CREATE` statements as written, comments and all, so two
 //! databases built from the same logical schema but different comments or
@@ -16,6 +16,8 @@ use turso::Connection;
 pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/0001_init.sql"),
     include_str!("../../migrations/0002_security_knobs.sql"),
+    include_str!("../../migrations/0003_sso.sql"),
+    include_str!("../../migrations/0004_no_photo_limit.sql"),
 ];
 
 /// The whole declared schema — every migration applied in order — as one

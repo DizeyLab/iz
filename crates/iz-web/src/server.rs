@@ -1,31 +1,35 @@
-//! Server-side plumbing for the auth surface: the session cookie, the person
-//! behind the current request, and the role guards.
+//! Server-side plumbing: the application context, the person behind the
+//! current request, and the role guards.
 //!
 //! Every guard here is the real one. The UI hides what a role may not do, but
 //! the answer that matters is the one given in this module, on the server.
 //!
-//! Ported from `iz-web/src/server.rs` and the `Refusal`/`call_id` pieces of
-//! `iz-web/src/auth.rs`, onto topcoat's context/cookie/layer primitives.
+//! There are no local passwords — im holds the central session over OIDC and
+//! `iz-client` (vendored from `im-client` via `in-client`) holds this app's
+//! side of it. This module's `current_user` maps im's claims onto the local
+//! user row, provisioning it on first sight.
 
-use iz_core::accounts::{AccountError, Accounts};
-use iz_core::auth::PasswordProblem;
+use std::sync::Arc;
+
 use iz_core::board::Transition;
 use iz_core::mail::Engine;
-use iz_core::store::{Freeing, User};
+use iz_core::store::{Freeing, Store, StoreError, User};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use topcoat::asset::AssetBundle;
 use topcoat::context::{Cx, app_context, memoize, try_app_context};
-use topcoat::cookie::{Cookie, Cookies, SameSite, cookie, cookies};
+use topcoat::cookie::{Cookies, cookies};
 use topcoat::router::request::headers;
 use topcoat::router::{Body, HeaderValue, Next, StatusCode, header, response::Response, to_bytes};
 
-/// The session cookie's name. One cookie, one browser, one session row.
-pub const SESSION_COOKIE: &str = "iz_session";
+/// The workspace store, put into context by the router.
+pub fn store(cx: &Cx) -> Arc<dyn Store> {
+    app_context::<Arc<dyn Store>>(cx).clone()
+}
 
-/// The workspace's account service, put into context by the router.
-pub fn accounts(cx: &Cx) -> Accounts {
-    app_context::<Accounts>(cx).clone()
+/// The loaded `config/iz.toml`, put into context by `main.rs`.
+pub fn config(cx: &Cx) -> iz_core::Config {
+    app_context::<iz_core::Config>(cx).clone()
 }
 
 /// The mail engine, or the fact that there is nobody to hand a crossing to.
@@ -169,45 +173,10 @@ pub fn mail(cx: &Cx) -> Mail {
         .unwrap_or_else(Mail::silent)
 }
 
-/// The application cookie jar, with the attributes every İz cookie wants.
-fn app_cookies(cx: &Cx) -> impl Cookies {
-    cookies(cx)
-        .default_secure(true)
-        .default_http_only(true)
-        .default_same_site(SameSite::Lax)
-        .default_path("/")
-}
-
-/// The cookie value this request presented, if it presented one.
-pub fn presented_session(cx: &Cx) -> Option<String> {
-    cookies(cx)
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-}
-
-/// Any other cookie the request presented, by name — the client-set,
-/// non-`HttpOnly` ones (e.g. `iz_rows_<section>`) that JS reads and
-/// writes on its own.
+/// Any cookie the request presented, by name — the client-set, non-`HttpOnly`
+/// ones (e.g. `iz_rows_<section>`) that JS reads and writes on its own.
 pub fn presented_cookie(cx: &Cx, name: &str) -> Option<String> {
     cookies(cx).get(name).map(|c| c.value().to_string())
-}
-
-/// A stable-enough label for the client, for rate limiting. A proxy header is
-/// only trusted because İz is meant to sit behind one; the address bucket is
-/// the limit that actually protects the Argon2 work either way.
-///
-/// topcoat 0.6.2 exposes no peer address; x-forwarded-for or nothing.
-pub fn client_label(cx: &Cx) -> String {
-    let Some(forwarded) = headers(cx).get("x-forwarded-for") else {
-        return "unknown".to_string();
-    };
-    let Ok(raw) = forwarded.to_str() else {
-        return "unknown".to_string();
-    };
-    match raw.split(',').next() {
-        Some(first) if !first.trim().is_empty() => first.trim().to_string(),
-        _ => "unknown".to_string(),
-    }
 }
 
 /// The stylesheet this binary serves must be the one compiled into it.
@@ -259,51 +228,47 @@ pub fn stylesheet_guard(bundle: &AssetBundle) -> Result<String, String> {
     ))
 }
 
-/// Writes the session cookie. `HttpOnly` so script cannot read it, `Secure` so
-/// it never crosses plain HTTP, `SameSite=Lax` so another site's form cannot
-/// post with it.
-pub fn set_session_cookie(cx: &Cx, token: &str, lifetime: time::Duration) {
-    app_cookies(cx).add(cookie! {
-        SESSION_COOKIE = token.to_owned();
-        Path = "/";
-        Secure;
-        HttpOnly;
-        SameSite = Lax;
-        MaxAge = lifetime
-    });
-}
-
-/// Removes the session cookie from this browser. The server-side revocation is
-/// what actually ends the session; this only tidies the client.
-pub fn clear_session_cookie(cx: &Cx) {
-    app_cookies(cx).remove(Cookie::build((SESSION_COOKIE, "")).path("/").build());
-}
-
 /// The person behind this request, or nobody, or the store failing to say.
+///
+/// im is asked on every request — the cookie holds an opaque session token,
+/// introspected per call — so an admin revoking the person in im signs them
+/// out here at once. The first sight of a `sub` inserts the local row (open
+/// provisioning: any im user who completes SSO gets one; a legacy row with
+/// the same address is claimed onto the new `sub`); every later sight
+/// refreshes the address and name, syncs the admin role from im's flag, and
+/// stamps the last sign-in time.
 ///
 /// A store error is not "nobody" — a busy database mid-drag is a fact about
 /// the database, not about whether this browser is signed in, and a caller
 /// that folded the two together would send a signed-in person to a sign-in
 /// screen because a write elsewhere held a lock for a moment.
+///
+/// A disabled account reads as nobody: the cookie is im's business and is
+/// left untouched, but every guard below refuses as if signed out.
 #[memoize(as_ref)]
-pub async fn current_user(cx: &Cx) -> Result<Option<User>, AccountError> {
-    let Some(presented) = presented_session(cx) else {
+pub async fn current_user(cx: &Cx) -> Result<Option<User>, StoreError> {
+    let Some(claims) = iz_client::current_user(cx).await else {
         return Ok(None);
     };
-    accounts(cx).authenticate(&presented).await
+    let user = store(cx)
+        .provision_user(&claims.sub, &claims.email, &claims.name, claims.admin)
+        .await?;
+    if user.disabled {
+        return Ok(None);
+    }
+    Ok(Some(user))
 }
 
 /// The person behind this request, or a refusal the caller can return as-is.
 ///
-/// A store error becomes `Refusal::Unavailable` — the same place every other
-/// account error already lands, via `refusal_for` below — rather than
-/// `SignInFirst`, which would tell a signed-in person to sign in again over
-/// what was only a database hiccup.
+/// A store error becomes `Refusal::Unavailable` rather than `SignInFirst`,
+/// which would tell a signed-in person to sign in again over what was only
+/// a database hiccup.
 pub async fn require_user(cx: &Cx) -> Result<User, Refusal> {
     match current_user(cx).await {
         Ok(Some(user)) => Ok(user.clone()),
         Ok(None) => Err(Refusal::SignInFirst),
-        Err(error) => Err(refusal_for(error)),
+        Err(error) => Err(error.clone().into()),
     }
 }
 
@@ -328,56 +293,25 @@ pub async fn require_writer(cx: &Cx) -> Result<User, Refusal> {
     }
 }
 
-/// Shared by `From<AccountError>` and the `&AccountError` `current_user`
-/// hands back once memoized, so both paths land on the exact same wording.
-fn refusal_for(error: &AccountError) -> Refusal {
-    match error {
-        AccountError::Rejected => Refusal::Rejected,
-        AccountError::RateLimited => Refusal::RateLimited,
-        AccountError::Password(problem) => Refusal::Password(*problem),
-        AccountError::Forbidden => Refusal::Forbidden,
-        AccountError::AlreadyClaimed => Refusal::AlreadyClaimed,
-        AccountError::AddressTaken => Refusal::AddressTaken,
-        AccountError::Store(error) => {
-            eprintln!("store error: {error}");
-            Refusal::Unavailable
-        }
-        AccountError::Auth(error) => {
-            eprintln!("auth error: {error}");
-            Refusal::Unavailable
-        }
-    }
-}
-
-impl From<AccountError> for Refusal {
-    fn from(error: AccountError) -> Self {
-        refusal_for(&error)
+impl From<StoreError> for Refusal {
+    fn from(error: StoreError) -> Self {
+        eprintln!("store error: {error}");
+        Refusal::Unavailable
     }
 }
 
 /// Everything a refused call is allowed to say.
 ///
-/// Ported from `iz-web/src/auth.rs`; the auth pages that construct most of
-/// these variants land in a later slice, but the server plumbing above needs
-/// the type now.
+/// The codes are the contract's: a browser without script only ever sees
+/// them through the address bar, so each one has a short word form
+/// ([`Refusal::code`]) beside its sentence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal {
-    /// Wrong address, wrong password, or no account at all — deliberately one
-    /// answer for all three.
-    Rejected,
-    RateLimited,
-    /// A password broke a stated rule. Only reachable once we know who the
-    /// person is, so it gives nothing away. The problem itself rides in the
-    /// variant — the wording is built at the edge, in the reader's language,
-    /// never reflected out of the address bar.
-    Password(PasswordProblem),
+    /// Signed in, but refused here rather than merely hidden in the UI.
     Forbidden,
+    /// No session, a revoked one, or a disabled account — deliberately one
+    /// answer for all three.
     SignInFirst,
-    AlreadyClaimed,
-    /// Admin-side wording, shown on the member list and nowhere public.
-    AddressTaken,
-    /// The link is spent, expired, or was never real.
-    LinkNotUsable,
     /// A card with no title is not a card.
     EmptyTitle,
     /// A person with no name is not a person the board can show.
@@ -451,23 +385,15 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    /// The refusal in words, ported verbatim from `iz-web/src/auth.rs`.
+    /// The refusal in words.
     pub fn message(&self) -> String {
         match self {
-            Refusal::Rejected => "That did not work.".to_string(),
-            Refusal::RateLimited => {
-                "Too many attempts — wait a few minutes and try again.".to_string()
-            }
-            Refusal::Password(problem) => problem.to_string(),
             Refusal::Forbidden => "Not permitted.".to_string(),
             Refusal::SignInFirst => "Sign in first.".to_string(),
-            Refusal::AlreadyClaimed => "This workspace already has an owner.".to_string(),
-            Refusal::AddressTaken => "That address already has an account.".to_string(),
-            Refusal::LinkNotUsable => "This link no longer works.".to_string(),
             Refusal::EmptyTitle => "Give the task a title.".to_string(),
             Refusal::EmptyName => "Give yourself a name.".to_string(),
             Refusal::BadLimit => {
-                "A limit has to be at least 1 MB, and no wider than 500 MB per file or 20 MB per photo."
+                "A limit has to be at least 1 MB, and no wider than 500 MB per file."
                     .to_string()
             }
             Refusal::BadPolicy => "A security number is out of range.".to_string(),
@@ -533,7 +459,7 @@ impl Refusal {
             Refusal::NoSuchMember => "Böyle bir üye yok.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
             Refusal::BadLimit => {
-                "Limit en az 1 MB, dosya başına en çok 500 MB, fotoğraf başına en çok 20 MB olabilir."
+                "Limit en az 1 MB, dosya başına en çok 500 MB olabilir."
                     .to_string()
             }
             Refusal::BadPolicy => "Güvenlik sayısı aralığın dışında.".to_string(),
@@ -554,20 +480,7 @@ impl Refusal {
             Refusal::EmptyTag => "Etikete bir ad ver.".to_string(),
             Refusal::TagInUse => "Bu etikette kartlar var.".to_string(),
             Refusal::EmptyBody => "Önce bir şey yaz.".to_string(),
-            Refusal::Rejected => "Bu işe yaramadı.".to_string(),
-            Refusal::RateLimited => {
-                "Çok fazla deneme — birkaç dakika bekleyip tekrar dene.".to_string()
-            }
-            Refusal::AlreadyClaimed => "Bu çalışma alanının zaten bir sahibi var.".to_string(),
-            Refusal::AddressTaken => "Bu adresin zaten bir hesabı var.".to_string(),
-            Refusal::LinkNotUsable => "Bu bağlantı artık çalışmıyor.".to_string(),
             Refusal::EmptyName => "Kendine bir isim ver.".to_string(),
-            // The validator's own words, in the reader's language.
-            Refusal::Password(problem) => match problem {
-                PasswordProblem::TooShort => "En az 10 karakter.".to_string(),
-                PasswordProblem::LooksLikeYou => "Adresin ya da adın değil.".to_string(),
-                PasswordProblem::IsCurrent => "Bu zaten mevcut parolan.".to_string(),
-            },
         }
     }
 
@@ -576,16 +489,8 @@ impl Refusal {
     /// ours says nothing at all rather than something invented.
     pub fn from_code(code: &str) -> Option<Refusal> {
         Some(match code {
-            "rejected" => Refusal::Rejected,
-            "rate-limited" => Refusal::RateLimited,
-            "password-short" => Refusal::Password(PasswordProblem::TooShort),
-            "password-you" => Refusal::Password(PasswordProblem::LooksLikeYou),
-            "password-current" => Refusal::Password(PasswordProblem::IsCurrent),
             "forbidden" => Refusal::Forbidden,
             "sign-in-first" => Refusal::SignInFirst,
-            "already-claimed" => Refusal::AlreadyClaimed,
-            "address-taken" => Refusal::AddressTaken,
-            "link-not-usable" => Refusal::LinkNotUsable,
             "empty-title" => Refusal::EmptyTitle,
             "empty-name" => Refusal::EmptyName,
             "bad-limit" => Refusal::BadLimit,
@@ -630,20 +535,8 @@ impl Refusal {
     /// name that survives a round trip through a URL.
     pub fn code(&self) -> &'static str {
         match self {
-            Refusal::Rejected => "rejected",
-            Refusal::RateLimited => "rate-limited",
-            // The problem itself, not the wording, so the sentence is built
-            // here on the way back rather than reflected out of the address.
-            Refusal::Password(problem) => match problem {
-                PasswordProblem::TooShort => "password-short",
-                PasswordProblem::LooksLikeYou => "password-you",
-                PasswordProblem::IsCurrent => "password-current",
-            },
             Refusal::Forbidden => "forbidden",
             Refusal::SignInFirst => "sign-in-first",
-            Refusal::AlreadyClaimed => "already-claimed",
-            Refusal::AddressTaken => "address-taken",
-            Refusal::LinkNotUsable => "link-not-usable",
             Refusal::EmptyTitle => "empty-title",
             Refusal::EmptyName => "empty-name",
             Refusal::BadLimit => "bad-limit",
@@ -694,9 +587,8 @@ pub fn call_id(path: &str) -> String {
 /// back — read straight off the query, since there is no client-side action
 /// value to check first the way a hydrated page in the old UI had.
 ///
-/// Ported from the old UI's `auth.rs` `refusal_of`/`refusal_from_query`,
-/// collapsed into one function: every topcoat page is rendered server-side on
-/// every request, so there is only ever the query to read.
+/// Every topcoat page is rendered server-side on every request, so there is
+/// only ever the query to read.
 pub fn refusal_of(cx: &Cx, call: &str) -> Option<Refusal> {
     let query = topcoat::router::request::uri(cx).query()?;
     let mut code = None;
@@ -986,21 +878,12 @@ mod refusal_redirect_tests {
 #[cfg(test)]
 mod refusal_message_tests {
     use super::Refusal;
-    use iz_core::auth::PasswordProblem;
 
     #[test]
     fn every_refusal_survives_the_address_bar() {
         let all = [
-            Refusal::Rejected,
-            Refusal::RateLimited,
-            Refusal::Password(PasswordProblem::TooShort),
-            Refusal::Password(PasswordProblem::LooksLikeYou),
-            Refusal::Password(PasswordProblem::IsCurrent),
             Refusal::Forbidden,
             Refusal::SignInFirst,
-            Refusal::AlreadyClaimed,
-            Refusal::AddressTaken,
-            Refusal::LinkNotUsable,
             Refusal::EmptyTitle,
             Refusal::EmptyComment,
             Refusal::NoFile,
@@ -1081,88 +964,5 @@ mod call_id_tests {
     fn a_call_is_named_by_its_last_path_piece() {
         assert_eq!(call_id("/api/link_tasks"), "link_tasks");
         assert_eq!(call_id("/api/link_tasks?x=1"), "link_tasksx1");
-    }
-}
-
-#[cfg(test)]
-mod session_cookie_tests {
-    use super::{SESSION_COOKIE, clear_session_cookie, presented_session, set_session_cookie};
-    use topcoat::context::{Cx, CxTestBuilder};
-    use topcoat::cookie::{CookieJarCell, write_cookies};
-
-    /// A `Cx` whose request carried the given `Cookie` header, ready for
-    /// `set_session_cookie`/`presented_session`/`clear_session_cookie` to read
-    /// and write through.
-    fn cx_with(cookie_header: Option<&str>) -> Cx {
-        let mut builder = http::Request::builder();
-        if let Some(value) = cookie_header {
-            builder = builder.header(http::header::COOKIE, value);
-        }
-        let (parts, ()) = builder.body(()).unwrap().into_parts();
-        CxTestBuilder::new()
-            .request_context(parts)
-            .request_context(CookieJarCell::new())
-            .build()
-    }
-
-    fn set_cookie_headers(cx: &Cx) -> Vec<String> {
-        let mut headers = http::HeaderMap::new();
-        write_cookies(cx, &mut headers);
-        headers
-            .get_all(http::header::SET_COOKIE)
-            .iter()
-            .map(|v| v.to_str().unwrap().to_owned())
-            .collect()
-    }
-
-    /// The cookie name is a wire contract: every existing browser's `Cookie`
-    /// header still says "iz_session", and it must stay byte-identical or
-    /// every one of them is signed out at once.
-    #[test]
-    fn the_cookie_name_stayed_byte_identical() {
-        assert_eq!(SESSION_COOKIE, "iz_session");
-    }
-
-    #[test]
-    fn setting_writes_the_session_cookie_with_the_right_attributes() {
-        let cx = cx_with(None);
-        set_session_cookie(&cx, "tok123", time::Duration::days(14));
-
-        let set = set_cookie_headers(&cx);
-        assert_eq!(set.len(), 1);
-        assert!(set[0].starts_with("iz_session=tok123;"), "{}", set[0]);
-        for attr in [
-            "Path=/",
-            "Secure",
-            "HttpOnly",
-            "SameSite=Lax",
-            "Max-Age=1209600",
-        ] {
-            assert!(set[0].contains(attr), "{} missing {attr}", set[0]);
-        }
-    }
-
-    #[test]
-    fn presented_session_reads_the_cookie_the_browser_sent() {
-        let cx = cx_with(Some("iz_session=tok123"));
-        assert_eq!(presented_session(&cx).as_deref(), Some("tok123"));
-    }
-
-    #[test]
-    fn absent_cookie_presents_nothing() {
-        let cx = cx_with(None);
-        assert_eq!(presented_session(&cx), None);
-    }
-
-    #[test]
-    fn clearing_expires_the_cookie_at_the_same_path() {
-        let cx = cx_with(Some("iz_session=tok123"));
-        clear_session_cookie(&cx);
-
-        let set = set_cookie_headers(&cx);
-        assert_eq!(set.len(), 1);
-        assert!(set[0].starts_with("iz_session="), "{}", set[0]);
-        assert!(set[0].contains("Max-Age=0"), "{}", set[0]);
-        assert!(set[0].contains("Path=/"), "{}", set[0]);
     }
 }

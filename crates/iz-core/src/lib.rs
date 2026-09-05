@@ -2,8 +2,8 @@
 //!
 //! The vocabulary — roles and record shapes — compiles everywhere, so the UI
 //! and the server speak the same types. The `server` feature adds the halves
-//! that must never reach the browser: the store, the password hashing and the
-//! token minting.
+//! that must never reach the browser: the store, the mail engine and the
+//! config.
 
 pub mod board;
 pub mod detail;
@@ -13,10 +13,6 @@ pub use detail::TaskDetail;
 pub use role::Role;
 
 #[cfg(feature = "server")]
-pub mod accounts;
-#[cfg(feature = "server")]
-pub mod auth;
-#[cfg(feature = "server")]
 pub mod live;
 #[cfg(feature = "server")]
 pub mod config;
@@ -25,8 +21,6 @@ pub mod mail;
 #[cfg(feature = "server")]
 pub mod store;
 
-#[cfg(feature = "server")]
-pub use accounts::{AccountError, Accounts};
 #[cfg(feature = "server")]
 pub use board::{BoardReads, load as load_board};
 #[cfg(feature = "server")]

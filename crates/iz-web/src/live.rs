@@ -22,7 +22,7 @@ use topcoat::router::content::sse::{Event, KeepAlive, Sse};
 use topcoat::router::response::{IntoResponse, Response};
 use topcoat::router::{StatusCode, route};
 
-use crate::server::{accounts, require_user};
+use crate::server::{store, require_user};
 
 /// How long one connection is held before the server ends it and the browser
 /// opens another. Set from `config/iz.toml`; absent — as in the test router
@@ -87,7 +87,7 @@ async fn live(cx: &Cx) -> topcoat::Result<Response> {
         return (StatusCode::UNAUTHORIZED, "").into_response(cx);
     };
     let admin = user.role.can_administer();
-    let rx = accounts(cx).store().subscribe();
+    let rx = store(cx).subscribe();
     let stopping = try_app_context::<Shutdown>(cx).map(|s| s.0.clone());
     let deadline = Instant::now() + try_app_context::<LiveWindow>(cx).copied().unwrap_or_default().0;
 

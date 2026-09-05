@@ -19,6 +19,7 @@ topcoat = { version = "0.6.2", default-features = false, features = [
   "multipart",
   "sse",
 ] }
+iz-client = { workspace = true }
 iz-core = { workspace = true, features = ["server"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -60,3 +61,5 @@ http = "1.5"
 # announcement it expects instead of for a clock.
 http-body-util = "0.1"
 ulid = { workspace = true }
+iz-client = { workspace = true, features = ["test-seam"] }
+parking_lot = "0.12"

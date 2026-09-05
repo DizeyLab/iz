@@ -901,19 +901,10 @@ impl Engine {
                 ActivityKind::Described
                 | ActivityKind::Moved
                 | ActivityKind::Unblocked
-                | ActivityKind::WorkspaceClaimed
-                | ActivityKind::Invited
-                | ActivityKind::LinkResent
-                | ActivityKind::Joined
-                | ActivityKind::SignedIn
-                | ActivityKind::SignedOut
-                | ActivityKind::SignInFailed
-                | ActivityKind::PasswordChanged
                 | ActivityKind::RoleChanged
                 | ActivityKind::ProfileSaved
                 | ActivityKind::SenderSaved
                 | ActivityKind::LimitsSaved
-                | ActivityKind::SecuritySaved
                 | ActivityKind::TestMailSent
                 | ActivityKind::RuleCreated
                 | ActivityKind::RuleEdited

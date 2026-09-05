@@ -1,7 +1,7 @@
 //! Reconcile a live Turso database with the declared whole schema.
 //!
 //! The live file is never altered in place. Instead a new file is built from
-//! `migrations/0001_init.sql`, the data is copied with an explicit per-table
+//! the declared schema, the data is copied with an explicit per-table
 //! column map, the copy is verified, and only then the files are swapped. The
 //! original file is kept as a timestamped backup and is never deleted.
 //!
@@ -269,9 +269,7 @@ fn build_maps(
     old_has_batch_window: bool,
     old_has_clock: bool,
     old_has_reminder: bool,
-    old_has_feed_seen: bool,
     old_has_tag: bool,
-    old_has_security: bool,
 ) -> Vec<TableMap> {
     let mut maps = Vec::new();
 
@@ -285,7 +283,6 @@ fn build_maps(
                 "attachment_limit_bytes",
                 "old.attachment_limit_bytes".into(),
             ),
-            ("photo_limit_bytes", "old.photo_limit_bytes".into()),
             ("allowed_file_types", "old.allowed_file_types".into()),
             (
                 // A database written before notifications were batched has no
@@ -344,119 +341,34 @@ fn build_maps(
                     "NULL".into()
                 },
             ),
-            (
-                // The security knobs are the newest workspace columns: a
-                // database old enough to be reconciled has never heard of
-                // them and starts on today's defaults, exactly the numbers
-                // the matching migration's `DEFAULT` clauses backfill. One
-                // probe stands for all four — a database that carries one
-                // carries them all, because they shipped together.
-                "rate_limit_attempts",
-                if old_has_security {
-                    "old.rate_limit_attempts".into()
-                } else {
-                    crate::store::DEFAULT_RATE_LIMIT_ATTEMPTS.to_string()
-                },
-            ),
-            (
-                "rate_window_minutes",
-                if old_has_security {
-                    "old.rate_window_minutes".into()
-                } else {
-                    crate::store::DEFAULT_RATE_WINDOW_MINUTES.to_string()
-                },
-            ),
-            (
-                "session_lifetime_days",
-                if old_has_security {
-                    "old.session_lifetime_days".into()
-                } else {
-                    crate::store::DEFAULT_SESSION_LIFETIME_DAYS.to_string()
-                },
-            ),
-            (
-                "signin_link_lifetime_days",
-                if old_has_security {
-                    "old.signin_link_lifetime_days".into()
-                } else {
-                    crate::store::DEFAULT_SIGNIN_LINK_LIFETIME_DAYS.to_string()
-                },
-            ),
             ("public_url", "old.public_url".into()),
         ],
     });
 
     maps.push(TableMap {
         name: "user",
-        columns: {
-            let mut columns = old_cols(&[
-                "id",
-                "workspace_id",
-                "email",
-                "display_name",
-                "role",
-                "password_hash",
-                "invited_by",
-                "timezone",
-                "theme",
-                "language",
-                "ui",
-                // `photo` is deliberately unmapped: the bytes do not travel
-                // with the copy. `extract_blobs` wrote each one to the
-                // storage directory under the user's id; the mime type is
-                // metadata and stays with the row.
-                "photo_mime",
-                "created_at",
-                "last_signed_in_at",
-            ]);
-            // The feed's read marker: new with the feed schema, so a
-            // database old enough to predate it starts unseen — and a
-            // database that already carries it keeps its marker across the
-            // rebuild rather than having its read state wiped.
-            columns.push(if old_has_feed_seen {
-                ("feed_seen_at", "old.feed_seen_at".into())
-            } else {
-                ("feed_seen_at", "NULL".into())
-            });
-            columns
-        },
+        columns: vec![
+            ("id", "old.id".into()),
+            ("workspace_id", "old.workspace_id".into()),
+            // SSO is new with this schema: no carried row has met the
+            // provider yet, so none carries a sub — the first sign-in
+            // claims by address — and the move disables nobody.
+            ("oidc_sub", "NULL".into()),
+            ("email", "old.email".into()),
+            ("display_name", "old.display_name".into()),
+            ("role", "old.role".into()),
+            ("disabled", "0".into()),
+            ("timezone", "old.timezone".into()),
+            ("theme", "old.theme".into()),
+            ("language", "old.language".into()),
+            ("ui", "old.ui".into()),
+            ("created_at", "old.created_at".into()),
+            ("last_signed_in_at", "old.last_signed_in_at".into()),
+        ],
     });
     maps.push(TableMap {
         name: "workspace_owner",
         columns: old_cols(&["singleton", "user_id", "claimed_at"]),
-    });
-    maps.push(TableMap {
-        name: "signin_link",
-        columns: {
-            let mut columns = old_cols(&[
-                "id",
-                "user_id",
-                "token_hash",
-                "created_at",
-                "expires_at",
-                "used_at",
-            ]);
-            // The link's kind is new with this schema: every link a database
-            // old enough to be reconciled could carry is an invitation —
-            // resets did not exist to be mailed yet.
-            columns.push(("kind", "'join'".into()));
-            columns
-        },
-    });
-    maps.push(TableMap {
-        name: "session",
-        columns: old_cols(&[
-            "id",
-            "user_id",
-            "token_hash",
-            "created_at",
-            "expires_at",
-            "revoked_at",
-        ]),
-    });
-    maps.push(TableMap {
-        name: "auth_attempt",
-        columns: old_cols(&["id", "bucket", "attempted_at"]),
     });
     maps.push(TableMap {
         name: "board",
@@ -829,17 +741,13 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
     let has_batch_window = old_has_column(old_conn, "workspace", "mail_batch_minutes").await?;
     let has_clock = old_has_column(old_conn, "task", "clock_at").await?;
     let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
-    let has_feed_seen = old_has_column(old_conn, "user", "feed_seen_at").await?;
     let has_tag = old_has_column(old_conn, "tag", "id").await?;
-    let has_security = old_has_column(old_conn, "workspace", "rate_limit_attempts").await?;
     let maps = build_maps(
         has_smtp_check,
         has_batch_window,
         has_clock,
         has_reminder,
-        has_feed_seen,
         has_tag,
-        has_security,
     );
     validate_maps(new_conn, &maps).await?;
 
@@ -943,9 +851,6 @@ async fn verify(old_conn: &Connection, new_conn: &Connection) -> Result<()> {
         "workspace",
         "user",
         "workspace_owner",
-        "signin_link",
-        "session",
-        "auth_attempt",
         "board",
         "board_column",
         "task",
@@ -1142,7 +1047,7 @@ mod tests {
         let conn = db.connect().unwrap();
         conn.execute_batch(&schema_sql()).await.unwrap();
 
-        let maps = build_maps(false, false, false, false, false, false, false);
+        let maps = build_maps(false, false, false, false, false);
         validate_maps(&conn, &maps)
             .await
             .expect("the full map set was refused against the declared schema");
@@ -1165,8 +1070,10 @@ mod tests {
     }
 
     /// Writes an old-shape database at `path`: the declared schema, plus the
-    /// two blob columns the swap removed, holding one attachment and two
-    /// users — one photographed, one not. Returns the bytes it planted.
+    /// two blob columns the swap removed and the whole password era — its
+    /// user and workspace columns and its session, link and attempt ledgers —
+    /// holding one attachment, one live session and two users, one
+    /// photographed, one not. Returns the bytes it planted.
     async fn old_shape_database(path: &str) -> (Vec<u8>, Vec<u8>) {
         let attachment_bytes = b"file-bytes".to_vec();
         let photo_bytes = b"face-bytes".to_vec();
@@ -1184,11 +1091,33 @@ mod tests {
         conn.execute("ALTER TABLE user ADD COLUMN photo BLOB", ())
             .await
             .unwrap();
+        // The password era's columns, back on the rows they were dropped
+        // from — and the three ledgers SSO retired.
+        for ddl in [
+            "ALTER TABLE user ADD COLUMN password_hash TEXT",
+            "ALTER TABLE user ADD COLUMN invited_by TEXT REFERENCES user(id)",
+            "ALTER TABLE user ADD COLUMN photo_mime TEXT",
+            "ALTER TABLE user ADD COLUMN feed_seen_at TEXT",
+            "ALTER TABLE workspace ADD COLUMN rate_limit_attempts INTEGER NOT NULL DEFAULT 10",
+            "ALTER TABLE workspace ADD COLUMN rate_window_minutes INTEGER NOT NULL DEFAULT 15",
+            "ALTER TABLE workspace ADD COLUMN session_lifetime_days INTEGER NOT NULL DEFAULT 14",
+            "ALTER TABLE workspace ADD COLUMN signin_link_lifetime_days INTEGER NOT NULL DEFAULT 7",
+            "CREATE TABLE session (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES user(id), \
+             token_hash TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, \
+             revoked_at TEXT)",
+            "CREATE TABLE signin_link (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES user(id), \
+             token_hash TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, \
+             used_at TEXT, kind TEXT NOT NULL DEFAULT 'join')",
+            "CREATE TABLE auth_attempt (id TEXT PRIMARY KEY, bucket TEXT NOT NULL, \
+             attempted_at TEXT NOT NULL)",
+        ] {
+            conn.execute(ddl, ()).await.unwrap();
+        }
         let now = "2026-01-01T00:00:00Z";
         conn.execute(
-            "INSERT INTO user (id, workspace_id, email, display_name, role, photo_mime, photo, \
-                 created_at) \
-                 VALUES ('U1', 'W1', 'one@iz.sh', 'One', 'admin', 'image/png', ?1, ?2)",
+            "INSERT INTO user (id, workspace_id, email, display_name, role, password_hash, \
+             photo_mime, photo, created_at) \
+             VALUES ('U1', 'W1', 'one@iz.sh', 'One', 'admin', 'argon2$hash', 'image/png', ?1, ?2)",
             params![&photo_bytes[..], now],
         )
         .await
@@ -1243,6 +1172,26 @@ mod tests {
         )
         .await
         .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, user_id, token_hash, created_at, expires_at) \
+                 VALUES ('S1', 'U1', 'digest', ?1, ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO signin_link (id, user_id, token_hash, created_at, expires_at) \
+                 VALUES ('L1', 'U1', 'digest', ?1, ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auth_attempt (id, bucket, attempted_at) VALUES ('A1', 'bucket', ?1)",
+            params![now],
+        )
+        .await
+        .unwrap();
         (attachment_bytes, photo_bytes)
     }
 
@@ -1291,6 +1240,44 @@ mod tests {
             !old_has_column(&conn, "user", "photo").await.unwrap(),
             "the rebuilt user table still carries photo"
         );
+        // The password era did not survive the rebuild: its columns are
+        // gone, its ledgers are gone, and every carried row starts
+        // unclaimed and enabled.
+        for column in ["password_hash", "invited_by", "photo_mime", "feed_seen_at"] {
+            assert!(
+                !old_has_column(&conn, "user", column).await.unwrap(),
+                "the rebuilt user table still carries {column}"
+            );
+        }
+        for column in [
+            "rate_limit_attempts",
+            "rate_window_minutes",
+            "session_lifetime_days",
+            "signin_link_lifetime_days",
+        ] {
+            assert!(
+                !old_has_column(&conn, "workspace", column).await.unwrap(),
+                "the rebuilt workspace table still carries {column}"
+            );
+        }
+        for table in ["session", "signin_link", "auth_attempt"] {
+            let mut rows = conn
+                .query(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                )
+                .await
+                .unwrap();
+            let count = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+            assert_eq!(count, 0, "{table} survived the rebuild");
+        }
+        let mut rows = conn
+            .query("SELECT oidc_sub, disabled FROM user WHERE id = 'U1'", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<Option<String>>(0).unwrap(), None);
+        assert_eq!(row.get::<i64>(1).unwrap(), 0);
         drop(conn);
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);

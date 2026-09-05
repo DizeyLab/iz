@@ -3,7 +3,7 @@
 // first overflow.
 #![recursion_limit = "256"]
 
-pub mod auth;
+pub mod avatar;
 pub mod board;
 pub mod detail;
 pub mod dropdown;
@@ -14,7 +14,6 @@ pub mod live;
 pub mod logs;
 pub mod pages;
 pub mod people;
-pub mod photo;
 pub mod rules;
 pub mod server;
 pub mod settings;

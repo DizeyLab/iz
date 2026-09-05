@@ -13,8 +13,6 @@ use topcoat::{
     view::{Unescaped, view},
 };
 
-use iz_core::board::Person;
-
 use crate::i18n::{Key, Lang, t};
 use crate::server::current_user;
 
@@ -69,127 +67,96 @@ pub(crate) async fn wordmark(cx: &Cx) -> Result {
     }
 }
 
-/// A person as a circle (or, on the Instrument skin, a square) — the initials
-/// avatar when there is no photo, an `<img>` reading `/photo/{id}` otherwise.
-/// Shared by the board, the modal and every topbar user menu.
-pub(crate) async fn avatar(cx: &Cx, person: &Person, extra: &str) -> Result {
-    let tone = person
-        .id
+/// A person as a circle (or, on the Instrument skin, a square): the initials,
+/// toned by the id so every account has its own colour, with the im photo
+/// over it when im has one. Whether im has one is not known cheaply — the
+/// photo is the app's credentialed fetch, not the browser's — so the `<img>`
+/// always renders and hides itself on error (see `avatar_script`), leaving
+/// the initials beneath as the fallback. Shared by the board, the modal and
+/// every topbar user menu.
+pub(crate) async fn avatar(cx: &Cx, id: &str, display_name: &str, extra: &str) -> Result {
+    let tone = id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
         % 5;
     let class = format!("avatar avatar-tone-{tone} {extra}");
-    let name = person.display_name.clone();
-    if person.has_photo {
-        let src = format!(
-            "/photo/{}?v={}",
-            person.id,
-            crate::photo::photo_stamp(cx, &person.id)
-        );
-        view! {
-            cx =>
-            <img class=(class) src=(src) alt=(name.clone()) data-name=(name)>
-        }
-    } else {
-        let initials = person.initials();
-        view! {
-            cx =>
-            <span class=(class) data-name=(name)>(initials)</span>
-        }
+    let initials = initials_of(display_name);
+    let src = format!("/avatar/{id}");
+    view! {
+        cx =>
+        <span class="avatar-stack">
+            <span class=(class.clone()) data-name=(display_name.to_string())>(initials)</span>
+            <img class=(format!("{class} avatar-photo")) src=(src) alt="" data-name=(display_name.to_string())>
+        </span>
     }
 }
 
-/// The avatar overlay: with a photo set, the avatar click opens the file
-/// viewer's chrome (`detail.rs`'s `file_viewer_modal` — the
-/// `.modal-scrim.viewer-scrim` scrim and the `.modal.viewer` panel around a
-/// `.viewer-media` image) around the same `/photo/{id}?v=` URL the avatar
-/// reads. Built here because the overlay has no server state behind it — no
-/// route, no query parameter, nothing to render — so it is client-built and
-/// `__izAdded`'d. Closing is not wired here at all: the stretched
-/// `.viewer-close` anchor and the scrim click are the global handlers in the
-/// soft-nav script above, and Escape is `detail.rs`'s `escape_closes`
-/// (priority 90), which the page emits alongside this script. The picture is
-/// read off the avatar's own `<img>` at click time, stamp included, so a
-/// fresh upload is the fresh bytes. The Change half serves the settings
-/// identity row alone: it hands the click to the hidden file input, whose
-/// change the shared autosubmit listener posts as the photo form. Emitted by
-/// the settings page and the person page — every surface that draws a
-/// clickable `.avatar-view`.
+/// The first letters of the first two words, uppercased — "Ada Lovelace"
+/// wears "AL", a bare address wears its first letter.
+fn initials_of(name: &str) -> String {
+    let mut out = String::new();
+    for word in name.split_whitespace().take(2) {
+        if let Some(first) = word.chars().next() {
+            out.extend(first.to_uppercase());
+        }
+    }
+    if out.is_empty() {
+        out.push('?');
+    }
+    out
+}
+
+/// The photo half's client half: a missing photo must fall back to the
+/// initials beneath it, and a bare `<img>` to a 404 shows the broken-image
+/// box instead. One document-level capture `error` listener hides every
+/// `img.avatar-photo` that fails, plus a sweep for the ones already failed
+/// before it ran; hiding is registered through `__izOwn` so the live morph
+/// — which owns no names, only what the client declares — does not strip it
+/// back off on the next refresh.
 pub(crate) async fn avatar_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
             if (window.__izAvatar) { return; } \
             window.__izAvatar = true; \
-            document.addEventListener('click', function (e) { \
-                var view = e.target.closest ? e.target.closest('.avatar-view') : null; \
-                if (view) { \
-                    var img = view.querySelector('img.avatar'); \
-                    if (!img || document.querySelector('.viewer-scrim')) { return; } \
-                    var scrim = document.createElement('div'); \
-                    scrim.className = 'modal-scrim viewer-scrim'; \
-                    var close = document.createElement('a'); \
-                    close.className = 'viewer-close'; \
-                    close.href = window.location.href; \
-                    var label = view.getAttribute('data-close-label'); \
-                    if (label) { close.setAttribute('aria-label', label); } \
-                    var media = document.createElement('img'); \
-                    media.className = 'viewer-media'; \
-                    media.src = img.src; \
-                    media.alt = img.alt; \
-                    var body = document.createElement('div'); \
-                    body.className = 'viewer-body'; \
-                    body.appendChild(media); \
-                    var box = document.createElement('div'); \
-                    box.className = 'modal viewer'; \
-                    box.tabIndex = -1; \
-                    box.appendChild(body); \
-                    scrim.appendChild(close); \
-                    scrim.appendChild(box); \
-                    document.body.appendChild(window.__izAdded(scrim)); \
-                    box.focus(); \
-                    return; \
-                } \
-                var change = e.target.closest ? e.target.closest('[data-avatar-change]') : null; \
-                if (change) { \
-                    var row = change.closest('.identity-row'); \
-                    var input = row ? row.querySelector('.file-upload-input') : null; \
-                    if (input) { input.click(); } \
-                } \
+            function hide(img) { \
+                if (window.__izOwn) { window.__izOwn(img, [], ['style']); } \
+                img.style.display = 'none'; \
+            } \
+            document.addEventListener('error', function (e) { \
+                var img = e.target && e.target.closest ? e.target.closest('img.avatar-photo') : null; \
+                if (img) { hide(img); } \
             }, true); \
+            document.querySelectorAll('img.avatar-photo').forEach(function (img) { \
+                if (img.complete && img.naturalWidth === 0) { hide(img); } \
+            }); \
         })();";
     view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
 /// The topbar's signed-in identity: the display name, opening on hover or
 /// focus onto details (name, address, role) and sign-out. Shared by every
-/// signed-in page's topbar (board, settings, mail rules, logs).
+/// signed-in page's topbar.
 pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
     let role_key = match me.role {
         iz_core::Role::Admin => Key::RoleAdminOption,
         iz_core::Role::Member => Key::RoleMemberOption,
         iz_core::Role::Viewer => Key::RoleViewerOption,
     };
-    let person = iz_core::board::Person {
-        id: me.id.clone(),
-        display_name: me.display_name.clone(),
-        has_photo: me.has_photo,
-    };
     view! {
         cx =>
         <div class="user-menu">
             <button type="button" class="user-menu-trigger">
-                (avatar(cx, &person, "").await?)
+                (avatar(cx, &me.id, &me.display_name, "").await?)
                 <span class="user-menu-trigger-name">(me.display_name.clone())</span>
             </button>
             <div class="user-menu-panel">
                 <div class="user-menu-name">(me.display_name.clone())</div>
                 <div class="user-menu-email">(me.email.clone())</div>
                 <div class="user-menu-role">(t(lang, role_key))</div>
-                <a class="user-menu-item" href=(format!("/people/{}", me.id))>(t(lang, Key::YourProfile))</a>
-                <form class="user-menu-item-form" method="post" action="/api/sign_out" data-hard="">
-                    <button class="user-menu-item" type="submit">(t(lang, Key::SignOut))</button>
-                </form>
+                <a class="user-menu-item" href=(format!("{}/", crate::server::config(cx).oidc.issuer)) data-hard="">(t(lang, Key::Profile))</a>
+                <a class="user-menu-item" href="/settings">(t(lang, Key::NavSettings))</a>
+                <a class="user-menu-item" href="/auth/logout" data-hard="">(t(lang, Key::SignOut))</a>
             </div>
         </div>
     }
@@ -301,8 +268,8 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lan
 /// the `iz:wire` event (`dropdown.rs`, the audio player) over the new
 /// nodes.
 ///
-/// Forms that must really navigate (sign-in/out, claim, redeem: the session
-/// cookie and the whole page identity change) opt out with `data-hard`.
+/// Forms that must really navigate (sign-in/out: the session and the whole
+/// page identity change) opt out with `data-hard`.
 /// Overlay closes never hit the server at all: the board is already
 /// rendered under the modal, so `__izCloseModal`/`__izCloseViewer`
 /// drop the overlay's DOM and rewrite the URL.

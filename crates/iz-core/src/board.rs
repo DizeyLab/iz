@@ -95,6 +95,9 @@ pub enum Moved {
 pub struct Person {
     pub id: String,
     pub display_name: String,
+    /// Whether a local photo exists — always false since SSO: avatars come
+    /// from the provider, and the board keeps the field so the shape the
+    /// pages read does not churn under them.
     pub has_photo: bool,
 }
 

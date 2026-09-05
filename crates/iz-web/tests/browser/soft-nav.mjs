@@ -9,9 +9,11 @@
 // page and then hard-navigated back to the board a few hundred milliseconds
 // later — one press lost, every first visit.
 //
-// Wants a server on a throwaway database with the workspace unclaimed:
-//
-//     node crates/iz-web/tests/browser/soft-nav.mjs http://127.0.0.1:7791
+// Wants the server run.sh leaves behind, plus the session cookie it mints:
+// IZ_SESSION_COOKIE carries the sealed token the fake im knows, so the
+// first goto lands straight on the board — no claim form, no sign-in
+// round-trip. That first request is also what provisions the workspace
+// owner, the fake's admin:true doing what the claim did.
 //
 // Playwright lives outside the repo — İz has no node dependency and
 // gains none here. Point PLAYWRIGHT_BROWSERS_PATH at the browser download
@@ -32,23 +34,21 @@ page.on('pageerror', (e) => errors.push('PE ' + e.message));
 page.on('console', (m) => {
     if (m.type() === 'error') errors.push('CON ' + m.text());
 });
-// Every full document load, soft-nav's whole point being that there is
-// exactly one of them: the claim.
+// Every full document load. The cookie-signed first goto is the one: it
+// lands straight on the board, and everything after it must arrive by swap
+// (plus the fit script's one self-reload on the first Logs visit).
 const loads = [];
 page.on('load', () => loads.push(page.url()));
 
-// The workspace is unclaimed, so the first page is the claim form and
-// filling it signs the admin in.
+const session = process.env.IZ_SESSION_COOKIE;
+if (!session) {
+    note('FAIL IZ_SESSION_COOKIE is empty — run through run.sh');
+    process.exit(1);
+}
+await ctx.addCookies([{ name: 'iz_session', value: session, url: base }]);
 await page.goto(base + '/', { waitUntil: 'networkidle' });
-await page.fill('input[name="display_name"]', 'Ada Lovelace');
-await page.fill('input[name="email"]', 'ada@iz.sh');
-await page.fill('input[name="password"]', 'correct horse battery staple');
-await Promise.all([
-    page.waitForLoadState('networkidle'),
-    page.click('button[type="submit"]'),
-]);
-if (!/\/$/.test(new URL(page.url()).pathname)) {
-    failures.push(`claiming the workspace landed on ${page.url()}`);
+if ((await page.locator('.board-stage').count()) === 0) {
+    failures.push(`signing in landed on ${page.url()} with no board`);
 }
 await page.screenshot({ path: `${shots}/board.png`, fullPage: true });
 

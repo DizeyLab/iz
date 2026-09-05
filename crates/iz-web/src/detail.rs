@@ -5,7 +5,7 @@
 //! topcoat has no browser bundle at all, so every one of the ten calls below
 //! answers a plain form post with a 303 back to the page it came from —
 //! [`crate::server::carry_refusal_on_redirect`] carries the refusal (if any)
-//! onto that redirect's query the same way `crate::auth`'s calls do — and the
+//! onto that redirect's query — and the
 //! page it lands on reads the fresh task straight off the store. There is no
 //! resource to refetch and no action to hold a pending state: a reload *is*
 //! the refresh.
@@ -31,7 +31,7 @@ use topcoat::router::{HeaderName, StatusCode, header, route};
 use topcoat::view::{class, view};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, back_to, mail, refusal_of, require_user, require_writer};
+use crate::server::{Refusal, store, back_to, mail, refusal_of, require_user, require_writer};
 
 /// A task this board could be linked to: enough to name it in the picker and
 /// nothing more.
@@ -42,8 +42,8 @@ pub struct LinkTarget {
     pub title: String,
 }
 
-/// The person the current browser is signed in as, wired the same as
-/// `iz-web/src/auth.rs`'s `Me` so [`fetch_task`]'s answer keeps its shape.
+/// The person the current browser is signed in as. Identity — name, address,
+/// role — is vouched by im; only the language rides along for rendering.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Me {
     pub id: String,
@@ -51,7 +51,6 @@ pub struct Me {
     pub email: String,
     pub role: iz_core::Role,
     pub language: String,
-    pub has_photo: bool,
 }
 
 impl From<&User> for Me {
@@ -62,7 +61,6 @@ impl From<&User> for Me {
             email: user.email.clone(),
             role: user.role,
             language: user.language.clone(),
-            has_photo: user.has_photo,
         }
     }
 }
@@ -193,14 +191,14 @@ async fn writer_and_task(
     task_id: &str,
 ) -> std::result::Result<(User, TaskFacts), Refusal> {
     let user = require_writer(cx).await?;
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let facts = task_of(store.as_ref(), &user, task_id).await?;
     Ok((user, facts))
 }
 
 /// A 303 back to wherever the form was posted from, carrying `refusal` as the
-/// body for `carry_refusal_on_redirect` to read — the same shape `auth.rs`
-/// uses for every one of its mutating calls.
+/// body for `carry_refusal_on_redirect` to read — the same shape every one
+/// of the mutating calls uses.
 type Redirect = Result<(StatusCode, [(HeaderName, String); 1], Json<Option<Refusal>>)>;
 
 fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
@@ -289,7 +287,7 @@ async fn load_snapshot(
         Ok(user) => user,
         Err(refusal) => return Ok(Err(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
 
     let Some(mut detail) = load(store.as_ref(), &user.workspace_id, task_id).await? else {
         return Ok(Err(Refusal::NotFound));
@@ -594,7 +592,7 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let activity_ids = store
         .save_task(
             &input.task_id,
@@ -628,7 +626,7 @@ async fn set_task_tag(cx: &Cx, Form(input): Form<SetTaskTagForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let Some(board) = store.board(&actor.workspace_id).await? else {
         return redirect(cx, Some(Refusal::Unavailable));
     };
@@ -660,7 +658,7 @@ async fn assign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
 
     let Some(person) = store.user(&input.user_id).await? else {
         return redirect(cx, Some(Refusal::NotFound));
@@ -696,7 +694,7 @@ async fn unassign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
 
     let Some(person) = store.user(&input.user_id).await? else {
         return redirect(cx, Some(Refusal::NotFound));
@@ -731,7 +729,7 @@ async fn link_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let other = match task_of(store.as_ref(), &actor, &input.other_id).await {
         Ok(facts) => facts,
         Err(refusal) => return redirect(cx, Some(refusal)),
@@ -769,7 +767,7 @@ async fn unlink_tasks(cx: &Cx, Form(input): Form<LinkForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let other = match task_of(store.as_ref(), &actor, &input.other_id).await {
         Ok(facts) => facts,
         Err(refusal) => return redirect(cx, Some(refusal)),
@@ -806,7 +804,7 @@ async fn create_subtask(cx: &Cx, Form(input): Form<NewSubtaskForm>) -> Redirect 
     if title.is_empty() {
         return redirect(cx, Some(Refusal::EmptyTitle));
     }
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let columns = store.columns(&parent.board_id).await?;
     let Some(first) = columns.iter().min_by_key(|column| column.position) else {
         return redirect(cx, Some(Refusal::NotFound));
@@ -844,7 +842,7 @@ async fn set_parent(cx: &Cx, Form(input): Form<ParentForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let wanted = input.parent_id.trim();
 
     // Whichever end is not the task itself has to be a task this person may
@@ -905,7 +903,7 @@ async fn post_comment(cx: &Cx, Form(input): Form<CommentForm>) -> Redirect {
     if !user.role.can_comment() {
         return redirect(cx, Some(Refusal::Forbidden));
     }
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     if let Err(refusal) = task_of(store.as_ref(), &user, &input.task_id).await {
         return redirect(cx, Some(refusal));
     }
@@ -930,7 +928,7 @@ async fn what_delete_costs(
     if let Err(refusal) = writer_and_task(cx, &input.task_id).await {
         return Ok(Json(Err(refusal)));
     }
-    match accounts(cx).store().deletion_cost(&input.task_id).await? {
+    match store(cx).deletion_cost(&input.task_id).await? {
         Some(cost) => Ok(Json(Ok(cost))),
         None => Ok(Json(Err(Refusal::NotFound))),
     }
@@ -947,7 +945,7 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let deletion = store
         .delete_task(&input.task_id, &user.id, OffsetDateTime::now_utc())
         .await?;
@@ -978,7 +976,7 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
         Ok(user) => user,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let Some(attachment) = store.attachment(&input.file_id).await? else {
         return redirect(cx, Some(Refusal::NotFound));
     };
@@ -1555,7 +1553,7 @@ async fn assignee_chip(
         cx =>
         <span class="assignee-chip">
             <a class="person-link" href=(format!("/people/{}", person.id))>
-                (crate::layout::avatar(cx, person, "avatar-sm").await?)
+                (crate::layout::avatar(cx, &person.id, &person.display_name, "avatar-sm").await?)
                 <span class="assignee-name">(person.display_name.clone())</span>
             </a>
             if may_write {
@@ -1587,7 +1585,7 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) 
                             <input type="hidden" name="task_id" value=(task_id.to_string())>
                             <input type="hidden" name="user_id" value=(person.id.clone())>
                             <button class="pop-row" type="submit">
-                                (crate::layout::avatar(cx, person, "avatar-sm").await?)
+                                (crate::layout::avatar(cx, &person.id, &person.display_name, "avatar-sm").await?)
                                 <span class="pop-row-name">(person.display_name.clone())</span>
                             </button>
                         </form>
@@ -1667,7 +1665,7 @@ async fn subtask_row(
     let release_title = t(lang, Key::ReleaseThisPart);
     let mut faces = Vec::new();
     for person in &part.assignees {
-        faces.push(crate::layout::avatar(cx, person, "").await?);
+        faces.push(crate::layout::avatar(cx, &person.id, &person.display_name, "").await?);
     }
     view! {
         cx =>
@@ -1815,7 +1813,7 @@ async fn file_chip(
         // The stamp rides on the row, which the chip's `FileLine` does not
         // carry: one lookup per plain-download chip buys the same versioned
         // URL the viewer streams from.
-        match accounts(cx).store().attachment(&file.id).await {
+        match store(cx).attachment(&file.id).await {
             Ok(Some(row)) => format!("/files/{}?v={}", file.id, attachment_stamp(&row)),
             _ => format!("/files/{}", file.id),
         }
@@ -1843,7 +1841,7 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
         cx =>
         <div class="comment">
             <a class="person-link" href=(format!("/people/{}", comment.author.id))>
-                (crate::layout::avatar(cx, &comment.author, "avatar-lg").await?)
+                (crate::layout::avatar(cx, &comment.author.id, &comment.author.display_name, "avatar-lg").await?)
             </a>
             <div class="comment-said">
                 <div class="comment-head">
@@ -1966,7 +1964,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
     // click delete yet" state, so the cost is already known by the time the
     // disclosure opens.
     let cost = if may_delete {
-        accounts(cx).store().deletion_cost(&detail.id).await?
+        store(cx).deletion_cost(&detail.id).await?
     } else {
         None
     };
@@ -2416,7 +2414,7 @@ pub async fn file_viewer_modal(
         Ok(user) => user,
         Err(_) => return view! { cx => },
     };
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     if task_of(store.as_ref(), &user, task_id).await.is_err() {
         return view! { cx => };
     }

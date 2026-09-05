@@ -10,11 +10,10 @@
 // chip and detail field alike — with zero page errors and no document
 // overflow while the popover stands open.
 //
-// Wants the server run.sh leaves behind: the workspace already claimed
-// (soft-nav claims it), so this signs in — but it claims too, so the
-// script runs standalone as well:
-//
-//     node crates/iz-web/tests/browser/moment.mjs http://127.0.0.1:7791
+// Wants the server run.sh leaves behind, plus the session cookie it mints:
+// IZ_SESSION_COOKIE carries the sealed token the fake im knows — the same
+// minted session soft-nav runs on, so the owner is already provisioned.
+// Standalone runs need it too: there is no form left to sign in through.
 //
 // Playwright lives outside the repo, exactly as soft-nav.mjs says.
 const { chromium } = await import(process.env.IZ_PLAYWRIGHT || 'playwright');
@@ -36,26 +35,14 @@ page.on('console', (m) => {
     if (m.type() === 'error') errors.push('CON ' + m.text());
 });
 
-// The workspace is either unclaimed (standalone run: the claim form comes
-// up, and filling it signs the admin in) or already claimed by soft-nav
-// (the sign-in form comes up for the same admin).
-await page.goto(base + '/', { waitUntil: 'networkidle' });
-if (await page.locator('input[name="display_name"]').count()) {
-    await page.fill('input[name="display_name"]', 'Ada Lovelace');
-    await page.fill('input[name="email"]', 'ada@iz.sh');
-    await page.fill('input[name="password"]', 'correct horse battery staple');
-    await Promise.all([
-        page.waitForLoadState('networkidle'),
-        page.click('button[type="submit"]'),
-    ]);
-} else {
-    await page.fill('input[name="email"]', 'ada@iz.sh');
-    await page.fill('input[name="password"]', 'correct horse battery staple');
-    await Promise.all([
-        page.waitForLoadState('networkidle'),
-        page.click('button[type="submit"]'),
-    ]);
+// Signed in by cookie before the first request; the board must be there.
+const session = process.env.IZ_SESSION_COOKIE;
+if (!session) {
+    note('FAIL IZ_SESSION_COOKIE is empty — run through run.sh');
+    process.exit(1);
 }
+await ctx.addCookies([{ name: 'iz_session', value: session, url: base }]);
+await page.goto(base + '/', { waitUntil: 'networkidle' });
 if (await page.locator('.board-stage').count() === 0) {
     failures.push(`signing in landed on ${page.url()} with no board`);
 }

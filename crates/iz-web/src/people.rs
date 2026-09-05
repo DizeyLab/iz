@@ -3,7 +3,7 @@
 //! writes — the one editor a profile has stays where it already lives, on
 //! `/settings?section=profile`, which the page links to for its own person
 //! and nowhere else. A stranger and a missing id read the same: the router's
-//! own not-found, never a `403` — `photo.rs` keeps the same rule for bytes.
+//! own not-found, never a `403` — `avatar.rs` keeps the same rule for bytes.
 
 use topcoat::Result;
 use topcoat::context::Cx;
@@ -15,13 +15,12 @@ use iz_core::detail::ActivityKind;
 use iz_core::store::{ActivityFilter, Dir, FeedPage};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{accounts, require_user};
+use crate::server::{require_user, store};
 
 path_param!(user_id);
 
-/// What the account itself is doing: the owner reads as the owner, somebody
-/// who has never chosen a password reads as invited, and everybody else is
-/// the day they were last here.
+/// What the account itself is doing: somebody who has never signed in reads
+/// as invited, and everybody else is the day they were last here.
 fn last_seen(lang: Lang, has_signed_in: bool, last_day: Option<String>) -> String {
     if !has_signed_in {
         t(lang, Key::InvitedStatus).to_string()
@@ -35,18 +34,14 @@ fn last_seen(lang: Lang, has_signed_in: bool, last_day: Option<String>) -> Strin
 /// The verb a feed line opens with. The task kinds read through
 /// [`crate::i18n::activity_kind_word`]; the account kinds are not all in that
 /// table and would fall through as raw tokens (`profile_saved`), so the ones
-/// with a translated word take it here.
+/// with a translated word take it here. Kinds no account can write any more
+/// read through the same fallthrough as history — the row stays, the word is
+/// the stored token.
 fn kind_word(lang: Lang, kind: &ActivityKind) -> String {
     match kind {
-        ActivityKind::WorkspaceClaimed => t(lang, Key::ActWorkspaceClaimed).into(),
-        ActivityKind::Joined => t(lang, Key::ActJoined).into(),
-        ActivityKind::SignedIn => t(lang, Key::ActSignedIn).into(),
-        ActivityKind::SignedOut => t(lang, Key::ActSignedOut).into(),
-        ActivityKind::PasswordChanged => t(lang, Key::ActPasswordChanged).into(),
         ActivityKind::ProfileSaved => t(lang, Key::ActProfileSaved).into(),
         ActivityKind::SenderSaved => t(lang, Key::ActSenderSaved).into(),
         ActivityKind::LimitsSaved => t(lang, Key::ActLimitsSaved).into(),
-        ActivityKind::SecuritySaved => t(lang, Key::ActSecuritySaved).into(),
         ActivityKind::TestMailSent => t(lang, Key::ActTestMailSent).into(),
         ActivityKind::MessageSent => t(lang, Key::ActMessageSent).into(),
         ActivityKind::Other(raw) if raw == "password_reset_requested" => {
@@ -67,7 +62,7 @@ async fn people_page(cx: &Cx) -> Result {
         Err(_) => return Err(not_found().into()),
     };
     let lang = Lang::from_code(&user.language);
-    let store = accounts(cx).store().clone();
+    let store = store(cx);
     let target_id: &str = path_param::<UserId>(cx);
     let Some(person) = store.user(target_id).await? else {
         return Err(not_found().into());
@@ -78,11 +73,6 @@ async fn people_page(cx: &Cx) -> Result {
 
     let zone = iz_core::detail::parse_zone(&user.timezone);
     let mine = person.id == user.id;
-    let who = iz_core::board::Person {
-        id: person.id.clone(),
-        display_name: person.display_name.clone(),
-        has_photo: person.has_photo,
-    };
     let is_owner = store
         .owner()
         .await?
@@ -90,17 +80,11 @@ async fn people_page(cx: &Cx) -> Result {
     let joined = iz_core::board::day_label(person.created_at.to_offset(zone).date());
     let seen = last_seen(
         lang,
-        person.has_signed_in(),
+        person.last_signed_in_at.is_some(),
         person
             .last_signed_in_at
             .map(|at| iz_core::board::day_label(at.to_offset(zone).date())),
     );
-    // Who let them in, as a name that leads to that person's own page. The
-    // first account was invited by nobody.
-    let inviter = match &person.invited_by {
-        Some(id) => store.user(id).await?,
-        None => None,
-    };
     let role_key = match person.role {
         iz_core::Role::Admin => Key::RoleAdminOption,
         iz_core::Role::Member => Key::RoleMemberOption,
@@ -133,13 +117,7 @@ async fn people_page(cx: &Cx) -> Result {
         <main class="people-shell">
             <section class="panel person-card">
                 <div class="person-head">
-                    if person.has_photo {
-                        <button class="avatar-view" type="button" data-close-label=(t(lang, Key::Close))>
-                            (crate::layout::avatar(cx, &who, "avatar-xl").await?)
-                        </button>
-                    } else {
-                        (crate::layout::avatar(cx, &who, "avatar-xl").await?)
-                    }
+                    (crate::layout::avatar(cx, &person.id, &person.display_name, "avatar-xl").await?)
                     <div class="person-heading">
                         <h2 class="person-name">(person.display_name.clone())</h2>
                         <div class="person-marks">
@@ -166,12 +144,6 @@ async fn people_page(cx: &Cx) -> Result {
                         <dt>(t(lang, Key::LastSeenLabel))</dt>
                         <dd>(seen)</dd>
                     </div>
-                    if let Some(inviter) = inviter {
-                        <div class="person-field">
-                            <dt>(t(lang, Key::InvitedByLabel))</dt>
-                            <dd><a href=(format!("/people/{}", inviter.id))>(inviter.display_name.clone())</a></dd>
-                        </div>
-                    }
                 </dl>
             </section>
 

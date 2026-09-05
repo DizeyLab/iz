@@ -169,19 +169,10 @@ pub enum ActivityKind {
     Commented,
     /// Account and admin moments: they belong to the workspace, not to any
     /// one task, and ride the same trail with no task attached.
-    WorkspaceClaimed,
-    Invited,
-    LinkResent,
-    Joined,
-    SignedIn,
-    SignedOut,
-    SignInFailed,
-    PasswordChanged,
     RoleChanged,
     ProfileSaved,
     SenderSaved,
     LimitsSaved,
-    SecuritySaved,
     TestMailSent,
     RuleCreated,
     RuleEdited,
@@ -202,19 +193,10 @@ impl ActivityKind {
             ActivityKind::Commented => "commented",
             ActivityKind::Parented => "parented",
             ActivityKind::Unparented => "unparented",
-            ActivityKind::WorkspaceClaimed => "workspace_claimed",
-            ActivityKind::Invited => "invited",
-            ActivityKind::LinkResent => "link_resent",
-            ActivityKind::Joined => "joined",
-            ActivityKind::SignedIn => "signed_in",
-            ActivityKind::SignedOut => "signed_out",
-            ActivityKind::SignInFailed => "sign_in_failed",
-            ActivityKind::PasswordChanged => "password_changed",
             ActivityKind::RoleChanged => "role_changed",
             ActivityKind::ProfileSaved => "profile_saved",
             ActivityKind::SenderSaved => "sender_saved",
             ActivityKind::LimitsSaved => "limits_saved",
-            ActivityKind::SecuritySaved => "security_saved",
             ActivityKind::TestMailSent => "test_mail_sent",
             ActivityKind::RuleCreated => "rule_created",
             ActivityKind::RuleEdited => "rule_edited",
@@ -260,19 +242,10 @@ impl ActivityKind {
             "unblocked" => ActivityKind::Unblocked,
             "deleted" => ActivityKind::Deleted,
             "commented" => ActivityKind::Commented,
-            "workspace_claimed" => ActivityKind::WorkspaceClaimed,
-            "invited" => ActivityKind::Invited,
-            "link_resent" => ActivityKind::LinkResent,
-            "joined" => ActivityKind::Joined,
-            "signed_in" => ActivityKind::SignedIn,
-            "signed_out" => ActivityKind::SignedOut,
-            "sign_in_failed" => ActivityKind::SignInFailed,
-            "password_changed" => ActivityKind::PasswordChanged,
             "role_changed" => ActivityKind::RoleChanged,
             "profile_saved" => ActivityKind::ProfileSaved,
             "sender_saved" => ActivityKind::SenderSaved,
             "limits_saved" => ActivityKind::LimitsSaved,
-            "security_saved" => ActivityKind::SecuritySaved,
             "test_mail_sent" => ActivityKind::TestMailSent,
             "rule_created" => ActivityKind::RuleCreated,
             "rule_edited" => ActivityKind::RuleEdited,
@@ -326,19 +299,10 @@ impl ActivityEntry {
             // Account and admin kinds never appear in a task's strip — they
             // ride the workspace feed, which words its own lines — but the
             // match still has to say something if one ever reaches it.
-            ActivityKind::WorkspaceClaimed
-            | ActivityKind::Invited
-            | ActivityKind::LinkResent
-            | ActivityKind::Joined
-            | ActivityKind::SignedIn
-            | ActivityKind::SignedOut
-            | ActivityKind::SignInFailed
-            | ActivityKind::PasswordChanged
-            | ActivityKind::RoleChanged
+            ActivityKind::RoleChanged
             | ActivityKind::ProfileSaved
             | ActivityKind::SenderSaved
             | ActivityKind::LimitsSaved
-            | ActivityKind::SecuritySaved
             | ActivityKind::TestMailSent
             | ActivityKind::RuleCreated
             | ActivityKind::RuleEdited

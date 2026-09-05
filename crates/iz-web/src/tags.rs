@@ -28,7 +28,7 @@ use topcoat::view::view;
 use iz_core::store::{Store, Tag, User};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, accounts, back_to, refusal_of, require_admin};
+use crate::server::{Refusal, store, back_to, refusal_of, require_admin};
 
 /// One tag as the screen reads it: a name, an order and whether it is the
 /// default every task wears when nothing else is chosen.
@@ -89,7 +89,7 @@ async fn tag_of_this_workspace(
     tag_id: &str,
 ) -> std::result::Result<(Arc<dyn Store>, User, Tag), Refusal> {
     let user = require_admin(cx).await?;
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let board = store
         .board(&user.workspace_id)
         .await
@@ -149,7 +149,7 @@ async fn create_tag(cx: &Cx, Form(input): Form<CreateTagForm>) -> Redirect {
     if name.is_empty() {
         return redirect(cx, Some(Refusal::EmptyTag));
     }
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let board = match store.board(&user.workspace_id).await {
         Ok(Some(board)) => board,
         _ => return redirect(cx, Some(Refusal::Unavailable)),
@@ -353,7 +353,7 @@ async fn tags_page(cx: &Cx) -> Result {
         }
     };
     let lang = Lang::from_code(&user.language);
-    let store = accounts(cx).store().clone();
+    let store = store(cx).clone();
     let tags = match tags_of(&store, &user).await {
         Ok(tags) => tags,
         Err(refusal) => {
