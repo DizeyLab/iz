@@ -1264,31 +1264,61 @@ async fn logs_screen(
 }
 
 /// Fits the active tab's page size to the browser's own viewport: measured
-/// once per load/swap against the first rendered row, never against a guess
-/// at the row height. A fit that would change the page size reloads once
-/// through a fresh `iz_rows_<section>` cookie; the `sessionStorage` guard,
-/// keyed to the exact fit computed, stops a borderline measurement from
-/// reloading forever. A container too short to measure (no rows yet, or a
-/// stage not yet laid out) is left alone rather than guessed at.
+/// against the first rendered row, never against a guess at the row height.
+/// A fit that would change the page size reloads once through a fresh
+/// `iz_rows_<section>` cookie.
+///
+/// Hardened after im's port showed the failure modes of the naive version:
+/// never measure while the document's fonts are still arriving (every fresh
+/// document repaints rows in the fallback face first, and a fit confirmed
+/// under it is wrong by half — after forty waits the CDN is presumed dead
+/// and the fallback face is the truth the page keeps); a fit is committed
+/// only when two measures in a row agree (the font swap flips row heights
+/// once, so a transient value never confirms); the reload loop is bounded
+/// by a hop budget rather than a per-value veto (a vetoed value would stay
+/// wrong for the whole session); and the measurement is driven by the
+/// geometry itself — a ResizeObserver on the first row re-measures whenever
+/// its height changes, a window resize re-measures for the new viewport.
+/// A container too short to measure (no rows yet, or a stage not yet laid
+/// out) is left alone rather than guessed at.
 async fn log_fit_script(cx: &Cx) -> Result {
     use topcoat::view::Unescaped;
     let js = "(function() {\
-        var list = document.querySelector('.rule-list[data-rows], .log-list[data-rows]');\
-        if (!list) { return; }\
-        var section = list.dataset.section;\
-        var current = parseInt(list.dataset.rows, 10);\
-        var row = list.firstElementChild;\
-        if (!row || !row.offsetHeight) { return; }\
-        var stage = list.closest('.settings-stage');\
-        if (!stage) { return; }\
-        var avail = stage.getBoundingClientRect().bottom - list.getBoundingClientRect().top - 44;\
-        var fit = Math.max(10, Math.floor(avail / row.offsetHeight));\
-        if (fit === current) { return; }\
-        var guard = 'izLogFit:' + section + ':' + fit;\
-        if (window.sessionStorage.getItem(guard)) { return; }\
-        window.sessionStorage.setItem(guard, '1');\
-        document.cookie = 'iz_rows_' + section + '=' + fit + ';path=/';\
-        location.replace(location.href);\
+        var waits = 0;\
+        var lastFit = -1;\
+        function measure() {\
+            if (document.fonts && document.fonts.status === 'loading' && waits < 40) {\
+                waits++;\
+                setTimeout(measure, 300);\
+                return;\
+            }\
+            var list = document.querySelector('.rule-list[data-rows], .log-list[data-rows]');\
+            if (!list) { return; }\
+            var section = list.dataset.section;\
+            var current = parseInt(list.dataset.rows, 10);\
+            var row = list.firstElementChild;\
+            if (!row || !row.offsetHeight) { return; }\
+            var stage = list.closest('.settings-stage');\
+            if (!stage) { return; }\
+            var avail = stage.getBoundingClientRect().bottom - list.getBoundingClientRect().top - 44;\
+            var fit = Math.max(10, Math.floor(avail / row.offsetHeight));\
+            if (fit === current) { lastFit = -1; window.sessionStorage.removeItem('izLogFitHops'); return; }\
+            if (fit !== lastFit) { lastFit = fit; setTimeout(measure, 350); return; }\
+            var hops = parseInt(window.sessionStorage.getItem('izLogFitHops') || '0', 10);\
+            if (hops >= 5) { return; }\
+            window.sessionStorage.setItem('izLogFitHops', String(hops + 1));\
+            document.cookie = 'iz_rows_' + section + '=' + fit + ';path=/';\
+            location.replace(location.href);\
+        }\
+        var timer = null;\
+        function schedule() {\
+            if (timer) { clearTimeout(timer); }\
+            timer = setTimeout(function () { timer = null; measure(); }, 200);\
+        }\
+        var row0 = document.querySelector('.rule-list[data-rows], .log-list[data-rows]');\
+        if (row0 && row0.firstElementChild && window.ResizeObserver) { new ResizeObserver(schedule).observe(row0.firstElementChild); }\
+        window.addEventListener('resize', schedule);\
+        schedule();\
     })();";
     view! { cx => <script>(Unescaped::new_unchecked(js))</script> }
 }
