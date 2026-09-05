@@ -198,6 +198,5 @@ async fn people_page(cx: &Cx) -> Result {
 
         (crate::layout::escape_script(cx).await?)
         (crate::detail::escape_closes(cx).await?)
-        (crate::layout::avatar_script(cx).await?)
     }
 }

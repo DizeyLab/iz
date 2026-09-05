@@ -136,7 +136,9 @@ pub(crate) async fn avatar_script(cx: &Cx) -> Result {
 
 /// The topbar's signed-in identity: the display name, opening on hover or
 /// focus onto details (name, address, role) and sign-out. Shared by every
-/// signed-in page's topbar.
+/// signed-in page's topbar — which is why `avatar_script` rides along here:
+/// every page with avatars has this menu, and the script's guard makes the
+/// one emission enough no matter how many avatars the page carries.
 pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
     let role_key = match me.role {
         iz_core::Role::Admin => Key::RoleAdminOption,
@@ -159,6 +161,7 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
                 <a class="user-menu-item" href="/auth/logout" data-hard="">(t(lang, Key::SignOut))</a>
             </div>
         </div>
+        (avatar_script(cx).await?)
     }
 }
 

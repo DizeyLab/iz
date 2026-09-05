@@ -3668,6 +3668,72 @@ async fn the_viewer_renders_in_page_for_a_renderable_file_and_ignores_a_foreign_
     assert!(!String::from_utf8_lossy(&missing_page.bytes).contains("viewer-body"));
 }
 
+/// The PDF reader is the one viewer with a presentation mode: its overlay
+/// carries the Present control and the delegated listener that answers it,
+/// while an image's overlay carries neither.
+#[tokio::test]
+async fn the_pdf_viewer_offers_presentation_mode_and_other_viewers_do_not() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Present me").await;
+
+    let pdf = b"%PDF-1.4 nothing to see".to_vec();
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("deck.pdf", "application/pdf", &pdf)),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let pdf_id = attachment_id_named(&snapshot.body, "deck.pdf");
+
+    let page = app
+        .get(&format!("/?task={task}&file={pdf_id}"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains("viewer-present"),
+        "no Present control on a PDF: {html}"
+    );
+    assert!(
+        html.contains("requestFullscreen"),
+        "no presentation wiring on a PDF: {html}"
+    );
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("spec.png", "image/png", &png)),
+    )
+    .await;
+    let snapshot = app
+        .post(
+            "/api/fetch_task",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+        )
+        .await;
+    let png_id = attachment_id_named(&snapshot.body, "spec.png");
+    let page = app
+        .get(&format!("/?task={task}&file={png_id}"), Some(&admin_cookie))
+        .await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        !html.contains("viewer-present"),
+        "an image got the PDF's Present control: {html}"
+    );
+}
+
 /// A file is opened from a section, so closing it lands back on that section:
 /// the close links carry the tab the viewer was opened over, not the panel's
 /// default.
@@ -5121,6 +5187,28 @@ async fn the_avatar_is_not_found_without_an_im_photo() {
         .get(&format!("/avatar/{member_id}"), Some(&member))
         .await;
     assert_eq!(photo.status, StatusCode::NOT_FOUND);
+}
+
+/// Every page with avatars carries the fallback script: the board's topbar
+/// and card faces are `<img>`s to 404s without it, and a bare failed `<img>`
+/// is the broken-image box, not the initials. Catches a page that renders
+/// `avatar()` without the behavior that hides the failure.
+#[tokio::test]
+async fn the_board_carries_the_avatar_fallback_script() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+
+    let page = app.get("/", Some(&admin)).await;
+    assert_eq!(page.status.as_u16(), 200);
+    let html = String::from_utf8(page.bytes).unwrap();
+    assert!(
+        html.contains("avatar-photo"),
+        "the topbar face is not on the board: {html}"
+    );
+    assert!(
+        html.contains("__izAvatar"),
+        "avatars without the fallback script show the broken-image box: {html}"
+    );
 }
 /// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`
 /// exists beyond the `already` count — the engine runs off the request in a
