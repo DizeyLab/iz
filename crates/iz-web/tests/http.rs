@@ -4737,6 +4737,166 @@ async fn set_role_cannot_make_an_admin() {
     );
 }
 
+/// An admin may add a member who has never signed in, and the row is a
+/// member like any other: a task can be assigned to it straight away.
+/// Catches a members table that only knows rows SSO wrote.
+#[tokio::test]
+async fn an_admin_may_add_a_member_before_their_first_sign_in() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/add_member",
+            Some(&admin_cookie),
+            &[
+                ("display_name", "Mert"),
+                ("email", "mert@iz.sh"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=add_member"),
+        "{:?}",
+        answer.location
+    );
+
+    let member_id = user_id(&app, "mert@iz.sh").await;
+    let row = app.store.user(&member_id).await.unwrap().unwrap();
+    assert_eq!(row.oidc_sub, None, "an unclaimed row carries no sub");
+    assert_eq!(row.role, Role::Member);
+
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Onboard Mert").await;
+    app.store.assign_task(&task, &member_id).await.unwrap();
+}
+
+/// A member who posts to the add route anyway is refused, and no row is
+/// written. Catches a handler that trusts the form's being hidden.
+#[tokio::test]
+async fn a_non_admin_may_not_add_members_over_http() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+
+    let answer = app
+        .post(
+            "/api/add_member",
+            Some(&member),
+            &[
+                ("display_name", "Mert"),
+                ("email", "mert@iz.sh"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=add_member"),
+        "{:?}",
+        answer.location
+    );
+
+    let workspace_id = app.workspace_id().await;
+    assert!(
+        app.store
+            .user_by_email(&workspace_id, "mert@iz.sh")
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused add wrote its row anyway"
+    );
+}
+
+/// The second add of an address is refused, however it is cased. Catches a
+/// duplicate check that compares what was typed instead of what was folded.
+#[tokio::test]
+async fn adding_the_same_address_twice_is_refused_over_http() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let first = app
+        .post(
+            "/api/add_member",
+            Some(&admin_cookie),
+            &[
+                ("display_name", "Mert"),
+                ("email", "mert@iz.sh"),
+                ("role", "member"),
+            ],
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::SEE_OTHER);
+
+    let answer = app
+        .post(
+            "/api/add_member",
+            Some(&admin_cookie),
+            &[
+                ("display_name", "Mert Again"),
+                ("email", "MERT@iz.sh"),
+                ("role", "viewer"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=already-member&on=add_member"),
+        "{:?}",
+        answer.location
+    );
+}
+
+/// `add_member` writes member or viewer only: admin comes from im, never
+/// from this route. Catches an add that trusts the form's role value.
+#[tokio::test]
+async fn add_member_cannot_make_an_admin() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    let answer = app
+        .post(
+            "/api/add_member",
+            Some(&admin_cookie),
+            &[
+                ("display_name", "Boss"),
+                ("email", "boss@iz.sh"),
+                ("role", "admin"),
+            ],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=add_member"),
+        "{:?}",
+        answer.location
+    );
+
+    let workspace_id = app.workspace_id().await;
+    assert!(
+        app.store
+            .user_by_email(&workspace_id, "boss@iz.sh")
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused add wrote its row anyway"
+    );
+}
+
 /// Losing im's admin flag drops the role to member on the very next request.
 /// Catches a provision that grants admin once and never syncs it back down —
 /// a demoted admin would keep administering forever.

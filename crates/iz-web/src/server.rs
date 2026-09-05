@@ -381,6 +381,8 @@ pub enum Refusal {
     NotFound,
     /// A recipient id that names nobody in this workspace.
     NoSuchMember,
+    /// The address typed into the add-member form already has a row here.
+    AlreadyMember,
     Unavailable,
 }
 
@@ -425,6 +427,7 @@ impl Refusal {
             Refusal::NotNestable => "Subtasks go one level deep.".to_string(),
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::NoSuchMember => "No such member.".to_string(),
+            Refusal::AlreadyMember => "Already a member.".to_string(),
             Refusal::Unavailable => "Something went wrong.".to_string(),
         }
     }
@@ -457,6 +460,7 @@ impl Refusal {
             Refusal::NotNestable => "Alt görevler tek seviyedir.".to_string(),
             Refusal::NotFound => "Böyle bir görev yok.".to_string(),
             Refusal::NoSuchMember => "Böyle bir üye yok.".to_string(),
+            Refusal::AlreadyMember => "Zaten üye.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
             Refusal::BadLimit => {
                 "Limit en az 1 MB, dosya başına en çok 500 MB olabilir."
@@ -522,6 +526,7 @@ impl Refusal {
             "not-nestable" => Refusal::NotNestable,
             "not-found" => Refusal::NotFound,
             "no-such-member" => Refusal::NoSuchMember,
+            "already-member" => Refusal::AlreadyMember,
             "unavailable" => Refusal::Unavailable,
             _ => return None,
         })
@@ -565,6 +570,7 @@ impl Refusal {
             Refusal::NotNestable => "not-nestable",
             Refusal::NotFound => "not-found",
             Refusal::NoSuchMember => "no-such-member",
+            Refusal::AlreadyMember => "already-member",
             Refusal::Unavailable => "unavailable",
         }
     }
@@ -901,6 +907,7 @@ mod refusal_message_tests {
             Refusal::NotNestable,
             Refusal::NotFound,
             Refusal::NoSuchMember,
+            Refusal::AlreadyMember,
             Refusal::TagInUse,
             Refusal::BadLimit,
             Refusal::BadPolicy,

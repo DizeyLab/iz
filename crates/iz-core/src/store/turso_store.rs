@@ -1369,6 +1369,71 @@ impl Store for TursoStore {
         self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
+    async fn add_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+        role: Role,
+    ) -> Result<User> {
+        // The caller only ever passes Member or Viewer; Admin is refused
+        // here too, so a second writer of this row cannot mint one.
+        if role == Role::Admin {
+            return Err(StoreError::Conflict("member_role"));
+        }
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err(StoreError::Conflict("member_name"));
+        }
+        let email = fold_email(email);
+        if email.is_empty() {
+            return Err(StoreError::Conflict("member_email"));
+        }
+        // Folded on the way in, like provision_user folds, so the binary
+        // unique index below means what the case-insensitive check here
+        // says even for rows the password era left unfolded.
+        let seen = {
+            let sql = format!("SELECT {USER_COLUMNS} FROM user WHERE workspace_id = ?1 AND email = ?2 COLLATE NOCASE");
+            self.one_row(&sql, params![workspace_id, email.clone()])
+                .await?
+        };
+        if seen.is_some() {
+            return Err(StoreError::Conflict("member"));
+        }
+        let id = Ulid::new().to_string();
+        let now = now_text()?;
+        let conn = self.conn.lock().await;
+        // Unclaimed: no sub, never signed in. The guards read such a row
+        // as nobody, while assignment and mail read it as anyone else.
+        // A concurrent add of the same address loses on the unique index
+        // and reads back as the duplicate the check above already refused.
+        let insert = conn
+            .execute(
+                "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, role, \
+                 disabled, created_at, last_signed_in_at) \
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, 0, ?6, NULL)",
+                params![
+                    id.clone(),
+                    workspace_id,
+                    email,
+                    display_name,
+                    role.as_str(),
+                    now
+                ],
+            )
+            .await;
+        match insert {
+            Ok(_) => {}
+            Err(e) if is_constraint_violation(&e) => {
+                return Err(StoreError::Conflict("member"));
+            }
+            Err(e) => return Err(backend(e)),
+        }
+        drop(conn);
+        self.announce([Topic::Members]);
+        self.user(&id).await?.ok_or(StoreError::NotFound)
+    }
+
     async fn owner(&self) -> Result<Option<User>> {
         let sql = format!(
             "SELECT {USER_COLUMNS} FROM user \

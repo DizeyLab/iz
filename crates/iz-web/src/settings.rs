@@ -21,7 +21,7 @@ use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
 use topcoat::view::view;
 
 use iz_core::detail::ActivityKind;
-use iz_core::store::{NewSender, SenderCheck, SenderTest, Store, User};
+use iz_core::store::{NewSender, SenderCheck, SenderTest, Store, StoreError, User};
 
 use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, config, mail, require_admin, require_user, store};
@@ -143,7 +143,7 @@ fn section_of_call(call: &str) -> &'static str {
     match call {
         "save_sender" | "send_test_mail" | "check_sender" => "outgoing",
         "save_limits" => "limits",
-        "set_role" | "set_disabled" => "members",
+        "set_role" | "set_disabled" | "add_member" => "members",
         "send_message" => "message",
         _ => "profile",
     }
@@ -775,6 +775,55 @@ async fn set_disabled(
 }
 
 #[derive(serde::Deserialize)]
+struct AddMemberForm {
+    display_name: String,
+    email: String,
+    role: iz_core::Role,
+}
+
+/// Adds a member who has not signed in yet. Admin-only. The row is
+/// unclaimed — no sub, never signed in — until the address signs in and
+/// [`Store::provision_user`](iz_core::store::Store::provision_user) claims
+/// it. The admin role is im's to grant and is refused here, like in
+/// `set_role`.
+#[route(POST "/api/add_member")]
+async fn add_member(
+    cx: &Cx,
+    Form(input): Form<AddMemberForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    let admin = match require_admin(cx).await {
+        Ok(admin) => admin,
+        Err(refusal) => return Ok(saved_or_refused("add_member", Some(refusal))),
+    };
+    if input.role == iz_core::Role::Admin {
+        return Ok(saved_or_refused("add_member", Some(Refusal::Forbidden)));
+    }
+    if input.display_name.trim().is_empty() {
+        return Ok(saved_or_refused("add_member", Some(Refusal::EmptyName)));
+    }
+    if !is_address(input.email.trim()) {
+        return Ok(saved_or_refused("add_member", Some(Refusal::BadEmail)));
+    }
+    let refusal = match store(cx)
+        .add_member(
+            &admin.workspace_id,
+            &input.email,
+            &input.display_name,
+            input.role,
+        )
+        .await
+    {
+        Ok(_) => None,
+        Err(StoreError::Conflict("member")) => Some(Refusal::AlreadyMember),
+        Err(problem) => {
+            eprintln!("store error: {problem}");
+            Some(Refusal::Unavailable)
+        }
+    };
+    Ok(saved_or_refused("add_member", refusal))
+}
+
+#[derive(serde::Deserialize)]
 struct SendMessageForm {
     to: String,
     subject: String,
@@ -1138,7 +1187,8 @@ async fn settings_page(cx: &Cx) -> Result {
     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
     let (role_refusal, _) = call_state(query, "set_role");
     let (disabled_refusal, _) = call_state(query, "set_disabled");
-    let member_refusal = role_refusal.or(disabled_refusal);
+    let (add_refusal, add_saved) = call_state(query, "add_member");
+    let member_refusal = role_refusal.or(disabled_refusal).or(add_refusal);
     let (message_refusal, message_saved) = call_state(query, "send_message");
 
     view! {
@@ -1527,6 +1577,31 @@ async fn settings_page(cx: &Cx) -> Result {
                             if let Some(refusal) = &member_refusal {
                                 <p class="field-error">(refusal.message_in(lang))</p>
                             }
+                            <form method="post" action="/api/add_member">
+                                <div class="field-row">
+                                    <label class="field">
+                                        <span class="field-label">(t(lang, Key::NameLabel))</span>
+                                        <input class="field-input" type="text" name="display_name" maxlength="200">
+                                    </label>
+                                    <label class="field">
+                                        <span class="field-label">(t(lang, Key::EmailLabel))</span>
+                                        <input class="field-input" type="text" name="email" maxlength="320">
+                                    </label>
+                                    <label class="field field-narrow">
+                                        <span class="field-label">(t(lang, Key::RoleCol))</span>
+                                        <select class="field-input" name="role">
+                                            <option value="member">(t(lang, Key::RoleMemberOption))</option>
+                                            <option value="viewer">(t(lang, Key::RoleViewerOption))</option>
+                                        </select>
+                                    </label>
+                                </div>
+                                <div class="panel-foot">
+                                    if add_saved {
+                                        <span class="field-note">(t(lang, Key::Saved))</span>
+                                    }
+                                    <button class="primary" type="submit">(t(lang, Key::AddMember))</button>
+                                </div>
+                            </form>
                         </div>
                     </section>
                 }

@@ -8047,6 +8047,91 @@ async fn a_matching_address_claims_its_row_preserving_id_role_and_prefs() {
 }
 
 #[tokio::test]
+async fn an_added_member_waits_unclaimed_until_their_first_sign_in() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let added = scratch
+        .store
+        .add_member(&workspace, "Mert@Iz.Sh", "Mert", Role::Member)
+        .await
+        .unwrap();
+    assert_eq!(added.email, "mert@iz.sh");
+    assert_eq!(added.display_name, "Mert");
+    assert_eq!(added.role, Role::Member);
+    assert_eq!(added.oidc_sub, None);
+    assert_eq!(added.last_signed_in_at, None);
+    assert!(!added.disabled);
+    // Visible to the member list in creation order, like any other row.
+    let names: Vec<_> = scratch
+        .store
+        .users(&workspace)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|user| user.email)
+        .collect();
+    assert_eq!(names, vec!["ada@iz.sh".to_string(), "mert@iz.sh".to_string()]);
+}
+
+#[tokio::test]
+async fn adding_the_same_address_twice_is_refused() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    scratch
+        .store
+        .add_member(&workspace, "mert@iz.sh", "Mert", Role::Member)
+        .await
+        .unwrap();
+    // Case differs, address does not: the fold on the way in says so.
+    let again = scratch
+        .store
+        .add_member(&workspace, "MERT@iz.sh", "Mert Again", Role::Viewer)
+        .await;
+    assert!(
+        matches!(again, Err(StoreError::Conflict(_))),
+        "a duplicate address was added twice: {again:?}"
+    );
+}
+
+#[tokio::test]
+async fn adding_an_admin_or_a_blank_name_is_refused() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let admin = scratch
+        .store
+        .add_member(&workspace, "boss@iz.sh", "Boss", Role::Admin)
+        .await;
+    assert!(
+        matches!(admin, Err(StoreError::Conflict(_))),
+        "an admin was typed in: {admin:?}"
+    );
+    let blank = scratch
+        .store
+        .add_member(&workspace, "ghost@iz.sh", "   ", Role::Member)
+        .await;
+    assert!(
+        matches!(blank, Err(StoreError::Conflict(_))),
+        "a blank name was stored: {blank:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_first_sign_in_claims_the_added_row() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let added = scratch
+        .store
+        .add_member(&workspace, "mert@iz.sh", "Mert", Role::Member)
+        .await
+        .unwrap();
+    let claimed = scratch
+        .store
+        .provision_user("sub-mert", "MERT@IZ.SH", "Mert Yılmaz", false)
+        .await
+        .unwrap();
+    assert_eq!(claimed.id, added.id);
+    assert_eq!(claimed.oidc_sub.as_deref(), Some("sub-mert"));
+    assert_eq!(claimed.role, Role::Member);
+    assert!(claimed.last_signed_in_at.is_some());
+}
+
+#[tokio::test]
 async fn a_returning_sign_in_refreshes_what_the_provider_owns() {
     let scratch = Scratch::open().await;
     let first = scratch

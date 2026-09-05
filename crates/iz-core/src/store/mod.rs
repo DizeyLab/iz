@@ -730,6 +730,24 @@ pub trait Store: BoardReads + DetailReads + 'static {
         im_admin: bool,
     ) -> Result<User>;
 
+    /// Writes an account for somebody who has not signed in yet.
+    ///
+    /// An unclaimed row is born here: `oidc_sub` stays NULL, so no sign-in
+    /// guard can see it, and the first sign-in with a matching address
+    /// claims it — [`Store::provision_user`]'s email match stamps the sub
+    /// onto this row, keeping its id, role and history. Until then the
+    /// person is assignable and mailable like anyone else. `Admin` is
+    /// refused: that role is im's to grant, never typed in. A duplicate
+    /// address in the same workspace is refused with
+    /// [`StoreError::Conflict`], as is a blank display name.
+    async fn add_member(
+        &self,
+        workspace_id: &str,
+        email: &str,
+        display_name: &str,
+        role: Role,
+    ) -> Result<User>;
+
     async fn user(&self, id: &str) -> Result<Option<User>>;
 
     /// Lookup by address. Callers must not turn a `None` into a different
