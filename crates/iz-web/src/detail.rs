@@ -31,7 +31,7 @@ use topcoat::router::{HeaderName, StatusCode, header, route};
 use topcoat::view::{class, view};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, store, back_to, mail, refusal_of, require_user, require_writer};
+use crate::server::{Refusal, back_to, mail, refusal_of, require_user, require_writer, store};
 
 /// A task this board could be linked to: enough to name it in the picker and
 /// nothing more.
@@ -417,7 +417,9 @@ async fn load_snapshot(
                     state_kind: state_kind.to_string(),
                     attempts: send.attempts,
                     last_error: may_administer.then(|| send.last_error.clone()).flatten(),
-                    sent_at: send.sent_at.map(|at| moment_label_with_seconds_in(at, zone)),
+                    sent_at: send
+                        .sent_at
+                        .map(|at| moment_label_with_seconds_in(at, zone)),
                 }
             })
             .collect();
@@ -1168,6 +1170,7 @@ pub(crate) async fn escape_closes(cx: &Cx) -> Result {
         window.__izEsc.register(90, function () { \
             if (document.querySelector('.datepick-pop .edit-toggle:checked')) { return false; } \
             if (document.querySelector('.viewer-scrim')) { \
+                if (document.fullscreenElement) { return true; } \
                 window.__izCloseViewer(); \
                 return true; \
             } \
@@ -2478,6 +2481,9 @@ pub async fn file_viewer_modal(
             <div class="modal viewer" tabindex="-1">
                 <header class="detail-head">
                     <span class="detail-headline"><span class="detail-key">(name.clone())</span></span>
+                    if kind == crate::files::ViewerKind::Pdf {
+                        <button type="button" class="quiet viewer-present">(t(lang, Key::Present))</button>
+                    }
                     <a class="quiet" href=(download_href)>(t(lang, Key::Download))</a>
                     <span class="detail-esc">(t(lang, Key::Esc))</span>
                     <a class="detail-close" href=(close_href) aria-label=(t(lang, Key::CloseTheFile))>(glyph::cross(cx).await?)</a>
@@ -2506,8 +2512,36 @@ pub async fn file_viewer_modal(
                     }
                 </div>
             </div>
+            if kind == crate::files::ViewerKind::Pdf {
+                (pdf_present_script(cx).await?)
+            }
         </div>
     }
+}
+
+/// The PDF reader's presentation mode: the browser's own plugin fills the
+/// screen — its toolbar, page box and thumbnails all keep working there,
+/// which a drawn-over canvas of our own would not give. Wiring is one
+/// delegated document listener, so a soft swap that replaces the button
+/// needs no re-wire: whichever `.viewer-present` is on screen when the
+/// click lands is the one that presents. `Escape` in fullscreen is the
+/// browser's own exit gesture and never reaches the page; the guard in
+/// [`escape_closes`] covers the ones that do.
+async fn pdf_present_script(cx: &Cx) -> Result {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () { \
+            if (window.__izPresentWired) { return; } \
+            window.__izPresentWired = true; \
+            document.addEventListener('click', function (e) { \
+                var button = e.target.closest('.viewer-present'); \
+                if (!button) { return; } \
+                var panel = button.closest('.viewer'); \
+                if (!panel || !panel.requestFullscreen) { return; } \
+                if (document.fullscreenElement) { document.exitFullscreen(); } else { panel.requestFullscreen(); } \
+            }); \
+        })();";
+    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
 }
 
 /// One window of one sheet as a table: the tab strip when the book has more

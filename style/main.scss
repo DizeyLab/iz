@@ -1263,6 +1263,45 @@ img.avatar {
 
 .viewer-pdf { width: 100%; height: 78vh; border: 1px solid var(--border); border-radius: var(--radius-md); }
 
+// A PDF is the browser's own reader living in an <object>, and it reads like
+// a workbook does: the panel takes the viewer the whole way out, because the
+// plugin only unfolds its full toolbar — page box, thumbnails, zoom — when
+// it has the room, and a document is read, not peeked at through 960px.
+.viewer:has(.viewer-pdf) {
+  width: min(96vw, 1400px);
+  height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  .viewer-body {
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+    padding: 16px 20px 20px;
+  }
+
+  .viewer-pdf { height: 100%; max-height: none; }
+}
+
+// Presented, the panel is the screen. The plugin keeps its own toolbar and
+// the header keeps its actions; only the frame's chrome comes off.
+.viewer:fullscreen {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border: none;
+  border-radius: 0;
+}
+
+// The viewer's header actions line up on one centered row: the filename is a
+// single line, and the download/present boxes center against it instead of
+// riding the headline's top edge the way the task modal's taller controls do.
+.viewer .detail-head { align-items: center; }
+
+.viewer .detail-esc { margin-top: 0; }
+
 // A workbook has no element of its own, so the viewer draws it: a tab strip
 // when the book has more than one sheet, and a grid that pans inside its own
 // box — the document never scrolls.
@@ -4107,6 +4146,7 @@ input[type="radio"] {
   .modal-scrim { padding: 16px; }
 
   .modal { max-height: calc(100dvh - 32px); }
+  .viewer:has(.viewer-pdf) { height: calc(100dvh - 32px); }
 
   .new-task-row { flex-wrap: wrap; }
 

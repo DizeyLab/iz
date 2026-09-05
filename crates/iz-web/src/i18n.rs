@@ -66,6 +66,7 @@ pub enum Key {
     Play,
     Pause,
     CloseTheFile,
+    Present,
     ThisFileWillNotOpen,
     Previous,
     Next,
@@ -359,7 +360,6 @@ pub fn take_off_this_task(lang: Lang, name: &str) -> String {
     }
 }
 
-
 /// The phrase a key names, in a user's language.
 pub fn t(lang: Lang, key: Key) -> &'static str {
     use Key::*;
@@ -431,6 +431,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Play, Tr) => "Oynat",
         (Pause, En) => "Pause",
         (Pause, Tr) => "Duraklat",
+        (Present, En) => "Present",
+        (Present, Tr) => "Sun",
         (CloseTheFile, En) => "Close the file",
         (CloseTheFile, Tr) => "Dosyayı kapat",
         (ThisFileWillNotOpen, En) => "This file will not open.",
@@ -662,7 +664,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (LinkAddressLabel, Tr) => "Bağlantı adresi",
         (SenderNotConfiguredYet, En) => "No sender to test.",
         (SenderNotConfiguredYet, Tr) => "Test edilecek gönderen yok.",
-
 
         (MailRules, En) => "Mail rules",
         (MailRules, Tr) => "Posta kuralları",
@@ -1032,7 +1033,6 @@ pub fn last_seen_label(lang: Lang, day: &str) -> String {
     }
 }
 
-
 /// The sender panel's failed-test note, in a user's language.
 pub fn not_delivered_label(lang: Lang, moment: &str, problem: &str) -> String {
     match lang {
@@ -1140,9 +1140,6 @@ pub fn unblocked_label(lang: Lang, detail: &str) -> String {
         Lang::Tr => format!("bu görevin engelini kaldırdı — {detail}"),
     }
 }
-
-
-
 
 pub fn role_changed_label(lang: Lang, detail: &str) -> String {
     match lang {
