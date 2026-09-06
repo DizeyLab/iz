@@ -30,9 +30,8 @@ use time::{Duration, OffsetDateTime};
 use crate::board::Transition;
 use crate::detail::ActivityKind;
 use crate::store::{
-    ActivityEvent, Audience, ClaimedSend, Event, Freeing, MailOutcome, MailRule, MailSend, SendKind,
-    Store,
-    Trigger,
+    ActivityEvent, Audience, ClaimedSend, Event, Freeing, MailOutcome, MailRule, MailSend,
+    SendKind, Store, Trigger,
 };
 
 /// Why the mail server would not take it, and whether that can change.
@@ -344,8 +343,7 @@ impl Engine {
                         self.owe(rule, &event, task_id, &mut report).await?;
                     }
                     Trigger::StatusBecomes(watched) => {
-                        let detail =
-                            format!("unblocked:{}", watched.as_deref().unwrap_or("any"));
+                        let detail = format!("unblocked:{}", watched.as_deref().unwrap_or("any"));
                         self.store
                             .record_mail_decision(
                                 &rule.id,
@@ -739,9 +737,9 @@ impl Engine {
         let Some(mail) = mail else {
             return Ok(());
         };
-        let Some(send) = sends.first() else {
+        if sends.is_empty() {
             return Ok(());
-        };
+        }
         let now = OffsetDateTime::now_utc();
         match self.mailer.send(&mail).await {
             Ok(()) => {
@@ -768,17 +766,24 @@ impl Engine {
                 report.held += 1;
             }
             Err(problem) => {
-                let attempts = send.attempts + 1;
-                // The last attempt is written down as given up on rather than
-                // left looking like it is still coming.
-                let retry_at =
-                    (problem.retryable && attempts < MAX_ATTEMPTS).then(|| now + backoff(attempts));
+                // The retry ladder is each row's own: a batch is one envelope,
+                // but the rows in it arrived at different times and may be at
+                // different rungs. Deciding from the first row would write a
+                // fresh row off on its first failure, or keep retrying a row
+                // whose five attempts are spent.
+                let mut any_retry = false;
                 for one in sends {
+                    let attempts = one.attempts + 1;
+                    // The last attempt is written down as given up on rather
+                    // than left looking like it is still coming.
+                    let retry_at = (problem.retryable && attempts < MAX_ATTEMPTS)
+                        .then(|| now + backoff(attempts));
+                    any_retry |= retry_at.is_some();
                     self.store
                         .record_send_refused(&one.id, &problem.message, retry_at, now)
                         .await?;
                 }
-                if retry_at.is_some() {
+                if any_retry {
                     report.failed += 1;
                 } else {
                     report.abandoned += 1;

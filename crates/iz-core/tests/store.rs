@@ -3462,6 +3462,75 @@ async fn a_failing_send_is_retried_a_bounded_number_of_times_and_then_written_of
 }
 
 #[tokio::test]
+async fn a_batch_mates_retry_clock_is_its_own() {
+    // Two owed rows, same card and reader, at different rungs of the retry
+    // ladder, answered by one envelope: the refusal writes the exhausted row
+    // off and sets the fresh one down to try again — the envelope is shared,
+    // the clocks are not.
+    let (dir, store, workspace, admin) = waiting(30).await;
+    let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rule = a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::refusing(
+        (0..iz_core::mail::MAX_ATTEMPTS)
+            .map(|_| MailError::retryable("connection timed out"))
+            .collect(),
+    );
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
+
+    // Row A: owed by the first crossing, refused on four delivery passes, one
+    // rung from written off.
+    let first = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&first).await.unwrap();
+    let mut when = OffsetDateTime::now_utc() + Duration::minutes(31);
+    for _ in 1..iz_core::mail::MAX_ATTEMPTS {
+        engine.deliver_owed(when, 10).await.unwrap();
+        when += backoff(iz_core::mail::MAX_ATTEMPTS) + Duration::minutes(1);
+    }
+
+    // Row B: a second crossing owes the same reader again, fresh on the
+    // ladder, held by the same quiet window.
+    moved_to(&store, &workspace, &task, "Done", "Backlog", &admin).await;
+    let second = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&second).await.unwrap();
+
+    // One envelope answers both rows and is refused: A's fifth attempt, B's
+    // first.
+    let due = OffsetDateTime::now_utc() + Duration::minutes(31);
+    let when = when.max(due);
+    engine.deliver_owed(when, 10).await.unwrap();
+
+    let rows = store.sends_for_rule(&rule.id, 10).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    let exhausted = rows
+        .iter()
+        .find(|row| row.attempts == iz_core::mail::MAX_ATTEMPTS);
+    let fresh = rows.iter().find(|row| row.attempts == 1);
+    let Some(exhausted) = exhausted else {
+        panic!("no row at the top of the ladder: {rows:?}");
+    };
+    let Some(fresh) = fresh else {
+        panic!("the fresh row was not marked with its own first attempt: {rows:?}");
+    };
+    assert_eq!(exhausted.state, SendState::Abandoned);
+    assert_eq!(fresh.state, SendState::Failed);
+    assert!(
+        fresh.next_attempt_at.is_some(),
+        "the fresh row rides its own retry clock: {fresh:?}"
+    );
+
+    // And when the host answers again, the fresh row still goes out.
+    let later = fresh.next_attempt_at.unwrap() + Duration::minutes(1);
+    engine.deliver_owed(later, 10).await.unwrap();
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@iz.sh");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_refused_address_is_written_off_at_the_first_answer() {
     let (dir, store, workspace, admin) = shared().await;
     let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;

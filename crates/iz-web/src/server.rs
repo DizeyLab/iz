@@ -105,7 +105,6 @@ impl Mail {
             let ev = store.event(&activity_id).await;
             let report = match ev {
                 Ok(Some(iz_core::store::Event::Happened(ev))) => {
-                    eprintln!("AFTER_ACTIVITY happened kind={:?}", ev.kind);
                     match engine.on_activity(&ev).await {
                         Ok(_) => {
                             engine
@@ -395,8 +394,7 @@ impl Refusal {
             Refusal::EmptyTitle => "Give the task a title.".to_string(),
             Refusal::EmptyName => "Give yourself a name.".to_string(),
             Refusal::BadLimit => {
-                "A limit has to be at least 1 MB, and no wider than 500 MB per file."
-                    .to_string()
+                "A limit has to be at least 1 MB, and no wider than 500 MB per file.".to_string()
             }
             Refusal::BadPolicy => "A security number is out of range.".to_string(),
             Refusal::BadZone => "That is not a timezone.".to_string(),
@@ -463,8 +461,7 @@ impl Refusal {
             Refusal::AlreadyMember => "Zaten üye.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
             Refusal::BadLimit => {
-                "Limit en az 1 MB, dosya başına en çok 500 MB olabilir."
-                    .to_string()
+                "Limit en az 1 MB, dosya başına en çok 500 MB olabilir.".to_string()
             }
             Refusal::BadPolicy => "Güvenlik sayısı aralığın dışında.".to_string(),
             Refusal::BadZone => "Bu bir saat dilimi değil.".to_string(),
