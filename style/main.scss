@@ -870,6 +870,9 @@ a {
   font-weight: 600;
   line-height: 1.4;
   margin-top: 4px;
+  // A pasted URL has no space to wrap at; without this it runs off the card
+  // instead of folding.
+  overflow-wrap: anywhere;
 }
 
 .card-foot {
@@ -1723,7 +1726,13 @@ img.avatar {
   box-shadow: var(--shadow-2);
 }
 
-.pop-panel-wide { min-width: 320px; }
+// The wide pickers hang off a trigger sitting at a panel's edge; a flat
+// 320px floor walks them past a phone's viewport, where the locked body
+// keeps them unreachable. The floor yields to the screen first.
+.pop-panel-wide {
+  min-width: min(320px, calc(100dvw - 32px));
+  max-width: calc(100dvw - 32px);
+}
 
 .pop-list {
   display: flex;
@@ -1804,6 +1813,13 @@ img.avatar {
   // edge, and every row under it inherits that.
   padding: 22px 24px 0;
 }
+
+// The generic spacer grows, and here it once split the head's free width
+// with the headline fifty-fifty: a long title wrapped inside half the mast
+// while the other half sat empty. The headline's own flex already pushes
+// the trailing controls (status pill, close, board link) to the right edge,
+// so the spacer has nothing to do in this row.
+.detail-head > .spacer { flex-grow: 0; }
 
 .detail-headline {
   flex: 1;
@@ -1917,6 +1933,9 @@ img.avatar {
   font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1.3;
+  // Same trap as the prose: an unbroken run would push the head row wider
+  // than the panel instead of folding.
+  overflow-wrap: anywhere;
 }
 
 .title-form {
@@ -2779,6 +2798,9 @@ img.avatar {
   line-height: 1.55;
   color: var(--ink-soft);
   white-space: pre-wrap;
+  // pre-wrap keeps the author's lines but still needs somewhere to break
+  // a run that never ends.
+  overflow-wrap: anywhere;
 }
 
 .comment-composer {
@@ -3308,6 +3330,18 @@ input[type="radio"] {
 }
 
 // -- the member list --------------------------------------------------------
+
+// The members register keeps its named columns and pans inside the panel
+// rather than squeezing the role select out of the screen. Panning is not a
+// phone rescue: a mid-size window squeezes the same way.
+.table-pan {
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+
+  .member-table { min-width: 560px; }
+}
 
 // The columns are named, not counted, and only one of them is elastic.
 //
@@ -4132,6 +4166,16 @@ input[type="radio"] {
     }
 
     .topbar-nav-links { gap: 10px; }
+
+    // The stamp is a clock reading, not the news; below the smallest common
+    // phone it gives up its width and ends in an ellipsis, one line.
+    .log-stamp {
+      flex-shrink: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   }
 
   // -- board -----------------------------------------------------------------
@@ -4199,6 +4243,16 @@ input[type="radio"] {
 
   .detail-foot { padding: 14px 16px 16px; }
 
+  // -- popovers ----------------------------------------------------------------
+
+  // The datepick hangs from the right end of the filter row; anchored left
+  // it opens past the panel's clipped edge. Anchor it right, the way the
+  // assignee pop already is.
+  .datepick-pop .edit-form {
+    left: auto;
+    right: 0;
+  }
+
   // -- the settings shell: rail becomes a strip -------------------------------
 
   .settings-shell { flex-direction: column; }
@@ -4222,17 +4276,6 @@ input[type="radio"] {
   }
 
   .settings-stage { padding: 16px 16px 32px; }
-
-  // The members register keeps its named columns and pans inside the panel
-  // rather than squeezing the role select out of the screen.
-  .table-pan {
-    overflow-x: auto;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar { display: none; }
-
-    .member-table { min-width: 560px; }
-  }
 
   .field-row { flex-wrap: wrap; }
 
@@ -4258,4 +4301,37 @@ input[type="radio"] {
   // -- account screens ---------------------------------------------------------
 
   .auth-stage { padding: 0 16px 24px; }
+}
+
+// --- Tablet (between the phone fold and the desktop) ------------------------
+//
+// The desktop layout holds here, but its evenly shared columns and fields
+// run short of room: a track keeps a floor to stay readable, and what does
+// not fit pans inside its region, the way it does on a phone. No document
+// scrollbar opens here either.
+@media (min-width: 621px) and (max-width: 1024px) {
+
+  // -- board -----------------------------------------------------------------
+
+  // Five or seven columns shared across a 620-something window are 90px
+  // slivers. Each keeps a card's width instead; the row pans sideways under
+  // the finger, silently, as the phone rail already does.
+  .board-columns {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(180px, 1fr);
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar { display: none; }
+  }
+
+  .column { scroll-snap-align: start; }
+
+  // -- settings ----------------------------------------------------------------
+
+  // The rail keeps its width; two fields that no longer have the room for
+  // their columns stack instead of squeezing into slivers.
+  .field-row { flex-wrap: wrap; }
 }

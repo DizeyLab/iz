@@ -502,9 +502,15 @@ async fn render_card(
     }
 }
 
-/// Opens a card's context menu at the cursor and closes whichever one was
-/// open; a plain document click closes it again. Rendered once — every
-/// card's `@contextmenu` calls into this same global, by the menu's id.
+/// Opens a card's context menu at the cursor — clamped inside the viewport
+/// like `dropdown.rs`'s `place()`, with the move submenu flipped or pinned
+/// to stay inside too; only JS knows the cursor and the viewport, so the
+/// submenu's spot is computed here rather than left to its stylesheet's
+/// `left: 100%`. The submenu is invisible until hover, so `placeSubmenus`
+/// flashes each one open to measure — nothing paints mid-script. Closes
+/// whichever one was open; a plain document click closes it again. Rendered
+/// once — every card's `@contextmenu` calls into this same global, by the
+/// menu's id.
 ///
 /// Also registers the board page's own `Escape` resolvers on
 /// `window.__izEsc`: the datepicker panel (priority 20 — below the
@@ -522,13 +528,34 @@ async fn card_menu_script(cx: &Cx) -> Result {
         if (window.__izCardMenu) { return; } \
         window.__izCardMenu = true; \
         function closeCardMenus() { document.querySelectorAll('.card-menu-open').forEach(function (el) { el.classList.remove('card-menu-open'); }); } \
+        function placeSubmenus(menu) { \
+            menu.querySelectorAll('.card-menu-submenu').forEach(function (sub) { \
+                sub.style.display = 'block'; \
+                var box = sub.getBoundingClientRect(); \
+                var move = sub.parentElement.getBoundingClientRect(); \
+                sub.style.display = ''; \
+                var left = move.right + 4; \
+                if (left + box.width > window.innerWidth - 4) { left = Math.max(4, move.left - 4 - box.width); } \
+                var top = Math.max(4, Math.min(move.top, window.innerHeight - box.height - 4)); \
+                sub.style.left = (left - move.left) + 'px'; \
+                sub.style.top = (top - move.top) + 'px'; \
+                sub.style.right = 'auto'; \
+                sub.style.marginLeft = '0'; \
+                sub.style.marginRight = '0'; \
+                window.__izOwn(sub, [], ['style']); \
+            }); \
+        } \
         window.__izOpenCardMenu = function (e, id) { \
             closeCardMenus(); \
             var menu = document.getElementById(id); \
             if (!menu) { return; } \
-            menu.style.left = e.clientX + 'px'; \
-            menu.style.top = e.clientY + 'px'; \
             window.__izOwn(menu, ['card-menu-open'], ['style']); \
+            var w = menu.offsetWidth, h = menu.offsetHeight; \
+            var left = Math.max(4, Math.min(e.clientX, window.innerWidth - w - 4)); \
+            var top = Math.max(4, Math.min(e.clientY, window.innerHeight - h - 4)); \
+            menu.style.left = left + 'px'; \
+            menu.style.top = top + 'px'; \
+            placeSubmenus(menu); \
         }; \
         document.addEventListener('click', closeCardMenus); \
         window.__izEsc.register(20, function () { \
