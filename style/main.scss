@@ -449,6 +449,32 @@ a {
   background: var(--border);
 }
 
+// The family switcher: the dizey wordmarks, lowercase like the brand's own
+// name, standing with the mark while the page nav keeps its auto-margin
+// place on the right. The current app is ink; the others are muted until
+// the pointer finds them.
+.service-switcher {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.service-mark {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+
+  &:hover { color: var(--ink); }
+
+  &-on {
+    color: var(--ink);
+  }
+}
+
 .topbar-nav-links {
   display: flex;
   gap: 16px;

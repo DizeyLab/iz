@@ -42,6 +42,10 @@ pub struct Config {
     pub client_secret: String,
     /// Must exactly match one of the URIs registered with im.
     pub redirect_uri: String,
+    /// Where im sends the browser when a sign-out that started here
+    /// finishes: this app's own public address, slash-terminated. Offered
+    /// to im's `/logout` as its `back`, so the browser comes home.
+    pub logout_back: String,
     /// The app's session cookie name, e.g. `iz_session`.
     pub cookie_name: String,
     /// 32 bytes, generated once per app and kept out of the repository.
@@ -538,12 +542,22 @@ async fn iz_callback(cx: &Cx) -> Result<Response, topcoat::Error> {
     }
 }
 
-/// Signs out of the app only. To end the central session too, post to im's
-/// `/logout` — a link there is a silent re-login, by design.
+/// Signs out of the app and then of the family: the local cookie is
+/// cleared, and the browser is sent on to im's `/logout` with `back`
+/// pointed back here. Ending the central session is im's half of the
+/// handoff — which is why a sign-out anywhere is a sign-out everywhere.
 #[route(GET "/auth/logout")]
 async fn iz_logout(cx: &Cx) -> Result<Response, topcoat::Error> {
-    clear_cookie(cx, &client(cx).config.cookie_name);
-    see(cx, "/")
+    let config = &client(cx).config;
+    clear_cookie(cx, &config.cookie_name);
+    see(
+        cx,
+        &format!(
+            "{}/logout?back={}",
+            config.issuer,
+            urlencoded(&config.logout_back)
+        ),
+    )
 }
 
 fn urlencoded(raw: &str) -> String {
@@ -863,6 +877,7 @@ mod tests {
             client_id: "client-1".into(),
             client_secret: "secret".into(),
             redirect_uri: "http://app.test/auth/callback".into(),
+            logout_back: "http://app.test/".into(),
             cookie_name: "iz_session".into(),
             cookie_key: [7u8; 32],
         };
@@ -942,6 +957,7 @@ mod tests {
             client_id: "client-1".into(),
             client_secret: "s3cr3t".into(),
             redirect_uri: "http://app.test/auth/callback".into(),
+            logout_back: "http://app.test/".into(),
             cookie_name: "iz_session".into(),
             cookie_key: [7u8; 32],
         }

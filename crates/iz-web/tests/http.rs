@@ -280,6 +280,12 @@ struct App {
 
 impl App {
     async fn build(mail: Mail) -> Self {
+        Self::build_with(mail, Vec::new()).await
+    }
+
+    /// Like `build`, but with a `[[services]]` list, so a test can see the
+    /// family switcher a configured deployment shows.
+    async fn build_with(mail: Mail, services: Vec<iz_core::config::ServiceConfig>) -> Self {
         let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("iz.db");
@@ -295,6 +301,7 @@ impl App {
             client_id: "iz-test".to_string(),
             client_secret: "s3cr3t".to_string(),
             redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            logout_back: "http://127.0.0.1:7655/".to_string(),
             cookie_name: "iz_session".to_string(),
             cookie_key: [7u8; 32],
         };
@@ -303,6 +310,8 @@ impl App {
             storage,
             listen: "127.0.0.1:7655".parse().unwrap(),
             live_seconds: 300,
+            base_url: String::new(),
+            services,
             oidc: iz_core::config::OidcConfig {
                 issuer: fake.url(),
                 client_id: "iz-test".to_string(),
@@ -371,6 +380,7 @@ impl App {
             client_id: "iz-test".to_string(),
             client_secret: "s3cr3t".to_string(),
             redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            logout_back: "http://127.0.0.1:7655/".to_string(),
             cookie_name: "iz_session".to_string(),
             cookie_key: [7u8; 32],
         };
@@ -378,6 +388,8 @@ impl App {
             database: db,
             storage,
             listen: "127.0.0.1:7655".parse().unwrap(),
+            base_url: String::new(),
+            services: Vec::new(),
             live_seconds: 300,
             oidc: iz_core::config::OidcConfig {
                 issuer: fake.url(),
@@ -677,6 +689,11 @@ impl App {
             .get(header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
@@ -688,6 +705,7 @@ impl App {
             content_range,
             accept_ranges,
             etag,
+            location,
             bytes,
         }
     }
@@ -708,6 +726,8 @@ struct Raw {
     content_range: Option<String>,
     accept_ranges: Option<String>,
     etag: Option<String>,
+    /// Where a 303 sends the browser — the sign-out handoff's whole point.
+    location: Option<String>,
     bytes: Vec<u8>,
 }
 
@@ -9556,4 +9576,66 @@ fn the_stylesheet_guard_refuses_a_foreign_bundle() {
         .expect_err("a foreign bundle passed the guard");
     assert!(problem.contains("another build"), "{problem}");
     std::fs::remove_dir_all(&foreign).unwrap();
+}
+
+/// Sign-out leaves through the family's front door: the local cookie is
+/// cleared, and the browser is handed to im's `/logout` with `back` pointed
+/// at this app, so the central session ends with the local one.
+#[tokio::test]
+async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let raw = app.get("/auth/logout", Some(&admin)).await;
+    assert_eq!(raw.status, StatusCode::SEE_OTHER);
+    let expected = format!(
+        "{}/logout?back={}",
+        app.client.issuer,
+        encode("http://127.0.0.1:7655/")
+    );
+    assert_eq!(raw.location.as_deref(), Some(expected.as_str()));
+}
+
+/// The signed-in chrome carries the family's wordmark trio when the config
+/// lists services: one mark per `[[services]]` row in the file's order, the
+/// current app held in ink with `aria-current`, the others plain links out.
+/// A deployment that lists none shows no switcher at all.
+#[tokio::test]
+async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_configured() {
+    let services = vec![
+        iz_core::config::ServiceConfig {
+            key: "in".to_string(),
+            name: "Files".to_string(),
+            url: "http://127.0.0.1:7655".to_string(),
+        },
+        iz_core::config::ServiceConfig {
+            key: "iz".to_string(),
+            name: "Board".to_string(),
+            url: "http://127.0.0.1:7654".to_string(),
+        },
+        iz_core::config::ServiceConfig {
+            key: "im".to_string(),
+            name: "Account".to_string(),
+            url: "http://127.0.0.1:7650".to_string(),
+        },
+    ];
+    let app = App::build_with(Mail::silent(), services).await;
+    let board_admin = admin(&app).await;
+    let html = String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
+    assert!(html.contains("service-switcher"), "{html}");
+    assert!(html.contains("service-mark-on"), "{html}");
+    assert!(html.contains("aria-current=\"page\""), "{html}");
+    // The trio reads in the order the config gave, with the current app
+    // between its neighbours, not pushed to an end.
+    let in_at = html.find("href=\"http://127.0.0.1:7655\"").unwrap();
+    let iz_at = html.find("service-mark-on").unwrap();
+    let im_at = html.find("href=\"http://127.0.0.1:7650\"").unwrap();
+    assert!(in_at < iz_at && iz_at < im_at, "marks out of order: {html}");
+
+    let alone = App::open().await;
+    let alone_admin = admin(&alone).await;
+    let plain = String::from_utf8_lossy(&alone.get("/", Some(&alone_admin)).await.bytes).to_string();
+    assert!(
+        !plain.contains("service-switcher"),
+        "no services, no switcher: {plain}"
+    );
 }

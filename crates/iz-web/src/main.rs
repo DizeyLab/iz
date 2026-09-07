@@ -123,6 +123,10 @@ async fn main() {
         client_id: config.oidc.client_id.clone(),
         client_secret: config.oidc.client_secret.clone(),
         redirect_uri: config.oidc.redirect_uri.clone(),
+        // Where im's /logout sends the browser when a sign-out that
+        // started here finishes: this app's public address, derived from
+        // `listen` unless the file says a `base_url`.
+        logout_back: format!("{}/", config.public_url().trim_end_matches('/')),
         cookie_name: "iz_session".to_string(),
         cookie_key,
     };

@@ -27,6 +27,7 @@ fn main() {
         client_id: String::new(),
         client_secret: String::new(),
         redirect_uri: String::new(),
+        logout_back: String::new(),
         cookie_name,
         cookie_key: key,
     };

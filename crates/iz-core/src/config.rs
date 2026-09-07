@@ -53,10 +53,37 @@ storage = "storage"
 # this is the only thing that decides where İz binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
 listen = "127.0.0.1:7654"
+# This app's public address, when it differs from `listen` — a proxy in
+# front, for instance. It is where a sign-out sends the browser back to,
+# so a deployment the family reaches by name sets it. Empty: derived
+# from `listen`.
+base_url = ""
 # How long a live-update connection is held before the browser is asked to
 # reconnect, in seconds. The reconnect is what re-checks the session, so a
 # revoked sign-in stops receiving within this long.
 live_seconds = 300
+
+# The dizey family, as the topbar's wordmark switcher shows it: one
+# [[services]] table per app, with key ("in"|"im"|"iz"), a human name, and
+# the url, absolute, no trailing slash. An empty list keeps the switcher
+# off. Production serves the family at https://<key>.dizey.sh, written in
+# the deploy's own config; this file carries only the development
+# addresses.
+[[services]]
+key = "in"
+name = "Files"
+url = "http://127.0.0.1:7655"
+
+[[services]]
+key = "im"
+name = "Account"
+url = "http://127.0.0.1:7650"
+
+[[services]]
+key = "iz"
+name = "Board"
+url = "http://127.0.0.1:7654"
+
 [oidc]
 # The provider that signs people in. Required: no default is guessed.
 issuer = ""
@@ -113,6 +140,27 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[
             "live_seconds = 300\n"
         ),
     ),
+    (
+        "base_url",
+        concat!(
+            "# This app's public address, when it differs from `listen` — a proxy\n",
+            "# in front, for instance. It is where a sign-out sends the browser\n",
+            "# back to, so a deployment the family reaches by name sets it.\n",
+            "# Empty: derived from `listen`.\n",
+            "base_url = \"\"\n"
+        ),
+    ),
+    (
+        "services",
+        concat!(
+            "# The dizey family, as the topbar's wordmark switcher shows it: one\n",
+            "# [[services]] table per app, with key (\"in\"|\"im\"|\"iz\"), a human\n",
+            "# name, and the url, absolute, no trailing slash. An empty list keeps\n",
+            "# the switcher off. Production serves the family at\n",
+            "# https://<key>.dizey.sh, written in the deploy's own config.\n",
+            "services = []\n"
+        ),
+    ),
 ];
 
 /// The `[oidc]` table of `config/iz.toml`, before the values are checked.
@@ -128,6 +176,15 @@ struct OidcToml {
     other: std::collections::BTreeMap<String, toml::Value>,
 }
 
+/// One `[[services]]` entry of `config/iz.toml`, before the values are
+/// checked.
+#[derive(Deserialize)]
+struct ServiceToml {
+    key: String,
+    name: String,
+    url: String,
+}
+
 /// The shape of `config/iz.toml`, before the values are checked. Anything
 /// else the file says lands in `other`, which is read for its key names only
 /// — enough for the report to say a key was seen and not obeyed.
@@ -137,6 +194,8 @@ struct Toml {
     storage: Option<String>,
     listen: Option<String>,
     live_seconds: Option<u64>,
+    base_url: Option<String>,
+    services: Option<Vec<ServiceToml>>,
     oidc: Option<OidcToml>,
     #[serde(flatten)]
     other: std::collections::BTreeMap<String, toml::Value>,
@@ -154,6 +213,18 @@ pub struct OidcConfig {
     /// Where the provider sends the browser after sign-in. Defaults from
     /// `listen` when the file is silent about it.
     pub redirect_uri: String,
+}
+
+/// One of the apps the topbar's wordmark switcher links to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceConfig {
+    /// The wordmark, lowercase — and how the app recognises itself in the
+    /// list (`"iz"` here).
+    pub key: String,
+    /// The human name, offered as the link's title: "Files", "Account".
+    pub name: String,
+    /// Where the app lives: absolute, no trailing slash.
+    pub url: String,
 }
 
 /// What the process needs to know before it opens a socket.
@@ -175,6 +246,14 @@ pub struct Config {
     /// asked to reconnect. The reconnect re-authenticates, which is how a
     /// session revoked mid-stream stops being fed.
     pub live_seconds: u64,
+    /// This app's own public address as a URL, when the file says one.
+    /// Empty means "derive it from `listen`" — the same arrangement
+    /// `redirect_uri` has. It is where the family sends the browser back
+    /// to after a sign-out that started here.
+    pub base_url: String,
+    /// The apps of the family, as the topbar's wordmark switcher links
+    /// them. Empty: no switcher, and everything else stays as it was.
+    pub services: Vec<ServiceConfig>,
     /// The OIDC provider İz trusts.
     pub oidc: OidcConfig,
     /// Whether `config/iz.toml` did not exist and was just written with the
@@ -286,6 +365,30 @@ impl Config {
             why: format!("{listen:?} is not a host:port address — {err}"),
         })?;
 
+        // Empty means "derive it": the same arrangement `redirect_uri` has,
+        // so a deployment behind a proxy says its public name once and
+        // everyone else follows `listen` for free.
+        let base_url = value(toml.base_url).unwrap_or_default();
+
+        // An entry that cannot be shown — no wordmark, no name, no
+        // destination — is refused rather than rendered half of itself.
+        let mut services = Vec::new();
+        for service in toml.services.unwrap_or_default() {
+            if service.key.trim().is_empty()
+                || service.name.trim().is_empty()
+                || service.url.trim().is_empty()
+            {
+                return Err(ConfigError::Invalid {
+                    key: "services",
+                    why: "every [[services]] needs a non-empty key, name and url".to_string(),
+                });
+            }
+            services.push(ServiceConfig {
+                key: service.key,
+                name: service.name,
+                url: service.url,
+            });
+        }
         // Zero would mean a stream that ends the moment it opens, which is a
         // reconnect loop rather than a live feed; the key is refused rather
         // than quietly corrected, because a deployment that meant to say
@@ -315,6 +418,8 @@ impl Config {
             database,
             storage,
             listen,
+            base_url,
+            services,
             live_seconds,
             oidc: OidcConfig {
                 issuer,
@@ -337,6 +442,21 @@ impl Config {
     /// the only thing this defers to.
     pub fn listen_url(&self) -> String {
         listen_url_of(&self.listen)
+    }
+
+    /// This app's address as a URL, for when another service sends the
+    /// browser back here after a sign-out that started here: `base_url`
+    /// when the file sets one, else the address bound.
+    ///
+    /// The derivation mirrors `redirect_uri`'s, and for the same reason: a
+    /// deployment behind a proxy says its public name once, and everyone
+    /// else follows `listen` for free.
+    pub fn public_url(&self) -> String {
+        if self.base_url.is_empty() {
+            self.listen_url()
+        } else {
+            self.base_url.clone()
+        }
     }
 
     /// The lines to print once at startup. Nothing secret is among them.
@@ -463,13 +583,17 @@ fn complete(path: &Path, text: &str, base: &Path) {
     }
 }
 
-/// Whether the file sets this key — a line whose first word it is. A key
-/// named inside a comment or a value does not count.
+/// Whether the file sets this key — a line whose first word it is, or an
+/// array-of-tables header naming it (`[[services]]`), which is how a list
+/// of tables says the same thing. A key named inside a comment or a value
+/// does not count.
 fn mentions(text: &str, key: &str) -> bool {
+    let header = format!("[[{key}]]");
     text.lines().any(|line| {
-        line.trim_start()
-            .strip_prefix(key)
+        let line = line.trim_start();
+        line.strip_prefix(key)
             .is_some_and(|rest| rest.trim_start().starts_with('='))
+            || line.starts_with(&header)
     })
 }
 
@@ -593,7 +717,8 @@ mod tests {
         let dir = scratch();
         std::fs::create_dir_all(dir.join("config")).unwrap();
         let mine = &format!(
-            "database = \"iz.db\"\nstorage = \"files\"\nlisten = \"0.0.0.0:8080\"\nlive_seconds = 30\n{OIDC}"
+            "database = \"iz.db\"\nstorage = \"files\"\nlisten = \"0.0.0.0:8080\"\n\
+             live_seconds = 30\nbase_url = \"\"\nservices = []\n{OIDC}"
         );
         std::fs::write(dir.join(FILE_NAME), mine).unwrap();
         let config = Config::load_from(&dir).unwrap();
@@ -758,30 +883,28 @@ mod tests {
     }
 
     /// The sender used to be environment variables read directly, and the
-    /// base URL used to be a key of its own. Both are gone, so a file that
-    /// still carries them must do nothing at all — not half-configure a
-    /// sender, not stop the boot, and above all not quietly send through an
-    /// account the Settings screen does not show. The report says they were
-    /// seen, so a typo is visible too.
+    /// mail base URL used to be a key of this file too before the Settings
+    /// screen took it over. A file that still carries the sender's secrets
+    /// must do nothing at all — not half-configure a sender, not stop the
+    /// boot, and above all not quietly send through an account the Settings
+    /// screen does not show. The report says they were seen, so a typo is
+    /// visible too. (`base_url` is a key here again, with a different job:
+    /// the address the family returns the browser to after a sign-out.)
     #[test]
     fn keys_nothing_reads_are_named_rather_than_obeyed() {
         let config = Config::parse(
-            &format!(
-                "database = \"/srv/iz.db\"\nbase_url = \"https://iz.sh\"\n\
-                 smtp_password = \"hunter2-and-then-some\"\n{OIDC}"
-            ),
+            &format!("database = \"/srv/iz.db\"\nsmtp_password = \"hunter2-and-then-some\"\n{OIDC}"),
             Path::new("."),
             false,
         )
         .expect("a key the file no longer honours is not an error");
 
-        assert_eq!(config.ignored, vec!["base_url", "smtp_password"]);
+        assert_eq!(config.ignored, vec!["smtp_password"]);
         let report = config.report().join("\n");
         assert!(
             !report.contains("hunter2-and-then-some"),
             "the report read a key it no longer honours: {report}"
         );
-        assert!(report.contains("base_url"), "{report}");
         assert!(
             report.contains("the sender is in Settings"),
             "the report should say where the sender lives: {report}"
@@ -837,6 +960,80 @@ mod tests {
         );
     }
 
+    /// The family list parses into the switcher's entries, in the order the
+    /// file gives them — the order the wordmarks show.
+    #[test]
+    fn services_parse_into_the_switcher_list() {
+        let config = Config::parse(
+            &format!(
+                "database = \"iz.db\"\n\
+                 [[services]]\nkey = \"in\"\nname = \"Files\"\nurl = \"http://127.0.0.1:7655\"\n\
+                 [[services]]\nkey = \"iz\"\nname = \"Board\"\nurl = \"http://127.0.0.1:7654\"\n\
+                 [[services]]\nkey = \"im\"\nname = \"Account\"\nurl = \"http://127.0.0.1:7650\"\n\
+                 {OIDC}"
+            ),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        let keys: Vec<&str> = config.services.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, vec!["in", "iz", "im"]);
+        assert_eq!(config.services[1].name, "Board");
+        assert_eq!(config.services[0].url, "http://127.0.0.1:7655");
+    }
+
+    /// A file silent about the family keeps the switcher off, and the
+    /// address the family returns the browser to falls back to the address
+    /// bound — the same fallback `redirect_uri` has.
+    #[test]
+    fn without_services_or_base_url_the_switcher_is_off_and_the_address_is_derived() {
+        let config = Config::parse(
+            &format!("database = \"iz.db\"\nlisten = \"0.0.0.0:9000\"\n{OIDC}"),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert!(config.services.is_empty());
+        assert_eq!(config.public_url(), "http://127.0.0.1:9000");
+    }
+
+    /// An explicit public address wins over the derived one: a deployment
+    /// behind a proxy says its name once, and the sign-out `back` uses it.
+    #[test]
+    fn an_explicit_base_url_wins_for_the_address_the_family_returns_to() {
+        let config = Config::parse(
+            &format!(
+                "database = \"iz.db\"\nlisten = \"127.0.0.1:7654\"\n\
+                 base_url = \"https://iz.dizey.sh\"\n{OIDC}"
+            ),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.public_url(), "https://iz.dizey.sh");
+    }
+
+    /// An entry that could not be shown — a wordmark, a name or a
+    /// destination missing — stops the boot naming the key, rather than
+    /// rendering half a link.
+    #[test]
+    fn a_service_missing_a_field_stops_the_boot_naming_the_key() {
+        let problem = Config::parse(
+            &format!(
+                "database = \"iz.db\"\n\
+                 [[services]]\nkey = \"in\"\nname = \"\"\nurl = \"http://127.0.0.1:7655\"\n\
+                 {OIDC}"
+            ),
+            Path::new("."),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(problem, ConfigError::Invalid { key: "services", .. }),
+            "{problem:?}"
+        );
+    }
+
     #[test]
     fn a_key_inside_oidc_nothing_reads_is_named_with_its_table() {
         let config = Config::parse(
@@ -867,6 +1064,31 @@ mod tests {
         assert!(listen_at < oidc_at, "{completed}");
         let reparsed: toml::Value = toml::from_str(&completed).unwrap();
         assert!(reparsed.get("listen").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that already carries `[[services]]` tables is not completed
+    /// with the empty list: the header is how a list of tables says the
+    /// key is set, and an appended `services = []` beside it would read as
+    /// a phantom, empty extra entry.
+    #[test]
+    fn completion_does_not_add_services_beside_tables_already_there() {
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let mine = &format!(
+            "database = \"iz.db\"\n\
+             [[services]]\nkey = \"in\"\nname = \"Files\"\nurl = \"http://127.0.0.1:7655\"\n{OIDC}"
+        );
+        std::fs::write(dir.join(FILE_NAME), mine).unwrap();
+        Config::load_from(&dir).unwrap();
+        let written = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        assert_eq!(written.matches("[[services]]").count(), 1, "{written}");
+        assert!(!written.contains("services = []"), "{written}");
+        // What was there is untouched: the sole family entry survives, and
+        // a re-parse reads it back as exactly one service.
+        assert!(written.contains("key = \"in\""), "{written}");
+        let reparsed: toml::Value = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed["services"].as_array().map(Vec::len), Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

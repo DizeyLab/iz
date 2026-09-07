@@ -212,6 +212,7 @@ impl NavPage {
 pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lang) -> Result {
     view! {
         cx =>
+        (service_switcher(cx).await?)
         <nav class="topbar-nav-links">
             for page in NavPage::ALL {
                 if role.can_administer() || !matches!(page, NavPage::Rules | NavPage::Logs | NavPage::Tags) {
@@ -224,6 +225,40 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lan
                 }
             }
         </nav>
+    }
+}
+
+/// The family's wordmark trio — `in im iz` — as the topbar's switcher
+/// between the apps of dizey.sh. The current app is held in ink and marked
+/// `aria-current`; the others are plain doors out, titled with the human
+/// name the config gives them. Rendered only when config/iz.toml lists
+/// services, so a deployment standing alone shows a chrome without the
+/// trio. The links leave this origin, so they carry `data-hard`, like the
+/// issuer link in the user menu.
+async fn service_switcher(cx: &Cx) -> Result {
+    const SELF: &str = "iz";
+    let services = crate::server::config(cx).services;
+    view! {
+        cx =>
+        if !services.is_empty() {
+            <nav class="service-switcher">
+                for service in services {
+                    if service.key == SELF {
+                        <span
+                            class="service-mark service-mark-on"
+                            aria-current="page"
+                            title=(service.name)
+                        >
+                            (service.key)
+                        </span>
+                    } else {
+                        <a class="service-mark" href=(service.url) title=(service.name) data-hard="">
+                            (service.key)
+                        </a>
+                    }
+                }
+            </nav>
+        }
     }
 }
 
