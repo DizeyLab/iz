@@ -720,6 +720,23 @@ pub trait Store: BoardReads + DetailReads + 'static {
         reminder_minutes: u32,
     ) -> Result<()>;
 
+    // -- app settings ------------------------------------------------------
+
+    /// One app-level setting, by key. `None` when the key was never set —
+    /// the caller owns the default, not the row.
+    ///
+    /// App-level on purpose: the workspace row carries what members share,
+    /// while a key here belongs to the deployment itself — the family list
+    /// mirrored from im, the public address a sign-out lands on. No
+    /// workspace column, because there is no workspace to name.
+    async fn get_setting(&self, key: &str) -> Result<Option<String>>;
+
+    /// Writes one app-level setting, creating or replacing the row.
+    /// Quiet by design: a background mirror rewrites its key every beat,
+    /// and an announcement it cannot help is one nobody asked for. What a
+    /// settings save owes the screen it lands on, the redirect carries.
+    async fn set_setting(&self, key: &str, value: &str) -> Result<()>;
+
     // -- users -------------------------------------------------------------
 
     /// Upserts the account for a person who just proved who they are to im.

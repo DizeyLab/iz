@@ -1707,6 +1707,28 @@ impl Store for TursoStore {
         Ok(())
     }
 
+    async fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        match self
+            .one_row("SELECT value FROM setting WHERE key = ?1", params![key])
+            .await?
+        {
+            Some(row) => Ok(Some(text(&row, 0)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO setting (key, value) VALUES (?1, ?2) \
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
     async fn set_limits(
         &self,
         workspace_id: &str,

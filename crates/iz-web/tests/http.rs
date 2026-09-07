@@ -280,12 +280,15 @@ struct App {
 
 impl App {
     async fn build(mail: Mail) -> Self {
-        Self::build_with(mail, Vec::new()).await
+        Self::build_with(mail, None, "").await
     }
 
-    /// Like `build`, but with a `[[services]]` list, so a test can see the
-    /// family switcher a configured deployment shows.
-    async fn build_with(mail: Mail, services: Vec<iz_core::config::ServiceConfig>) -> Self {
+    /// Like `build`, but with the knobs a configured deployment has: the
+    /// family list mirrored from im — passed as the raw JSON the `setting`
+    /// row holds, so a test can also feed it a body that will not parse —
+    /// and the configured `base_url`. Building them in is what lets the
+    /// switcher and the sign-out handoff be asserted over real HTTP.
+    async fn build_with(mail: Mail, family: Option<String>, base_url: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("iz.db");
@@ -295,23 +298,21 @@ impl App {
                 .await
                 .unwrap(),
         );
+        // The family list is a mirror, not a config: the test plays the
+        // part of the background beat that stores what im served.
+        if let Some(family) = &family {
+            store
+                .set_setting(iz_web::server::FAMILY_KEY, family)
+                .await
+                .unwrap();
+        }
         let fake = FakeIm::spawn().await;
-        let client = iz_client::Config {
-            issuer: fake.url(),
-            client_id: "iz-test".to_string(),
-            client_secret: "s3cr3t".to_string(),
-            redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
-            logout_back: "http://127.0.0.1:7655/".to_string(),
-            cookie_name: "iz_session".to_string(),
-            cookie_key: [7u8; 32],
-        };
         let config = iz_core::Config {
             database: db,
             storage,
             listen: "127.0.0.1:7655".parse().unwrap(),
             live_seconds: 300,
-            base_url: String::new(),
-            services,
+            base_url: base_url.to_string(),
             oidc: iz_core::config::OidcConfig {
                 issuer: fake.url(),
                 client_id: "iz-test".to_string(),
@@ -320,6 +321,17 @@ impl App {
             },
             ignored: Vec::new(),
             defaulted: false,
+        };
+        // The fallback half of the chain, built exactly as `main.rs` builds
+        // it: the configured public address, else the address bound.
+        let client = iz_client::Config {
+            issuer: fake.url(),
+            client_id: "iz-test".to_string(),
+            client_secret: "s3cr3t".to_string(),
+            redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            logout_back: config.public_url(),
+            cookie_name: "iz_session".to_string(),
+            cookie_key: [7u8; 32],
         };
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let router = iz_client::mount(
@@ -337,6 +349,9 @@ impl App {
             client.clone(),
         )
         .app_context(store.clone())
+        .app_context(iz_client::LogoutBack(Arc::new(
+            iz_web::server::logout_back,
+        )))
         .app_context(config.clone())
         .app_context(TEST_LIVE_WINDOW)
         .app_context(iz_web::live::Shutdown(stopping))
@@ -375,21 +390,11 @@ impl App {
             "https://iz.sh",
         ));
         let fake = FakeIm::spawn().await;
-        let client = iz_client::Config {
-            issuer: fake.url(),
-            client_id: "iz-test".to_string(),
-            client_secret: "s3cr3t".to_string(),
-            redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
-            logout_back: "http://127.0.0.1:7655/".to_string(),
-            cookie_name: "iz_session".to_string(),
-            cookie_key: [7u8; 32],
-        };
         let config = iz_core::Config {
             database: db,
             storage,
             listen: "127.0.0.1:7655".parse().unwrap(),
             base_url: String::new(),
-            services: Vec::new(),
             live_seconds: 300,
             oidc: iz_core::config::OidcConfig {
                 issuer: fake.url(),
@@ -399,6 +404,17 @@ impl App {
             },
             ignored: Vec::new(),
             defaulted: false,
+        };
+        // The fallback half of the chain, built exactly as `main.rs` builds
+        // it: the configured public address, else the address bound.
+        let client = iz_client::Config {
+            issuer: fake.url(),
+            client_id: "iz-test".to_string(),
+            client_secret: "s3cr3t".to_string(),
+            redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
+            logout_back: config.public_url(),
+            cookie_name: "iz_session".to_string(),
+            cookie_key: [7u8; 32],
         };
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let router = iz_client::mount(
@@ -416,6 +432,9 @@ impl App {
             client.clone(),
         )
         .app_context(store.clone())
+        .app_context(iz_client::LogoutBack(Arc::new(
+            iz_web::server::logout_back,
+        )))
         .app_context(config.clone())
         .app_context(TEST_LIVE_WINDOW)
         .app_context(iz_web::live::Shutdown(stopping))
@@ -9580,9 +9599,12 @@ fn the_stylesheet_guard_refuses_a_foreign_bundle() {
 
 /// Sign-out leaves through the family's front door: the local cookie is
 /// cleared, and the browser is handed to im's `/logout` with `back` pointed
-/// at this app, so the central session ends with the local one.
+/// at this app. Where "here" is resolves per request — the stored public
+/// address wins, the configured `base_url` is the fallback, and the
+/// address the server binds is the last resort.
 #[tokio::test]
 async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
+    // No stored address, no configured one: the bind address answers.
     let app = App::open().await;
     let admin = admin(&app).await;
     let raw = app.get("/auth/logout", Some(&admin)).await;
@@ -9593,49 +9615,75 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
         encode("http://127.0.0.1:7655/")
     );
     assert_eq!(raw.location.as_deref(), Some(expected.as_str()));
+
+    // A configured `base_url` is what the fallback says when nothing is
+    // stored — a deployment behind a proxy says its name once, in the file.
+    let configured = App::build_with(Mail::silent(), None, "https://board.example").await;
+    let raw = configured.get("/auth/logout", None).await;
+    let expected = format!(
+        "{}/logout?back={}",
+        configured.client.issuer,
+        encode("https://board.example/")
+    );
+    assert_eq!(raw.location.as_deref(), Some(expected.as_str()));
+
+    // A stored public address wins over the configured chain, and it reads
+    // per request: no restart between the save and the next sign-out.
+    let stored = App::build_with(Mail::silent(), None, "https://stale.example").await;
+    stored
+        .store
+        .set_setting(iz_web::server::PUBLIC_URL_KEY, "https://stored.example")
+        .await
+        .unwrap();
+    let raw = stored.get("/auth/logout", None).await;
+    let expected = format!(
+        "{}/logout?back={}",
+        stored.client.issuer,
+        encode("https://stored.example/")
+    );
+    assert_eq!(raw.location.as_deref(), Some(expected.as_str()));
 }
 
-/// The signed-in chrome carries the family's wordmark trio when the config
-/// lists services: one mark per `[[services]]` row in the file's order, the
-/// current app held in ink with `aria-current`, the others plain links out.
-/// A deployment that lists none shows no switcher at all.
+/// The switcher renders the family list the app mirrors from im — the
+/// stored JSON, in stored order, with the current app held in ink with
+/// `aria-current`, the others plain links out. A list that is absent,
+/// empty, or will not parse shows no switcher at all.
 #[tokio::test]
 async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_configured() {
-    let services = vec![
-        iz_core::config::ServiceConfig {
-            key: "in".to_string(),
-            name: "Files".to_string(),
-            url: "http://127.0.0.1:7655".to_string(),
-        },
-        iz_core::config::ServiceConfig {
-            key: "iz".to_string(),
-            name: "Board".to_string(),
-            url: "http://127.0.0.1:7654".to_string(),
-        },
-        iz_core::config::ServiceConfig {
-            key: "im".to_string(),
-            name: "Account".to_string(),
-            url: "http://127.0.0.1:7650".to_string(),
-        },
-    ];
-    let app = App::build_with(Mail::silent(), services).await;
+    let family = "\
+        [{\"key\":\"in\",\"name\":\"Files\",\"url\":\"http://127.0.0.1:7655\"},\
+        {\"key\":\"iz\",\"name\":\"Board\",\"url\":\"http://127.0.0.1:7654\"},\
+        {\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}]"
+        .to_string();
+    let app = App::build_with(Mail::silent(), Some(family), "").await;
     let board_admin = admin(&app).await;
     let html = String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
     assert!(html.contains("service-switcher"), "{html}");
     assert!(html.contains("service-mark-on"), "{html}");
     assert!(html.contains("aria-current=\"page\""), "{html}");
-    // The trio reads in the order the config gave, with the current app
+    // The mirror reads in the order im served it, with the current app
     // between its neighbours, not pushed to an end.
     let in_at = html.find("href=\"http://127.0.0.1:7655\"").unwrap();
     let iz_at = html.find("service-mark-on").unwrap();
     let im_at = html.find("href=\"http://127.0.0.1:7650\"").unwrap();
     assert!(in_at < iz_at && iz_at < im_at, "marks out of order: {html}");
 
-    let alone = App::open().await;
-    let alone_admin = admin(&alone).await;
-    let plain = String::from_utf8_lossy(&alone.get("/", Some(&alone_admin)).await.bytes).to_string();
+    // A list that will not parse hides the switcher rather than rendering
+    // half of it — and so does an empty one, and a mirror that never
+    // arrived.
+    for broken in ["[".to_string(), "[]".to_string()] {
+        let app = App::build_with(Mail::silent(), Some(broken), "").await;
+        let board_admin = admin(&app).await;
+        let html =
+            String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
+        assert!(!html.contains("service-switcher"), "{html}");
+    }
+    let plain = App::open().await;
+    let alone_admin = admin(&plain).await;
+    let plain =
+        String::from_utf8_lossy(&plain.get("/", Some(&alone_admin)).await.bytes).to_string();
     assert!(
         !plain.contains("service-switcher"),
-        "no services, no switcher: {plain}"
+        "no mirror, no switcher: {plain}"
     );
 }

@@ -13,6 +13,9 @@
 //! against im; when im has revoked the central session, the rotation is
 //! refused and the app sees a signed-out user.
 
+use std::pin::Pin;
+use std::sync::Arc;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as b64url;
 use chacha20poly1305::aead::Aead;
@@ -42,15 +45,30 @@ pub struct Config {
     pub client_secret: String,
     /// Must exactly match one of the URIs registered with im.
     pub redirect_uri: String,
-    /// Where im sends the browser when a sign-out that started here
-    /// finishes: this app's own public address, slash-terminated. Offered
-    /// to im's `/logout` as its `back`, so the browser comes home.
+    /// Fallback for where im sends the browser when a sign-out that
+    /// started here finishes: this app's public address. Offered to im's
+    /// `/logout` as its `back`, so the browser comes home. An app whose
+    /// public address is a stored setting — a live fact, not a boot-time
+    /// one — registers a [`LogoutBack`] resolver, and this is what answers
+    /// when that resolver is absent or has no opinion.
     pub logout_back: String,
     /// The app's session cookie name, e.g. `iz_session`.
     pub cookie_name: String,
     /// 32 bytes, generated once per app and kept out of the repository.
     pub cookie_key: [u8; 32],
 }
+
+/// The answer a [`LogoutBack`] resolver returns for one request: where the
+/// browser comes home to, or `None` to say the app has no opinion this
+/// time and [`Config::logout_back`] should answer.
+pub type BackAnswer<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
+
+/// A per-request resolver for where im sends the browser when a sign-out
+/// that started here finishes. An app whose public address is a stored
+/// setting registers one as an app context; `/auth/logout` asks it first
+/// and falls back to [`Config::logout_back`] when it is absent or answers
+/// `None`.
+pub struct LogoutBack(pub Arc<dyn for<'a> Fn(&'a Cx) -> BackAnswer<'a> + Send + Sync>);
 
 /// The registered state: the config, one HTTP client, and the JWKS cache.
 pub struct IzClient {
@@ -165,6 +183,17 @@ pub struct DirectoryMember {
     pub admin: bool,
 }
 
+/// One entry of im's family list: the wordmark key, the human name, and
+/// where the app lives — exactly what the topbar switcher renders.
+/// `Serialize` because the app that fetched it mirrors it into its own
+/// store as the same JSON array im served.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct FamilyService {
+    pub key: String,
+    pub name: String,
+    pub url: String,
+}
+
 impl IzClient {
     /// The family phonebook: every non-disabled user im knows, fetched as
     /// the app (`Authorization: Basic` with the client pair, the same
@@ -176,6 +205,27 @@ impl IzClient {
         let reply = self
             .http
             .get(format!("{}/directory", self.config.issuer))
+            .basic_auth(&self.config.client_id, Some(&self.config.client_secret))
+            .send()
+            .await
+            .ok()?;
+        if !reply.status().is_success() {
+            return None;
+        }
+        reply.json().await.ok()
+    }
+
+    /// The family list: every app im's admin panel serves, fetched as the
+    /// app (`Authorization: Basic` with the client pair, the same
+    /// credentials the directory takes). `None` on anything that is not a
+    /// readable list — a refused pair, a dropped connection, a body that
+    /// is not the array — because a missed beat must never look like an
+    /// empty family: the caller keeps the list it has and asks again next
+    /// beat.
+    pub async fn family(&self) -> Option<Vec<FamilyService>> {
+        let reply = self
+            .http
+            .get(format!("{}/family", self.config.issuer))
             .basic_auth(&self.config.client_id, Some(&self.config.client_secret))
             .send()
             .await
@@ -546,16 +596,32 @@ async fn iz_callback(cx: &Cx) -> Result<Response, topcoat::Error> {
 /// cleared, and the browser is sent on to im's `/logout` with `back`
 /// pointed back here. Ending the central session is im's half of the
 /// handoff — which is why a sign-out anywhere is a sign-out everywhere.
+///
+/// Where "here" is resolves per request: a registered [`LogoutBack`] is
+/// asked first — a public address stored as a setting is a live fact, not
+/// a boot-time one — and [`Config::logout_back`] answers when it is
+/// absent or has no opinion. Either way the value goes out
+/// slash-terminated: im redirects onto it, and a back without its slash
+/// would make the next path segment join it by luck.
 #[route(GET "/auth/logout")]
 async fn iz_logout(cx: &Cx) -> Result<Response, topcoat::Error> {
-    let config = &client(cx).config;
-    clear_cookie(cx, &config.cookie_name);
+    let state = client(cx);
+    clear_cookie(cx, &state.config.cookie_name);
+    let asked = match try_app_context::<LogoutBack>(cx) {
+        Some(resolver) => (resolver.0)(cx).await,
+        None => None,
+    };
+    let back = format!(
+        "{}/",
+        asked.unwrap_or_else(|| state.config.logout_back.clone())
+            .trim_end_matches('/')
+    );
     see(
         cx,
         &format!(
             "{}/logout?back={}",
-            config.issuer,
-            urlencoded(&config.logout_back)
+            state.config.issuer,
+            urlencoded(&back)
         ),
     )
 }

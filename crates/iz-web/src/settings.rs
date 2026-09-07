@@ -24,7 +24,7 @@ use iz_core::detail::ActivityKind;
 use iz_core::store::{NewSender, SenderCheck, SenderTest, Store, StoreError, User};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, config, mail, require_admin, require_user, store};
+use crate::server::{PUBLIC_URL_KEY, Refusal, config, mail, require_admin, require_user, store};
 
 /// The widest the limit may be set to. A ceiling of any size is a promise
 /// the disk has to keep, and a limit typed with one extra zero is a mistake
@@ -143,6 +143,7 @@ fn section_of_call(call: &str) -> &'static str {
     match call {
         "save_sender" | "send_test_mail" | "check_sender" => "outgoing",
         "save_limits" => "limits",
+        "save_public_url" => "server",
         "set_role" | "set_disabled" | "add_member" => "members",
         "send_message" => "message",
         _ => "profile",
@@ -500,6 +501,48 @@ fn probe_sender(
             eprintln!("store error: {problem}");
         }
     });
+}
+
+#[derive(serde::Deserialize)]
+struct SavePublicUrlForm {
+    #[serde(default)]
+    public_url: String,
+}
+
+/// Writes the app-level public address: where a sign-out that started here
+/// sends the browser once im is done with it. Admin-only, checked here.
+///
+/// The workspace's own link address lives on the sender row — that one is
+/// about mailed links. This one is about the family's handoff, so it is a
+/// setting of the app itself, and the logout route reads it per request:
+/// a save takes effect on the very next sign-out, no restart.
+///
+/// A value the boot would not take is refused here for the same reason
+/// [`is_origin`] refuses one on the sender panel, and the stored setting
+/// is left untouched. Saving empty clears the row; the config chain —
+/// `base_url`, else the address bound — answers instead.
+#[route(POST "/api/save_public_url")]
+async fn save_public_url(
+    cx: &Cx,
+    Form(input): Form<SavePublicUrlForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    if let Err(refusal) = require_admin(cx).await {
+        return Ok(saved_or_refused("save_public_url", Some(refusal)));
+    }
+    // Trailing slashes go: every consumer appends its own path, and a
+    // stored `https://iz.sh//` is a handoff that works by luck.
+    let public_url = input.public_url.trim().trim_end_matches('/').to_string();
+    if !public_url.is_empty() && !is_origin(&public_url) {
+        return Ok(saved_or_refused("save_public_url", Some(Refusal::BadOrigin)));
+    }
+    let refusal = match store(cx).set_setting(PUBLIC_URL_KEY, &public_url).await {
+        Ok(()) => None,
+        Err(problem) => {
+            eprintln!("store error: {problem}");
+            Some(Refusal::Unavailable)
+        }
+    };
+    Ok(saved_or_refused("save_public_url", refusal))
 }
 
 /// Dials the mail server without sending anything, on an admin's say-so.
@@ -1118,6 +1161,7 @@ enum Section {
     Profile,
     Outgoing,
     Limits,
+    Server,
     Members,
     Message,
 }
@@ -1154,6 +1198,7 @@ async fn settings_page(cx: &Cx) -> Result {
     let section = match query_value(query, "section") {
         Some("outgoing") if administers => Section::Outgoing,
         Some("limits") if administers => Section::Limits,
+        Some("server") if administers => Section::Server,
         Some("members") if administers => Section::Members,
         Some("message") if administers => Section::Message,
         _ => Section::Profile,
@@ -1180,11 +1225,20 @@ async fn settings_page(cx: &Cx) -> Result {
     } else {
         None
     };
+    // What the public-address field shows: the stored app-level address,
+    // or nothing — the placeholder then shows what the fallback chain
+    // would use, the same way the sender panel's does.
+    let stored_public_url = if administers {
+        store(cx).get_setting(PUBLIC_URL_KEY).await.ok().flatten()
+    } else {
+        None
+    };
 
     let (profile_refusal, profile_saved) = call_state(query, "save_profile");
     let (sender_refusal, sender_saved) = call_state(query, "save_sender");
     let (test_refusal, _) = call_state(query, "send_test_mail");
     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
+    let (server_refusal, server_saved) = call_state(query, "save_public_url");
     let (role_refusal, _) = call_state(query, "set_role");
     let (disabled_refusal, _) = call_state(query, "set_disabled");
     let (add_refusal, add_saved) = call_state(query, "add_member");
@@ -1206,6 +1260,7 @@ async fn settings_page(cx: &Cx) -> Result {
                 if administers {
                     <a class=(rail_class(section, Section::Outgoing)) href="/settings?section=outgoing">(t(lang, Key::OutgoingMail))</a>
                     <a class=(rail_class(section, Section::Limits)) href="/settings?section=limits">(t(lang, Key::WorkspaceLimits))</a>
+                    <a class=(rail_class(section, Section::Server)) href="/settings?section=server">(t(lang, Key::Server))</a>
                     <a class=(rail_class(section, Section::Message)) href="/settings?section=message">(t(lang, Key::Message))</a>
                 }
             </nav>
@@ -1478,6 +1533,40 @@ async fn settings_page(cx: &Cx) -> Result {
                                 <button class="primary" type="submit">(t(lang, Key::Save))</button>
                             </div>
                         </form>
+                    </section>
+                }
+
+                if section == Section::Server {
+                    <section class="panel" id="server">
+                        <div class="panel-head">
+                            <h2 class="panel-title">(t(lang, Key::Server))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
+                        </div>
+                        <form method="post" action="/api/save_public_url" class="panel-body" id="public-address">
+                            <label class="field">
+                                <span class="field-label">(t(lang, Key::PublicAddressLabel))</span>
+                                <input
+                                    class="field-input"
+                                    type="text"
+                                    name="public_url"
+                                    value=(stored_public_url.clone().unwrap_or_default())
+                                    placeholder=(configured_url.clone())
+                                >
+                            </label>
+                            <p class="panel-lede">(t(lang, Key::PublicAddressNote))</p>
+                        </form>
+                        <div class="panel-foot panel-foot-split">
+                            <div class="foot-side"></div>
+                            <div class="foot-side">
+                                if let Some(refusal) = &server_refusal {
+                                    <span class="field-error">(refusal.message_in(lang))</span>
+                                }
+                                if server_saved {
+                                    <span class="field-note">(t(lang, Key::Saved))</span>
+                                }
+                                <button class="primary" type="submit" form="public-address">(t(lang, Key::Save))</button>
+                            </div>
+                        </div>
                     </section>
                 }
 

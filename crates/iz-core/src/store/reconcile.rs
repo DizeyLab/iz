@@ -554,6 +554,10 @@ fn build_maps(
             "created_at",
         ]),
     });
+    maps.push(TableMap {
+        name: "setting",
+        columns: old_cols(&["key", "value"]),
+    });
 
     maps
 }
@@ -742,6 +746,7 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
     let has_clock = old_has_column(old_conn, "task", "clock_at").await?;
     let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
     let has_tag = old_has_column(old_conn, "tag", "id").await?;
+    let has_setting = old_has_column(old_conn, "setting", "key").await?;
     let maps = build_maps(
         has_smtp_check,
         has_batch_window,
@@ -757,6 +762,13 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
         // The map itself still exists, so `validate_maps` sees the declared
         // table covered whatever shape crosses the rebuild.
         if map.name == "tag" && !has_tag {
+            continue;
+        }
+        // A database from before app-level settings has no `setting` table:
+        // nothing to copy — the rebuilt table starts empty, and the first
+        // boot's family mirror refills it. The map itself still exists, so
+        // `validate_maps` sees the declared table covered either way.
+        if map.name == "setting" && !has_setting {
             continue;
         }
         // The default tags are seeded just before `task`: the old tags are

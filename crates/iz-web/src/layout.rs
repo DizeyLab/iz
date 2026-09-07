@@ -14,7 +14,7 @@ use topcoat::{
 };
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::current_user;
+use crate::server::{FAMILY_KEY, current_user, store};
 
 /// The İz monogram again, as the tab icon: the same drawing as `wordmark`,
 /// inlined because it must carry its own colours — a data URI has no page to
@@ -228,21 +228,35 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lan
     }
 }
 
-/// The family's wordmark trio — `in im iz` — as the topbar's switcher
-/// between the apps of dizey.sh. The current app is held in ink and marked
-/// `aria-current`; the others are plain doors out, titled with the human
-/// name the config gives them. Rendered only when config/iz.toml lists
-/// services, so a deployment standing alone shows a chrome without the
-/// trio. The links leave this origin, so they carry `data-hard`, like the
-/// issuer link in the user menu.
+/// The family list as the switcher shows it, read from the app's own
+/// `setting` store — the mirror im's admin panel feeds through the
+/// background beat in `main.rs`. Absent, empty, unparseable or a store
+/// that will not answer all read the same: an empty list, which renders
+/// no switcher. A page must not fail for the want of a wordmark.
+async fn family_of(cx: &Cx) -> Vec<iz_client::FamilyService> {
+    match store(cx).get_setting(FAMILY_KEY).await {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// The family's wordmark switcher — `in im iz` — as the topbar's way
+/// between the apps of dizey.sh. The current app is held in ink and
+/// marked `aria-current`; the others are plain doors out, titled with the
+/// human name im's admin panel gives them. The list is the app's own
+/// mirror of im's `/family` ([`family_of`]), so the panel decides the
+/// trio without a deploy here, and a mirror that has not arrived yet —
+/// or a deployment standing alone — shows a chrome without the trio. The
+/// links leave this origin, so they carry `data-hard`, like the issuer
+/// link in the user menu.
 async fn service_switcher(cx: &Cx) -> Result {
     const SELF: &str = "iz";
-    let services = crate::server::config(cx).services;
+    let family = family_of(cx).await;
     view! {
         cx =>
-        if !services.is_empty() {
+        if !family.is_empty() {
             <nav class="service-switcher">
-                for service in services {
+                for service in family {
                     if service.key == SELF {
                         <span
                             class="service-mark service-mark-on"

@@ -5568,7 +5568,14 @@ fn every_writing_method_announces_or_is_named_here() {
     // announce for themselves when they commit. Announcing the lease as
     // well would wake every connected client on every sweep for a screen
     // that would look identical.
-    const SILENT_ON_PURPOSE: &[&str] = &["claim_sends_owed"];
+    //
+    // `set_setting` serves two keys: the public address a sign-out hands
+    // the browser to, and the family list the background beat rewrites
+    // every five minutes from im. Neither renders on a live screen — the
+    // logout handoff is resolved per request, the switcher is served with
+    // the page — and an announcement the mirror cannot help would wake
+    // every open client, every beat, for nothing.
+    const SILENT_ON_PURPOSE: &[&str] = &["claim_sends_owed", "set_setting"];
 
     let source = include_str!("../src/store/turso_store.rs");
     let start = source
@@ -8431,4 +8438,46 @@ async fn a_sync_without_a_workspace_skips_and_writes_nothing() {
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Skipped);
     assert!(scratch.store.workspace().await.unwrap().is_none());
+}
+
+/// The app-level setting drawer: a key never set reads as absent, one set
+/// reads back, and setting it again replaces rather than duplicates — the
+/// family mirror rewrites its key every beat, and two rows for one key
+/// would make "which one renders" a coin flip.
+#[tokio::test]
+async fn app_settings_round_trip_through_one_row_per_key() {
+    let scratch = Scratch::open().await;
+
+    assert_eq!(scratch.store.get_setting("family").await.unwrap(), None);
+
+    scratch
+        .store
+        .set_setting("family", r#"[{"key":"in"}]"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        scratch.store.get_setting("family").await.unwrap(),
+        Some(r#"[{"key":"in"}]"#.to_string())
+    );
+
+    scratch.store.set_setting("family", "[]").await.unwrap();
+    assert_eq!(
+        scratch.store.get_setting("family").await.unwrap(),
+        Some("[]".to_string())
+    );
+
+    // Keys are independent drawers: rewriting one leaves the other alone.
+    scratch
+        .store
+        .set_setting("public_url", "https://iz.example")
+        .await
+        .unwrap();
+    assert_eq!(
+        scratch.store.get_setting("family").await.unwrap(),
+        Some("[]".to_string())
+    );
+    assert_eq!(
+        scratch.store.get_setting("public_url").await.unwrap(),
+        Some("https://iz.example".to_string())
+    );
 }

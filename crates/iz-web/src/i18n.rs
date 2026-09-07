@@ -185,6 +185,9 @@ pub enum Key {
     NotFromAddress,
     NotAnOrigin,
     LinkAddressLabel,
+    Server,
+    PublicAddressLabel,
+    PublicAddressNote,
     SenderNotConfiguredYet,
 
     // pages.rs
@@ -662,6 +665,19 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (NotAnOrigin, Tr) => "http:// veya https:// adresi değil.",
         (LinkAddressLabel, En) => "Link address",
         (LinkAddressLabel, Tr) => "Bağlantı adresi",
+        (Server, En) => "Server",
+        (Server, Tr) => "Sunucu",
+        (PublicAddressLabel, En) => "Public address",
+        (PublicAddressLabel, Tr) => "Genel adres",
+        (PublicAddressNote, En) => {
+            "Where the family sends the browser after a sign-out that started \
+             here. Empty: the configured address, then the one this server binds."
+        }
+        (PublicAddressNote, Tr) => {
+            "Aile, burada başlayan bir oturum kapanışından sonra tarayıcıyı \
+             buraya gönderir. Boş: yapılandırılmış adres, sonra bu sunucunun \
+             bağlandığı adres."
+        }
         (SenderNotConfiguredYet, En) => "No sender to test.",
         (SenderNotConfiguredYet, Tr) => "Test edilecek gönderen yok.",
 

@@ -32,6 +32,33 @@ pub fn config(cx: &Cx) -> iz_core::Config {
     app_context::<iz_core::Config>(cx).clone()
 }
 
+/// The app-level `setting` key the background beat in `main.rs` stores
+/// im's family list under, and `layout.rs`'s switcher renders from. The
+/// value is a JSON array of `{key, name, url}` — exactly what im's
+/// `/family` served.
+pub const FAMILY_KEY: &str = "family";
+
+/// The app-level `setting` key the public-address field on Settings
+/// writes: where a sign-out that started here sends the browser. Saving
+/// empty clears the row rather than storing an empty string, so what the
+/// fallback chain sits under is always either a usable address or nothing.
+pub const PUBLIC_URL_KEY: &str = "public_url";
+
+/// Resolves where a sign-out that started here sends the browser, per
+/// request: the public address an admin stored wins; a missing or
+/// unreadable one is no opinion, and iz-client falls back to the
+/// configured chain — `base_url`, else the address bound. Registered as
+/// an app context in `main.rs`; this function is the shape that
+/// registration wants.
+pub fn logout_back(cx: &Cx) -> iz_client::BackAnswer<'_> {
+    Box::pin(async move {
+        match store(cx).get_setting(PUBLIC_URL_KEY).await {
+            Ok(Some(value)) if !value.trim().is_empty() => Some(value),
+            _ => None,
+        }
+    })
+}
+
 /// The mail engine, or the fact that there is nobody to hand a crossing to.
 ///
 /// The running server always has an engine: the sender is workspace settings
@@ -333,6 +360,8 @@ pub enum Refusal {
     BadEmail,
     /// Something in the allowed-types list is not a file extension.
     BadFileType,
+    /// A public address that is not an http:// or https:// origin.
+    BadOrigin,
     /// The sender panel was saved with a field it cannot work without, or with
     /// one that is not what it claims to be. The message names the field: this
     /// is a form somebody is filling in, not an attacker probing, and "that did
@@ -405,6 +434,7 @@ impl Refusal {
             Refusal::BadFileType => {
                 "File types are extensions — png, pdf, zip — separated by commas.".to_string()
             }
+            Refusal::BadOrigin => "Not an http:// or https:// address.".to_string(),
             Refusal::BadSender(problem) => problem.clone(),
             Refusal::EmptyComment => "Write something first.".to_string(),
             Refusal::NoFile => "Choose a file first.".to_string(),
@@ -472,6 +502,7 @@ impl Refusal {
             Refusal::BadFileType => {
                 "Dosya türleri virgülle ayrılmış uzantılardır — png, pdf, zip.".to_string()
             }
+            Refusal::BadOrigin => "http:// veya https:// adresi değil.".to_string(),
             // `BadSender`'s sentence is built where the complaint is
             // decided (`settings.rs`), already in the caller's language —
             // this is only reached for a request with no admin to read a
@@ -502,6 +533,7 @@ impl Refusal {
             "bad-language" => Refusal::BadLanguage,
             "bad-email" => Refusal::BadEmail,
             "bad-file-type" => Refusal::BadFileType,
+            "bad-origin" => Refusal::BadOrigin,
             // The specific complaint (which field, and why) lives only in the
             // response the save itself returned; a code that survived a round
             // trip through the address bar carries no more than this.
@@ -549,6 +581,7 @@ impl Refusal {
             Refusal::BadLanguage => "bad-language",
             Refusal::BadEmail => "bad-email",
             Refusal::BadFileType => "bad-file-type",
+            Refusal::BadOrigin => "bad-origin",
             Refusal::BadSender(_) => "bad-sender",
             Refusal::EmptyComment => "empty-comment",
             Refusal::NoFile => "no-file",

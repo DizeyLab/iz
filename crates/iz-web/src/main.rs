@@ -123,10 +123,11 @@ async fn main() {
         client_id: config.oidc.client_id.clone(),
         client_secret: config.oidc.client_secret.clone(),
         redirect_uri: config.oidc.redirect_uri.clone(),
-        // Where im's /logout sends the browser when a sign-out that
-        // started here finishes: this app's public address, derived from
-        // `listen` unless the file says a `base_url`.
-        logout_back: format!("{}/", config.public_url().trim_end_matches('/')),
+        // Fallback for where im's /logout sends the browser when a
+        // sign-out that started here finishes: this app's configured
+        // public address. The stored one answers first — the
+        // `LogoutBack` context below is asked before this is.
+        logout_back: config.public_url(),
         cookie_name: "iz_session".to_string(),
         cookie_key,
     };
@@ -165,6 +166,7 @@ async fn main() {
         oidc,
     )
     .app_context(store.clone())
+    .app_context(iz_client::LogoutBack(Arc::new(iz_web::server::logout_back)))
     .app_context(config.clone())
     .app_context(iz_web::live::LiveWindow(std::time::Duration::from_secs(
         config.live_seconds,
@@ -313,10 +315,11 @@ async fn sweep(engine: std::sync::Arc<iz_core::MailEngine>, store: Arc<dyn iz_co
 /// long enough that the two services are not talking about it constantly.
 const DIRECTORY_SECONDS: u64 = 300;
 
-/// Keeps the member list a mirror of im's directory, first pass at boot and
-/// then on the beat. Every pass is a full read of a short list, so the
-/// store hears one entry at a time and announces only what changed. An im
-/// that does not answer — down, restarting, mid-deploy — costs one log line
+/// Keeps the member list a mirror of im's directory, and the switcher's
+/// family list a mirror of im's admin panel, first pass at boot and then
+/// on the beat. Every pass is a full read of a short list, so the store
+/// hears one entry at a time and announces only what changed. An im that
+/// does not answer — down, restarting, mid-deploy — costs one log line
 /// and nothing else: the rows stay, and the next beat asks again.
 async fn directory_sync(store: Arc<dyn iz_core::store::Store>, client: iz_client::IzClient) {
     loop {
@@ -332,6 +335,23 @@ async fn directory_sync(store: Arc<dyn iz_core::store::Store>, client: iz_client
                 }
             }
             None => eprintln!("directory sync: im did not answer; keeping the rows there are"),
+        }
+        // The family rides the same beat: one JSON array in one setting
+        // row, the same shape im's `/family` served this pass. `family`
+        // refuses a body it cannot read whole rather than storing half a
+        // switcher, so what lands in the row is always renderable.
+        match client.family().await {
+            Some(family) => match serde_json::to_string(&family) {
+                Ok(json) => {
+                    if let Err(problem) =
+                        store.set_setting(iz_web::server::FAMILY_KEY, &json).await
+                    {
+                        eprintln!("family sync: {problem}");
+                    }
+                }
+                Err(problem) => eprintln!("family sync: {problem}"),
+            },
+            None => eprintln!("family sync: im did not answer; keeping the list there is"),
         }
         tokio::time::sleep(std::time::Duration::from_secs(DIRECTORY_SECONDS)).await;
     }
