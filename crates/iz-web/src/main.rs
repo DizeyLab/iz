@@ -149,6 +149,7 @@ async fn main() {
     tokio::spawn(directory_sync(
         store.clone(),
         iz_client::IzClient::new(oidc.clone()),
+        config.public_url(),
     ));
     // Told when the process is stopping, so the live streams end instead of
     // being waited out. See `iz_web::live::Shutdown`.
@@ -321,7 +322,15 @@ const DIRECTORY_SECONDS: u64 = 300;
 /// hears one entry at a time and announces only what changed. An im that
 /// does not answer — down, restarting, mid-deploy — costs one log line
 /// and nothing else: the rows stay, and the next beat asks again.
-async fn directory_sync(store: Arc<dyn iz_core::store::Store>, client: iz_client::IzClient) {
+async fn directory_sync(
+    store: Arc<dyn iz_core::store::Store>,
+    client: iz_client::IzClient,
+    configured_url: String,
+) {
+    // An address that never arrives would otherwise say so every beat,
+    // five minutes apart, forever. It is one deployment fact, so it is
+    // said once and the mirror goes on without it.
+    let mut said_no_address = false;
     loop {
         match client.directory().await {
             Some(members) => {
@@ -335,6 +344,29 @@ async fn directory_sync(store: Arc<dyn iz_core::store::Store>, client: iz_client
                 }
             }
             None => eprintln!("directory sync: im did not answer; keeping the rows there are"),
+        }
+        // Before asking for the family, this app files itself in it, so a
+        // deployment appears in everyone's switcher without an admin
+        // typing its address. Resolved per beat in the order a sign-out
+        // resolves it — the stored public address an admin set wins over
+        // the configured one — because both can change while the process
+        // runs. Registration is announcement, not permission: a refusal,
+        // an im too old to know the route, a dropped connection all cost
+        // one line and the fetch below still runs.
+        let origin = match store.get_setting(iz_web::server::PUBLIC_URL_KEY).await {
+            Ok(Some(stored)) if !stored.trim().is_empty() => stored.trim().to_string(),
+            _ => configured_url.trim().to_string(),
+        };
+        let origin = origin.trim_end_matches('/').to_string();
+        if origin.is_empty() {
+            if !said_no_address {
+                said_no_address = true;
+                eprintln!(
+                    "family: no public address to register; set base_url or the Server rail's public address"
+                );
+            }
+        } else if let Err(problem) = client.register_family("iz", "Board", &origin).await {
+            eprintln!("family register: {problem}");
         }
         // The family rides the same beat: one JSON array in one setting
         // row, the same shape im's `/family` served this pass. `family`

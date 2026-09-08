@@ -55,8 +55,10 @@ storage = "storage"
 listen = "127.0.0.1:7654"
 # This app's public address, when it differs from `listen` — a proxy in
 # front, for instance. It is where a sign-out sends the browser back to,
-# so a deployment the family reaches by name sets it. Empty: derived
-# from `listen`.
+# and the address İz files itself under in im's family list, as the key
+# "iz", so the family's switcher finds it without an admin typing it. A
+# deployment the family reaches by name sets it. Empty: derived from
+# `listen`.
 base_url = ""
 # How long a live-update connection is held before the browser is asked to
 # reconnect, in seconds. The reconnect is what re-checks the session, so a
@@ -124,8 +126,10 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[
         concat!(
             "# This app's public address, when it differs from `listen` — a proxy\n",
             "# in front, for instance. It is where a sign-out sends the browser\n",
-            "# back to, so a deployment the family reaches by name sets it.\n",
-            "# Empty: derived from `listen`.\n",
+            "# back to, and the address İz files itself under in im's family\n",
+            "# list, as the key \"iz\", so the family's switcher finds it without\n",
+            "# an admin typing it. A deployment the family reaches by name sets\n",
+            "# it. Empty: derived from `listen`.\n",
             "base_url = \"\"\n"
         ),
     ),

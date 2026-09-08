@@ -244,6 +244,49 @@ impl IzClient {
         }
         reply.json().await.ok()
     }
+
+    /// Files this app in im's family list, so the switcher learns where it
+    /// lives without an admin typing the address: the app's key, name and
+    /// public origin posted as the app (`Authorization: Basic` with the
+    /// client pair, the same credentials the family fetch takes). `Ok` on
+    /// any 2xx; anything else is an `Err` naming the status and whatever
+    /// `error`/`reason` im gave with it — a refused pair, a key another app
+    /// owns, or the 404 an im too old to register answers. All of those are
+    /// a line in the log and never a reason to stop mirroring: the caller
+    /// goes on to the fetch either way.
+    pub async fn register_family(
+        &self,
+        key: &str,
+        name: &str,
+        url: &str,
+    ) -> std::result::Result<(), String> {
+        let reply = self
+            .http
+            .post(format!("{}/family/register", self.config.issuer))
+            .basic_auth(&self.config.client_id, Some(&self.config.client_secret))
+            .json(&serde_json::json!({ "key": key, "name": name, "url": url }))
+            .send()
+            .await
+            .map_err(|problem| problem.to_string())?;
+        let status = reply.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // The body is im's own account of the refusal — `owned`, `invalid`
+        // with a reason. A body that is not JSON, or one that names neither,
+        // leaves the status to speak alone.
+        let body = reply.text().await.unwrap_or_default();
+        let said = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+        let error = said.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        let reason = said.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        let detail = match (error, reason) {
+            ("", "") => String::new(),
+            (error, "") => format!(": {error}"),
+            ("", reason) => format!(": {reason}"),
+            (error, reason) => format!(": {error} ({reason})"),
+        };
+        Err(format!("im answered {status}{detail}"))
+    }
 }
 
 /// Path of im's RFC 7662 introspection endpoint, relative to the issuer.
@@ -1114,6 +1157,13 @@ mod tests {
         token: Arc<OnceLock<String>>,
         jwks: Arc<OnceLock<String>>,
         introspect: Arc<OnceLock<String>>,
+        /// Status and body for `POST /family/register`, so a test can be
+        /// an im that accepts, one that says the key is owned, or one too
+        /// old to know the route at all.
+        register: Arc<OnceLock<(u16, String)>>,
+        /// The whole first registration request, head and body, for the
+        /// test that reads back what was sent.
+        register_seen: Arc<OnceLock<String>>,
     }
 
     struct FakeIm {
@@ -1158,16 +1208,25 @@ mod tests {
                             let head = String::from_utf8_lossy(&req[..body_start]).to_string();
                             let first = head.lines().next().unwrap_or("").to_string();
                             let len = content_length(&head);
+                            let whole =
+                                String::from_utf8_lossy(&req[..body_start + len]).to_string();
                             req.drain(..body_start + len);
-                            let payload = if first.starts_with("POST /token ") {
-                                canned.token.get().cloned().unwrap_or_default()
+                            let (status, payload) = if first.starts_with("POST /token ") {
+                                (200, canned.token.get().cloned().unwrap_or_default())
                             } else if first.starts_with("GET /jwks.json ") {
-                                canned.jwks.get().cloned().unwrap_or_default()
+                                (200, canned.jwks.get().cloned().unwrap_or_default())
+                            } else if first.starts_with("POST /family/register ") {
+                                let _ = canned.register_seen.set(whole);
+                                canned
+                                    .register
+                                    .get()
+                                    .cloned()
+                                    .unwrap_or((200, String::new()))
                             } else {
-                                canned.introspect.get().cloned().unwrap_or_default()
+                                (200, canned.introspect.get().cloned().unwrap_or_default())
                             };
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                                "HTTP/1.1 {status} answer\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
                                 payload.len()
                             );
                             if socket.write_all(response.as_bytes()).await.is_err() {
@@ -1471,6 +1530,76 @@ mod tests {
             !res.clears_session(),
             "a live session must not clear the cookie: {:?}",
             res.set_cookies
+        );
+    }
+
+    /// The happy path, and the request im gets: the client pair as Basic
+    /// auth and the three fields under the registration route.
+    #[tokio::test]
+    async fn register_family_files_the_app_and_carries_the_client_pair() {
+        let canned = CannedIm::default();
+        let _ = canned.register.set((
+            200,
+            serde_json::json!({"key": "iz", "name": "Board", "url": "https://iz.dizey.sh"})
+                .to_string(),
+        ));
+        let fake = FakeIm::spawn(canned.clone()).await;
+        let client = IzClient::new(test_config(fake.url()));
+        let filed = client
+            .register_family("iz", "Board", "https://iz.dizey.sh")
+            .await;
+        assert!(filed.is_ok(), "a 200 must read as filed: {filed:?}");
+        let seen = canned.register_seen.get().cloned().unwrap_or_default();
+        assert!(
+            seen.contains(&format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode("client-1:s3cr3t")
+            )),
+            "the registration must carry the client pair: {seen}"
+        );
+        assert!(
+            seen.contains(r#""key":"iz""#)
+                && seen.contains(r#""name":"Board""#)
+                && seen.contains(r#""url":"https://iz.dizey.sh""#),
+            "the registration must carry key, name and url: {seen}"
+        );
+    }
+
+    /// Another app holds the key: the error names the status and im's word
+    /// for it, so the log line says which of the two it was.
+    #[tokio::test]
+    async fn register_family_reports_a_key_another_app_owns() {
+        let canned = CannedIm::default();
+        let _ = canned
+            .register
+            .set((409, serde_json::json!({"error": "owned"}).to_string()));
+        let fake = FakeIm::spawn(canned).await;
+        let client = IzClient::new(test_config(fake.url()));
+        let problem = client
+            .register_family("iz", "Board", "https://iz.dizey.sh")
+            .await
+            .expect_err("a 409 must not read as filed");
+        assert!(
+            problem.contains("409") && problem.contains("owned"),
+            "the refusal must name the status and im's word: {problem}"
+        );
+    }
+
+    /// An im too old to register answers 404. That is an `Err` like any
+    /// other — the caller logs it and goes on to the fetch.
+    #[tokio::test]
+    async fn register_family_reports_an_im_that_does_not_register_yet() {
+        let canned = CannedIm::default();
+        let _ = canned.register.set((404, "not found".into()));
+        let fake = FakeIm::spawn(canned).await;
+        let client = IzClient::new(test_config(fake.url()));
+        let problem = client
+            .register_family("iz", "Board", "https://iz.dizey.sh")
+            .await
+            .expect_err("a 404 must not read as filed");
+        assert!(
+            problem.contains("404"),
+            "the refusal names the status: {problem}"
         );
     }
 }
