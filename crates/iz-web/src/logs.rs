@@ -1013,7 +1013,7 @@ async fn logs_screen(
     view! {
         cx =>
         <header class="topbar">
-            (crate::layout::mark(cx).await?)
+            (crate::layout::family_mark(cx).await?)
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Logs, me.role, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &me, lang).await?)

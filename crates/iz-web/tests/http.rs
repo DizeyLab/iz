@@ -9644,10 +9644,10 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
     assert_eq!(raw.location.as_deref(), Some(expected.as_str()));
 }
 
-/// The switcher renders the family list the app mirrors from im — the
-/// stored JSON, in stored order, with the current app held in ink with
-/// `aria-current`, the others plain links out. A list that is absent,
-/// empty, or will not parse shows no switcher at all.
+/// The flyout under the monogram renders the family list the app mirrors
+/// from im — the stored JSON, in stored order, minus this app's own row,
+/// each sibling a plain link out. A list that is absent, empty, will not
+/// parse, or holds this app alone shows the bare mark and no flyout.
 #[tokio::test]
 async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_configured() {
     let family = "\
@@ -9658,20 +9658,20 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
     let app = App::build_with(Mail::silent(), Some(family), "").await;
     let board_admin = admin(&app).await;
     let html = String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
+    assert!(html.contains("wordmark-family"), "{html}");
     assert!(html.contains("service-switcher"), "{html}");
-    assert!(html.contains("service-mark-on"), "{html}");
-    assert!(html.contains("aria-current=\"page\""), "{html}");
-    // The mirror reads in the order im served it, with the current app
-    // between its neighbours, not pushed to an end.
+    // This app has no door back into itself: only the siblings hang there,
+    // in the order im served them.
+    assert!(!html.contains("href=\"http://127.0.0.1:7654\""), "{html}");
     let in_at = html.find("href=\"http://127.0.0.1:7655\"").unwrap();
-    let iz_at = html.find("service-mark-on").unwrap();
     let im_at = html.find("href=\"http://127.0.0.1:7650\"").unwrap();
-    assert!(in_at < iz_at && iz_at < im_at, "marks out of order: {html}");
+    assert!(in_at < im_at, "marks out of order: {html}");
 
-    // A list that will not parse hides the switcher rather than rendering
-    // half of it — and so does an empty one, and a mirror that never
-    // arrived.
-    for broken in ["[".to_string(), "[]".to_string()] {
+    // A list that will not parse hides the flyout rather than rendering
+    // half of it — and so do an empty one, a list holding this app alone,
+    // and a mirror that never arrived.
+    let alone = "[{\"key\":\"iz\",\"name\":\"Board\",\"url\":\"http://127.0.0.1:7654\"}]";
+    for broken in ["[".to_string(), "[]".to_string(), alone.to_string()] {
         let app = App::build_with(Mail::silent(), Some(broken), "").await;
         let board_admin = admin(&app).await;
         let html =

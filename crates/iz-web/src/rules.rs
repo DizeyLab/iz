@@ -876,7 +876,7 @@ async fn rules_page(cx: &Cx) -> Result {
 
     view! {
         <header class="topbar">
-            (crate::layout::mark(cx).await?)
+            (crate::layout::family_mark(cx).await?)
             (crate::layout::topbar_nav(cx, crate::layout::NavPage::Rules, user.role, lang).await?)
             <div class="spacer"></div>
             (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)

@@ -212,7 +212,6 @@ impl NavPage {
 pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lang) -> Result {
     view! {
         cx =>
-        (service_switcher(cx).await?)
         <nav class="topbar-nav-links">
             for page in NavPage::ALL {
                 if role.can_administer() || !matches!(page, NavPage::Rules | NavPage::Logs | NavPage::Tags) {
@@ -240,39 +239,44 @@ async fn family_of(cx: &Cx) -> Vec<iz_client::FamilyService> {
     }
 }
 
-/// The family's wordmark switcher — `in im iz` — as the topbar's way
-/// between the apps of dizey.sh. The current app is held in ink and
-/// marked `aria-current`; the others are plain doors out, titled with the
-/// human name im's admin panel gives them. The list is the app's own
-/// mirror of im's `/family` ([`family_of`]), so the panel decides the
-/// trio without a deploy here, and a mirror that has not arrived yet —
-/// or a deployment standing alone — shows a chrome without the trio. The
-/// links leave this origin, so they carry `data-hard`, like the issuer
+/// The monogram with the family behind it — the way between the apps of
+/// dizey.sh. The mark alone stands in the chrome; the siblings' wordmarks
+/// hang in a flyout that opens under it on hover and on keyboard focus (the
+/// mark is an `<a href="/">`, so it is already focusable and `:focus-within`
+/// carries it), middots between, each titled with the human name im's admin
+/// panel gives it. No script: the flyout is CSS, and it stays in the DOM at
+/// opacity zero so Tab reaches its links. The list is the app's own mirror
+/// of im's `/family` ([`family_of`]), minus this app's own row — a door back
+/// into the room one is standing in is no door — so the panel decides the
+/// family without a deploy here, and a mirror that has not arrived yet, or a
+/// deployment standing alone, renders the bare mark: nothing to reveal.
+/// The links leave this origin, so they carry `data-hard`, like the issuer
 /// link in the user menu.
-async fn service_switcher(cx: &Cx) -> Result {
+pub(crate) async fn family_mark(cx: &Cx) -> Result {
     const SELF: &str = "iz";
-    let family = family_of(cx).await;
+    let siblings: Vec<_> = family_of(cx)
+        .await
+        .into_iter()
+        .filter(|service| service.key != SELF)
+        .collect();
+    if siblings.is_empty() {
+        return mark(cx).await;
+    }
     view! {
         cx =>
-        if !family.is_empty() {
+        <div class="wordmark-family">
+            (mark(cx).await?)
             <nav class="service-switcher">
-                for service in family {
-                    if service.key == SELF {
-                        <span
-                            class="service-mark service-mark-on"
-                            aria-current="page"
-                            title=(service.name)
-                        >
-                            (service.key)
-                        </span>
-                    } else {
-                        <a class="service-mark" href=(service.url) title=(service.name) data-hard="">
-                            (service.key)
-                        </a>
+                for (at, service) in siblings.iter().enumerate() {
+                    if at > 0 {
+                        <span class="service-sep">"·"</span>
                     }
+                    <a class="service-mark" href=(service.url.clone()) title=(service.name.clone()) data-hard="">
+                        (service.key.clone())
+                    </a>
                 }
             </nav>
-        }
+        </div>
     }
 }
 
