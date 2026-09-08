@@ -146,10 +146,14 @@ async fn main() {
     // mailable before their first visit, and the provider's renames and
     // admin flips follow on their own. Runs beside the sweep, first pass
     // right away so a fresh deploy sees everyone at boot.
+    // The address the app files itself under is `base_url` alone: a bound
+    // address is no fallback here — a loopback bind is nothing anyone else
+    // can reach, and filing it would overwrite the real one in every
+    // switcher.
     tokio::spawn(directory_sync(
         store.clone(),
         iz_client::IzClient::new(oidc.clone()),
-        config.public_url(),
+        config.base_url.clone(),
     ));
     // Told when the process is stopping, so the live streams end instead of
     // being waited out. See `iz_web::live::Shutdown`.
