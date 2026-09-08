@@ -670,6 +670,28 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 } \
                 if (control.hasAttribute && control.hasAttribute('data-autosubmit')) { control.form.requestSubmit(); } \
             }); \
+            document.addEventListener('dragover', function (e) { \
+                var box = e.target.closest ? e.target.closest('.file-upload-box') : null; \
+                if (!box || !e.dataTransfer || e.dataTransfer.types.indexOf('Files') === -1) { return; } \
+                e.preventDefault(); \
+                e.dataTransfer.dropEffect = 'copy'; \
+                window.__izOwn(box, ['file-upload-over'], []); \
+            }); \
+            document.addEventListener('dragleave', function (e) { \
+                var box = e.target.closest ? e.target.closest('.file-upload-box') : null; \
+                if (box && !box.contains(e.relatedTarget)) { box.classList.remove('file-upload-over'); } \
+            }); \
+            document.addEventListener('drop', function (e) { \
+                var box = e.target.closest ? e.target.closest('.file-upload-box') : null; \
+                if (!box) { return; } \
+                e.preventDefault(); \
+                box.classList.remove('file-upload-over'); \
+                var input = box.querySelector('.file-upload-input'); \
+                var form = input ? input.form : null; \
+                if (!input || !form || form.__izUploading || !e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) { return; } \
+                input.files = e.dataTransfer.files; \
+                input.dispatchEvent(new Event('change', { bubbles: true })); \
+            }); \
             document.addEventListener('click', function (e) { \
                 var link = e.target.closest ? e.target.closest('a') : null; \
                 if (link) { \

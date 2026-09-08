@@ -2728,6 +2728,8 @@ img.avatar {
   cursor: pointer;
 
   &:hover { border-color: var(--accent); }
+  // A drag parked over the box wears the same accent as `:hover`.
+  &.file-upload-over { border-color: var(--accent); color: var(--accent); }
 
   &:has(.file-upload-input:focus-visible) {
     outline: 2px solid var(--accent);

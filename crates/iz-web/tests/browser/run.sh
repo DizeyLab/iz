@@ -115,3 +115,7 @@ SHOT_DIR="$shots" node "$repo/crates/iz-web/tests/browser/moment.mjs" "http://12
 # The avatar proxy's own pass, same minted session and owner as the moment
 # field. Either script failing fails the run.
 SHOT_DIR="$shots" node "$repo/crates/iz-web/tests/browser/photo.mjs" "http://127.0.0.1:$port"
+
+# The file drop's own pass, same minted session and owner as the avatar
+# proxy. Either script failing fails the run.
+SHOT_DIR="$shots" node "$repo/crates/iz-web/tests/browser/drop.mjs" "http://127.0.0.1:$port"
