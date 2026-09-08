@@ -16,7 +16,7 @@ use topcoat::{
 use crate::i18n::{Key, Lang, t};
 use crate::server::{FAMILY_KEY, current_user, store};
 
-/// The İz monogram again, as the tab icon: the same drawing as `wordmark`,
+/// The iz monogram again, as the tab icon: the same drawing as `wordmark`,
 /// inlined because it must carry its own colours — a data URI has no page to
 /// inherit `currentColor` or the accent token from, so the two themes are
 /// spelled out in a media query inside the SVG.
@@ -30,19 +30,19 @@ const FAVICON: &str = "data:image/svg+xml,\
     <path class='s' d='M11.4 10.6h9.3L11.4 19.8h9.5' fill='none' \
     stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/></svg>";
 
-/// The İz monogram — a dotted `i` beside a stroked `z`, the trace the product
+/// The iz monogram — a dotted `i` beside a stroked `z`, the trace the product
 /// is named for. It takes `currentColor` for its strokes and the accent for
 /// its tittle, so one drawing serves both skins and both themes.
 ///
-/// The monogram and the wordmark are alternates, never a pair: `İz` spells the
-/// first two letters of `İz`, so standing them side by side reads as a
+/// The monogram and the wordmark are alternates, never a pair: `iz` spells the
+/// first two letters of `iz`, so standing them side by side reads as a
 /// stutter no amount of space or framing repairs. The mark carries the chrome,
 /// where the name is already known and the room is 44px; the word carries the
 /// front door, where a stranger arrives and nothing else has said it yet.
 pub(crate) async fn mark(cx: &Cx) -> Result {
     view! {
         cx =>
-        <a class="wordmark" href="/" aria-label="İz">
+        <a class="wordmark" href="/" aria-label="iz">
             <svg class="wordmark-mark" width="24" height="24" viewBox="0 0 24 24"
                 aria-hidden="true">
                 <rect x="3.1" y="9.4" width="4.4" height="11.6" rx="2.2"
@@ -62,7 +62,7 @@ pub(crate) async fn wordmark(cx: &Cx) -> Result {
     view! {
         cx =>
         <a class="wordmark wordmark-lone" href="/">
-            <span class="wordmark-text">"İz"</span>
+            <span class="wordmark-text">"iz"</span>
         </a>
     }
 }
@@ -978,7 +978,7 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                     rel="stylesheet"
                     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,600;1,400;1,600&display=swap"
                 >
-                <title>"İz"</title>
+                <title>"iz"</title>
                 <link rel="icon" href=(FAVICON)>
                 <link rel="stylesheet" href=(STYLE)>
                 topcoat::runtime::script()

@@ -120,7 +120,7 @@ fn mime_of_extension(ext: &str) -> Option<&'static str> {
 /// true for a mime type a browser renders on its own ([`renders_inline`]) and
 /// the caller did not ask for a forced download (`?dl=1`) — an uploaded HTML
 /// or SVG file stays `attachment` either way, so it is offered to save rather
-/// than run on İz's origin. The ASCII fallback keeps only characters no
+/// than run on iz's origin. The ASCII fallback keeps only characters no
 /// quoting scheme could turn into a delimiter or a control character;
 /// `filename*` carries the real name, percent-encoded, for browsers that read
 /// it.
@@ -173,7 +173,7 @@ pub(crate) enum ViewerKind {
     Video,
     Audio,
     Pdf,
-    /// A spreadsheet İz reads itself and lays out as a table — no browser
+    /// A spreadsheet iz reads itself and lays out as a table — no browser
     /// renders one, so this is the only viewer whose bytes are parsed here
     /// rather than handed to an element.
     Sheet,

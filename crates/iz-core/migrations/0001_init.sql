@@ -1,4 +1,4 @@
--- Iz's schema, whole, in one file.
+-- iz's schema, whole, in one file.
 --
 -- One plain SQL file, applied at boot to an empty database: Turso has no
 -- migration runner of its own, and keeping the schema as SQL is what makes
@@ -8,7 +8,7 @@
 -- borrow its tail.
 --
 -- This file is the first migration, not the whole schema any more. It is the
--- shape İz was deployed with before workspace settings could be versioned;
+-- shape iz was deployed with before workspace settings could be versioned;
 -- everything after it is a numbered `0002_*.sql` beside it, and an empty
 -- database is built by applying them in order. A live database is brought up
 -- by `iz reconcile`, not by re-running the files, so a change to a table

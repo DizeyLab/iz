@@ -1,9 +1,9 @@
-//! Everything İz reads from `config/iz.toml`, in one place.
+//! Everything iz reads from `config/iz.toml`, in one place.
 //!
 //! Nothing here has a silent default once the file exists. A key that is
 //! missing, empty or unusable stops the boot and says which key and which
 //! file, because the alternative is worse than not starting: a wrong
-//! `database` does not mean "no data", it means a second İz quietly
+//! `database` does not mean "no data", it means a second iz quietly
 //! writing a different file while everyone believes they are looking at the
 //! same board — and Turso is single-writer, so the two are not even
 //! reconcilable afterwards.
@@ -50,12 +50,12 @@ database = "iz.db"
 # Where attachments live as files, created on boot.
 storage = "storage"
 # The address the server listens on. Environment variables are ignored —
-# this is the only thing that decides where İz binds. It is also the
+# this is the only thing that decides where iz binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
 listen = "127.0.0.1:7654"
 # This app's public address, when it differs from `listen` — a proxy in
 # front, for instance. It is where a sign-out sends the browser back to,
-# and the address İz files itself under in im's family list, as the key
+# and the address iz files itself under in im's family list, as the key
 # "iz", so the family's switcher finds it without an admin typing it. A
 # deployment the family reaches by name sets it. Empty: derived from
 # `listen`.
@@ -68,9 +68,9 @@ live_seconds = 300
 [oidc]
 # The provider that signs people in. Required: no default is guessed.
 issuer = ""
-# The client id İz presents to the provider. Required.
+# The client id iz presents to the provider. Required.
 client_id = ""
-# The client secret İz presents to the provider. Required. The file holds a
+# The client secret iz presents to the provider. Required. The file holds a
 # live credential once this is filled in, so it is created mode 0600.
 client_secret = ""
 # Where the provider sends the browser back after sign-in. Not written here:
@@ -107,7 +107,7 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[
         "listen",
         concat!(
             "# The address the server listens on. Environment variables are ignored —\n",
-            "# this is the only thing that decides where İz binds. It is also the\n",
+            "# this is the only thing that decides where iz binds. It is also the\n",
             "# address mail links fall back to, until an admin sets one in Settings.\n",
             "listen = \"127.0.0.1:7654\"\n"
         ),
@@ -126,7 +126,7 @@ const OPTIONAL_KEYS: &[(&str, &str)] = &[
         concat!(
             "# This app's public address, when it differs from `listen` — a proxy\n",
             "# in front, for instance. It is where a sign-out sends the browser\n",
-            "# back to, and the address İz files itself under in im's family\n",
+            "# back to, and the address iz files itself under in im's family\n",
             "# list, as the key \"iz\", so the family's switcher finds it without\n",
             "# an admin typing it. A deployment the family reaches by name sets\n",
             "# it. Empty: derived from `listen`.\n",
@@ -163,14 +163,14 @@ struct Toml {
     other: std::collections::BTreeMap<String, toml::Value>,
 }
 
-/// The OIDC provider İz trusts, and how İz presents itself to it.
+/// The OIDC provider iz trusts, and how iz presents itself to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OidcConfig {
     /// The provider's issuer URL. Sign-ins from anywhere else are refused.
     pub issuer: String,
-    /// The client id İz presents to the provider.
+    /// The client id iz presents to the provider.
     pub client_id: String,
-    /// The client secret İz presents to the provider. Never printed.
+    /// The client secret iz presents to the provider. Never printed.
     pub client_secret: String,
     /// Where the provider sends the browser after sign-in. Defaults from
     /// `listen` when the file is silent about it.
@@ -201,7 +201,7 @@ pub struct Config {
     /// `redirect_uri` has. It is where the family sends the browser back
     /// to after a sign-out that started here.
     pub base_url: String,
-    /// The OIDC provider İz trusts.
+    /// The OIDC provider iz trusts.
     pub oidc: OidcConfig,
     /// Whether `config/iz.toml` did not exist and was just written with the
     /// development defaults this boot.
@@ -365,7 +365,7 @@ impl Config {
     /// A bind that names no interface — `0.0.0.0`, `::` — answers everywhere
     /// and is reachable at none of it by name, so the loopback stands in: a
     /// link somebody on the box can click beats a link nobody can. Whoever
-    /// puts İz behind a proxy sets the real address in Settings, which is
+    /// puts iz behind a proxy sets the real address in Settings, which is
     /// the only thing this defers to.
     pub fn listen_url(&self) -> String {
         listen_url_of(&self.listen)

@@ -443,7 +443,7 @@ async fn save_sender(
 /// went so the answer survives a reload.
 ///
 /// It goes to their own address and nowhere else. A test that could be
-/// pointed at an address somebody typed would be a way to make İz mail a
+/// pointed at an address somebody typed would be a way to make iz mail a
 /// stranger on demand, which is a thing worth not building.
 /// How long to wait for a mail server before writing the attempt off.
 ///
@@ -1097,7 +1097,7 @@ async fn sender_now(cx: &Cx, zone: time::UtcOffset) -> Result<Sender> {
 
 /// Whether a typed address is an origin a link can be built on: an http or
 /// https scheme, a host after it, and no whitespace anywhere. A path is
-/// allowed — İz behind `example.com/iz` is a real deployment — but a
+/// allowed — iz behind `example.com/iz` is a real deployment — but a
 /// bare host or a mail address is not.
 fn is_origin(value: &str) -> bool {
     let Some(rest) = value
@@ -1407,7 +1407,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                             type="text"
                                             name="from_name"
                                             value=(sender.from_name.clone())
-                                            placeholder="İz"
+                                            placeholder="iz"
                                         >
                                     </label>
                                     <label class="field">

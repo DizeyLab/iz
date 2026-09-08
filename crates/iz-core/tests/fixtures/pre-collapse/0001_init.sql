@@ -1,4 +1,4 @@
--- Iz's schema, whole, in one file.
+-- iz's schema, whole, in one file.
 --
 -- Plain versioned SQL applied at boot: Turso has no migration runner of its
 -- own, and keeping the schema as SQL is what makes the store trait swappable.
@@ -11,7 +11,7 @@
 -- database it describes is recreated — twenty migrations were collapsed into
 -- this file once for that reason, and a twenty-first would start the same rot
 -- over. The reasoning the old migrations carried is kept, on the tables it
--- explains. The day Iz runs somewhere with data worth keeping, the next
+-- explains. The day iz runs somewhere with data worth keeping, the next
 -- change becomes 0002 and this note goes away.
 
 CREATE TABLE workspace (
@@ -226,7 +226,7 @@ CREATE INDEX comment_by_task ON comment(task_id);
 
 -- Attachments live in the database file, not on disk beside it.
 --
--- Iz is one process over one file, and a second place to keep state is a
+-- iz is one process over one file, and a second place to keep state is a
 -- second thing to back up, to lock, and to get out of step with the rows that
 -- name it. And a path is exactly where an uploaded file name must never end
 -- up: `../../etc` is a valid file name and a terrible path. Keeping the bytes

@@ -1275,7 +1275,7 @@ impl Store for TursoStore {
                         let workspace_id = Ulid::new().to_string();
                         let board_id = Ulid::new().to_string();
                         tx.execute(
-                            "INSERT INTO workspace (id, name, created_at) VALUES (?1, 'İz', ?2)",
+                            "INSERT INTO workspace (id, name, created_at) VALUES (?1, 'iz', ?2)",
                             params![workspace_id.clone(), now.clone()],
                         )
                         .await
@@ -5238,7 +5238,7 @@ mod probe {
                     port: 587,
                     username: "iz".into(),
                     password: Some("hunter2-and-then-some".into()),
-                    from_name: "İz".into(),
+                    from_name: "iz".into(),
                     from_address: "iz@iz.sh".into(),
                 },
             )

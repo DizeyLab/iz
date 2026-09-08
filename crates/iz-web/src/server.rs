@@ -685,7 +685,7 @@ pub fn back_to(cx: &Cx, nowhere: &str) -> String {
 /// function handler answers with a redirect back to the page it came from, and
 /// the value — the whole refusal — sits in a body nobody will ever look at.
 /// The click then looks like nothing happening, which is the worst answer
-/// İz can give.
+/// iz can give.
 ///
 /// So the refusal is copied onto the `Location`, as `?refusal=<code>&on=<call>`,
 /// and the page renders it from the query. This is one place rather than
@@ -763,7 +763,7 @@ fn carrying(location: &str, code: &str, called: &str) -> Option<String> {
     }
     // The Location we are rewriting came from the form post's Referer, and on a
     // cross-origin post the Referer is whatever the other site is. Sending the
-    // browser back there would make İz an open redirect, so the address is
+    // browser back there would make iz an open redirect, so the address is
     // rebuilt from its path and query alone and anything that is not a plain
     // absolute path is answered with the board.
     let here = same_origin(location);
@@ -866,7 +866,7 @@ mod refusal_redirect_tests {
     }
 
     // The Referer of a cross-origin post is the other site's address, and it
-    // reaches this function as the Location. İz answers on its own ground or
+    // reaches this function as the Location. iz answers on its own ground or
     // not at all.
     #[test]
     fn another_site_cannot_be_redirected_to() {
@@ -885,7 +885,7 @@ mod refusal_redirect_tests {
         }
         // An address with a path keeps the path — it is read as a path on this
         // site, which is the point: whatever the Referer claimed, the browser
-        // is sent somewhere on İz.
+        // is sent somewhere on iz.
         let carried = carrying(
             "http://elsewhere.example/steal?task=DZ-01",
             "cycle",

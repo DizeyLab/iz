@@ -1,5 +1,5 @@
 // The one check `cargo test` cannot make: that the soft swap actually holds
-// in a browser. `tests/http.rs` asserts the shape of the script İz serves;
+// in a browser. `tests/http.rs` asserts the shape of the script iz serves;
 // only a real engine runs it.
 //
 // Guards the URL-lag class. `swap()` (`src/layout.rs`) replaces the body,
@@ -15,7 +15,7 @@
 // round-trip. That first request is also what provisions the workspace
 // owner, the fake's admin:true doing what the claim did.
 //
-// Playwright lives outside the repo — İz has no node dependency and
+// Playwright lives outside the repo — iz has no node dependency and
 // gains none here. Point PLAYWRIGHT_BROWSERS_PATH at the browser download
 // and IZ_PLAYWRIGHT at the installed package (ESM resolves imports from
 // this file's directory, not the working one, so a bare name will not do).

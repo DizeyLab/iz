@@ -184,8 +184,8 @@ impl Engine {
     pub async fn send_test(&self, to: &str) -> std::result::Result<Duration, MailError> {
         let mail = Outgoing {
             to: to.to_string(),
-            subject: "İz test mail".to_string(),
-            body: "Somebody pressed the test button in İz's settings, and this \
+            subject: "iz test mail".to_string(),
+            body: "Somebody pressed the test button in iz's settings, and this \
                    is what came out. Nothing else was sent, and nobody else was \
                    written to.\n"
                 .to_string(),
@@ -544,7 +544,7 @@ impl Engine {
                 .await?;
             return Ok(());
         }
-        // The workspace's quiet window. Zero is what İz did before it had
+        // The workspace's quiet window. Zero is what iz did before it had
         // one: every trigger its own mail, sent as soon as it is owed.
         let window = self
             .store

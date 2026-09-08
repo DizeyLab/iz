@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the browser checks against a throwaway İz and a fake im beside it:
+# Runs the browser checks against a throwaway iz and a fake im beside it:
 # its own database, its own ports, torn down after. Never touches
 # config/iz.toml or iz.db — the server reads its config from the working
 # directory, so it is given a directory of its own.
@@ -12,7 +12,7 @@
 #
 #     crates/iz-web/tests/browser/run.sh
 #
-# Playwright is not a dependency of this repo and never will be: İz has
+# Playwright is not a dependency of this repo and never will be: iz has
 # no node in it. It is installed once into ~/.cache/iz/browser-tests
 # (Chromium included, ~120MB) the first time this runs, and found there
 # every time after. IZ_PLAYWRIGHT and PLAYWRIGHT_BROWSERS_PATH override

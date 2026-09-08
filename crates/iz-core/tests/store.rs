@@ -114,7 +114,7 @@ async fn the_schema_is_created_once_and_survives_reopen() {
     // schema (its CREATE TABLE would fail on the first one) and must not
     // lose what the first open wrote.
     let second = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
-    assert_eq!(second.workspace().await.unwrap().unwrap().name, "İz");
+    assert_eq!(second.workspace().await.unwrap().unwrap().name, "iz");
     drop(second);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -694,7 +694,7 @@ async fn the_workspace_record_carries_the_sender_but_never_its_password() {
                 port: 587,
                 username: "iz".into(),
                 password: Some("a-very-secret-string".into()),
-                from_name: "İz".into(),
+                from_name: "iz".into(),
                 from_address: "iz@iz.sh".into(),
             },
         )
@@ -705,7 +705,7 @@ async fn the_workspace_record_carries_the_sender_but_never_its_password() {
     assert_eq!(ws.smtp_host.as_deref(), Some("smtp.fastmail.com"));
     assert_eq!(ws.smtp_port, Some(587));
     assert_eq!(ws.smtp_username.as_deref(), Some("iz"));
-    assert_eq!(ws.smtp_from_name.as_deref(), Some("İz"));
+    assert_eq!(ws.smtp_from_name.as_deref(), Some("iz"));
     assert_eq!(ws.smtp_from_address.as_deref(), Some("iz@iz.sh"));
     assert!(ws.smtp_password_set, "the screen must be able to say 'set'");
 
@@ -727,7 +727,7 @@ async fn a_save_with_no_password_typed_keeps_the_stored_one() {
         port: 587,
         username: "iz".into(),
         password: Some("keep-me".into()),
-        from_name: "İz".into(),
+        from_name: "iz".into(),
         from_address: "iz@iz.sh".into(),
     };
     scratch
@@ -764,7 +764,7 @@ async fn a_typed_password_replaces_the_stored_one() {
         port: 587,
         username: "iz".into(),
         password: Some("the-old-one".into()),
-        from_name: "İz".into(),
+        from_name: "iz".into(),
         from_address: "iz@iz.sh".into(),
     };
     scratch
@@ -801,7 +801,7 @@ async fn the_stored_password_is_not_the_plaintext_on_disk() {
                 port: 587,
                 username: "iz".into(),
                 password: Some("a-very-secret-string".into()),
-                from_name: "İz".into(),
+                from_name: "iz".into(),
                 from_address: "iz@iz.sh".into(),
             },
         )
@@ -855,7 +855,7 @@ async fn a_password_that_will_not_decrypt_reads_back_as_none() {
                 port: 587,
                 username: "iz".into(),
                 password: Some("a-very-secret-string".into()),
-                from_name: "İz".into(),
+                from_name: "iz".into(),
                 from_address: "iz@iz.sh".into(),
             },
         )
@@ -889,7 +889,7 @@ async fn a_password_that_will_not_decrypt_reads_back_as_none() {
                 port: 587,
                 username: "iz".into(),
                 password: Some("a-fresh-password".into()),
-                from_name: "İz".into(),
+                from_name: "iz".into(),
                 from_address: "iz@iz.sh".into(),
             },
         )
@@ -4368,7 +4368,7 @@ async fn an_invite_mail_is_owed_without_a_rule() {
     let now = OffsetDateTime::now_utc();
 
     let invite = store
-        .queue_invite("newcomer@iz.sh", "Join İz", "Come aboard.", now)
+        .queue_invite("newcomer@iz.sh", "Join iz", "Come aboard.", now)
         .await
         .unwrap();
     assert_eq!(invite.rule_id, None);
@@ -4391,7 +4391,7 @@ async fn an_invite_mail_with_no_sender_is_held_not_failed() {
     let (dir, store, _workspace, _admin) = shared().await;
     let now = OffsetDateTime::now_utc();
     store
-        .queue_invite("newcomer@iz.sh", "Join İz", "Come aboard.", now)
+        .queue_invite("newcomer@iz.sh", "Join iz", "Come aboard.", now)
         .await
         .unwrap();
 
@@ -4438,7 +4438,7 @@ async fn two_passes_over_one_owed_mail_send_it_once() {
     let (dir, store, _workspace, _admin) = shared().await;
     let now = OffsetDateTime::now_utc();
     store
-        .queue_invite("newcomer@iz.sh", "Join İz", "Come aboard.", now)
+        .queue_invite("newcomer@iz.sh", "Join iz", "Come aboard.", now)
         .await
         .unwrap();
 
@@ -4525,7 +4525,7 @@ async fn a_lease_that_expires_gives_the_mail_back() {
     let store = &scratch.store;
     let now = OffsetDateTime::now_utc();
     let invite = store
-        .queue_invite("newcomer@iz.sh", "Join İz", "Come aboard.", now)
+        .queue_invite("newcomer@iz.sh", "Join iz", "Come aboard.", now)
         .await
         .unwrap();
 
@@ -5659,7 +5659,7 @@ async fn a_sender_check_is_recorded_apart_from_a_test_and_cleared_on_edit() {
         port: 465,
         username: "iz".into(),
         password: Some("hunter2".into()),
-        from_name: "İz".into(),
+        from_name: "iz".into(),
         from_address: "iz@iz.sh".into(),
     };
     store
@@ -5722,7 +5722,7 @@ async fn a_sender_check_is_recorded_apart_from_a_test_and_cleared_on_edit() {
 // carries a live-shaped database across it.
 // ---------------------------------------------------------------------------
 
-/// Builds a database at the PRE-COLLAPSE schema — the shape İz was actually
+/// Builds a database at the PRE-COLLAPSE schema — the shape iz was actually
 /// deployed with, kept verbatim in `tests/fixtures/` — and fills it with the
 /// kinds of row a live workspace holds, blobs included.
 async fn live_shaped_database() -> (PathBuf, String) {
@@ -5820,7 +5820,7 @@ fn backups_beside(dir: &PathBuf) -> Vec<String> {
     found
 }
 
-/// Brings a `live_shaped_database` up to the shape İz deployed between the
+/// Brings a `live_shaped_database` up to the shape iz deployed between the
 /// schema collapse and today: the `tag` table exists, tasks wear `tag_id`,
 /// and each board carries its default `General` plus a tag the admin made —
 /// with the four declared-schema objects a live database still lacks absent,
@@ -6729,7 +6729,7 @@ async fn a_hold_never_pulls_a_leased_row_back_under_the_pass_that_took_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A workspace with no window is İz as it was: a trigger is a mail, sent
+/// A workspace with no window is iz as it was: a trigger is a mail, sent
 /// the moment it is owed.
 #[tokio::test]
 async fn no_window_sends_each_trigger_as_it_happens() {
