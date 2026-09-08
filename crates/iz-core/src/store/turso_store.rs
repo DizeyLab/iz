@@ -137,6 +137,7 @@ impl TursoStore {
         };
         store.migrate(path).await?;
         store.retire_actor_only_decisions().await?;
+        store.retire_viewer_assignments().await?;
         store.encrypt_plaintext_passwords().await?;
         store.resniff_generic_attachments().await?;
         store.sweep_orphan_files().await?;
@@ -204,6 +205,50 @@ impl TursoStore {
         )
         .await
         .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Assignment rows a Viewer still carries — written before a demotion
+    /// swept them, or by a hand at the table — are a chip the mail audience
+    /// refuses: the card says four people, two get the letter. Like the two
+    /// repairs around it, this runs once per boot, idempotently: a database
+    /// the pass has healed has no row left to match, and one that never
+    /// carried any reads only the empty set. Reminders are re-derived to
+    /// match, so a pending warning names nobody the sweep just removed.
+    async fn retire_viewer_assignments(&self) -> Result<()> {
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let mut rows = tx
+            .query(
+                "SELECT DISTINCT a.task_id FROM task_assignee a \
+                 JOIN user u ON u.id = a.user_id WHERE u.role = ?1",
+                params![Role::Viewer.as_str()],
+            )
+            .await
+            .map_err(backend)?;
+        let mut tasks = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            tasks.push(text(&row, 0)?);
+        }
+        drop(rows);
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        tx.execute(
+            "DELETE FROM task_assignee WHERE user_id IN \
+             (SELECT id FROM user WHERE role = ?1)",
+            params![Role::Viewer.as_str()],
+        )
+        .await
+        .map_err(backend)?;
+        let now = OffsetDateTime::now_utc();
+        for task_id in &tasks {
+            self.sync_task_reminders(&tx, task_id, now).await?;
+        }
+        tx.commit().await.map_err(backend)?;
         Ok(())
     }
 
@@ -681,6 +726,49 @@ impl TursoStore {
         }
 
         Ok(abandoned > 0 || minted > 0)
+    }
+
+    /// Every task `user_id` stops being assigned to here, with whether the
+    /// reminder re-derivation that followed touched the queue — the pairs a
+    /// demotion owes its readers. Deletes the rows inside the caller's
+    /// transaction and re-derives each task's reminders to match, the same
+    /// write `unassign_task` makes: a person leaving every card at once is
+    /// many unassignments, not a new shape.
+    async fn retire_assignments(
+        &self,
+        tx: &Transaction<'_>,
+        user_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<Vec<(String, bool)>> {
+        let mut rows = tx
+            .query(
+                "SELECT task_id FROM task_assignee WHERE user_id = ?1",
+                params![user_id],
+            )
+            .await
+            .map_err(backend)?;
+        let mut tasks = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            tasks.push(text(&row, 0)?);
+        }
+        drop(rows);
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Before the resync: it reads the assignee list, and the person being
+        // retired must not be minted a reminder on their way out.
+        tx.execute(
+            "DELETE FROM task_assignee WHERE user_id = ?1",
+            params![user_id],
+        )
+        .await
+        .map_err(backend)?;
+        let mut touched = Vec::with_capacity(tasks.len());
+        for task_id in tasks {
+            let queue = self.sync_task_reminders(tx, &task_id, now).await?;
+            touched.push((task_id, queue));
+        }
+        Ok(touched)
     }
 }
 
@@ -1871,10 +1959,16 @@ impl Store for TursoStore {
             Ok(())
         }
     }
-
     async fn set_role(&self, user_id: &str, role: Role) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let n = conn
+        // IMMEDIATE: a demotion's role write and the assignment sweep it owes
+        // are one write set — a card that renders between the two would show
+        // a chip the mail audience already refuses.
+        let mut conn = self.tx_conn().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(backend)?;
+        let n = tx
             .execute(
                 "UPDATE user SET role = ?1 WHERE id = ?2",
                 params![role.as_str(), user_id],
@@ -1882,12 +1976,36 @@ impl Store for TursoStore {
             .await
             .map_err(backend)?;
         if n == 0 {
-            Err(StoreError::NotFound)
-        } else {
-            drop(conn);
-            self.announce([Topic::Members]);
-            Ok(())
+            return Err(StoreError::NotFound);
         }
+        let mut topics = vec![Topic::Members];
+        // A Viewer cannot be assigned, so a demotion to one is also every
+        // unassignment: a row left behind draws a chip the mail audience
+        // silently skips — the card saying four people while two get the
+        // letter.
+        if role == Role::Viewer {
+            match self
+                .retire_assignments(&tx, user_id, OffsetDateTime::now_utc())
+                .await
+            {
+                Ok(touched) => {
+                    for (task_id, queue) in touched {
+                        topics.push(Topic::Task(task_id));
+                        if queue {
+                            topics.push(Topic::Queue);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            }
+        }
+        tx.commit().await.map_err(backend)?;
+        drop(conn);
+        self.announce(topics);
+        Ok(())
     }
 
     async fn set_user_disabled(&self, user_id: &str, disabled: bool) -> Result<()> {

@@ -8257,6 +8257,76 @@ async fn losing_the_admin_flag_drops_an_admin_to_member_and_nothing_else() {
         .unwrap();
     assert_eq!(still.role, Role::Viewer);
 }
+
+/// A demotion to Viewer is every unassignment at once: the role cannot be
+/// assigned, and a row left behind is a chip on the card that the mail
+/// audience silently skips — the card says four people, two get the letter.
+#[tokio::test]
+async fn demoting_a_member_to_viewer_takes_their_assignments_with_them() {
+    let (dir, store, workspace, admin) = shared().await;
+    let kept = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    let demoted = member(&store, &workspace, "grace@iz.sh", "Grace").await;
+    let first = add_task(&store, &workspace, "Backlog", "First", None, &admin).await;
+    let second = add_task(&store, &workspace, "Backlog", "Second", None, &admin).await;
+    for task in [&first, &second] {
+        store.assign_task(task, &kept).await.unwrap();
+        store.assign_task(task, &demoted).await.unwrap();
+    }
+
+    store.set_role(&demoted, Role::Viewer).await.unwrap();
+
+    for task in [&first, &second] {
+        let chips = store.assignees_for_task(task).await.unwrap();
+        assert_eq!(
+            chips.iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>(),
+            ["Emre"],
+            "the demoted person is still a chip on {task}"
+        );
+        let mailed = store.recipients_for_task(task).await.unwrap();
+        assert_eq!(
+            mailed.iter().map(|p| p.email.as_str()).collect::<Vec<_>>(),
+            ["emre@iz.sh"],
+            "task {task} reads two audiences"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A database from before demotions swept assignments — or a hand at the
+/// table — can carry a Viewer's rows. The boot heal takes them, so the two
+/// reads agree from the first render after the deploy.
+#[tokio::test]
+async fn a_boot_leaves_no_viewer_still_assigned() {
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("iz.db").to_string_lossy().into_owned();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+    let (workspace, admin) = claim(&store).await;
+    let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    drop(store);
+
+    // The broken state itself: a role write that swept nothing, the shape a
+    // database written before the sweep carries.
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute("PRAGMA foreign_keys = ON", ()).await.unwrap();
+    conn.execute(
+        "UPDATE user SET role = 'viewer' WHERE id = ?1",
+        turso::params![mate],
+    )
+    .await
+    .unwrap();
+
+    let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+    assert!(
+        reopened.assignees_for_task(&task).await.unwrap().is_empty(),
+        "the boot kept a chip the mail audience refuses"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}
 #[tokio::test]
 async fn a_provision_announces_only_when_the_row_changes() {
     let scratch = Scratch::open().await;
