@@ -200,6 +200,11 @@ pub struct User {
     pub language: String,
     /// Display-only, as [`Self::timezone`].
     pub ui: String,
+    /// How many times the person's photo has changed at the provider: the
+    /// `?v=` stamp an avatar URL carries, so a page can be served for months
+    /// and the browser still refetches the day the face changes. Zero: no
+    /// photo, or a provider too old to count.
+    pub photo_version: u64,
 }
 
 /// The profile page's totals for one person: what is on their plate, what
@@ -784,18 +789,20 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// gets a row born linked — assignable, mailable and avatar-able before
     /// their first visit. An unclaimed row with a matching address is
     /// claimed (sub stamped, id/role/preferences/history kept), a known row
-    /// follows the provider's address, name and admin flag, and a row that
-    /// already agrees is left alone. Unlike [`Store::provision_user`] this
-    /// is not a sign-in: `last_signed_in_at` is never stamped, and an empty
-    /// database grows no workspace (the first sign-in builds it; the next
-    /// beat mirrors everyone). The admin flag claims an unclaimed owner the
-    /// same way provision does. Says what happened through [`MemberSync`].
+    /// follows the provider's address, name, admin flag and photo version,
+    /// and a row that already agrees is left alone. Unlike
+    /// [`Store::provision_user`] this is not a sign-in: `last_signed_in_at`
+    /// is never stamped, and an empty database grows no workspace (the first
+    /// sign-in builds it; the next beat mirrors everyone). The admin flag
+    /// claims an unclaimed owner the same way provision does. Says what
+    /// happened through [`MemberSync`].
     async fn sync_member(
         &self,
         sub: &str,
         email: &str,
         display_name: &str,
         im_admin: bool,
+        photo_version: u64,
     ) -> Result<MemberSync>;
 
     async fn user(&self, id: &str) -> Result<Option<User>>;

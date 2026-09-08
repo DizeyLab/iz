@@ -938,6 +938,8 @@ struct Member {
     email: String,
     role: iz_core::Role,
     disabled: bool,
+    /// The face's version, for the row's avatar `?v=` stamp.
+    photo_version: u64,
     /// The day they last signed in, as the list writes it, or nothing.
     last_signed_in: Option<String>,
     is_you: bool,
@@ -955,6 +957,7 @@ async fn members_now(cx: &Cx, asking: &User) -> Result<Vec<Member>> {
         .into_iter()
         .map(|user| Member {
             disabled: user.disabled,
+            photo_version: user.photo_version,
             last_signed_in: user
                 .last_signed_in_at
                 .map(|at| iz_core::board::day_label(at.to_offset(zone).date())),
@@ -1272,7 +1275,7 @@ async fn settings_page(cx: &Cx) -> Result {
                     </div>
                     <div class="panel-body">
                         <div class="identity-row">
-                            (crate::layout::avatar(cx, &user.id, &user.display_name, "avatar-lg").await?)
+                            (crate::layout::avatar(cx, &user.id, &user.display_name, user.photo_version, "avatar-lg").await?)
                             <div class="identity-who">
                                 <div class="identity-name">(user.display_name.clone())</div>
                                 <div class="identity-address">(user.email.clone())</div>
@@ -1604,7 +1607,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                         <tr class="member-row">
                                             <td class="member-col-name member-name">
                                                 <span class="member-name-row">
-                                                    (crate::layout::avatar(cx, &member.id, &member.display_name, "avatar-sm").await?)
+                                                    (crate::layout::avatar(cx, &member.id, &member.display_name, member.photo_version, "avatar-sm").await?)
                                                     <a href=(format!("/people/{}", member.id))>(member.display_name.clone())</a>
                                                     if member.is_you {
                                                         <span class="member-you">(t(lang, Key::You))</span>

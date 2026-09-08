@@ -422,7 +422,7 @@ async fn render_card(
     let subtasks_open = card.holds_on_subtasks();
     let mut assignees = Vec::new();
     for person in card.assignees.iter() {
-        assignees.push(crate::layout::avatar(cx, &person.id, &person.display_name, "").await?);
+        assignees.push(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "").await?);
     }
     let has_assignees = !card.assignees.is_empty();
     let task_id = card.id.clone();

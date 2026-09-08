@@ -20,6 +20,7 @@ topcoat = { version = "0.6.2", default-features = false, features = [
   "sse",
 ] }
 iz-client = { workspace = true }
+im-client = { workspace = true }
 iz-core = { workspace = true, features = ["server"] }
 serde.workspace = true
 serde_json.workspace = true

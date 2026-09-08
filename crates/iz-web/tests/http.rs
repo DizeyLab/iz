@@ -349,6 +349,11 @@ impl App {
             client.clone(),
         )
         .app_context(store.clone())
+        .app_context(im_client::directory::DirectoryClient::new(
+            fake.url(),
+            "iz-test",
+            "s3cr3t",
+        ))
         .app_context(iz_client::LogoutBack(Arc::new(
             iz_web::server::logout_back,
         )))
@@ -432,6 +437,11 @@ impl App {
             client.clone(),
         )
         .app_context(store.clone())
+        .app_context(im_client::directory::DirectoryClient::new(
+            fake.url(),
+            "iz-test",
+            "s3cr3t",
+        ))
         .app_context(iz_client::LogoutBack(Arc::new(
             iz_web::server::logout_back,
         )))
@@ -708,6 +718,11 @@ impl App {
             .get(header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let location = response
             .headers()
             .get(header::LOCATION)
@@ -724,6 +739,7 @@ impl App {
             content_range,
             accept_ranges,
             etag,
+            cache_control,
             location,
             bytes,
         }
@@ -745,6 +761,7 @@ struct Raw {
     content_range: Option<String>,
     accept_ranges: Option<String>,
     etag: Option<String>,
+    cache_control: Option<String>,
     /// Where a 303 sends the browser — the sign-out handoff's whole point.
     location: Option<String>,
     bytes: Vec<u8>,
@@ -4945,8 +4962,7 @@ async fn a_synced_member_is_listed_and_assignable_before_their_first_sign_in() {
         .unwrap();
 
     let sync = app
-        .store
-        .sync_member("sub-mert", "mert@iz.sh", "Mert", false)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0)
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -5164,10 +5180,12 @@ async fn the_sign_in_card_links_the_login_and_names_a_failed_round_trip() {
 // Avatar: the signed-in person's face, proxied from im
 // ---------------------------------------------------------------------------
 
-/// One's own avatar proxies im's photo bytes with the app's credential.
-/// Catches a proxy that drops the auth or mangles the bytes.
+/// A member's avatar proxies im's photo bytes with the app's credential.
+/// Catches a proxy that drops the auth or mangles the bytes, and pins the
+/// versioned caching: the row's `photo_version` is the ETag and the `?v=`
+/// stamp a page renders.
 #[tokio::test]
-async fn ones_own_avatar_proxies_the_im_photo() {
+async fn a_members_avatar_proxies_the_im_photo() {
     let app = App::open().await;
     let admin = admin(&app).await;
     let admin_id = user_id(&app, "ada@iz.sh").await;
@@ -5177,19 +5195,80 @@ async fn ones_own_avatar_proxies_the_im_photo() {
     assert_eq!(photo.status, StatusCode::OK);
     assert_eq!(photo.content_type.as_deref(), Some("image/png"));
     assert_eq!(photo.bytes, PNG);
+    // The row has met no photo yet: version zero, and the ETag says so.
+    assert_eq!(photo.etag.as_deref(), Some("\"p0\""));
+    // No stamp on the URL: revalidate, never cache hard — the URL a page
+    // renders always carries the stamp, so this is only the stray fetch.
+    assert_eq!(photo.cache_control.as_deref(), Some("private, no-cache"));
 
-    let etag = photo.etag.clone().expect("no ETag on the served avatar");
     let cached = app
-        .get_with_if_none_match(&format!("/avatar/{admin_id}"), Some(&admin), &etag)
+        .get_with_if_none_match(&format!("/avatar/{admin_id}"), Some(&admin), "\"p0\"")
         .await;
     assert_eq!(cached.status, StatusCode::NOT_MODIFIED);
     assert!(cached.bytes.is_empty());
 }
 
-/// Another account's id reads exactly like no photo — never a glimpse across
-/// the fence. Catches a proxy that serves any id to any session.
+/// The stamp the row carries pins the face: `?v=` agreeing with the row is
+/// cacheable for a year because the URL itself changes when the face does,
+/// any other spelling revalidates, and a sync that hears of a new photo
+/// moves both the stamp and the ETag together.
 #[tokio::test]
-async fn another_accounts_avatar_is_not_found() {
+async fn a_matching_version_stamp_is_immutable_and_a_new_one_moves_it() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+    let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
+    let member_id = user_id(&app, "emre@iz.sh").await;
+    // The directory pass finds the row by its sub — the same subject the
+    // sign-in provisions — and reports the face's third revision.
+    app.store
+        .sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 3)
+        .await
+        .unwrap();
+    app.fake.set_photo("im-emre@iz.sh", PNG.to_vec(), "image/png");
+
+    let stamped = app
+        .get(&format!("/avatar/{member_id}?v=3"), Some(&member))
+        .await;
+    assert_eq!(stamped.status, StatusCode::OK);
+    assert_eq!(
+        stamped.cache_control.as_deref(),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert_eq!(stamped.etag.as_deref(), Some("\"p3\""));
+
+    // Any other spelling — a stale stamp, junk, none — may not be pinned.
+    for query in ["?v=2", "?v=junk", ""] {
+        let stray = app
+            .get(&format!("/avatar/{member_id}{query}"), Some(&member))
+            .await;
+        assert_eq!(stray.cache_control.as_deref(), Some("private, no-cache"));
+    }
+
+    // im's count moves; the next sync (the stream's event, or the beat)
+    // carries it onto the row, and the old stamp stops being true.
+    app.store
+        .sync_member("sub-emre", "emre@iz.sh", "Emre", false, 4)
+        .await
+        .unwrap();
+    let moved = app
+        .get(&format!("/avatar/{member_id}?v=4"), Some(&member))
+        .await;
+    assert_eq!(moved.etag.as_deref(), Some("\"p4\""));
+    assert_eq!(
+        moved.cache_control.as_deref(),
+        Some("private, max-age=31536000, immutable")
+    );
+    let stale = app
+        .get(&format!("/avatar/{member_id}?v=3"), Some(&member))
+        .await;
+    assert_eq!(stale.cache_control.as_deref(), Some("private, no-cache"));
+}
+
+/// Any member's face serves to any signed-in member — the board shows
+/// assignees' faces, so the bytes must be reachable — while a browser
+/// without a session is refused outright, the way the live channel is.
+#[tokio::test]
+async fn another_members_avatar_serves_but_a_signed_out_browser_does_not() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let admin_id = user_id(&app, "ada@iz.sh").await;
@@ -5197,26 +5276,18 @@ async fn another_accounts_avatar_is_not_found() {
     app.fake.set_photo("im-ada", PNG.to_vec(), "image/png");
 
     let photo = app.get(&format!("/avatar/{admin_id}"), Some(&member)).await;
-    assert_eq!(photo.status, StatusCode::NOT_FOUND);
+    assert_eq!(photo.status, StatusCode::OK);
+    assert_eq!(photo.bytes, PNG);
+
+    let refused = app.get(&format!("/avatar/{admin_id}"), None).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 }
 
-/// Without a session the avatar names the fix: 401, the way the live channel
-/// refuses. Catches a proxy that 404s strangers into probing ids.
+/// A row that has not met the provider — invited, never signed in, never
+/// synced — has no face to fetch, and an id nobody holds reads the same.
+/// Catches a proxy that fails the page around a missing face.
 #[tokio::test]
-async fn the_avatar_refuses_a_signed_out_browser() {
-    let app = App::open().await;
-    let _ = admin(&app).await;
-    let admin_id = user_id(&app, "ada@iz.sh").await;
-    app.fake.set_photo("im-ada", PNG.to_vec(), "image/png");
-
-    let photo = app.get(&format!("/avatar/{admin_id}"), None).await;
-    assert_eq!(photo.status, StatusCode::UNAUTHORIZED);
-}
-
-/// im has no photo for this account: 404, and the page falls back to
-/// initials. Catches a proxy that fails the page around a missing face.
-#[tokio::test]
-async fn the_avatar_is_not_found_without_an_im_photo() {
+async fn the_avatar_is_not_found_without_a_linked_row() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
     let member = invited(&app, &admin_cookie, "emre@iz.sh", "Emre", Role::Member).await;
@@ -5226,6 +5297,11 @@ async fn the_avatar_is_not_found_without_an_im_photo() {
         .get(&format!("/avatar/{member_id}"), Some(&member))
         .await;
     assert_eq!(photo.status, StatusCode::NOT_FOUND);
+
+    let stranger = app
+        .get(&format!("/avatar/{}", Ulid::new()), Some(&member))
+        .await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND);
 }
 
 /// Every page with avatars carries the fallback script: the board's topbar

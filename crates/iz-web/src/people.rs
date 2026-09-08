@@ -117,7 +117,7 @@ async fn people_page(cx: &Cx) -> Result {
         <main class="people-shell">
             <section class="panel person-card">
                 <div class="person-head">
-                    (crate::layout::avatar(cx, &person.id, &person.display_name, "avatar-xl").await?)
+                    (crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-xl").await?)
                     <div class="person-heading">
                         <h2 class="person-name">(person.display_name.clone())</h2>
                         <div class="person-marks">

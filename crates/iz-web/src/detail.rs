@@ -51,6 +51,8 @@ pub struct Me {
     pub email: String,
     pub role: iz_core::Role,
     pub language: String,
+    /// The face's version, for the topbar avatar's `?v=` stamp.
+    pub photo_version: u64,
 }
 
 impl From<&User> for Me {
@@ -61,6 +63,7 @@ impl From<&User> for Me {
             email: user.email.clone(),
             role: user.role,
             language: user.language.clone(),
+            photo_version: user.photo_version,
         }
     }
 }
@@ -1556,7 +1559,7 @@ async fn assignee_chip(
         cx =>
         <span class="assignee-chip">
             <a class="person-link" href=(format!("/people/{}", person.id))>
-                (crate::layout::avatar(cx, &person.id, &person.display_name, "avatar-sm").await?)
+                (crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?)
                 <span class="assignee-name">(person.display_name.clone())</span>
             </a>
             if may_write {
@@ -1588,7 +1591,7 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) 
                             <input type="hidden" name="task_id" value=(task_id.to_string())>
                             <input type="hidden" name="user_id" value=(person.id.clone())>
                             <button class="pop-row" type="submit">
-                                (crate::layout::avatar(cx, &person.id, &person.display_name, "avatar-sm").await?)
+                                (crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?)
                                 <span class="pop-row-name">(person.display_name.clone())</span>
                             </button>
                         </form>
@@ -1668,7 +1671,7 @@ async fn subtask_row(
     let release_title = t(lang, Key::ReleaseThisPart);
     let mut faces = Vec::new();
     for person in &part.assignees {
-        faces.push(crate::layout::avatar(cx, &person.id, &person.display_name, "").await?);
+        faces.push(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "").await?);
     }
     view! {
         cx =>
@@ -1844,7 +1847,7 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
         cx =>
         <div class="comment">
             <a class="person-link" href=(format!("/people/{}", comment.author.id))>
-                (crate::layout::avatar(cx, &comment.author.id, &comment.author.display_name, "avatar-lg").await?)
+                (crate::layout::avatar(cx, &comment.author.id, &comment.author.display_name, comment.author.photo_version, "avatar-lg").await?)
             </a>
             <div class="comment-said">
                 <div class="comment-head">

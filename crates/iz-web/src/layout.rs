@@ -69,19 +69,27 @@ pub(crate) async fn wordmark(cx: &Cx) -> Result {
 
 /// A person as a circle (or, on the Instrument skin, a square): the initials,
 /// toned by the id so every account has its own colour, with the im photo
-/// over it when im has one. Whether im has one is not known cheaply — the
-/// photo is the app's credentialed fetch, not the browser's — so the `<img>`
-/// always renders and hides itself on error (see `avatar_script`), leaving
-/// the initials beneath as the fallback. Shared by the board, the modal and
+/// over it when im has one. The URL carries the row's `photo_version` as
+/// `?v=`, so a changed face is a changed URL: a browser may cache the old
+/// answer for a year and still see the new one the day the row moves — the
+/// live refresh morphs the attribute and the img follows. The `<img>` always
+/// renders and hides itself on error (see `avatar_script`), leaving the
+/// initials beneath as the fallback. Shared by the board, the modal and
 /// every topbar user menu.
-pub(crate) async fn avatar(cx: &Cx, id: &str, display_name: &str, extra: &str) -> Result {
+pub(crate) async fn avatar(
+    cx: &Cx,
+    id: &str,
+    display_name: &str,
+    photo_version: u64,
+    extra: &str,
+) -> Result {
     let tone = id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
         % 5;
     let class = format!("avatar avatar-tone-{tone} {extra}");
     let initials = initials_of(display_name);
-    let src = format!("/avatar/{id}");
+    let src = format!("/avatar/{id}?v={photo_version}");
     view! {
         cx =>
         <span class="avatar-stack">
@@ -149,7 +157,7 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
         cx =>
         <div class="user-menu">
             <button type="button" class="user-menu-trigger">
-                (avatar(cx, &me.id, &me.display_name, "").await?)
+                (avatar(cx, &me.id, &me.display_name, me.photo_version, "").await?)
                 <span class="user-menu-trigger-name">(me.display_name.clone())</span>
             </button>
             <div class="user-menu-panel">
@@ -158,7 +166,6 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
                 <div class="user-menu-role">(t(lang, role_key))</div>
                 <a class="user-menu-item" href=(format!("{}/", crate::server::config(cx).oidc.issuer)) data-hard="">(t(lang, Key::Profile))</a>
                 <a class="user-menu-item" href="/settings">(t(lang, Key::NavSettings))</a>
-                <a class="user-menu-item" href="/auth/logout" data-hard="">(t(lang, Key::SignOut))</a>
             </div>
         </div>
         (avatar_script(cx).await?)
@@ -869,6 +876,7 @@ pub async fn live_script(cx: &Cx) -> Result {
                 if (path === '/tags') { return topic === 'tags' || topic === 'members'; } \
                 if (path === '/settings') { return topic === 'settings' || topic === 'members'; } \
                 if (path === '/people/') { return topic === 'members'; } \
+                return topic === 'members'; \
             } \
             try { \
                 var src = new EventSource('/api/live'); \

@@ -95,10 +95,10 @@ pub enum Moved {
 pub struct Person {
     pub id: String,
     pub display_name: String,
-    /// Whether a local photo exists — always false since SSO: avatars come
-    /// from the provider, and the board keeps the field so the shape the
-    /// pages read does not churn under them.
-    pub has_photo: bool,
+    /// How many times the provider has re-photographed this person: the
+    /// `?v=` an avatar URL carries, so a browser may cache the bytes hard
+    /// and still refetch the day the face changes. Zero: no photo there.
+    pub photo_version: u64,
 }
 
 impl Person {

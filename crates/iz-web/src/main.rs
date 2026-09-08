@@ -131,6 +131,15 @@ async fn main() {
         cookie_name: "iz_session".to_string(),
         cookie_key,
     };
+    // The shared identity directory: the same issuer and Basic pair the OIDC
+    // side holds, pointed at im's roster. One HTTP pool inside, cheap to
+    // clone — the avatar route reaches it through the router context below,
+    // and the two mirror tasks carry their own handles.
+    let directory = im_client::directory::DirectoryClient::new(
+        config.oidc.issuer.clone(),
+        config.oidc.client_id.clone(),
+        config.oidc.client_secret.clone(),
+    );
     // The engine is always built, because a sender can appear at any moment:
     // an admin fills the panel in and the next sweep sends what was held. It
     // holds one connection pool, rebuilt only when the settings behind it
@@ -142,19 +151,24 @@ async fn main() {
     ));
     tokio::spawn(sweep(engine.clone(), store.clone()));
 
-    // The member list mirrors im's directory: people are assignable and
-    // mailable before their first visit, and the provider's renames and
-    // admin flips follow on their own. Runs beside the sweep, first pass
-    // right away so a fresh deploy sees everyone at boot.
+    // The member list mirrors im's directory two ways. The live stream is
+    // the fast path — a photo uploaded, a rename, a disable in im lands
+    // within a moment and announces, so every open board swaps the face
+    // without a reload. The beat stays as the watchdog: one full pass
+    // every five minutes heals whatever a dead stream hid, and keeps the
+    // family list fresh, which the stream does not carry. First passes
+    // run right away, so a fresh deploy sees everyone at boot.
     // The address the app files itself under is `base_url` alone: a bound
     // address is no fallback here — a loopback bind is nothing anyone else
     // can reach, and filing it would overwrite the real one in every
     // switcher.
     tokio::spawn(directory_sync(
         store.clone(),
+        directory.clone(),
         iz_client::IzClient::new(oidc.clone()),
         config.base_url.clone(),
     ));
+    tokio::spawn(directory_stream(store.clone(), directory.clone()));
     // Told when the process is stopping, so the live streams end instead of
     // being waited out. See `iz_web::live::Shutdown`.
     let (stop, stopping) = tokio::sync::watch::channel(false);
@@ -171,6 +185,7 @@ async fn main() {
         oidc,
     )
     .app_context(store.clone())
+    .app_context(directory)
     .app_context(iz_client::LogoutBack(Arc::new(iz_web::server::logout_back)))
     .app_context(config.clone())
     .app_context(iz_web::live::LiveWindow(std::time::Duration::from_secs(
@@ -321,13 +336,15 @@ async fn sweep(engine: std::sync::Arc<iz_core::MailEngine>, store: Arc<dyn iz_co
 const DIRECTORY_SECONDS: u64 = 300;
 
 /// Keeps the member list a mirror of im's directory, and the switcher's
-/// family list a mirror of im's admin panel, first pass at boot and then
-/// on the beat. Every pass is a full read of a short list, so the store
-/// hears one entry at a time and announces only what changed. An im that
-/// does not answer — down, restarting, mid-deploy — costs one log line
-/// and nothing else: the rows stay, and the next beat asks again.
+/// family list a mirror of im's admin panel, on the beat. The live stream
+/// (see [`directory_stream`]) is the fast path; this loop is the watchdog —
+/// every pass is a full read of a short list, so whatever a dead stream
+/// quietly missed is healed within five minutes. An im that does not
+/// answer — down, restarting, mid-deploy — costs one log line and nothing
+/// else: the rows stay, and the next beat asks again.
 async fn directory_sync(
     store: Arc<dyn iz_core::store::Store>,
+    directory: im_client::directory::DirectoryClient,
     client: iz_client::IzClient,
     configured_url: String,
 ) {
@@ -336,19 +353,7 @@ async fn directory_sync(
     // said once and the mirror goes on without it.
     let mut said_no_address = false;
     loop {
-        match client.directory().await {
-            Some(members) => {
-                for member in members {
-                    if let Err(problem) = store
-                        .sync_member(&member.sub, &member.email, &member.name, member.admin)
-                        .await
-                    {
-                        eprintln!("directory sync: {}: {problem}", member.email);
-                    }
-                }
-            }
-            None => eprintln!("directory sync: im did not answer; keeping the rows there are"),
-        }
+        mirror_directory(&store, &directory).await;
         // Before asking for the family, this app files itself in it, so a
         // deployment appears in everyone's switcher without an admin
         // typing its address. Resolved per beat in the order a sign-out
@@ -393,6 +398,80 @@ async fn directory_sync(
     }
 }
 
+/// One full pass of im's roster through the member rows: every entry
+/// through [`iz_core::store::Store::sync_member`], which announces only
+/// the rows that actually changed.
+async fn mirror_directory(
+    store: &Arc<dyn iz_core::store::Store>,
+    directory: &im_client::directory::DirectoryClient,
+) {
+    match directory.directory().await {
+        Ok(members) => {
+            for member in members {
+                apply_member(store, &member).await;
+            }
+        }
+        Err(problem) => {
+            eprintln!("directory sync: im did not answer ({problem}); keeping the rows there are")
+        }
+    }
+}
+
+async fn apply_member(
+    store: &Arc<dyn iz_core::store::Store>,
+    member: &im_client::directory::DirectoryMember,
+) {
+    if let Err(problem) = store
+        .sync_member(
+            &member.sub,
+            &member.email,
+            &member.name,
+            member.admin,
+            member.photo_version,
+        )
+        .await
+    {
+        eprintln!("directory sync: {}: {problem}", member.email);
+    }
+}
+
+/// The live half of the mirror: im's `/directory/live`, one event per
+/// changed member. Forever, in this shape: a full pass, then the stream;
+/// whenever the stream ends — im restarting, or its fifty-minute window
+/// closing — wait out a backoff that doubles from one second to thirty,
+/// replay a full pass (the resync that heals whatever the dead stream
+/// carried or dropped), and redial. A stream error inside the body is the
+/// same exit as a clean close: the pass below is what converges.
+async fn directory_stream(
+    store: Arc<dyn iz_core::store::Store>,
+    directory: im_client::directory::DirectoryClient,
+) {
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        mirror_directory(&store, &directory).await;
+        match directory.open_stream().await {
+            Ok(mut stream) => {
+                backoff = std::time::Duration::from_secs(1);
+                while let Some(event) = stream.next().await {
+                    match event {
+                        Ok(im_client::directory::DirectoryEvent::Profile(member)) => {
+                            apply_member(&store, &member).await;
+                        }
+                        Err(problem) => {
+                            eprintln!("directory stream: {problem}; re-listing");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(problem) => {
+                eprintln!("directory stream: im did not answer ({problem})");
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+    }
+}
 /// Waits for something to happen to the mail queue specifically.
 ///
 /// The channel carries every topic, and the sweep cares about one. Filtering
@@ -403,7 +482,6 @@ async fn directory_sync(
 ///
 /// Lagging means announcements were dropped — a reason to look, not to stop.
 async fn queue_touched(rx: &mut tokio::sync::broadcast::Receiver<iz_core::Change>) -> bool {
-    use tokio::sync::broadcast::error::RecvError;
     loop {
         match rx.recv().await {
             Ok(change) => {
@@ -411,8 +489,8 @@ async fn queue_touched(rx: &mut tokio::sync::broadcast::Receiver<iz_core::Change
                     return true;
                 }
             }
-            Err(RecvError::Lagged(_)) => return true,
-            Err(RecvError::Closed) => return false,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
         }
     }
 }

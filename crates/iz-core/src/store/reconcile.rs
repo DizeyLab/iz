@@ -270,6 +270,7 @@ fn build_maps(
     old_has_clock: bool,
     old_has_reminder: bool,
     old_has_tag: bool,
+    old_has_photo_version: bool,
 ) -> Vec<TableMap> {
     let mut maps = Vec::new();
 
@@ -363,6 +364,17 @@ fn build_maps(
             ("language", "old.language".into()),
             ("ui", "old.ui".into()),
             ("created_at", "old.created_at".into()),
+            (
+                // A database from before faces wore versions starts every
+                // member at zero — im's count of "never photographed" — and
+                // the next directory pass stamps the real one.
+                "photo_version",
+                if old_has_photo_version {
+                    "old.photo_version".into()
+                } else {
+                    "0".to_string()
+                },
+            ),
             ("last_signed_in_at", "old.last_signed_in_at".into()),
         ],
     });
@@ -747,12 +759,14 @@ async fn copy_data(old_conn: &Connection, new_conn: &Connection, path: &str) -> 
     let has_reminder = old_has_column(old_conn, "workspace", "reminder_minutes").await?;
     let has_tag = old_has_column(old_conn, "tag", "id").await?;
     let has_setting = old_has_column(old_conn, "setting", "key").await?;
+    let has_photo_version = old_has_column(old_conn, "user", "photo_version").await?;
     let maps = build_maps(
         has_smtp_check,
         has_batch_window,
         has_clock,
         has_reminder,
         has_tag,
+        has_photo_version,
     );
     validate_maps(new_conn, &maps).await?;
 
@@ -1059,7 +1073,7 @@ mod tests {
         let conn = db.connect().unwrap();
         conn.execute_batch(&schema_sql()).await.unwrap();
 
-        let maps = build_maps(false, false, false, false, false);
+        let maps = build_maps(false, false, false, false, false, false);
         validate_maps(&conn, &maps)
             .await
             .expect("the full map set was refused against the declared schema");

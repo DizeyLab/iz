@@ -1232,11 +1232,12 @@ fn user_from(row: &Row) -> Result<User> {
         theme: text(row, 10)?,
         language: text(row, 11)?,
         ui: text(row, 12)?,
+        photo_version: row.get::<i64>(13).map_err(backend)?.max(0) as u64,
     })
 }
 
 const USER_COLUMNS: &str = "id, workspace_id, oidc_sub, email, display_name, role, disabled, \
-     created_at, last_signed_in_at, timezone, theme, language, ui";
+     created_at, last_signed_in_at, timezone, theme, language, ui, photo_version";
 
 /// Addresses are matched case-insensitively; the display form is kept as typed.
 fn fold_email(email: &str) -> String {
@@ -1463,6 +1464,7 @@ impl Store for TursoStore {
         email: &str,
         display_name: &str,
         im_admin: bool,
+        photo_version: u64,
     ) -> Result<MemberSync> {
         let email = fold_email(email);
         // IMMEDIATE like provision_user: a beat racing a first sign-in over
@@ -1485,12 +1487,23 @@ impl Store for TursoStore {
             let role = synced_role(user.role, im_admin);
             // A sync is not a sign-in: last_signed_in_at is the person's own
             // fact, and the directory says nothing about it.
-            if user.email == email && user.display_name == display_name && role == user.role {
+            if user.email == email
+                && user.display_name == display_name
+                && role == user.role
+                && user.photo_version == photo_version
+            {
                 Some((user.id, MemberSync::Untouched))
             } else {
                 tx.execute(
-                    "UPDATE user SET email = ?1, display_name = ?2, role = ?3 WHERE id = ?4",
-                    params![email.clone(), display_name, role.as_str(), user.id.clone()],
+                    "UPDATE user SET email = ?1, display_name = ?2, role = ?3, \
+                     photo_version = ?4 WHERE id = ?5",
+                    params![
+                        email.clone(),
+                        display_name,
+                        role.as_str(),
+                        photo_version as i64,
+                        user.id.clone()
+                    ],
                 )
                 .await
                 .map_err(backend)?;
@@ -1511,13 +1524,14 @@ impl Store for TursoStore {
             if let Some(user) = seen {
                 let role = synced_role(user.role, im_admin);
                 tx.execute(
-                    "UPDATE user SET oidc_sub = ?1, email = ?2, display_name = ?3, role = ?4 \
-                     WHERE id = ?5",
+                    "UPDATE user SET oidc_sub = ?1, email = ?2, display_name = ?3, role = ?4, \
+                     photo_version = ?5 WHERE id = ?6",
                     params![
                         sub,
                         email.clone(),
                         display_name,
                         role.as_str(),
+                        photo_version as i64,
                         user.id.clone()
                     ],
                 )
@@ -1547,8 +1561,8 @@ impl Store for TursoStore {
                         let role = if im_admin { Role::Admin } else { Role::Member };
                         tx.execute(
                             "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, \
-                             role, disabled, created_at, last_signed_in_at) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, NULL)",
+                             role, disabled, created_at, last_signed_in_at, photo_version) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, NULL, ?8)",
                             params![
                                 id.clone(),
                                 workspace_id,
@@ -1556,7 +1570,8 @@ impl Store for TursoStore {
                                 email.clone(),
                                 display_name,
                                 role.as_str(),
-                                now.clone()
+                                now.clone(),
+                                photo_version as i64
                             ],
                         )
                         .await
@@ -4807,7 +4822,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT u.id, u.display_name, 0 FROM task_assignee a \
+                "SELECT u.id, u.display_name, u.photo_version FROM task_assignee a \
                  JOIN user u ON u.id = a.user_id \
                  WHERE a.task_id = ?1 ORDER BY u.display_name",
                 params![task_id],
@@ -4819,7 +4834,7 @@ impl DetailReads for TursoStore {
             out.push(Person {
                 id: text(&row, 0)?,
                 display_name: text(&row, 1)?,
-                has_photo: row.get::<i64>(2).map_err(backend)? != 0,
+                photo_version: row.get::<i64>(2).map_err(backend)?.max(0) as u64,
             });
         }
         Ok(out)
@@ -4831,7 +4846,7 @@ impl DetailReads for TursoStore {
         // so neither leaves the server for this screen.
         let mut rows = conn
             .query(
-                "SELECT id, display_name, 0 FROM user \
+                "SELECT id, display_name, photo_version FROM user \
                  WHERE workspace_id = ?1 AND role <> ?2 ORDER BY display_name",
                 params![workspace_id, Role::Viewer.as_str()],
             )
@@ -4842,7 +4857,7 @@ impl DetailReads for TursoStore {
             out.push(Person {
                 id: text(&row, 0)?,
                 display_name: text(&row, 1)?,
-                has_photo: row.get::<i64>(2).map_err(backend)? != 0,
+                photo_version: row.get::<i64>(2).map_err(backend)?.max(0) as u64,
             });
         }
         Ok(out)
@@ -4890,7 +4905,7 @@ impl DetailReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, 0 \
+                "SELECT c.id, c.body, c.created_at, u.id, u.display_name, u.photo_version \
                  FROM comment c JOIN user u ON u.id = c.author_id \
                  WHERE c.task_id = ?1 ORDER BY c.created_at, c.rowid",
                 params![task_id],
@@ -4906,7 +4921,7 @@ impl DetailReads for TursoStore {
                 author: Person {
                     id: text(&row, 3)?,
                     display_name: text(&row, 4)?,
-                    has_photo: row.get::<i64>(5).map_err(backend)? != 0,
+                    photo_version: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
                 },
             });
         }
@@ -4946,7 +4961,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT a.id, a.kind, a.detail, a.created_at, u.id, u.display_name, \
-                 0 \
+                 u.photo_version \
                  FROM activity a LEFT JOIN user u ON u.id = a.actor_id \
                  WHERE a.task_id = ?1 ORDER BY a.created_at DESC, a.rowid DESC",
                 params![task_id],
@@ -4959,7 +4974,7 @@ impl DetailReads for TursoStore {
                 Some(id) => Some(Person {
                     id,
                     display_name: text(&row, 5)?,
-                    has_photo: row.get::<i64>(6).map_err(backend)? != 0,
+                    photo_version: row.get::<i64>(6).map_err(backend)?.max(0) as u64,
                 }),
                 None => None,
             };
@@ -4983,7 +4998,7 @@ impl DetailReads for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT t.id, t.task_key, t.title, t.column_id, t.done_at, t.parent_id, \
-                 u.id, u.display_name, 0 \
+                 u.id, u.display_name, u.photo_version \
                  FROM task t \
                  LEFT JOIN task_assignee a ON a.task_id = t.id \
                  LEFT JOIN user u ON u.id = a.user_id \
@@ -5007,7 +5022,7 @@ impl DetailReads for TursoStore {
                 Some(user_id) => Some(Person {
                     id: user_id,
                     display_name: text(&row, 7)?,
-                    has_photo: row.get::<i64>(8).map_err(backend)? != 0,
+                    photo_version: row.get::<i64>(8).map_err(backend)?.max(0) as u64,
                 }),
                 None => None,
             };
@@ -5116,7 +5131,7 @@ impl BoardReads for TursoStore {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "SELECT a.task_id, u.id, u.display_name, 0 \
+                "SELECT a.task_id, u.id, u.display_name, u.photo_version \
                  FROM task_assignee a \
                  JOIN task t ON t.id = a.task_id \
                  JOIN user u ON u.id = a.user_id \
@@ -5133,7 +5148,7 @@ impl BoardReads for TursoStore {
                 Person {
                     id: text(&row, 1)?,
                     display_name: text(&row, 2)?,
-                    has_photo: row.get::<i64>(3).map_err(backend)? != 0,
+                    photo_version: row.get::<i64>(3).map_err(backend)?.max(0) as u64,
                 },
             ));
         }

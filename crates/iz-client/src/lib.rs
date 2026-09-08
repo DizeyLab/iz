@@ -150,48 +150,6 @@ pub async fn current_user(cx: &Cx) -> Option<User> {
     }
 }
 
-/// The person's profile photo from im, if im has one. `None` on 404 and on
-/// anything else that is not the bytes — a dropped connection, a body that
-/// will not read, a reply without a mime — because a missing face must never
-/// fail the page around it: the caller renders its initials instead.
-///
-/// Authenticated as the app, not the browser: `Authorization: Basic
-/// base64(client_id ":" client_secret)` against im's `/photo/{user_id}`,
-/// the same credentials the introspection round-trip posts with.
-pub async fn photo_for(cx: &Cx, user_id: &str) -> Option<(Vec<u8>, String)> {
-    let state = client(cx);
-    let reply = state
-        .http
-        .get(format!("{}/photo/{user_id}", state.config.issuer))
-        .basic_auth(&state.config.client_id, Some(&state.config.client_secret))
-        .send()
-        .await
-        .ok()?;
-    if !reply.status().is_success() {
-        return None;
-    }
-    let mime = reply
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)?
-        .to_str()
-        .ok()?
-        .to_string();
-    let bytes = reply.bytes().await.ok()?.to_vec();
-    Some((bytes, mime))
-}
-
-/// One entry of im's directory: the stable subject, the address, the
-/// display name, and whether im calls the person an admin — exactly what
-/// mirroring the directory into local member rows needs.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct DirectoryMember {
-    pub sub: String,
-    pub email: String,
-    pub name: String,
-    #[serde(default)]
-    pub admin: bool,
-}
-
 /// One entry of im's family list: the wordmark key, the human name, and
 /// where the app lives — exactly what the topbar switcher renders.
 /// `Serialize` because the app that fetched it mirrors it into its own
@@ -204,26 +162,6 @@ pub struct FamilyService {
 }
 
 impl IzClient {
-    /// The family phonebook: every non-disabled user im knows, fetched as
-    /// the app (`Authorization: Basic` with the client pair, the same
-    /// credentials the photo route takes). `None` on anything that is not a
-    /// readable list — a refused pair, a dropped connection, a body that is
-    /// not the array — because a missed beat must never look like an empty
-    /// directory: the caller keeps the rows it has and asks again next beat.
-    pub async fn directory(&self) -> Option<Vec<DirectoryMember>> {
-        let reply = self
-            .http
-            .get(format!("{}/directory", self.config.issuer))
-            .basic_auth(&self.config.client_id, Some(&self.config.client_secret))
-            .send()
-            .await
-            .ok()?;
-        if !reply.status().is_success() {
-            return None;
-        }
-        reply.json().await.ok()
-    }
-
     /// The family list: every app im's admin panel serves, fetched as the
     /// app (`Authorization: Basic` with the client pair, the same
     /// credentials the directory takes). `None` on anything that is not a
