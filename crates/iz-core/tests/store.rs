@@ -8407,7 +8407,7 @@ async fn set_user_disabled_round_trips() {
 async fn a_synced_member_is_born_linked_and_never_signed_in() {
     let (scratch, workspace, _admin) = workspace_with_admin().await;
     let sync = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -8422,7 +8422,7 @@ async fn a_synced_member_is_born_linked_and_never_signed_in() {
     assert!(row.last_signed_in_at.is_none());
     // An im admin the workspace has never met is Admin from the first beat.
     scratch
-        .store.sync_member("sub-boss", "boss@iz.sh", "Boss", true, 0)
+        .store.sync_member("sub-boss", "boss@iz.sh", "Boss", true, 0, "UTC+03:00")
         .await
         .unwrap();
     let boss = scratch
@@ -8443,7 +8443,7 @@ async fn a_sync_claims_an_unclaimed_row_without_touching_its_sign_in_fact() {
         .await
         .unwrap();
     let sync = scratch
-        .store.sync_member("sub-mert", "MERT@iz.sh", "Mert Yılmaz", false, 0)
+        .store.sync_member("sub-mert", "MERT@iz.sh", "Mert Yılmaz", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Claimed);
@@ -8460,11 +8460,11 @@ async fn a_sync_claims_an_unclaimed_row_without_touching_its_sign_in_fact() {
 
 #[tokio::test]
 async fn a_sync_follows_provider_drift_but_not_the_sign_in_fact() {
-    let (scratch, workspace, admin_id) = workspace_with_admin().await;
+    let (scratch, _workspace, admin_id) = workspace_with_admin().await;
     let before = scratch.store.user(&admin_id).await.unwrap().unwrap();
     let seen = before.last_signed_in_at.clone();
     let sync = scratch
-        .store.sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", true, 0)
+        .store.sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Refreshed);
@@ -8473,7 +8473,7 @@ async fn a_sync_follows_provider_drift_but_not_the_sign_in_fact() {
     assert_eq!(after.last_signed_in_at, seen);
     // Losing the flag in the directory drops an Admin to Member.
     scratch
-        .store.sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", false, 0)
+        .store.sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", false, 0, "UTC+03:00")
         .await
         .unwrap();
     let demoted = scratch.store.user(&admin_id).await.unwrap().unwrap();
@@ -8485,7 +8485,7 @@ async fn an_agreeing_sync_is_untouched_and_silent() {
     let (scratch, _, _) = workspace_with_admin().await;
     let mut rx = scratch.store.subscribe();
     let sync = scratch
-        .store.sync_member("sub-ada", "ada@iz.sh", "Ada", true, 0)
+        .store.sync_member("sub-ada", "ada@iz.sh", "Ada", true, 0, "UTC")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Untouched);
@@ -8496,7 +8496,7 @@ async fn an_agreeing_sync_is_untouched_and_silent() {
 async fn a_sync_without_a_workspace_skips_and_writes_nothing() {
     let scratch = Scratch::open().await;
     let sync = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Skipped);
@@ -8512,8 +8512,7 @@ async fn a_photo_version_bump_refreshes_and_announces() {
     let (scratch, workspace, _admin) = workspace_with_admin().await;
     let mut rx = scratch.store.subscribe();
     let sync = scratch
-        .store
-        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -8528,8 +8527,7 @@ async fn a_photo_version_bump_refreshes_and_announces() {
 
     // The same version again: the row agrees, and silence is the answer.
     let again = scratch
-        .store
-        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(again, iz_core::store::MemberSync::Untouched);
@@ -8537,8 +8535,7 @@ async fn a_photo_version_bump_refreshes_and_announces() {
 
     // im counted another upload: the stamp moves and the move is news.
     let bumped = scratch
-        .store
-        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 3)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 3, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(bumped, iz_core::store::MemberSync::Refreshed);
@@ -8549,6 +8546,55 @@ async fn a_photo_version_bump_refreshes_and_announces() {
         .unwrap()
         .unwrap();
     assert_eq!(moved.photo_version, 3);
+    assert_eq!(announced(&mut rx), vec!["members".to_string()]);
+}
+
+/// The clock is the provider's fact now: a sync that hears of a member's
+/// timezone stamps it and says Refreshed (so the live channel hears), one
+/// that already agrees says Untouched, and a row born from the directory
+/// opens on the timezone im holds — never on iz's own old default.
+#[tokio::test]
+async fn a_timezone_change_refreshes_and_announces() {
+    let (scratch, workspace, _admin) = workspace_with_admin().await;
+    let mut rx = scratch.store.subscribe();
+    let sync = scratch
+        .store
+        .sync_member("sub-deniz", "deniz@iz.sh", "Deniz", false, 0, "UTC-05:00")
+        .await
+        .unwrap();
+    assert_eq!(sync, iz_core::store::MemberSync::Inserted);
+    let row = scratch
+        .store
+        .user_by_email(&workspace, "deniz@iz.sh")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.timezone, "UTC-05:00");
+    assert_eq!(announced(&mut rx), vec!["members".to_string()]);
+
+    // The same timezone again: the row agrees, and silence is the answer.
+    let again = scratch
+        .store
+        .sync_member("sub-deniz", "deniz@iz.sh", "Deniz", false, 0, "UTC-05:00")
+        .await
+        .unwrap();
+    assert_eq!(again, iz_core::store::MemberSync::Untouched);
+    assert!(announced(&mut rx).is_empty());
+
+    // im recorded a move: the next sync carries it and the move is news.
+    let moved = scratch
+        .store
+        .sync_member("sub-deniz", "deniz@iz.sh", "Deniz", false, 0, "UTC+03:00")
+        .await
+        .unwrap();
+    assert_eq!(moved, iz_core::store::MemberSync::Refreshed);
+    let row = scratch
+        .store
+        .user_by_email(&workspace, "deniz@iz.sh")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.timezone, "UTC+03:00");
     assert_eq!(announced(&mut rx), vec!["members".to_string()]);
 }
 

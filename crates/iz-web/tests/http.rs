@@ -4336,27 +4336,10 @@ async fn a_stamp_shifts_with_the_viewers_stored_timezone() {
     let utc = until_logs_contains(&app, &admin_cookie, "\"title\":\"Ship it\"").await;
     let utc_at = moment_for(&utc, "Ship it");
 
-    let saved = app
-        .post(
-            "/api/save_profile",
-            Some(&admin_cookie),
-            &[
-                ("timezone", "UTC+03:00"),
-                ("theme", "light"),
-                ("language", "en"),
-                ("ui", "instrument"),
-            ],
-        )
-        .await;
-    assert!(
-        !saved
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        saved.location
-    );
+    app.store
+        .sync_member("im-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
+        .await
+        .unwrap();
 
     let shifted = app
         .post("/api/current_logs", Some(&admin_cookie), &[])
@@ -4396,27 +4379,10 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
     let html = String::from_utf8_lossy(&page.bytes);
     let utc_at = activity_stamp_of(&html).to_string();
 
-    let saved = app
-        .post(
-            "/api/save_profile",
-            Some(&admin_cookie),
-            &[
-                ("timezone", "UTC+03:00"),
-                ("theme", "light"),
-                ("language", "en"),
-                ("ui", "instrument"),
-            ],
-        )
-        .await;
-    assert!(
-        !saved
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        saved.location
-    );
+    app.store
+        .sync_member("im-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
+        .await
+        .unwrap();
 
     let shifted_page = app
         .get(&format!("/?task={task}&tab=activity"), Some(&admin_cookie))
@@ -4433,27 +4399,38 @@ async fn a_task_modal_stamp_shifts_with_the_viewers_stored_timezone() {
 }
 
 #[tokio::test]
-async fn an_unlisted_timezone_is_refused() {
+async fn a_posted_timezone_is_ignored() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
+    // im owns the timezone now: a posted one — even an unlisted one — is
+    // not read, let alone refused or saved. The row keeps the value the
+    // directory last mirrored while the fields iz owns still save.
     let answer = app
         .post(
             "/api/save_profile",
             Some(&admin_cookie),
             &[
                 ("timezone", "Mars/Olympus_Mons"),
-                ("theme", "light"),
+                ("theme", "dark"),
                 ("language", "en"),
                 ("ui", "instrument"),
             ],
         )
         .await;
-    let location = answer.location.as_deref().unwrap_or_default();
     assert!(
-        location.contains("refusal=bad-zone&on=save_profile"),
-        "{location}"
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
     );
+    let admin_id = user_id(&app, "ada@iz.sh").await;
+    let row = app.store.user(&admin_id).await.unwrap().unwrap();
+    assert_eq!(row.timezone, "UTC");
+    assert_eq!(row.theme, "dark");
 }
 
 #[tokio::test]
@@ -4971,7 +4948,7 @@ async fn a_synced_member_is_listed_and_assignable_before_their_first_sign_in() {
         .unwrap();
 
     let sync = app
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0)
+        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -5217,6 +5194,26 @@ async fn a_members_avatar_proxies_the_im_photo() {
     assert!(cached.bytes.is_empty());
 }
 
+/// The profile section renders no timezone editor: the clock is im's now,
+/// so the form iz serves carries only the fields iz owns.
+#[tokio::test]
+async fn the_profile_section_has_no_timezone_editor() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+
+    let page = app.get("/settings", Some(&admin)).await;
+    assert_eq!(page.status.as_u16(), 200);
+    let html = String::from_utf8(page.bytes).unwrap();
+    assert!(
+        !html.contains("name=\"timezone\""),
+        "a timezone select is still on the profile: {html}"
+    );
+    assert!(
+        !html.contains("TIMEZONE"),
+        "a timezone label is still on the profile: {html}"
+    );
+}
+
 /// The stamp the row carries pins the face: `?v=` agreeing with the row is
 /// cacheable for a year because the URL itself changes when the face does,
 /// any other spelling revalidates, and a sync that hears of a new photo
@@ -5229,8 +5226,7 @@ async fn a_matching_version_stamp_is_immutable_and_a_new_one_moves_it() {
     let member_id = user_id(&app, "emre@iz.sh").await;
     // The directory pass finds the row by its sub — the same subject the
     // sign-in provisions — and reports the face's third revision.
-    app.store
-        .sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 3)
+    app.store.sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 3, "UTC+03:00")
         .await
         .unwrap();
     app.fake.set_photo("im-emre@iz.sh", PNG.to_vec(), "image/png");
@@ -5255,8 +5251,7 @@ async fn a_matching_version_stamp_is_immutable_and_a_new_one_moves_it() {
 
     // im's count moves; the next sync (the stream's event, or the beat)
     // carries it onto the row, and the old stamp stops being true.
-    app.store
-        .sync_member("sub-emre", "emre@iz.sh", "Emre", false, 4)
+    app.store.sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 4, "UTC+03:00")
         .await
         .unwrap();
     let moved = app
@@ -8313,29 +8308,13 @@ async fn a_clock_saved_on_a_task_renders_in_the_viewers_stored_timezone() {
     );
     assert!(html.contains(">Sep 02 11:00<"), "{html}");
 
-    // The same instant, read back by a viewer who stored UTC+03:00: the field
-    // and its label both shift, the stored value does not.
-    let saved = app
-        .post(
-            "/api/save_profile",
-            Some(&admin_cookie),
-            &[
-                ("timezone", "UTC+03:00"),
-                ("theme", "light"),
-                ("language", "en"),
-                ("ui", "instrument"),
-            ],
-        )
-        .await;
-    assert!(
-        !saved
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        saved.location
-    );
+    // The same instant, read back by a viewer whose row mirrors UTC+03:00
+    // from im: the field and its label both shift, the stored value does
+    // not. The mirror is the only path a timezone change still takes.
+    app.store
+        .sync_member("im-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
+        .await
+        .unwrap();
 
     let shifted = app
         .get(&format!("/?task={task}"), Some(&admin_cookie))
@@ -8679,27 +8658,10 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
 
     // The viewer reads in UTC+03:00, so the typed 14:00 is 11:00 stored and
     // 14:00 on the card again — the chip goes through the same zone both ways.
-    let saved = app
-        .post(
-            "/api/save_profile",
-            Some(&admin_cookie),
-            &[
-                ("timezone", "UTC+03:00"),
-                ("theme", "light"),
-                ("language", "en"),
-                ("ui", "instrument"),
-            ],
-        )
-        .await;
-    assert!(
-        !saved
-            .location
-            .as_deref()
-            .unwrap_or_default()
-            .contains("refusal="),
-        "{:?}",
-        saved.location
-    );
+    app.store
+        .sync_member("im-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
+        .await
+        .unwrap();
 
     let column = first_column(&app).await;
     let answer = app

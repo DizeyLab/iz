@@ -1465,6 +1465,7 @@ impl Store for TursoStore {
         display_name: &str,
         im_admin: bool,
         photo_version: u64,
+        timezone: &str,
     ) -> Result<MemberSync> {
         let email = fold_email(email);
         // IMMEDIATE like provision_user: a beat racing a first sign-in over
@@ -1491,17 +1492,19 @@ impl Store for TursoStore {
                 && user.display_name == display_name
                 && role == user.role
                 && user.photo_version == photo_version
+                && user.timezone == timezone
             {
                 Some((user.id, MemberSync::Untouched))
             } else {
                 tx.execute(
                     "UPDATE user SET email = ?1, display_name = ?2, role = ?3, \
-                     photo_version = ?4 WHERE id = ?5",
+                     photo_version = ?4, timezone = ?5 WHERE id = ?6",
                     params![
                         email.clone(),
                         display_name,
                         role.as_str(),
                         photo_version as i64,
+                        timezone,
                         user.id.clone()
                     ],
                 )
@@ -1525,13 +1528,14 @@ impl Store for TursoStore {
                 let role = synced_role(user.role, im_admin);
                 tx.execute(
                     "UPDATE user SET oidc_sub = ?1, email = ?2, display_name = ?3, role = ?4, \
-                     photo_version = ?5 WHERE id = ?6",
+                     photo_version = ?5, timezone = ?6 WHERE id = ?7",
                     params![
                         sub,
                         email.clone(),
                         display_name,
                         role.as_str(),
                         photo_version as i64,
+                        timezone,
                         user.id.clone()
                     ],
                 )
@@ -1561,8 +1565,9 @@ impl Store for TursoStore {
                         let role = if im_admin { Role::Admin } else { Role::Member };
                         tx.execute(
                             "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, \
-                             role, disabled, created_at, last_signed_in_at, photo_version) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, NULL, ?8)",
+                             role, disabled, created_at, last_signed_in_at, photo_version, \
+                             timezone) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, NULL, ?8, ?9)",
                             params![
                                 id.clone(),
                                 workspace_id,
@@ -1571,7 +1576,8 @@ impl Store for TursoStore {
                                 display_name,
                                 role.as_str(),
                                 now.clone(),
-                                photo_version as i64
+                                photo_version as i64,
+                                timezone
                             ],
                         )
                         .await

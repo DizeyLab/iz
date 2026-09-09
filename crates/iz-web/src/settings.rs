@@ -634,7 +634,6 @@ async fn send_test_mail(cx: &Cx) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
 
 #[derive(serde::Deserialize)]
 struct SaveProfileForm {
-    timezone: String,
     theme: String,
     language: String,
     ui: String,
@@ -649,31 +648,6 @@ const UI_OPTIONS: [&str; 2] = ["instrument", "ledger"];
 /// The values the language field offers.
 const LANGUAGE_OPTIONS: [&str; 2] = ["en", "tr"];
 
-/// The offsets the timezone field offers, `"UTC-12:00"` through `"UTC+14:00"`.
-///
-/// Decision: `time` (already a dependency) has no tz-database, and this
-/// workspace has no other crate that carries one — adding one just for a
-/// display label is a new dependency for what "show logs in my timezone"
-/// does not need. Fixed offsets satisfy it; `"UTC"` stands for +00:00.
-fn zone_options() -> Vec<String> {
-    (-12..=14)
-        .map(|hour: i32| {
-            if hour == 0 {
-                "UTC".to_string()
-            } else {
-                format!(
-                    "UTC{}{:02}:00",
-                    if hour > 0 { "+" } else { "-" },
-                    hour.abs()
-                )
-            }
-        })
-        .collect()
-}
-
-/// Writes the person asking's display-only preferences. Nobody touches
-/// anybody else here: the id comes from the session, never from the form.
-/// Name and address are im's to vouch and are not written here at all.
 #[route(POST "/api/save_profile")]
 async fn save_profile(
     cx: &Cx,
@@ -683,9 +657,6 @@ async fn save_profile(
         Ok(user) => user,
         Err(refusal) => return Ok(saved_or_refused("save_profile", Some(refusal))),
     };
-    if !zone_options().contains(&input.timezone) {
-        return Ok(saved_or_refused("save_profile", Some(Refusal::BadZone)));
-    }
     if !THEME_OPTIONS.contains(&input.theme.as_str()) {
         return Ok(saved_or_refused("save_profile", Some(Refusal::BadTheme)));
     }
@@ -699,7 +670,7 @@ async fn save_profile(
     let refusal = match store
         .set_preferences(
             &user.id,
-            &input.timezone,
+            &user.timezone,
             &input.theme,
             &input.language,
             &input.ui,
@@ -1326,14 +1297,6 @@ async fn settings_page(cx: &Cx) -> Result {
                         <p class="panel-lede">(t(lang, Key::IdentityFromIm))</p>
                     </div>
                     <form method="post" action="/api/save_profile" class="panel-body">
-                        <label class="field">
-                            <span class="field-label">(t(lang, Key::TimezoneLabel))</span>
-                            <select class="field-input" name="timezone">
-                                for zone in zone_options() {
-                                    <option value=(zone.clone()) selected=(zone == user.timezone)>(zone)</option>
-                                }
-                            </select>
-                        </label>
                         <label class="field">
                             <span class="field-label">(t(lang, Key::ThemeLabel))</span>
                             <select class="field-input" name="theme">

@@ -11,7 +11,7 @@ repository = "https://github.com/DizeyLab/iz"
 [workspace.dependencies]
 iz-core = { path = "crates/iz-core", default-features = false }
 iz-client = { path = "crates/iz-client" }
-im-client = { git = "https://github.com/DizeyLab/im", rev = "f7b2081", default-features = false }
+im-client = { git = "https://github.com/DizeyLab/im", rev = "509d0e7", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.20"

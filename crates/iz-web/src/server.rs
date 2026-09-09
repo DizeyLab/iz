@@ -349,7 +349,6 @@ pub enum Refusal {
     /// and days.
     BadPolicy,
     /// The timezone field was not one of the offsets the form offers.
-    BadZone,
     /// The theme field was not one of the values the form offers.
     BadTheme,
     /// The ui field was not one of the values the form offers.
@@ -426,7 +425,6 @@ impl Refusal {
                 "A limit has to be at least 1 MB, and no wider than 500 MB per file.".to_string()
             }
             Refusal::BadPolicy => "A security number is out of range.".to_string(),
-            Refusal::BadZone => "That is not a timezone.".to_string(),
             Refusal::BadTheme => "That is not a theme.".to_string(),
             Refusal::BadUi => "That is not an interface.".to_string(),
             Refusal::BadLanguage => "That is not a language.".to_string(),
@@ -494,7 +492,6 @@ impl Refusal {
                 "Limit en az 1 MB, dosya başına en çok 500 MB olabilir.".to_string()
             }
             Refusal::BadPolicy => "Güvenlik sayısı aralığın dışında.".to_string(),
-            Refusal::BadZone => "Bu bir saat dilimi değil.".to_string(),
             Refusal::BadTheme => "Bu bir tema değil.".to_string(),
             Refusal::BadUi => "Bu bir arayüz değil.".to_string(),
             Refusal::BadLanguage => "Bu bir dil değil.".to_string(),
@@ -527,7 +524,6 @@ impl Refusal {
             "empty-name" => Refusal::EmptyName,
             "bad-limit" => Refusal::BadLimit,
             "bad-policy" => Refusal::BadPolicy,
-            "bad-zone" => Refusal::BadZone,
             "bad-theme" => Refusal::BadTheme,
             "bad-ui" => Refusal::BadUi,
             "bad-language" => Refusal::BadLanguage,
@@ -575,7 +571,6 @@ impl Refusal {
             Refusal::EmptyName => "empty-name",
             Refusal::BadLimit => "bad-limit",
             Refusal::BadPolicy => "bad-policy",
-            Refusal::BadZone => "bad-zone",
             Refusal::BadTheme => "bad-theme",
             Refusal::BadUi => "bad-ui",
             Refusal::BadLanguage => "bad-language",
@@ -927,7 +922,6 @@ mod refusal_message_tests {
             Refusal::FileTypeNotAllowed,
             Refusal::BadDeadline,
             Refusal::BadClock,
-            Refusal::BadZone,
             Refusal::BadTheme,
             Refusal::BadLanguage,
             Refusal::BadEmail,

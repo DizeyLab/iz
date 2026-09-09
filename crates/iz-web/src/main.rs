@@ -437,6 +437,7 @@ async fn apply_member(
             &member.name,
             member.admin,
             member.photo_version,
+            &member.timezone,
         )
         .await
     {

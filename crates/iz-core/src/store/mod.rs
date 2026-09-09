@@ -789,8 +789,9 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// gets a row born linked — assignable, mailable and avatar-able before
     /// their first visit. An unclaimed row with a matching address is
     /// claimed (sub stamped, id/role/preferences/history kept), a known row
-    /// follows the provider's address, name, admin flag and photo version,
-    /// and a row that already agrees is left alone. Unlike
+    /// follows the provider's address, name, admin flag, photo version and
+    /// timezone — the provider owns the clock now — and a row that already
+    /// agrees is left alone. Unlike
     /// [`Store::provision_user`] this is not a sign-in: `last_signed_in_at`
     /// is never stamped, and an empty database grows no workspace (the first
     /// sign-in builds it; the next beat mirrors everyone). The admin flag
@@ -803,6 +804,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
         display_name: &str,
         im_admin: bool,
         photo_version: u64,
+        timezone: &str,
     ) -> Result<MemberSync>;
 
     async fn user(&self, id: &str) -> Result<Option<User>>;
