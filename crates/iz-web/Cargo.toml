@@ -25,6 +25,18 @@ iz-core = { workspace = true, features = ["server"] }
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
+# Talks to the family's Files service for attachment storage: the machine
+# API (multipart push, raw fetch, hard delete) behind iz's `[storage.in]`
+# token. rustls, not OpenSSL, for the same reason the mailer is.
+reqwest = { version = "0.13.4", default-features = false, features = [
+  "rustls",
+  "json",
+  "multipart",
+] }
+# Mints the external id every pushed attachment carries: in's service
+# routes are keyed by it, so it is minted here, before the push, not by
+# the store.
+ulid = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true }
 async-trait = "0.1.92"

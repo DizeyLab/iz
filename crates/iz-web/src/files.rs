@@ -15,9 +15,12 @@ use topcoat::router::{
 };
 
 use iz_core::store::sniff::sniff;
-use iz_core::store::{NewAttachment, Store, User};
+use iz_core::store::{
+    NewAttachment, NewRemoteAttachment, AttachmentWhere, StorageBackend, Store, User,
+};
 
 use crate::server::{Refusal, store, require_user};
+use ulid::Ulid;
 
 path_param!(id);
 
@@ -218,6 +221,16 @@ fn not_found() -> (StatusCode, HeaderMap, Vec<u8>) {
     (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new())
 }
 
+/// The 503 a stored attachment serves when the Files service cannot be
+/// reached — one plain line, and never the 404, because the row exists.
+fn service_unavailable() -> (StatusCode, HeaderMap, Vec<u8>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        HeaderMap::new(),
+        b"the Files service is unreachable\n".to_vec(),
+    )
+}
+
 /// A single-range `Range: bytes=...` request resolved against `total` bytes,
 /// as `(start, end)` inclusive. `None` for anything this does not parse as
 /// exactly one `bytes=` range (a multi-range header included) — the caller
@@ -376,23 +389,47 @@ async fn upload(
         None => None,
     };
 
-    let mut added: Result<(), iz_core::store::StoreError> = Ok(());
+    // Which surface keeps the bytes is decided per request, after the
+    // validation chain above — that chain (role, task, extension, streamed
+    // size, sniff, label) is identical in both modes, because a file iz
+    // would refuse on its own disk it refuses in the family's storage too.
+    let backend = match store.storage_backend().await {
+        Ok(backend) => backend,
+        Err(_) => return Ok(back_to(&task_id, Some(Refusal::Unavailable))),
+    };
+    let mut added: Result<(), Refusal> = Ok(());
     for (file_name, bytes) in files {
         let label = label_of(&file_name);
         let mime_type = sniff(&bytes);
 
-        added = store
-            .add_attachment(NewAttachment {
-                task_id: &task_id,
-                comment_id: comment_id.as_deref(),
-                file_name: &label,
-                mime_type,
-                bytes,
-                uploaded_by: &user.id,
-                at: OffsetDateTime::now_utc(),
-            })
-            .await
-            .map(|_| ());
+        added = match backend {
+            StorageBackend::Local => store
+                .add_attachment(NewAttachment {
+                    task_id: &task_id,
+                    comment_id: comment_id.as_deref(),
+                    file_name: &label,
+                    mime_type,
+                    bytes,
+                    uploaded_by: &user.id,
+                    at: OffsetDateTime::now_utc(),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|_| Refusal::NotFound),
+            StorageBackend::In => {
+                push_to_in(
+                    cx,
+                    store.as_ref(),
+                    &task_id,
+                    comment_id.as_deref(),
+                    &label,
+                    mime_type,
+                    bytes,
+                    &user.id,
+                )
+                .await
+            }
+        };
 
         if added.is_ok() && comment_id.is_none() {
             let _ = store
@@ -410,8 +447,61 @@ async fn upload(
 
     Ok(match added {
         Ok(_) => back_to(&task_id, None),
-        Err(_) => back_to(&task_id, Some(Refusal::NotFound)),
+        Err(refusal) => back_to(&task_id, Some(refusal)),
     })
+}
+
+/// The In-mode half of the upload: the bytes go out under an id minted
+/// here, and only when in says they landed does the row exist. Synchronous
+/// passthrough on purpose — no upload queue — so a service that is not
+/// there is a refusal the uploader can act on now. On the rare failure
+/// after the push landed (the task gone mid-request, say) the push is
+/// taken back best-effort; a leaked remote file is the accepted residual
+/// if that take-back also fails.
+async fn push_to_in(
+    cx: &Cx,
+    store: &dyn Store,
+    task_id: &str,
+    comment_id: Option<&str>,
+    label: &str,
+    mime_type: &str,
+    bytes: Vec<u8>,
+    uploader: &str,
+) -> Result<(), Refusal> {
+    let Some((_, url)) = crate::storage::in_of(store).await else {
+        return Err(Refusal::StorageNotListed);
+    };
+    let external_id = Ulid::new().to_string();
+    let size = bytes.len() as u64;
+    let client = crate::storage::client(cx);
+    if let Err(problem) = client
+        .put(&url, &external_id, label, bytes, mime_type)
+        .await
+    {
+        eprintln!("storage push: {problem:?}");
+        return Err(match problem {
+            crate::storage::StorageProblem::Quota => Refusal::StorageQuota,
+            _ => Refusal::StorageUnavailable,
+        });
+    }
+    if let Err(problem) = store
+        .add_remote_attachment(NewRemoteAttachment {
+            id: external_id.clone(),
+            task_id,
+            comment_id,
+            file_name: label,
+            mime_type,
+            size_bytes: size,
+            uploaded_by: uploader,
+            at: OffsetDateTime::now_utc(),
+        })
+        .await
+    {
+        eprintln!("storage row after push: {problem}");
+        let _ = client.delete(&url, &external_id).await;
+        return Err(Refusal::NotFound);
+    }
+    Ok(())
 }
 
 /// Serves one attachment's bytes, or the same not-found a stranger to the
@@ -433,8 +523,27 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
     if task_of(store.as_ref(), &user, &row.task_id).await.is_err() {
         return Ok(not_found());
     }
-    let Ok(Some(bytes)) = store.attachment_bytes(id).await else {
-        return Ok(not_found());
+    // A stored row's bytes are not on this disk: they come back through
+    // the Files service, and an unreachable service is a 503 — never the
+    // not-found a stranger sees, because the row exists and this caller
+    // has already cleared its task. A local row reads exactly as before.
+    let bytes = match row.remote {
+        AttachmentWhere::Local => match store.attachment_bytes(id).await {
+            Ok(Some(bytes)) => bytes,
+            _ => return Ok(not_found()),
+        },
+        AttachmentWhere::Stored => {
+            let Some((_, url)) = crate::storage::in_of(store.as_ref()).await else {
+                return Ok(service_unavailable());
+            };
+            match crate::storage::client(cx).fetch(&url, id).await {
+                Ok(bytes) => bytes,
+                Err(problem) => {
+                    eprintln!("storage fetch: {problem:?}");
+                    return Ok(service_unavailable());
+                }
+            }
+        }
     };
 
     let forced_download = query_params::<DownloadQuery>(cx)?.dl.is_some();

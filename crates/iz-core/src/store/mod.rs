@@ -112,6 +112,80 @@ pub struct Attachment {
     pub size_bytes: u64,
     pub uploaded_by: String,
     pub uploaded_at: OffsetDateTime,
+    /// Where the bytes live. `Stored` rows name no file on this machine: the
+    /// bytes sit with the family's Files service, under this very id.
+    pub remote: AttachmentWhere,
+}
+
+/// Where one attachment's bytes are. Serialized lowercase, so a page that
+/// carries the list sees the same words the column stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentWhere {
+    /// Under `<storage>/attachments/<id>` on this machine.
+    Local,
+    /// With the Files service, under this row's own id.
+    Stored,
+}
+
+impl AttachmentWhere {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttachmentWhere::Local => "local",
+            AttachmentWhere::Stored => "stored",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "local" => Some(AttachmentWhere::Local),
+            "stored" => Some(AttachmentWhere::Stored),
+            _ => None,
+        }
+    }
+}
+
+/// Which surface keeps the workspace's attachment bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    /// This machine's own storage tree, as it has always been.
+    Local,
+    /// The family's Files service, through the service key iz was minted.
+    In,
+}
+
+impl StorageBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageBackend::Local => "local",
+            StorageBackend::In => "in",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "local" => Some(StorageBackend::Local),
+            "in" => Some(StorageBackend::In),
+            _ => None,
+        }
+    }
+}
+
+/// A file already on the Files service, waiting for its row: the bytes went
+/// out under `id` before this was written, so the id is passed in rather
+/// than minted here — a row born pointing at bytes that were never pushed
+/// would serve nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewRemoteAttachment<'a> {
+    pub id: String,
+    pub task_id: &'a str,
+    pub comment_id: Option<&'a str>,
+    pub file_name: &'a str,
+    pub mime_type: &'a str,
+    pub size_bytes: u64,
+    pub uploaded_by: &'a str,
+    pub at: OffsetDateTime,
 }
 
 /// A file on its way into the store, bytes and all: the row goes to the
@@ -931,6 +1005,42 @@ pub trait Store: BoardReads + DetailReads + 'static {
 
     /// Takes a file away for good. `false` when there was no such row.
     async fn delete_attachment(&self, id: &str) -> Result<bool>;
+    // -- attachment storage backend -----------------------------------------
+
+    /// Writes which surface keeps the attachment bytes: this machine's own
+    /// tree, or the family's Files service. One save, one announcement —
+    /// the settings surfaces that show the choice re-read when it changes.
+    async fn set_storage_backend(&self, backend: StorageBackend) -> Result<()>;
+
+    /// The surface currently keeping the bytes. `Local` when the key was
+    /// never written — the default is the caller's, and the caller's
+    /// default is the machine, exactly as before this existed.
+    async fn storage_backend(&self) -> Result<StorageBackend>;
+
+    /// Writes the row for a file whose bytes were already pushed to the
+    /// Files service under `new.id`. No local file is touched: the row is
+    /// born stored, and nothing here can fail the bytes that are already
+    /// out.
+    async fn add_remote_attachment(&self, new: NewRemoteAttachment<'_>) -> Result<String>;
+
+    /// The rows still keeping their bytes on this machine, oldest first —
+    /// the migration drain's pick, and its progress meter.
+    async fn local_attachments(&self, limit: u64) -> Result<Vec<Attachment>>;
+
+    /// Marks a row stored and takes its local file with it — one call, so a
+    /// row can never be seen stored beside a file that is still there.
+    /// `false` when there was no such row.
+    async fn mark_attachment_stored(&self, id: &str) -> Result<bool>;
+
+    /// How many rows still keep their bytes on this machine.
+    async fn local_attachment_count(&self) -> Result<u64>;
+
+    /// Says, on the live channel, that the storage surface moved, without a
+    /// row changing. The migration's "nothing left to move" moment is not a
+    /// write — the last row's own write announced itself — but the card
+    /// watching the drain owes its reader one more refresh when the counter
+    /// it shows is gone.
+    async fn announce_storage(&self) -> Result<()>;
 
     /// Writes the title, description, deadline and clock the detail screen
     /// saved, and records one activity line per field that actually changed.

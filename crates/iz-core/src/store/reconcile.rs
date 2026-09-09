@@ -476,16 +476,24 @@ fn build_maps(
         // `bytes` is deliberately unmapped: the file's contents live under
         // the storage directory now, and `extract_blobs` wrote each one
         // there before this copy ran. The row keeps only the metadata.
-        columns: old_cols(&[
-            "id",
-            "task_id",
-            "comment_id",
-            "file_name",
-            "mime_type",
-            "size_bytes",
-            "uploaded_by",
-            "created_at",
-        ]),
+        columns: vec![
+            ("id", "old.id".into()),
+            ("task_id", "old.task_id".into()),
+            ("comment_id", "old.comment_id".into()),
+            ("file_name", "old.file_name".into()),
+            ("mime_type", "old.mime_type".into()),
+            ("size_bytes", "old.size_bytes".into()),
+            ("uploaded_by", "old.uploaded_by".into()),
+            ("created_at", "old.created_at".into()),
+            (
+                // Remote storage is new with this schema: every carried row
+                // kept its bytes on this machine, so every row arrives local
+                // — the schema's own default, said out loud here because the
+                // map is explicit on purpose.
+                "remote_state",
+                "'local'".to_string(),
+            ),
+        ],
     });
     maps.push(TableMap {
         name: "transition",

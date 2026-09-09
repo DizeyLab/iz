@@ -37,6 +37,11 @@ pub fn config(cx: &Cx) -> iz_core::Config {
 /// value is a JSON array of `{key, name, url}` — exactly what im's
 /// `/family` served.
 pub const FAMILY_KEY: &str = "family";
+/// The app-level `setting` key the storage mode form writes: which surface
+/// keeps the attachment bytes, `"local"` or `"in"`. The store's
+/// `set_storage_backend` owns the write and the announcement; the constant
+/// is named here beside `FAMILY_KEY` because tests read the row directly.
+pub const STORAGE_BACKEND_KEY: &str = "storage_backend";
 
 /// The app-level `setting` key the public-address field on Settings
 /// writes: where a sign-out that started here sends the browser. Saving
@@ -410,6 +415,17 @@ pub enum Refusal {
     NoSuchMember,
     /// The address typed into the add-member form already has a row here.
     AlreadyMember,
+    /// in refused the push: the bytes iz holds have spent the limit im set.
+    StorageQuota,
+    /// Storage through the Files service was asked for while `[storage.in]`
+    /// holds no token — there is no key to speak with.
+    StorageNotConfigured,
+    /// The Files service is not in the family mirror, so there is no URL to
+    /// push to. im's panel puts it there; iz does not guess.
+    StorageNotListed,
+    /// The Files service did not answer — down, mid-deploy, or the wire
+    /// between. An upload is not queued for later; it is refused now.
+    StorageUnavailable,
     Unavailable,
 }
 
@@ -454,6 +470,10 @@ impl Refusal {
             Refusal::NotFound => "No such task.".to_string(),
             Refusal::NoSuchMember => "No such member.".to_string(),
             Refusal::AlreadyMember => "Already a member.".to_string(),
+            Refusal::StorageNotConfigured => "The Files service has no key.".to_string(),
+            Refusal::StorageNotListed => "The Files service is not in the family.".to_string(),
+            Refusal::StorageUnavailable => "The Files service is unreachable.".to_string(),
+            Refusal::StorageQuota => "The Files service is full.".to_string(),
             Refusal::Unavailable => "Something went wrong.".to_string(),
         }
     }
@@ -487,6 +507,10 @@ impl Refusal {
             Refusal::NotFound => "Böyle bir görev yok.".to_string(),
             Refusal::NoSuchMember => "Böyle bir üye yok.".to_string(),
             Refusal::AlreadyMember => "Zaten üye.".to_string(),
+            Refusal::StorageNotConfigured => "Dosyalar hizmetinin anahtarı yok.".to_string(),
+            Refusal::StorageNotListed => "Dosyalar hizmeti ailede değil.".to_string(),
+            Refusal::StorageUnavailable => "Dosyalar hizmetine erişilemiyor.".to_string(),
+            Refusal::StorageQuota => "Dosyalar hizmeti dolu.".to_string(),
             Refusal::Unavailable => "Bir şeyler ters gitti.".to_string(),
             Refusal::BadLimit => {
                 "Limit en az 1 MB, dosya başına en çok 500 MB olabilir.".to_string()
@@ -552,6 +576,10 @@ impl Refusal {
             "not-found" => Refusal::NotFound,
             "no-such-member" => Refusal::NoSuchMember,
             "already-member" => Refusal::AlreadyMember,
+            "storage-quota" => Refusal::StorageQuota,
+            "storage-not-configured" => Refusal::StorageNotConfigured,
+            "storage-not-listed" => Refusal::StorageNotListed,
+            "storage-unavailable" => Refusal::StorageUnavailable,
             "unavailable" => Refusal::Unavailable,
             _ => return None,
         })
@@ -596,6 +624,10 @@ impl Refusal {
             Refusal::NotFound => "not-found",
             Refusal::NoSuchMember => "no-such-member",
             Refusal::AlreadyMember => "already-member",
+            Refusal::StorageNotConfigured => "storage-not-configured",
+            Refusal::StorageNotListed => "storage-not-listed",
+            Refusal::StorageUnavailable => "storage-unavailable",
+            Refusal::StorageQuota => "storage-quota",
             Refusal::Unavailable => "unavailable",
         }
     }

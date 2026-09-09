@@ -15,11 +15,11 @@ use ulid::Ulid;
 
 use super::secret;
 use super::{
-    ActivityEvent, ActivityFilter, ActivityLine, Attachment, Audience, ClaimedSend, CommentWritten,
-    Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision, MailOutcome, MailRule,
-    MailSend, MemberSync, NewAttachment, NewSender, NewTask, Recipient, Result, SendKind,
-    SendState, SenderCheck, SenderTest, Store, StoreError, Tag, TaskCreated, Trigger, User,
-    UserStats, Workspace,
+    ActivityEvent, ActivityFilter, ActivityLine, Attachment, AttachmentWhere, Audience,
+    ClaimedSend, CommentWritten, Deletion, Dir, Event, FeedCursor, FeedPage, Freeing, MailDecision,
+    MailOutcome, MailRule, MailSend, MemberSync, NewAttachment, NewRemoteAttachment, NewSender,
+    NewTask, Recipient, Result, SendKind, SendState, SenderCheck, SenderTest, StorageBackend,
+    Store, StoreError, Tag, TaskCreated, Trigger, User, UserStats, Workspace,
 };
 use super::{ReconcileOptions, reconcile, schema, sniff};
 use crate::Role;
@@ -392,7 +392,10 @@ impl TursoStore {
         // text column, no file reads, and the common case is done here.
         let mut rows = conn
             .query(
-                &format!("SELECT COUNT(*) FROM attachment WHERE mime_type IN ({marks})"),
+                &format!(
+                    "SELECT COUNT(*) FROM attachment \
+                     WHERE mime_type IN ({marks}) AND remote_state = 'local'"
+                ),
                 params_from_iter(buckets.iter().copied()),
             )
             .await
@@ -408,7 +411,8 @@ impl TursoStore {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT id, mime_type FROM attachment WHERE mime_type IN ({marks})",
+                    "SELECT id, mime_type FROM attachment \
+                     WHERE mime_type IN ({marks}) AND remote_state = 'local'",
                     marks = marks,
                 ),
                 params_from_iter(buckets.iter().copied()),
@@ -1232,6 +1236,7 @@ fn opt_stamp(row: &Row, idx: usize) -> Result<Option<OffsetDateTime>> {
 
 /// One attachment row, in the column order every query above selects.
 fn attachment_row(row: &Row) -> Result<Attachment> {
+    let remote = text(row, 8)?;
     Ok(Attachment {
         id: text(row, 0)?,
         task_id: text(row, 1)?,
@@ -1241,9 +1246,13 @@ fn attachment_row(row: &Row) -> Result<Attachment> {
         size_bytes: row.get::<i64>(5).map_err(backend)?.max(0) as u64,
         uploaded_by: text(row, 6)?,
         uploaded_at: parse_stamp(&text(row, 7)?)?,
+        remote: AttachmentWhere::parse(&remote).ok_or_else(|| {
+            StoreError::Corrupt(format!(
+                "attachment wears an unknown remote state {remote:?}"
+            ))
+        })?,
     })
 }
-
 fn text(row: &Row, idx: usize) -> Result<String> {
     row.get::<String>(idx).map_err(backend)
 }
@@ -2848,7 +2857,7 @@ impl Store for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
-                 uploaded_by, created_at FROM attachment \
+                 uploaded_by, created_at, remote_state FROM attachment \
                  WHERE task_id = ?1 ORDER BY created_at, rowid",
                 params![task_id],
             )
@@ -2866,7 +2875,7 @@ impl Store for TursoStore {
         let mut rows = conn
             .query(
                 "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
-                 uploaded_by, created_at FROM attachment WHERE id = ?1",
+                 uploaded_by, created_at, remote_state FROM attachment WHERE id = ?1",
                 params![id],
             )
             .await
@@ -2923,6 +2932,127 @@ impl Store for TursoStore {
             }
         }
         Ok(gone > 0)
+    }
+
+    async fn set_storage_backend(&self, which: StorageBackend) -> Result<()> {
+        // The key is also named by `iz-web` (`STORAGE_BACKEND_KEY`), which
+        // reads the row directly only in tests; the trait is the real door.
+        const KEY: &str = "storage_backend";
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO setting (key, value) VALUES (?1, ?2) \
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![KEY, which.as_str()],
+        )
+        .await
+        .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Settings]);
+        Ok(())
+    }
+
+    async fn storage_backend(&self) -> Result<StorageBackend> {
+        Ok(self
+            .get_setting("storage_backend")
+            .await?
+            .and_then(|raw| StorageBackend::parse(&raw))
+            .unwrap_or(StorageBackend::Local))
+    }
+
+    async fn add_remote_attachment(&self, new: NewRemoteAttachment<'_>) -> Result<String> {
+        // The bytes are already on the Files service under `new.id`; the row
+        // is the only fact to write, born stored. No file lands here, so a
+        // failure here costs a row, never bytes.
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO attachment (id, task_id, comment_id, file_name, mime_type, \
+                 size_bytes, uploaded_by, created_at, remote_state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'stored')",
+            params![
+                new.id.clone(),
+                new.task_id,
+                new.comment_id,
+                new.file_name,
+                new.mime_type,
+                new.size_bytes as i64,
+                new.uploaded_by,
+                stamp(new.at)?
+            ],
+        )
+        .await
+        .map_err(backend)?;
+        drop(conn);
+        self.announce([Topic::Task(new.task_id.to_string())]);
+        Ok(new.id)
+    }
+
+    async fn local_attachments(&self, limit: u64) -> Result<Vec<Attachment>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT id, task_id, comment_id, file_name, mime_type, size_bytes, \
+                 uploaded_by, created_at, remote_state FROM attachment \
+                 WHERE remote_state = 'local' ORDER BY created_at, rowid LIMIT ?1",
+                params![limit as i64],
+            )
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(backend)? {
+            out.push(attachment_row(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn mark_attachment_stored(&self, id: &str) -> Result<bool> {
+        // Which task gained a stored file has to be read before the row
+        // moves, the way `delete_attachment` reads its owner: after the
+        // write there is nothing left to ask.
+        let owner = self
+            .one_row("SELECT task_id FROM attachment WHERE id = ?1", params![id])
+            .await?
+            .map(|row| row.get::<String>(0).map_err(backend))
+            .transpose()?;
+        let conn = self.conn.lock().await;
+        let moved = conn
+            .execute(
+                "UPDATE attachment SET remote_state = 'stored' WHERE id = ?1",
+                params![id],
+            )
+            .await
+            .map_err(backend)?;
+        drop(conn);
+        if moved > 0 {
+            // The row says stored, so the file must go — one call, so no
+            // reader between the two ever sees stored beside a file that is
+            // still there. Best-effort: a file that survives the unlink is
+            // orphaned bytes the boot sweep collects.
+            let _ = std::fs::remove_file(attachment_file(&self.storage, id));
+            if let Some(task_id) = owner {
+                self.announce([Topic::Task(task_id)]);
+            }
+        }
+        Ok(moved > 0)
+    }
+
+    async fn local_attachment_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM attachment WHERE remote_state = 'local'",
+                (),
+            )
+            .await
+            .map_err(backend)?;
+        match rows.next().await.map_err(backend)? {
+            Some(row) => count_of(&row),
+            None => Ok(0),
+        }
+    }
+
+    async fn announce_storage(&self) -> Result<()> {
+        self.announce([Topic::Settings]);
+        Ok(())
     }
 
     async fn save_task(

@@ -21,7 +21,7 @@ use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
 use topcoat::view::view;
 
 use iz_core::detail::ActivityKind;
-use iz_core::store::{NewSender, SenderCheck, SenderTest, Store, StoreError, User};
+use iz_core::store::{NewSender, SenderCheck, SenderTest, StorageBackend, Store, StoreError, User};
 
 use crate::i18n::{Key, Lang, t};
 use crate::server::{PUBLIC_URL_KEY, Refusal, config, mail, require_admin, require_user, store};
@@ -142,7 +142,7 @@ fn redirect_to(query: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
 fn section_of_call(call: &str) -> &'static str {
     match call {
         "save_sender" | "send_test_mail" | "check_sender" => "outgoing",
-        "save_limits" => "limits",
+        "save_limits" | "save_storage" => "limits",
         "save_public_url" => "server",
         "set_role" | "set_disabled" | "add_member" => "members",
         "send_message" => "message",
@@ -303,6 +303,58 @@ async fn save_limits(
         }
     };
     Ok(saved_or_refused("save_limits", refusal))
+}
+
+#[derive(serde::Deserialize)]
+struct SaveStorageForm {
+    backend: String,
+}
+
+/// Switches which surface keeps attachment bytes. Admin-only, checked here
+/// — the Limits panel is an admin's, but the route is the gate.
+///
+/// `in` is refused unless the whole road is there: a key named by
+/// `[storage.in]`, and a family row pointing at the service. Anything
+/// less would strand new uploads at a service this workspace cannot
+/// reach; `local` always stands, because this disk is always here.
+#[route(POST "/api/save_storage")]
+async fn save_storage(
+    cx: &Cx,
+    Form(input): Form<SaveStorageForm>,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+    if let Err(refusal) = require_admin(cx).await {
+        return Ok(saved_or_refused("save_storage", Some(refusal)));
+    }
+    let backend = match input.backend.as_str() {
+        "local" => StorageBackend::Local,
+        "in" => {
+            if config(cx).storage_in.is_none() {
+                return Ok(saved_or_refused(
+                    "save_storage",
+                    Some(Refusal::StorageNotConfigured),
+                ));
+            }
+            let listed = crate::layout::family_of(cx)
+                .await
+                .iter()
+                .any(|service| service.key == "in");
+            if !listed {
+                return Ok(saved_or_refused(
+                    "save_storage",
+                    Some(Refusal::StorageNotListed),
+                ));
+            }
+            StorageBackend::In
+        }
+        _ => return Ok(saved_or_refused("save_storage", Some(Refusal::NotFound))),
+    };
+    match store(cx).set_storage_backend(backend).await {
+        Ok(()) => Ok(saved_or_refused("save_storage", None)),
+        Err(problem) => {
+            eprintln!("store error: {problem}");
+            Ok(saved_or_refused("save_storage", Some(Refusal::Unavailable)))
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -942,6 +994,65 @@ async fn connection_card(cx: &Cx, lang: Lang) -> Result {
     }
 }
 
+/// The Storage card's body: where the family says the Files service is,
+/// whether it answered the last beat, how full the account im limits
+/// stands, and — while rows still move — how far the drain has come.
+/// Read from the mirror and the beat's health only; the key
+/// `[storage.in]` holds is not read here, so no render path can carry it.
+async fn storage_card(
+    cx: &Cx,
+    lang: Lang,
+    listed: Option<(String, String)>,
+    snap: &crate::storage::StorageSnapshot,
+    backend: StorageBackend,
+) -> Result {
+    let service_line = match &listed {
+        Some((name, url)) => format!("{name} · {url}"),
+        None => t(lang, Key::StorageAbsent).to_string(),
+    };
+    let (state_word, state_class) = if snap.connected {
+        (t(lang, Key::ConnectionConnected), "connection-on")
+    } else {
+        (t(lang, Key::StorageUnreachable), "connection-wait")
+    };
+    let limit_line = match (snap.used, snap.quota) {
+        (Some(used), Some(quota)) => format!(
+            "{} of {}",
+            crate::storage::human_bytes(used),
+            crate::storage::human_bytes(quota)
+        ),
+        _ => "—".to_string(),
+    };
+    let problem_line = match &snap.problem_word {
+        Some(word) => format!(
+            "{} ago · {}",
+            crate::directory::age_text(snap.problem_age),
+            word
+        ),
+        None => t(lang, Key::ConnectionNever).to_string(),
+    };
+    view! {
+        cx =>
+        <dl class="connection-facts">
+            <dt>(t(lang, Key::StorageService))</dt>
+            <dd class="connection-fact">(service_line)</dd>
+            <dt>(t(lang, Key::StorageConnection))</dt>
+            <dd class="connection-fact">
+                <span class=(format!("connection-dot {state_class}"))></span>
+                (state_word)
+            </dd>
+            <dt>(t(lang, Key::StorageLimit))</dt>
+            <dd class="connection-fact">(limit_line)</dd>
+            if backend == StorageBackend::In && let Some((moved, total)) = snap.migrating {
+                <dt>(t(lang, Key::StorageMigration))</dt>
+                <dd class="connection-fact">(format!("{moved} of {total}"))</dd>
+            }
+            <dt>(t(lang, Key::StorageLastProblem))</dt>
+            <dd class="connection-fact">(problem_line)</dd>
+        </dl>
+    }
+}
+
 /// One row of the member list, as an admin may see it. Identity is im's to
 /// vouch — the row carries no password and no link token, only what the
 /// workspace itself decides: the role and whether the account is disabled.
@@ -1253,13 +1364,33 @@ async fn settings_page(cx: &Cx) -> Result {
     let (profile_refusal, profile_saved) = call_state(query, "save_profile");
     let (sender_refusal, sender_saved) = call_state(query, "save_sender");
     let (test_refusal, _) = call_state(query, "send_test_mail");
-    let (limits_refusal, limits_saved) = call_state(query, "save_limits");
-    let (server_refusal, server_saved) = call_state(query, "save_public_url");
-    let (role_refusal, _) = call_state(query, "set_role");
-    let (disabled_refusal, _) = call_state(query, "set_disabled");
-    let (add_refusal, add_saved) = call_state(query, "add_member");
-    let member_refusal = role_refusal.or(disabled_refusal).or(add_refusal);
-    let (message_refusal, message_saved) = call_state(query, "send_message");
+     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
+    let (storage_refusal, storage_saved) = call_state(query, "save_storage");
+     let (server_refusal, server_saved) = call_state(query, "save_public_url");
+     let (role_refusal, _) = call_state(query, "set_role");
+     let (disabled_refusal, _) = call_state(query, "set_disabled");
+     let (add_refusal, add_saved) = call_state(query, "add_member");
+     let member_refusal = role_refusal.or(disabled_refusal).or(add_refusal);
+     let (message_refusal, message_saved) = call_state(query, "send_message");
+
+    // What the Storage panel renders: the surface the workspace currently
+    // keeps its bytes on, where the family mirror says the Files service
+    // is, and the storage beat's latest stand. The key `[storage.in]`
+    // holds is only asked about (`is_some`), never read into the page.
+    let storage = if administers && section == Section::Limits {
+        let backend = store(cx)
+            .storage_backend()
+            .await
+            .unwrap_or(StorageBackend::Local);
+        let listed = crate::layout::family_of(cx)
+            .await
+            .into_iter()
+            .find(|service| service.key == "in")
+            .map(|service| (service.name, service.url));
+        Some((backend, listed, crate::storage::health(cx).snapshot()))
+    } else {
+        None
+    };
 
     view! {
         cx =>
@@ -1555,6 +1686,44 @@ async fn settings_page(cx: &Cx) -> Result {
                                 <button class="primary" type="submit">(t(lang, Key::Save))</button>
                             </div>
                         </form>
+                    </section>
+                }
+
+                // The storage toggle and its card, beside the limits it
+                // answers to: which surface keeps the bytes, and how the
+                // Files service stands this beat. The `in` option only
+                // exists when `[storage.in]` named a key — a deployment
+                // without one is offered no road it cannot take.
+                if section == Section::Limits && let Some((backend, listed, snap)) = storage {
+                    let local = backend == StorageBackend::Local;
+                    <section class="panel" id="storage" data-tick="">
+                        <div class="panel-head">
+                            <h2 class="panel-title">(t(lang, Key::StorageTitle))</h2>
+                            <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
+                        </div>
+                        <form method="post" action="/api/save_storage" class="panel-body">
+                            <label class="field">
+                                <span class="field-label">(t(lang, Key::StorageMode))</span>
+                                <select class="field-input" name="backend">
+                                    <option value="local" selected=(local)>(t(lang, Key::StorageModeLocal))</option>
+                                    if config(cx).storage_in.is_some() {
+                                        <option value="in" selected=(!local)>(t(lang, Key::StorageModeIn))</option>
+                                    }
+                                </select>
+                            </label>
+                            <div class="panel-foot">
+                                if let Some(refusal) = &storage_refusal {
+                                    <span class="field-error">(refusal.message_in(lang))</span>
+                                }
+                                if storage_saved {
+                                    <span class="field-note">(t(lang, Key::Saved))</span>
+                                }
+                                <button class="primary" type="submit">(t(lang, Key::Save))</button>
+                            </div>
+                        </form>
+                        <div class="panel-body">
+                            (storage_card(cx, lang, listed, &snap, backend).await?)
+                        </div>
                     </section>
                 }
 

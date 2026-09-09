@@ -239,7 +239,7 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lan
 /// background beat in `main.rs`. Absent, empty, unparseable or a store
 /// that will not answer all read the same: an empty list, which renders
 /// no switcher. A page must not fail for the want of a wordmark.
-async fn family_of(cx: &Cx) -> Vec<iz_client::FamilyService> {
+pub(crate) async fn family_of(cx: &Cx) -> Vec<iz_client::FamilyService> {
     match store(cx).get_setting(FAMILY_KEY).await {
         Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
         _ => Vec::new(),

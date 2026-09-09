@@ -273,6 +273,11 @@ struct App {
     store: Arc<dyn Store>,
     client: iz_client::Config,
     fake: FakeIm,
+    /// The storage peer's client and health, registered exactly as
+    /// `main.rs` registers them; `storage_cycle` tests run the beat by
+    /// hand over these.
+    storage_client: iz_web::storage::StorageClient,
+    storage_health: iz_web::storage::StorageHealth,
     /// What the Settings Connection card renders: poked by hand in tests
     /// the way the mirror task pokes it in the process.
     health: iz_web::directory::DirectoryHealth,
@@ -283,15 +288,23 @@ struct App {
 
 impl App {
     async fn build(mail: Mail) -> Self {
-        Self::build_with(mail, None, "").await
+        Self::build_with(mail, None, "", None).await
     }
-
+ 
     /// Like `build`, but with the knobs a configured deployment has: the
-    /// family list mirrored from im — passed as the raw JSON the `setting`
-    /// row holds, so a test can also feed it a body that will not parse —
-    /// and the configured `base_url`. Building them in is what lets the
-    /// switcher and the sign-out handoff be asserted over real HTTP.
-    async fn build_with(mail: Mail, family: Option<String>, base_url: &str) -> Self {
+     /// family list mirrored from im — passed as the raw JSON the `setting`
+     /// row holds, so a test can also feed it a body that will not parse —
+     /// and the configured `base_url`. Building them in is what lets the
+     /// switcher and the sign-out handoff be asserted over real HTTP.
+    ///
+    /// `storage_in` is the `[storage.in]` token, when the deployment
+    /// under test has one.
+    async fn build_with(
+        mail: Mail,
+        family: Option<String>,
+        base_url: &str,
+        storage_in: Option<String>,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("iz.db");
@@ -309,6 +322,8 @@ impl App {
                 .await
                 .unwrap();
         }
+        let storage_client = iz_web::storage::StorageClient::new(storage_in.clone());
+        let storage_health = iz_web::storage::StorageHealth::new();
         let fake = FakeIm::spawn().await;
         let config = iz_core::Config {
             database: db,
@@ -323,6 +338,8 @@ impl App {
                 redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
             },
             ignored: Vec::new(),
+            storage_in: storage_in
+                .map(|token| iz_core::config::InStorage { token }),
             defaulted: false,
         };
         // The fallback half of the chain, built exactly as `main.rs` builds
@@ -358,7 +375,9 @@ impl App {
             "iz-test",
             "s3cr3t",
         ))
-        .app_context(health.clone())
+         .app_context(health.clone())
+        .app_context(storage_client.clone())
+        .app_context(storage_health.clone())
         .app_context(iz_client::LogoutBack(Arc::new(
             iz_web::server::logout_back,
         )))
@@ -367,15 +386,17 @@ impl App {
         .app_context(iz_web::live::Shutdown(stopping))
         .app_context(mail)
         .build();
-        Self {
-            dir,
-            router,
-            store,
-            client,
-            fake,
-            health,
-            stop,
-        }
+         Self {
+             dir,
+             router,
+             store,
+             client,
+             fake,
+            storage_client,
+            storage_health,
+             health,
+             stop,
+         }
     }
 
     async fn open() -> Self {
@@ -414,6 +435,7 @@ impl App {
                 redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
             },
             ignored: Vec::new(),
+            storage_in: None,
             defaulted: false,
         };
         // The fallback half of the chain, built exactly as `main.rs` builds
@@ -428,6 +450,8 @@ impl App {
             cookie_key: [7u8; 32],
         };
         let health = iz_web::directory::DirectoryHealth::new();
+        let storage_client = iz_web::storage::StorageClient::new(None);
+        let storage_health = iz_web::storage::StorageHealth::new();
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let router = iz_client::mount(
             Router::builder()
@@ -449,7 +473,9 @@ impl App {
             "iz-test",
             "s3cr3t",
         ))
-        .app_context(health.clone())
+         .app_context(health.clone())
+        .app_context(storage_client.clone())
+        .app_context(storage_health.clone())
         .app_context(iz_client::LogoutBack(Arc::new(
             iz_web::server::logout_back,
         )))
@@ -458,17 +484,18 @@ impl App {
         .app_context(iz_web::live::Shutdown(stopping))
         .app_context(Mail::sending(engine))
         .build();
-        Self {
-            dir,
-            router,
-            store,
-            client,
-            fake,
-            health,
-            stop,
-        }
+         Self {
+             dir,
+             router,
+             store,
+             client,
+             fake,
+            storage_client,
+            storage_health,
+             health,
+             stop,
+         }
     }
-
     /// Mints a session cookie for an im identity, registering its claims on
     /// the fake — exactly what `/auth/callback` seals, without the browser
     /// dance. The local row is provisioned on the next request, the way a
@@ -9723,7 +9750,8 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
 
     // A configured `base_url` is what the fallback says when nothing is
     // stored — a deployment behind a proxy says its name once, in the file.
-    let configured = App::build_with(Mail::silent(), None, "https://board.example").await;
+    let configured =
+        App::build_with(Mail::silent(), None, "https://board.example", None).await;
     let raw = configured.get("/auth/logout", None).await;
     let expected = format!(
         "{}/logout?back={}",
@@ -9734,7 +9762,7 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
 
     // A stored public address wins over the configured chain, and it reads
     // per request: no restart between the save and the next sign-out.
-    let stored = App::build_with(Mail::silent(), None, "https://stale.example").await;
+    let stored = App::build_with(Mail::silent(), None, "https://stale.example", None).await;
     stored
         .store
         .set_setting(iz_web::server::PUBLIC_URL_KEY, "https://stored.example")
@@ -9760,7 +9788,7 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
         {\"key\":\"iz\",\"name\":\"Board\",\"url\":\"http://127.0.0.1:7654\"},\
         {\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}]"
         .to_string();
-    let app = App::build_with(Mail::silent(), Some(family), "").await;
+    let app = App::build_with(Mail::silent(), Some(family), "", None).await;
     let board_admin = admin(&app).await;
     let html = String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
     assert!(html.contains("wordmark-family"), "{html}");
@@ -9777,7 +9805,7 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
     // and a mirror that never arrived.
     let alone = "[{\"key\":\"iz\",\"name\":\"Board\",\"url\":\"http://127.0.0.1:7654\"}]";
     for broken in ["[".to_string(), "[]".to_string(), alone.to_string()] {
-        let app = App::build_with(Mail::silent(), Some(broken), "").await;
+        let app = App::build_with(Mail::silent(), Some(broken), "", None).await;
         let board_admin = admin(&app).await;
         let html =
             String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
@@ -9791,4 +9819,828 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
         !plain.contains("service-switcher"),
         "no mirror, no switcher: {plain}"
     );
+}
+
+// -- the Files service ------------------------------------------------------
+
+/// The Bearer key the storage tests name in `[storage.in]`: the fake in
+/// answers it and nothing else, so a call that arrives without it is a
+/// 401 the same way the real service answers an unknown key.
+const STORAGE_TOKEN: &str = "iz-storage-key";
+
+/// A fake in: the Files service's machine side over bare TCP, canned the
+/// way `iz_web::storage::StorageClient` speaks. Every `/api/service/*`
+/// call is recorded as `"<METHOD> <path>"` so a test can assert on the
+/// wire, not only on the rows; a push's file part is kept and served
+/// back by `GET /api/service/file/{id}`, so the fetch path reads the
+/// same bytes the push path wrote.
+struct FakeIn {
+    addr: std::net::SocketAddr,
+    calls: Arc<Mutex<Vec<String>>>,
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    refuse_quota: Arc<std::sync::atomic::AtomicBool>,
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeIn {
+    async fn spawn() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let refuse_quota = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log = calls.clone();
+        let store = files.clone();
+        let quota_flag = refuse_quota.clone();
+        let down_flag = down.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                if down_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let log = log.clone();
+                let store = store.clone();
+                let quota_flag = quota_flag.clone();
+                let socket_down = down_flag.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut socket = socket;
+                    let mut buf = vec![0u8; 8192];
+                    let mut req = Vec::new();
+                    // Same keep-alive loop as the fake im: closing after
+                    // every answer races the client's pool.
+                    loop {
+                        let body_start = loop {
+                            let Ok(n) = socket.read(&mut buf).await else {
+                                return;
+                            };
+                            if n == 0 {
+                                return;
+                            }
+                            req.extend_from_slice(&buf[..n]);
+                            if let Some(end) = headers_end(&req) {
+                                let head = String::from_utf8_lossy(&req[..end]).to_string();
+                                let len = content_length(&head);
+                                if req.len() >= end + len {
+                                    break end;
+                                }
+                            }
+                            if req.len() > 2_000_000 {
+                                return;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&req[..body_start]).to_string();
+                        // Down is per request, not per socket: a pooled
+                        // connection that was alive when the service went
+                        // down must stop answering too, the way the real
+                        // service's sockets die mid-conversation.
+                        if socket_down.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
+                        let first = head.lines().next().unwrap_or("").to_string();
+                        let len = content_length(&head);
+                        let body: Vec<u8> = req[body_start..body_start + len].to_vec();
+                        req.drain(..body_start + len);
+                        let (status, content_type, payload) =
+                            storage_answer(&log, &store, &quota_flag, &head, &first, &body);
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n",
+                            payload.len()
+                        );
+                        if socket.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        if socket.write_all(&payload).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            addr,
+            calls,
+            files,
+            refuse_quota,
+            down,
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// The wire, in order: one `"<METHOD> <path>"` per service call.
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().clone()
+    }
+
+    /// Whether a push under this id is being held by the service.
+    fn holds(&self, id: &str) -> bool {
+        self.files.lock().contains_key(id)
+    }
+
+    fn refuse_quota(&self) {
+        self.refuse_quota
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Stops answering — accepts and drops, which reads to the client as
+    /// the connection the storage ceilings are for.
+    fn set_down(&self) {
+        self.down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The fake in's one router: the probe is open, the machine side wants
+/// the Bearer key, and the four service routes answer the JSON shape the
+/// client parses. A push is kept under its `external_id` — pulled out of
+/// the multipart body by boundary, the way the real service's form
+/// parser would — so the fetch and delete routes have something real to
+/// work on.
+fn storage_answer(
+    log: &Arc<Mutex<Vec<String>>>,
+    files: &Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    refuse_quota: &Arc<std::sync::atomic::AtomicBool>,
+    head: &str,
+    request_line: &str,
+    body: &[u8],
+) -> (&'static str, String, Vec<u8>) {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    let path = target
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(target);
+    if method == "GET" && path == "/healthz" {
+        return ("200 OK", "text/plain".to_string(), b"ok".to_vec());
+    }
+    let authed = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("authorization")
+                && value.trim() == format!("Bearer {STORAGE_TOKEN}")
+        });
+    if !authed {
+        return (
+            "401 Unauthorized",
+            "application/json".to_string(),
+            br#"{"err":"Unauthorized"}"#.to_vec(),
+        );
+    }
+    log.lock().push(format!("{method} {path}"));
+    match (method, path) {
+        ("GET", "/api/service/status") => (
+            "200 OK",
+            "application/json".to_string(),
+            br#"{"ok":true,"quota_bytes":10737418240,"used_bytes":1073741824}"#.to_vec(),
+        ),
+        ("POST", "/api/service/files") => {
+            if refuse_quota.load(std::sync::atomic::Ordering::SeqCst) {
+                return (
+                    "200 OK",
+                    "application/json".to_string(),
+                    br#"{"err":"QuotaExceeded"}"#.to_vec(),
+                );
+            }
+            let Some(id) = multipart_field(body, head, "external_id") else {
+                return (
+                    "400 Bad Request",
+                    "application/json".to_string(),
+                    br#"{"err":"NoExternalId"}"#.to_vec(),
+                );
+            };
+            let bytes = multipart_file(body, head);
+            files.lock().insert(id.clone(), bytes);
+            let answer = format!("{{\"ok\":\"{id}\"}}");
+            ("200 OK", "application/json".to_string(), answer.into_bytes())
+        }
+        ("GET", path) => match path.strip_prefix("/api/service/file/") {
+            Some(id) if !id.is_empty() => match files.lock().get(id) {
+                Some(bytes) => (
+                    "200 OK",
+                    "application/octet-stream".to_string(),
+                    bytes.clone(),
+                ),
+                None => (
+                    "404 Not Found",
+                    "application/json".to_string(),
+                    br#"{"err":"NotFound"}"#.to_vec(),
+                ),
+            },
+            _ => (
+                "404 Not Found",
+                "application/json".to_string(),
+                br#"{"err":"NotFound"}"#.to_vec(),
+            ),
+        },
+        ("DELETE", path) => {
+            if let Some(id) = path.strip_prefix("/api/service/file/") {
+                files.lock().remove(id);
+            }
+            (
+                "200 OK",
+                "application/json".to_string(),
+                br#"{"ok":true}"#.to_vec(),
+            )
+        }
+        _ => (
+            "404 Not Found",
+            "text/plain".to_string(),
+            Vec::new(),
+        ),
+    }
+}
+/// One text field out of a multipart body, by `name`. The parts are read
+/// line-wise — a part's headers carry `name="..."`, its value rides the
+/// lines after them — which is enough for the two fields the client
+/// writes; the content-type check is the proof this is a multipart body
+/// at all.
+fn multipart_field(body: &[u8], head: &str, name: &str) -> Option<String> {
+    let multipart = head.lines().any(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("content-type: multipart/form-data")
+    });
+    if !multipart {
+        return None;
+    }
+    let marker = format!("name=\"{name}\"");
+    let mut in_part = false;
+    for part in body.split(|&b| b == b'\n') {
+        let text = String::from_utf8_lossy(part);
+        let line = text.trim_end_matches('\r');
+        if line.starts_with("--") {
+            in_part = false;
+            continue;
+        }
+        // The header line names the part; the value is the first line
+        // after the blank one that follows it.
+        if in_part {
+            if !line.is_empty() {
+                return Some(line.to_string());
+            }
+        } else if line.contains(&marker) && line.contains(':') {
+            in_part = true;
+        }
+    }
+    None
+}
+
+/// The file part's bytes out of a multipart body: everything between the
+/// `name="file"` part's blank line and the boundary that closes it.
+fn multipart_file(body: &[u8], head: &str) -> Vec<u8> {
+    let Some(boundary) = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(field, _)| field.trim().eq_ignore_ascii_case("content-type"))
+        .and_then(|(_, value)| value.split("boundary=").nth(1).map(str::trim))
+    else {
+        return Vec::new();
+    };
+    let marker = format!("--{boundary}");
+    let needle = b"name=\"file\"";
+    let Some(at) = body.windows(needle.len()).position(|w| w == needle) else {
+        return Vec::new();
+    };
+    let after = &body[at..];
+    let Some(start) = after.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Vec::new();
+    };
+    let bytes = &after[start + 4..];
+    let end = bytes
+        .windows(marker.len())
+        .position(|w| w == marker.as_bytes())
+        .unwrap_or(bytes.len());
+    bytes[..end]
+        .strip_suffix(b"\r\n")
+        .unwrap_or(&bytes[..end])
+        .to_vec()
+}
+
+/// The family mirror holding a Files row at `url`: the JSON the `setting`
+/// row keeps, exactly the shape the beat stores.
+fn family_with_in(url: &str) -> String {
+    format!(
+        "[{{\"key\":\"in\",\"name\":\"Files\",\"url\":\"{url}\"}},\
+         {{\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}}]"
+    )
+}
+
+/// An app whose deployment named a storage key, with a Files service in
+/// the family mirror to point at.
+async fn storage_app(fake: &FakeIn) -> App {
+    App::build_with(
+        Mail::silent(),
+        Some(family_with_in(&fake.url())),
+        "",
+        Some(STORAGE_TOKEN.to_string()),
+    )
+    .await
+}
+
+/// How many files sit in the storage tree's attachment directory: the
+/// honest count of what is still on this disk.
+fn local_file_count(app: &App) -> usize {
+    std::fs::read_dir(app.dir.join("storage").join("attachments"))
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn an_upload_in_in_mode_lands_on_the_service_and_serves_from_it() {
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Stored upload").await;
+
+    let saved = app
+        .post(
+            "/api/save_storage",
+            Some(&admin_cookie),
+            &[("backend", "in")],
+        )
+        .await;
+    assert_eq!(saved.status, StatusCode::SEE_OTHER, "{}", saved.body);
+    assert!(
+        saved
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_storage&section=limits"),
+        "{:?}",
+        saved.location
+    );
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("spec.png", "image/png", &png)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        answer.location.as_deref(),
+        Some(format!("/?task={task}&tab=files").as_str())
+    );
+    assert!(
+        fake.calls().iter().any(|call| call == "POST /api/service/files"),
+        "the push never happened: {:?}",
+        fake.calls()
+    );
+
+    let rows = app.store.attachments(&task).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].remote, iz_core::store::AttachmentWhere::Stored);
+    assert_eq!(local_file_count(&app), 0, "a local file was written anyway");
+    assert!(fake.holds(&rows[0].id));
+
+    let download = app
+        .get(&format!("/files/{}", rows[0].id), Some(&admin_cookie))
+        .await;
+    assert_eq!(download.status, StatusCode::OK);
+    assert_eq!(download.bytes, png);
+    assert_eq!(download.content_type.as_deref(), Some("image/png"));
+    assert!(
+        download
+            .disposition
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("inline;"),
+        "{:?}",
+        download.disposition
+    );
+    assert_eq!(
+        download.cache_control.as_deref(),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert!(
+        fake.calls()
+            .iter()
+            .any(|call| call.starts_with("GET /api/service/file/")),
+        "the fetch never happened: {:?}",
+        fake.calls()
+    );
+}
+
+/// A Files service that is not there is refused in the moment, on every
+/// leg: the upload says so, the download is a 503 rather than a
+/// not-found, and the delete leaves the row exactly where it was.
+#[tokio::test]
+async fn a_down_files_service_refuses_uploads_downloads_and_deletes() {
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Down service").await;
+    app.post(
+        "/api/save_storage",
+        Some(&admin_cookie),
+        &[("backend", "in")],
+    )
+    .await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("up.png", "image/png", &png)),
+    )
+    .await;
+    let rows = app.store.attachments(&task).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let stored = rows[0].id.clone();
+
+    fake.set_down();
+
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("down.png", "image/png", &png)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=storage-unavailable&on=upload_file"),
+        "{:?}",
+        answer.location
+    );
+    assert_eq!(app.store.attachments(&task).await.unwrap().len(), 1);
+
+    let download = app.get(&format!("/files/{stored}"), Some(&admin_cookie)).await;
+    assert_eq!(download.status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let delete = app
+        .post(
+            "/api/delete_file",
+            Some(&admin_cookie),
+            &[("file_id", &stored)],
+        )
+        .await;
+    assert_eq!(delete.status, StatusCode::SEE_OTHER);
+    assert!(
+        delete.body.contains("StorageUnavailable"),
+        "the delete did not refuse: {}",
+        delete.body
+    );
+    assert!(
+        app.store.attachment(&stored).await.unwrap().is_some(),
+        "the row went while the service was down"
+    );
+}
+
+/// Deleting a stored row takes the remote copy first and only then the
+/// row: the service sees the DELETE, its copy is gone, and the task's
+/// file list is empty.
+#[tokio::test]
+async fn deleting_a_stored_row_takes_the_remote_copy_first() {
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Remote delete").await;
+    app.post(
+        "/api/save_storage",
+        Some(&admin_cookie),
+        &[("backend", "in")],
+    )
+    .await;
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    app.post_multipart(
+        "/files",
+        Some(&admin_cookie),
+        &[("task_id", &task)],
+        Some(("gone.png", "image/png", &png)),
+    )
+    .await;
+    let rows = app.store.attachments(&task).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let stored = rows[0].id.clone();
+    assert!(fake.holds(&stored));
+
+    let answer = app
+        .post(
+            "/api/delete_file",
+            Some(&admin_cookie),
+            &[("file_id", &stored)],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER, "{}", answer.body);
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+    assert!(
+        fake.calls()
+            .iter()
+            .any(|call| call == &format!("DELETE /api/service/file/{stored}")),
+        "the remote copy was never taken: {:?}",
+        fake.calls()
+    );
+    assert!(!fake.holds(&stored));
+    assert!(
+        app.store.attachment(&stored).await.unwrap().is_none(),
+        "the row survived the delete"
+    );
+    assert!(app.store.attachments(&task).await.unwrap().is_empty());
+}
+
+/// The mode switch is an admin's, and `in` is only offered when the whole
+/// road is there: a key in the config and a family row naming the
+/// service. A member is refused; a keyless deployment is refused; a
+/// family without the service is refused; with both, the save lands.
+#[tokio::test]
+async fn save_storage_is_admin_only_and_refuses_a_road_that_is_not_there() {
+    // A member cannot switch the surface, on either value.
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+    let plain = member(&app, "memre@iz.sh", "Memre").await;
+    let answer = app
+        .post("/api/save_storage", Some(&plain), &[("backend", "local")])
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    // Settings routes carry the refusal on the redirect's query, not the
+    // body — the route has no hydrated caller to answer with a value.
+    assert_eq!(answer.body, "");
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=forbidden&on=save_storage&section=limits"),
+        "{:?}",
+        answer.location
+    );
+
+    // No `[storage.in]` token: `in` is not a road this deployment can
+    // take, no matter what the family says.
+    let keyless = App::build_with(
+        Mail::silent(),
+        Some(family_with_in(&fake.url())),
+        "",
+        None,
+    )
+    .await;
+    let keyless_admin = admin(&keyless).await;
+    let answer = keyless
+        .post(
+            "/api/save_storage",
+            Some(&keyless_admin),
+            &[("backend", "in")],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=storage-not-configured&on=save_storage"),
+        "{:?}",
+        answer.location
+    );
+    // The form never offered it either.
+    let html = String::from_utf8_lossy(
+        &keyless
+            .get("/settings?section=limits", Some(&keyless_admin))
+            .await
+            .bytes,
+    )
+    .to_string();
+    assert!(!html.contains("value=\"in\""), "{html}");
+
+    // A family with no Files row: there is no URL to push to.
+    let unlisted = App::build_with(
+        Mail::silent(),
+        Some(
+            "[{\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}]"
+                .to_string(),
+        ),
+        "",
+        Some(STORAGE_TOKEN.to_string()),
+    )
+    .await;
+    let unlisted_admin = admin(&unlisted).await;
+    let answer = unlisted
+        .post(
+            "/api/save_storage",
+            Some(&unlisted_admin),
+            &[("backend", "in")],
+        )
+        .await;
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=storage-not-listed&on=save_storage"),
+        "{:?}",
+        answer.location
+    );
+
+    // Both in place: the save lands, the store says so, and local stands
+    // as the way back.
+    let answer = app
+        .post(
+            "/api/save_storage",
+            Some(&admin_cookie),
+            &[("backend", "in")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("saved=save_storage&section=limits"),
+        "{:?}",
+        answer.location
+    );
+    assert_eq!(
+        app.store.storage_backend().await.unwrap(),
+        iz_core::store::StorageBackend::In
+    );
+    let answer = app
+        .post(
+            "/api/save_storage",
+            Some(&admin_cookie),
+            &[("backend", "local")],
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        app.store.storage_backend().await.unwrap(),
+        iz_core::store::StorageBackend::Local
+    );
+}
+
+/// The Storage card carries the beat's facts — the family's name for the
+/// service, the connection's stand, the limit im set, the drain's count,
+/// the last problem — and never the key the calls speak with.
+#[tokio::test]
+async fn the_storage_card_shows_the_beats_facts_without_the_key() {
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+
+    app.storage_health.seen(&fake.url(), "Files");
+    app.storage_health
+        .reachable(Some(1024 * 1024 * 1024), Some(10 * 1024 * 1024 * 1024));
+    let html = String::from_utf8_lossy(
+        &app
+            .get("/settings?section=limits", Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .to_string();
+    assert!(html.contains("id=\"storage\""), "{html}");
+    assert!(html.contains(&format!("Files · {}", fake.url())), "{html}");
+    assert!(html.contains("connection-on"), "{html}");
+    assert!(html.contains("Connected"), "{html}");
+    assert!(html.contains("1.0 GiB of 10.0 GiB"), "{html}");
+    assert!(html.contains("never"), "{html}");
+    assert!(!html.contains(STORAGE_TOKEN), "the key leaked: {html}");
+
+    // The drain's count and the last problem, once the beat has both.
+    app.post(
+        "/api/save_storage",
+        Some(&admin_cookie),
+        &[("backend", "in")],
+    )
+    .await;
+    app.storage_health.problem("quota");
+    app.storage_health.migrating(2, 5);
+    let html = String::from_utf8_lossy(
+        &app
+            .get("/settings?section=limits", Some(&admin_cookie))
+            .await
+            .bytes,
+    )
+    .to_string();
+    assert!(html.contains("2 of 5"), "{html}");
+    assert!(html.contains("quota"), "{html}");
+    assert!(html.contains("connection-wait"), "{html}");
+    assert!(html.contains("Unreachable"), "{html}");
+    assert!(!html.contains(STORAGE_TOKEN), "the key leaked: {html}");
+}
+
+/// One beat of the storage cycle, by hand: a workspace switched to in
+/// with rows still on this disk has them pushed, flipped to stored, and
+/// unlinked, and a service that has gone down since is a problem on the
+/// card rather than a stuck drain.
+#[tokio::test]
+async fn the_storage_beat_drains_local_rows_into_the_service() {
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Drained rows").await;
+
+    // Two rows on local disk, the way every row was before the switch.
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    for name in ["one.png", "two.png"] {
+        app.post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some((name, "image/png", &png)),
+        )
+        .await;
+    }
+    assert_eq!(local_file_count(&app), 2);
+    assert!(fake.calls().is_empty());
+
+    app.post(
+        "/api/save_storage",
+        Some(&admin_cookie),
+        &[("backend", "in")],
+    )
+    .await;
+    iz_web::storage::storage_cycle(&app.store, &app.storage_client, &app.storage_health).await;
+
+    let rows = app.store.attachments(&task).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.remote == iz_core::store::AttachmentWhere::Stored),
+        "not every row drained"
+    );
+    assert_eq!(local_file_count(&app), 0, "the local files survived the drain");
+    assert!(rows.iter().all(|row| fake.holds(&row.id)));
+    let snap = app.storage_health.snapshot();
+    assert!(snap.connected);
+    assert_eq!(snap.migrating, None);
+
+    // The service gone: the beat says so on the card and nothing moves —
+    // there is nothing left to move — while the rows stay serviceable
+    // from wherever the service comes back.
+    fake.set_down();
+    iz_web::storage::storage_cycle(&app.store, &app.storage_client, &app.storage_health).await;
+    let snap = app.storage_health.snapshot();
+    assert!(!snap.connected);
+    assert_eq!(snap.problem_word.as_deref(), Some("unreachable"));
+}
+
+/// A full service refuses the push with its own word, and the upload
+/// carries it: nothing is stored, on either side.
+#[tokio::test]
+async fn a_full_service_refuses_the_upload_with_its_own_word() {
+    let fake = FakeIn::spawn().await;
+    let app = storage_app(&fake).await;
+    let admin_cookie = admin(&app).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin_cookie, &column, "Full service").await;
+    app.post(
+        "/api/save_storage",
+        Some(&admin_cookie),
+        &[("backend", "in")],
+    )
+    .await;
+    fake.refuse_quota();
+
+    let png = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    let answer = app
+        .post_multipart(
+            "/files",
+            Some(&admin_cookie),
+            &[("task_id", &task)],
+            Some(("full.png", "image/png", &png)),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::SEE_OTHER);
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=storage-quota&on=upload_file"),
+        "{:?}",
+        answer.location
+    );
+    assert!(app.store.attachments(&task).await.unwrap().is_empty());
+    assert_eq!(local_file_count(&app), 0);
 }

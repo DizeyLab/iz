@@ -21,7 +21,7 @@ use iz_core::detail::{
     Comment, DeletionCost, DependencyEdge, TaskDetail, TaskFacts, moment_label_in,
     moment_label_with_seconds_in, parse_zone,
 };
-use iz_core::store::{Store, StoreError, User};
+use iz_core::store::{AttachmentWhere, Store, StoreError, User};
 use serde::{Deserialize, Serialize};
 use time::{Date, UtcOffset};
 use topcoat::Result;
@@ -974,7 +974,10 @@ async fn delete_task(cx: &Cx, Form(input): Form<TaskIdForm>) -> Redirect {
 /// [`delete_task`]'s soft one — an upload is not a fact worth an audit
 /// trail.
 /// Only the person who put it there, or an admin, may
-/// take it away.
+/// take it away. A row stored on the Files service takes its bytes from
+/// in first: the remote copy only goes when in says it went, so an
+/// unreachable service refuses the delete and the row stays, serviceable
+/// again the moment in returns.
 #[route(POST "/api/delete_file")]
 async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
     let user = match require_user(cx).await {
@@ -990,6 +993,16 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
     }
     if user.id != attachment.uploaded_by && !user.role.can_administer() {
         return redirect(cx, Some(Refusal::Forbidden));
+    }
+
+    if attachment.remote == AttachmentWhere::Stored {
+        let Some((_, url)) = crate::storage::in_of(store.as_ref()).await else {
+            return redirect(cx, Some(Refusal::StorageUnavailable));
+        };
+        if let Err(problem) = crate::storage::client(cx).delete(&url, &attachment.id).await {
+            eprintln!("storage delete: {problem:?}");
+            return redirect(cx, Some(Refusal::StorageUnavailable));
+        }
     }
 
     store.delete_attachment(&input.file_id).await?;

@@ -143,6 +143,16 @@ async fn main() {
         config.oidc.client_id.clone(),
         config.oidc.client_secret.clone(),
     );
+    // The family's Files service as a storage peer, beside the identity
+    // peer above: the client carries the key `[storage.in]` named (and
+    // when the deployment never configured one, the client still exists —
+    // every call then refuses before the wire), and the health beside it
+    // is what the Settings Storage card renders. The beat below keeps
+    // both current.
+    let storage_client = iz_web::storage::StorageClient::new(
+        config.storage_in.as_ref().map(|storage| storage.token.clone()),
+    );
+    let storage_health = iz_web::storage::StorageHealth::new();
     // The engine is always built, because a sender can appear at any moment:
     // an admin fills the panel in and the next sweep sends what was held. It
     // holds one connection pool, rebuilt only when the settings behind it
@@ -173,6 +183,16 @@ async fn main() {
         health.clone(),
     ));
     tokio::spawn(directory_stream(store.clone(), directory.clone(), health.clone()));
+    // The storage mirror's watchdog: follows the family to wherever in
+    // lives now, keeps the card's facts current, and — while the
+    // workspace's attachments live on in — drains the rows still on this
+    // disk. First pass runs right away, so a fresh enablement starts
+    // moving rows within the beat.
+    tokio::spawn(storage_beat(
+        store.clone(),
+        storage_client.clone(),
+        storage_health.clone(),
+    ));
     // Told when the process is stopping, so the live streams end instead of
     // being waited out. See `iz_web::live::Shutdown`.
     let (stop, stopping) = tokio::sync::watch::channel(false);
@@ -190,7 +210,9 @@ async fn main() {
     )
     .app_context(store.clone())
     .app_context(directory)
-    .app_context(health)
+    .app_context(health.clone())
+    .app_context(storage_client.clone())
+    .app_context(storage_health.clone())
     .app_context(iz_client::LogoutBack(Arc::new(iz_web::server::logout_back)))
     .app_context(config.clone())
     .app_context(iz_web::live::LiveWindow(std::time::Duration::from_secs(
@@ -502,6 +524,24 @@ async fn directory_stream(
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+    }
+}
+
+/// The storage beat: [`iz_web::storage::storage_cycle`] over and over,
+/// [`iz_web::storage::STORAGE_SECONDS`] apart. The cycle body is extracted
+/// the way `mirror_directory` is, so a test can run one beat by hand; this
+/// loop is only the alarm clock.
+async fn storage_beat(
+    store: Arc<dyn iz_core::store::Store>,
+    client: iz_web::storage::StorageClient,
+    health: iz_web::storage::StorageHealth,
+) {
+    loop {
+        iz_web::storage::storage_cycle(&store, &client, &health).await;
+        tokio::time::sleep(std::time::Duration::from_secs(
+            iz_web::storage::STORAGE_SECONDS,
+        ))
+        .await;
     }
 }
 

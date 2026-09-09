@@ -49,6 +49,13 @@ const DEVELOPMENT_DEFAULTS: &str = r#"# Where the one database file lives. One p
 database = "iz.db"
 # Where attachments live as files, created on boot.
 storage = "storage"
+# Attachments can live with the family's Files service instead of this
+# disk. Uncomment, fill in the service key minted for iz, and remove the
+# `storage` line above in the same breath — one key cannot be both a
+# path and a table, and a file that tries both is refused at boot.
+#[storage.in]
+#token = ""
+
 # The address the server listens on. Environment variables are ignored —
 # this is the only thing that decides where iz binds. It is also the
 # address mail links fall back to, until an admin sets one in Settings.
@@ -151,10 +158,15 @@ struct OidcToml {
 /// The shape of `config/iz.toml`, before the values are checked. Anything
 /// else the file says lands in `other`, which is read for its key names only
 /// — enough for the report to say a key was seen and not obeyed.
+///
+/// `storage` is read as a raw value on purpose: it has been a string (the
+/// attachments directory) since the first file, and the Files service turns
+/// it into a table — `[storage.in]`, whose `token` is the service key.
+/// One field, both shapes, and neither shape a surprise to the reader.
 #[derive(Deserialize)]
 struct Toml {
     database: Option<String>,
-    storage: Option<String>,
+    storage: Option<toml::Value>,
     listen: Option<String>,
     live_seconds: Option<u64>,
     base_url: Option<String>,
@@ -203,9 +215,22 @@ pub struct Config {
     pub base_url: String,
     /// The OIDC provider iz trusts.
     pub oidc: OidcConfig,
+    /// The family's Files service, when `[storage.in]` names a token.
+    /// Absent — or an empty token — means "not configured": the feature
+    /// cannot be switched on and never auto-appears. The token is a secret
+    /// minted once in in's panel; it is never printed and never rendered.
+    pub storage_in: Option<InStorage>,
     /// Whether `config/iz.toml` did not exist and was just written with the
     /// development defaults this boot.
     pub defaulted: bool,
+}
+
+/// The family's Files service, as the file states it: the service key minted
+/// for iz, shown once and kept here. `config/iz.toml` is created 0600, and
+/// nothing reads this token back out — not the report, not a page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InStorage {
+    pub token: String,
 }
 
 /// Why the process is not starting.
@@ -301,9 +326,39 @@ impl Config {
         let database = value(toml.database).ok_or(ConfigError::Missing("database"))?;
         let database = absolute(dir, Path::new(&database));
 
-        let storage = match value(toml.storage) {
-            Some(raw) => absolute(dir, Path::new(&raw)),
-            None => default_storage(&database),
+        // Two shapes share the one key. A string is where binary files live,
+        // as in every file so far — empty means the default beside the
+        // database, the same as no line at all. A table is the Files
+        // service: `[storage.in]`, whose `token` is the key minted for iz,
+        // and the file no longer names a local tree, so the default stands
+        // in for the directory the photos (always local) still need. Any
+        // other shape is a file that does not know what it is saying.
+        let (storage, storage_in) = match toml.storage {
+            Some(toml::Value::String(raw)) => {
+                let path = value(Some(raw));
+                let storage = match path {
+                    Some(raw) => absolute(dir, Path::new(&raw)),
+                    None => default_storage(&database),
+                };
+                (storage, None)
+            }
+            Some(toml::Value::Table(table)) => {
+                let token = table
+                    .get("in")
+                    .and_then(|in_table| in_table.get("token"))
+                    .and_then(|token| token.as_str())
+                    .map(str::to_string)
+                    .and_then(|token| value(Some(token)));
+                let storage_in = token.map(|token| InStorage { token });
+                (default_storage(&database), storage_in)
+            }
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    key: "storage",
+                    why: "a directory path or a [storage.in] table, not this".to_string(),
+                })
+            }
+            None => (default_storage(&database), None),
         };
 
         let listen = value(toml.listen).unwrap_or_else(|| DEFAULT_LISTEN.to_string());
@@ -355,6 +410,7 @@ impl Config {
                 redirect_uri,
             },
             ignored,
+            storage_in,
             defaulted,
         })
     }
@@ -443,8 +499,15 @@ fn complete(path: &Path, text: &str, base: &Path) {
         .collect();
     // `storage` has no fixed default to print: a file silent about it derives
     // the directory from where `database` points, so the completed line says
-    // the value this boot actually resolved rather than a placeholder.
-    if !mentions(text, "storage") {
+    // the value this boot actually resolved rather than a placeholder. A
+    // file that already speaks of the Files service (`[storage.in]`) is
+    // left alone — appending a `storage` line would turn the key into two
+    // shapes at once, and TOML refuses that file at the next boot.
+    let speaks_of_in = toml::from_str::<Toml>(text)
+        .ok()
+        .and_then(|t| t.storage)
+        .is_some_and(|storage| storage.is_table());
+    if !speaks_of_in && !mentions(text, "storage") {
         // The same base `parse` resolves against, or the completed line would
         // point somewhere this boot never looks (config/ vs the directory
         // the app runs from).
@@ -456,11 +519,22 @@ fn complete(path: &Path, text: &str, base: &Path) {
             .as_deref()
             .map(|db| default_storage(&absolute(base, Path::new(db))))
             .unwrap_or_else(|| PathBuf::from("storage"));
+        // The Files service block rides along commented: the token is a
+        // secret minted once, and a file is never auto-completed into
+        // holding one (in's r2-config rule). Reading the file is still how
+        // a reader learns the feature exists.
         missing.push((
             "storage",
             format!(
                 "# Where attachments live as files, created on boot.\n\
-                 storage = {:?}\n",
+                 storage = {:?}\n\
+                 \n\
+                 # Attachments can live with the family's Files service instead\n\
+                 # of this disk. Uncomment, fill in the service key minted for\n\
+                 # iz, and remove the `storage` line above in the same breath —\n\
+                 # one key cannot be both a path and a table.\n\
+                 #[storage.in]\n\
+                 #token = \"\"\n",
                 storage.display().to_string()
             ),
         ));
@@ -682,6 +756,60 @@ mod tests {
             config.storage
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The Files service block: present, it names a token and the local
+    /// attachments tree falls back beside the database — the file that
+    /// carries the table cannot also carry the `storage` path.
+    #[test]
+    fn a_storage_in_table_names_the_service_key() {
+        let config = Config::parse(
+            &format!("database = \"iz.db\"\n[storage.in]\ntoken = \"tok-123\"\n{OIDC}"),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            config.storage_in,
+            Some(InStorage {
+                token: "tok-123".to_string()
+            })
+        );
+        assert!(config.storage.ends_with("storage"), "{:?}", config.storage);
+    }
+
+    /// Absent, the feature does not exist: no default is invented, and the
+    /// mode form will never offer it.
+    #[test]
+    fn a_file_without_storage_in_configures_nothing() {
+        let config = Config::parse(
+            &format!("database = \"iz.db\"\nstorage = \"files\"\n{OIDC}"),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.storage_in, None);
+        assert!(config.storage.ends_with("files"));
+    }
+
+    /// An empty token is no token: the table alone does not half-configure
+    /// the feature.
+    #[test]
+    fn an_empty_storage_in_token_configures_nothing() {
+        let config = Config::parse(
+            &format!("database = \"iz.db\"\n[storage.in]\ntoken = \"\"\n{OIDC}"),
+            Path::new("."),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.storage_in, None);
+    }
+
+    /// The written file teaches the feature by carrying the block, but only
+    /// as a comment: a file is never auto-completed into holding a secret.
+    #[test]
+    fn the_written_template_carries_the_files_service_block_commented() {
+        assert!(DEVELOPMENT_DEFAULTS.contains("#[storage.in]"));
+        assert!(DEVELOPMENT_DEFAULTS.contains("#token = \"\""));
     }
 
     /// A live connection that expires instantly is a reconnect loop, so the

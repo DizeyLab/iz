@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use iz_core::Role;
 use iz_core::store::{
-    Audience, Event, MailOutcome, MailRule, NewAttachment, NewSender, SendKind, SendState, Store,
-    StoreError, Trigger, TursoStore, User,
+    Audience, Event, MailOutcome, MailRule, NewAttachment, NewRemoteAttachment, NewSender,
+    SendKind, SendState, StorageBackend, Store, StoreError, Trigger, TursoStore, User,
 };
 use time::{Duration, OffsetDateTime};
 use ulid::Ulid;
@@ -8855,4 +8855,248 @@ async fn app_settings_round_trip_through_one_row_per_key() {
         scratch.store.get_setting("public_url").await.unwrap(),
         Some("https://iz.example".to_string())
     );
+}
+
+// -- attachment storage backend ----------------------------------------------
+
+/// An attachment pushed to the Files service before its row exists: the row
+/// is born stored, names no file on this machine, and answers the screen's
+/// reads like any other attachment.
+#[tokio::test]
+async fn a_remote_attachment_is_born_stored_without_a_local_file() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(&scratch.store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let id = Ulid::new().to_string();
+    let stored = scratch
+        .store
+        .add_remote_attachment(NewRemoteAttachment {
+            id: id.clone(),
+            task_id: &task,
+            comment_id: None,
+            file_name: "remote.png",
+            mime_type: "image/png",
+            size_bytes: 7,
+            uploaded_by: &admin,
+            at: OffsetDateTime::now_utc(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored, id, "the row carries the id the push used");
+
+    let row = scratch.store.attachment(&id).await.unwrap().unwrap();
+    assert_eq!(row.remote, iz_core::store::AttachmentWhere::Stored);
+    assert_eq!(row.file_name, "remote.png");
+    assert_eq!(row.size_bytes, 7);
+    assert!(
+        !scratch
+            .storage
+            .join("attachments")
+            .join(&id)
+            .exists(),
+        "a stored row names no file on this machine"
+    );
+    assert_eq!(
+        scratch.store.attachments(&task).await.unwrap()[0].id,
+        id,
+        "the screen lists a stored row like any other"
+    );
+    assert_eq!(scratch.store.local_attachment_count().await.unwrap(), 0);
+    let _ = std::fs::remove_dir_all(&scratch.dir);
+}
+
+/// The mode is an app-level fact with a default the caller owns: reads
+/// before any write answer Local, and the write is visible to the next read.
+#[tokio::test]
+async fn the_storage_backend_reads_back_what_was_written() {
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    assert_eq!(
+        scratch.store.storage_backend().await.unwrap(),
+        StorageBackend::Local,
+        "a store never told answers Local, as it always has"
+    );
+    scratch
+        .store
+        .set_storage_backend(StorageBackend::In)
+        .await
+        .unwrap();
+    assert_eq!(
+        scratch.store.storage_backend().await.unwrap(),
+        StorageBackend::In
+    );
+    scratch
+        .store
+        .set_storage_backend(StorageBackend::Local)
+        .await
+        .unwrap();
+    assert_eq!(
+        scratch.store.storage_backend().await.unwrap(),
+        StorageBackend::Local
+    );
+    let _ = std::fs::remove_dir_all(&scratch.dir);
+}
+
+/// Switching the backend is a settings save: every surface showing it is
+/// woken, exactly like `set_limits`.
+#[tokio::test]
+async fn setting_the_storage_backend_announces_settings() {
+    let (scratch, _workspace, _admin) = workspace_with_admin().await;
+    let mut rx = scratch.store.subscribe();
+    scratch
+        .store
+        .set_storage_backend(StorageBackend::In)
+        .await
+        .unwrap();
+    let seen: Vec<String> = {
+        let mut out = Vec::new();
+        while let Ok(change) = rx.try_recv() {
+            out.push(change.topic.kind().to_string());
+        }
+        out
+    };
+    assert!(
+        seen.iter().any(|kind| kind == "settings"),
+        "the switch did not announce Settings; heard {seen:?}"
+    );
+    let _ = std::fs::remove_dir_all(&scratch.dir);
+}
+
+/// The drain's pick: only local rows, oldest first, and no more than asked.
+#[tokio::test]
+async fn local_attachments_are_the_oldest_local_rows_up_to_the_limit() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(&scratch.store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let now = OffsetDateTime::now_utc();
+    let mut ids = Vec::new();
+    for (n, name) in ["a.png", "b.png", "c.png"].iter().enumerate() {
+        ids.push(
+            scratch
+                .store
+                .add_attachment(NewAttachment {
+                    task_id: &task,
+                    comment_id: None,
+                    file_name: name,
+                    mime_type: "image/png",
+                    bytes: vec![0x89, b'0' + n as u8, 0x50, 0x4E, 0x47],
+                    uploaded_by: &admin,
+                    at: now + Duration::minutes(n as i64),
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    // The middle one already moved; it must not appear in the drain's pick.
+    scratch
+        .store
+        .mark_attachment_stored(&ids[1])
+        .await
+        .unwrap()
+        ;
+
+    let picked = scratch.store.local_attachments(10).await.unwrap();
+    assert_eq!(
+        picked.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+        vec![ids[0].clone(), ids[2].clone()],
+        "only local rows, in upload order"
+    );
+    assert_eq!(
+        scratch
+            .store
+            .local_attachments(1)
+            .await
+            .unwrap()
+            .iter()
+            .map(|a| a.id.clone())
+            .collect::<Vec<_>>(),
+        vec![ids[0].clone()],
+        "the limit is the drain's batch size"
+    );
+    assert_eq!(scratch.store.local_attachment_count().await.unwrap(), 2);
+    let _ = std::fs::remove_dir_all(&scratch.dir);
+}
+
+/// Marking stored flips the row and takes the file with it in the same
+/// call, and answers false for a row that is not there.
+#[tokio::test]
+async fn marking_stored_moves_the_row_and_unlinks_the_file() {
+    let (scratch, workspace, admin) = workspace_with_admin().await;
+    let task = add_task(&scratch.store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let id = scratch
+        .store
+        .add_attachment(NewAttachment {
+            task_id: &task,
+            comment_id: None,
+            file_name: "gone.png",
+            mime_type: "image/png",
+            bytes: vec![0x89, 0x50, 0x4E, 0x47],
+            uploaded_by: &admin,
+            at: OffsetDateTime::now_utc(),
+        })
+        .await
+        .unwrap();
+    let file = scratch.storage.join("attachments").join(&id);
+    assert!(file.is_file());
+
+    assert!(scratch.store.mark_attachment_stored(&id).await.unwrap());
+    assert_eq!(
+        scratch
+            .store
+            .attachment(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .remote,
+        iz_core::store::AttachmentWhere::Stored
+    );
+    assert!(!file.exists(), "the local bytes left with the row's state");
+    assert_eq!(scratch.store.local_attachment_count().await.unwrap(), 0);
+
+    let missing = Ulid::new().to_string();
+    assert!(
+        !scratch
+            .store
+            .mark_attachment_stored(&missing)
+            .await
+            .unwrap(),
+        "a row that is not there was never marked"
+    );
+    let _ = std::fs::remove_dir_all(&scratch.dir);
+}
+
+/// A row the boot sniffer must leave alone: a stored row wears bytes on the
+/// Files service, not under `attachments/`, so the pass that refines generic
+/// mimes by reading those files must not even look at it — a zip-pptx
+/// planted stored keeps its generic mime across the boot.
+#[tokio::test]
+async fn the_boot_resniff_leaves_stored_rows_alone() {
+    let dir = std::env::temp_dir().join(format!("iz-resniff-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("iz.db").to_str().unwrap().to_string();
+    drop(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute(
+        "INSERT INTO attachment (id, task_id, file_name, mime_type, size_bytes, \
+             uploaded_by, created_at, remote_state) \
+         VALUES ('FR', 'T1', 'deck.bin', 'application/zip', 4, 'U1', \
+             '2026-08-01T00:00:00Z', 'stored')",
+        turso::params![],
+    )
+    .await
+    .unwrap();
+    // The very bytes a local row would be refined on.
+    std::fs::write(
+        dir.join("storage").join("attachments").join("FR"),
+        zip_with(&["ppt/presentation.xml", "ppt/slides/slide1.xml"]),
+    )
+    .unwrap();
+    drop(conn);
+    drop(db);
+
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+    assert_eq!(
+        store.attachment("FR").await.unwrap().unwrap().mime_type,
+        "application/zip",
+        "a stored row's mime is the push's own fact, not this disk's guess"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
