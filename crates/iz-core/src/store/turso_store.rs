@@ -1156,9 +1156,13 @@ fn backend<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Backend(e.to_string())
 }
 
-/// Turso reports constraint failures as text; there is no typed error to match
-/// on in 0.8.0-pre.7.
+/// Turso carries constraint failures as `Error::Constraint`, but the message
+/// stays matched as well: other failure paths can surface the same text
+/// without the variant (accurate as of 0.8.0-pre.10).
 fn is_constraint_violation(e: &turso::Error) -> bool {
+    if matches!(e, turso::Error::Constraint(_)) {
+        return true;
+    }
     let text = e.to_string().to_lowercase();
     text.contains("constraint") || text.contains("unique")
 }
