@@ -677,19 +677,32 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
                 } \
                 if (control.hasAttribute && control.hasAttribute('data-autosubmit')) { control.form.requestSubmit(); } \
             }); \
+            // The Files tab's whole pane is the upload box's hit area: a drag
+            // caught anywhere in `.files-pane` lands on the box inside it, and
+            // the box is also the element that wears the mark — the control
+            // signals, the pane catches. A pane with no box (a viewer's Files
+            // tab) is not a target at all.
+            function uploadBox(zone) { \
+                return zone.classList.contains('files-pane') ? zone.querySelector('.file-upload-box') : zone; \
+            } \
             document.addEventListener('dragover', function (e) { \
-                var box = e.target.closest ? e.target.closest('.file-upload-box') : null; \
+                var zone = e.target.closest ? e.target.closest('.file-upload-box, .files-pane') : null; \
+                var box = zone ? uploadBox(zone) : null; \
                 if (!box || !e.dataTransfer || e.dataTransfer.types.indexOf('Files') === -1) { return; } \
                 e.preventDefault(); \
                 e.dataTransfer.dropEffect = 'copy'; \
                 window.__izOwn(box, ['file-upload-over'], []); \
             }); \
             document.addEventListener('dragleave', function (e) { \
-                var box = e.target.closest ? e.target.closest('.file-upload-box') : null; \
-                if (box && !box.contains(e.relatedTarget)) { box.classList.remove('file-upload-over'); } \
+                var zone = e.target.closest ? e.target.closest('.file-upload-box, .files-pane') : null; \
+                if (zone && !zone.contains(e.relatedTarget)) { \
+                    var box = uploadBox(zone); \
+                    if (box) { box.classList.remove('file-upload-over'); } \
+                } \
             }); \
             document.addEventListener('drop', function (e) { \
-                var box = e.target.closest ? e.target.closest('.file-upload-box') : null; \
+                var zone = e.target.closest ? e.target.closest('.file-upload-box, .files-pane') : null; \
+                var box = zone ? uploadBox(zone) : null; \
                 if (!box) { return; } \
                 e.preventDefault(); \
                 box.classList.remove('file-upload-over'); \

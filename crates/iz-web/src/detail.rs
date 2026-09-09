@@ -2183,7 +2183,9 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     }
 
                     if tab == Tab::Files {
-                    <section class="detail-block">
+                    // The section is the upload box's hit area: layout.rs's
+                    // drag listeners catch a file dropped anywhere in it.
+                    <section class="detail-block files-pane">
                         <div class="detail-block-head">
                             <span class="detail-label">(t(lang, Key::Files))</span>
                             <span class="detail-count">(detail.files.len())</span>

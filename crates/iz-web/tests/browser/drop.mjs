@@ -9,6 +9,8 @@
 // box, dragleave for the document body must unmark it, and a drop of two
 // files must ride the same change -> requestSubmit -> multipart XHR path
 // the picker uses — the landed chips are the proof, with zero page errors.
+// The pane legs then repeat the same three over the Files tab's whole
+// section, the box's hit area: a drop nowhere near the box still uploads.
 //
 // Wants the server run.sh leaves behind, plus the session cookie it mints:
 // IZ_SESSION_COOKIE carries the sealed token the fake im knows — the same
@@ -168,6 +170,68 @@ if (!failures.length) {
     }
 }
 
+// The same hand, dropped on the pane instead of the box: the Files tab's
+// whole section is the box's hit area, so a drag parked over the list or
+// the head marks the box, leaving the pane for the body unmarks it, and a
+// drop on the list rides the same change path. Dispatched on the head and
+// list nodes — children of the pane — to prove the closest() resolution,
+// not a lucky direct hit on the section itself.
+if (!failures.length) {
+    const paneOver = await page.evaluate(() => {
+        const head = document.querySelector('.files-pane .detail-block-head');
+        if (!head) return null;
+        const dt = new DataTransfer();
+        dt.items.add(new File(['iz three'], 'dropped-c.txt', { type: 'text/plain' }));
+        head.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        const box = document.querySelector('.file-upload-box');
+        return box ? box.classList.contains('file-upload-over') : null;
+    });
+    if (paneOver !== true) {
+        failures.push(`a dragover on the pane never marked the box (over=${paneOver})`);
+    }
+}
+
+if (!failures.length) {
+    const paneGone = await page.evaluate(() => {
+        const head = document.querySelector('.files-pane .detail-block-head');
+        if (!head) return null;
+        head.dispatchEvent(new DragEvent('dragleave', {
+            bubbles: true, cancelable: true, relatedTarget: document.body,
+        }));
+        const box = document.querySelector('.file-upload-box');
+        return box ? box.classList.contains('file-upload-over') : null;
+    });
+    if (paneGone !== false) failures.push(`dragleave off the pane never unmarked the box (over=${paneGone})`);
+}
+
+if (!failures.length) {
+    await page.evaluate(() => {
+        const list = document.querySelector('.files-pane .file-list');
+        if (!list) return;
+        const dt = new DataTransfer();
+        dt.items.add(new File(['iz three'], 'dropped-c.txt', { type: 'text/plain' }));
+        list.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    });
+    const paneDropped = await page
+        .waitForFunction(
+            () => {
+                const names = [...document.querySelectorAll('.file-chip-name')]
+                    .map((el) => el.textContent.trim()).sort();
+                return names.length === 3 && names[2] === 'dropped-c.txt';
+            },
+            { timeout: 10000 },
+        )
+        .then(() => true)
+        .catch(() => false);
+    if (!paneDropped) {
+        const chips = await page.evaluate(() =>
+            [...document.querySelectorAll('.file-chip-name')].map((el) => el.textContent.trim()));
+        failures.push(`a drop on the pane never landed as a chip — chips: ${chips.join(' | ')}`);
+    } else {
+        await page.screenshot({ path: `${shots}/drop-pane.png` });
+    }
+}
+
 await browser.close();
 
 note(`page errors ${errors.length ? errors.join(' | ') : 'none'}`);
@@ -176,4 +240,4 @@ if (failures.length) {
     for (const f of failures) note('FAIL ' + f);
     process.exit(1);
 }
-note('PASS the drop rides the real upload path: dragover marked the box, dragleave unmarked it, and both dropped files landed as chips');
+note('PASS the drop rides the real upload path: dragover marked the box, dragleave unmarked it, both dropped files landed as chips, and the pane itself caught a third');
