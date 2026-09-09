@@ -4397,3 +4397,21 @@ input[type="radio"] {
     background: #d99a26;
   }
 }
+
+// The migration meter on the Storage card's Migration fact: a sunken track
+// with an accent fill, the same meter in's settings panel draws for quota —
+// the family renders a level one way. Read-only: the level rides the fill's
+// inline width.
+.quota-bar {
+  height: 8px;
+  margin-top: 0.45rem;
+  background: var(--panel-sunken);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.quota-fill {
+  height: 100%;
+  background: var(--accent);
+}

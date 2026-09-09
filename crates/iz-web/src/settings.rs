@@ -465,11 +465,7 @@ async fn save_sender(
         // about a server that is no longer configured. Ask again at once,
         // rather than leaving the panel unchecked until somebody presses a
         // button.
-        probe_sender(
-            mail(cx),
-            store.clone(),
-            admin.workspace_id.clone(),
-        );
+        probe_sender(mail(cx), store.clone(), admin.workspace_id.clone());
     }
     let refusal = match outcome {
         Ok(()) => {
@@ -585,7 +581,10 @@ async fn save_public_url(
     // stored `https://iz.sh//` is a handoff that works by luck.
     let public_url = input.public_url.trim().trim_end_matches('/').to_string();
     if !public_url.is_empty() && !is_origin(&public_url) {
-        return Ok(saved_or_refused("save_public_url", Some(Refusal::BadOrigin)));
+        return Ok(saved_or_refused(
+            "save_public_url",
+            Some(Refusal::BadOrigin),
+        ));
     }
     let refusal = match store(cx).set_setting(PUBLIC_URL_KEY, &public_url).await {
         Ok(()) => None,
@@ -952,7 +951,6 @@ async fn send_message(
 // Page
 // ---------------------------------------------------------------------------
 
-
 /// The Connection card's body: who im is, as whom iz introduces itself,
 /// and whether the live identity feed is open at this moment. Read from
 /// the config and the mirror's health only — the client secret is not
@@ -973,7 +971,11 @@ async fn connection_card(cx: &Cx, lang: Lang) -> Result {
     } else {
         format!("{event_age} ago")
     };
-    let pass_line = if pass_age.is_empty() { never } else { format!("{pass_age} ago") };
+    let pass_line = if pass_age.is_empty() {
+        never
+    } else {
+        format!("{pass_age} ago")
+    };
     view! {
         cx =>
         <dl class="connection-facts">
@@ -992,6 +994,16 @@ async fn connection_card(cx: &Cx, lang: Lang) -> Result {
             <dd class="connection-fact">(pass_line)</dd>
         </dl>
     }
+}
+
+/// The share of a migration already moved, for the bar's width. An empty
+/// total stands at zero — the row only renders while rows remain, but a
+/// meter that could divide by nothing is a meter that never renders wrong.
+fn migration_percent(moved: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    (moved.saturating_mul(100) / total).min(100) as u8
 }
 
 /// The Storage card's body: where the family says the Files service is,
@@ -1045,7 +1057,12 @@ async fn storage_card(
             <dd class="connection-fact">(limit_line)</dd>
             if backend == StorageBackend::In && let Some((moved, total)) = snap.migrating {
                 <dt>(t(lang, Key::StorageMigration))</dt>
-                <dd class="connection-fact">(format!("{moved} of {total}"))</dd>
+                <dd class="connection-fact">
+                    (format!("{moved} of {total}"))
+                    <div class="quota-bar" role="progressbar" aria-valuenow=(migration_percent(moved, total).to_string()) aria-valuemin="0" aria-valuemax="100">
+                        <div class="quota-fill" style=(format!("width: {}%", migration_percent(moved, total)))></div>
+                    </div>
+                </dd>
             }
             <dt>(t(lang, Key::StorageLastProblem))</dt>
             <dd class="connection-fact">(problem_line)</dd>
@@ -1271,7 +1288,6 @@ fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
     (refusal, saved)
 }
 
-
 fn query_value<'q>(query: &'q str, key: &str) -> Option<&'q str> {
     query.split('&').find_map(|pair| {
         pair.split_once('=')
@@ -1341,8 +1357,7 @@ async fn settings_page(cx: &Cx) -> Result {
         None
     };
     let (limits, allowed_types) = if administers {
-        let (attachment, types, batch, reminder) =
-            limits_now(cx, &user.workspace_id).await?;
+        let (attachment, types, batch, reminder) = limits_now(cx, &user.workspace_id).await?;
         (Some((attachment, batch, reminder)), types)
     } else {
         (None, Vec::new())
@@ -1364,14 +1379,14 @@ async fn settings_page(cx: &Cx) -> Result {
     let (profile_refusal, profile_saved) = call_state(query, "save_profile");
     let (sender_refusal, sender_saved) = call_state(query, "save_sender");
     let (test_refusal, _) = call_state(query, "send_test_mail");
-     let (limits_refusal, limits_saved) = call_state(query, "save_limits");
+    let (limits_refusal, limits_saved) = call_state(query, "save_limits");
     let (storage_refusal, storage_saved) = call_state(query, "save_storage");
-     let (server_refusal, server_saved) = call_state(query, "save_public_url");
-     let (role_refusal, _) = call_state(query, "set_role");
-     let (disabled_refusal, _) = call_state(query, "set_disabled");
-     let (add_refusal, add_saved) = call_state(query, "add_member");
-     let member_refusal = role_refusal.or(disabled_refusal).or(add_refusal);
-     let (message_refusal, message_saved) = call_state(query, "send_message");
+    let (server_refusal, server_saved) = call_state(query, "save_public_url");
+    let (role_refusal, _) = call_state(query, "set_role");
+    let (disabled_refusal, _) = call_state(query, "set_disabled");
+    let (add_refusal, add_saved) = call_state(query, "add_member");
+    let member_refusal = role_refusal.or(disabled_refusal).or(add_refusal);
+    let (message_refusal, message_saved) = call_state(query, "send_message");
 
     // What the Storage panel renders: the surface the workspace currently
     // keeps its bytes on, where the family mirror says the Files service

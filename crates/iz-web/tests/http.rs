@@ -290,12 +290,12 @@ impl App {
     async fn build(mail: Mail) -> Self {
         Self::build_with(mail, None, "", None).await
     }
- 
+
     /// Like `build`, but with the knobs a configured deployment has: the
-     /// family list mirrored from im — passed as the raw JSON the `setting`
-     /// row holds, so a test can also feed it a body that will not parse —
-     /// and the configured `base_url`. Building them in is what lets the
-     /// switcher and the sign-out handoff be asserted over real HTTP.
+    /// family list mirrored from im — passed as the raw JSON the `setting`
+    /// row holds, so a test can also feed it a body that will not parse —
+    /// and the configured `base_url`. Building them in is what lets the
+    /// switcher and the sign-out handoff be asserted over real HTTP.
     ///
     /// `storage_in` is the `[storage.in]` token, when the deployment
     /// under test has one.
@@ -338,8 +338,7 @@ impl App {
                 redirect_uri: "http://127.0.0.1:7655/auth/callback".to_string(),
             },
             ignored: Vec::new(),
-            storage_in: storage_in
-                .map(|token| iz_core::config::InStorage { token }),
+            storage_in: storage_in.map(|token| iz_core::config::InStorage { token }),
             defaulted: false,
         };
         // The fallback half of the chain, built exactly as `main.rs` builds
@@ -375,28 +374,26 @@ impl App {
             "iz-test",
             "s3cr3t",
         ))
-         .app_context(health.clone())
+        .app_context(health.clone())
         .app_context(storage_client.clone())
         .app_context(storage_health.clone())
-        .app_context(iz_client::LogoutBack(Arc::new(
-            iz_web::server::logout_back,
-        )))
+        .app_context(iz_client::LogoutBack(Arc::new(iz_web::server::logout_back)))
         .app_context(config.clone())
         .app_context(TEST_LIVE_WINDOW)
         .app_context(iz_web::live::Shutdown(stopping))
         .app_context(mail)
         .build();
-         Self {
-             dir,
-             router,
-             store,
-             client,
-             fake,
+        Self {
+            dir,
+            router,
+            store,
+            client,
+            fake,
             storage_client,
             storage_health,
-             health,
-             stop,
-         }
+            health,
+            stop,
+        }
     }
 
     async fn open() -> Self {
@@ -473,28 +470,26 @@ impl App {
             "iz-test",
             "s3cr3t",
         ))
-         .app_context(health.clone())
+        .app_context(health.clone())
         .app_context(storage_client.clone())
         .app_context(storage_health.clone())
-        .app_context(iz_client::LogoutBack(Arc::new(
-            iz_web::server::logout_back,
-        )))
+        .app_context(iz_client::LogoutBack(Arc::new(iz_web::server::logout_back)))
         .app_context(config.clone())
         .app_context(TEST_LIVE_WINDOW)
         .app_context(iz_web::live::Shutdown(stopping))
         .app_context(Mail::sending(engine))
         .build();
-         Self {
-             dir,
-             router,
-             store,
-             client,
-             fake,
+        Self {
+            dir,
+            router,
+            store,
+            client,
+            fake,
             storage_client,
             storage_health,
-             health,
-             stop,
-         }
+            health,
+            stop,
+        }
     }
     /// Mints a session cookie for an im identity, registering its claims on
     /// the fake — exactly what `/auth/callback` seals, without the browser
@@ -4975,7 +4970,8 @@ async fn a_synced_member_is_listed_and_assignable_before_their_first_sign_in() {
         .unwrap();
 
     let sync = app
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -5253,10 +5249,12 @@ async fn a_matching_version_stamp_is_immutable_and_a_new_one_moves_it() {
     let member_id = user_id(&app, "emre@iz.sh").await;
     // The directory pass finds the row by its sub — the same subject the
     // sign-in provisions — and reports the face's third revision.
-    app.store.sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 3, "UTC+03:00")
+    app.store
+        .sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 3, "UTC+03:00")
         .await
         .unwrap();
-    app.fake.set_photo("im-emre@iz.sh", PNG.to_vec(), "image/png");
+    app.fake
+        .set_photo("im-emre@iz.sh", PNG.to_vec(), "image/png");
 
     let stamped = app
         .get(&format!("/avatar/{member_id}?v=3"), Some(&member))
@@ -5278,7 +5276,8 @@ async fn a_matching_version_stamp_is_immutable_and_a_new_one_moves_it() {
 
     // im's count moves; the next sync (the stream's event, or the beat)
     // carries it onto the row, and the old stamp stops being true.
-    app.store.sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 4, "UTC+03:00")
+    app.store
+        .sync_member("im-emre@iz.sh", "emre@iz.sh", "Emre", false, 4, "UTC+03:00")
         .await
         .unwrap();
     let moved = app
@@ -5375,7 +5374,10 @@ async fn the_connection_card_names_its_provider_without_its_secret() {
     let page = app.get("/settings", Some(&admin)).await;
     assert_eq!(page.status.as_u16(), 200);
     let html = String::from_utf8(page.bytes).unwrap();
-    assert!(html.contains("id=\"connection\""), "no Connection card: {html}");
+    assert!(
+        html.contains("id=\"connection\""),
+        "no Connection card: {html}"
+    );
     assert!(
         html.contains("iz-test:s3cr3t") == false,
         "the client secret leaked onto the page: {html}"
@@ -9750,8 +9752,7 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
 
     // A configured `base_url` is what the fallback says when nothing is
     // stored — a deployment behind a proxy says its name once, in the file.
-    let configured =
-        App::build_with(Mail::silent(), None, "https://board.example", None).await;
+    let configured = App::build_with(Mail::silent(), None, "https://board.example", None).await;
     let raw = configured.get("/auth/logout", None).await;
     let expected = format!(
         "{}/logout?back={}",
@@ -9952,8 +9953,7 @@ impl FakeIn {
     /// Stops answering — accepts and drops, which reads to the client as
     /// the connection the storage ceilings are for.
     fn set_down(&self) {
-        self.down
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.down.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -10020,7 +10020,11 @@ fn storage_answer(
             let bytes = multipart_file(body, head);
             files.lock().insert(id.clone(), bytes);
             let answer = format!("{{\"ok\":\"{id}\"}}");
-            ("200 OK", "application/json".to_string(), answer.into_bytes())
+            (
+                "200 OK",
+                "application/json".to_string(),
+                answer.into_bytes(),
+            )
         }
         ("GET", path) => match path.strip_prefix("/api/service/file/") {
             Some(id) if !id.is_empty() => match files.lock().get(id) {
@@ -10051,11 +10055,7 @@ fn storage_answer(
                 br#"{"ok":true}"#.to_vec(),
             )
         }
-        _ => (
-            "404 Not Found",
-            "text/plain".to_string(),
-            Vec::new(),
-        ),
+        _ => ("404 Not Found", "text/plain".to_string(), Vec::new()),
     }
 }
 /// One text field out of a multipart body, by `name`. The parts are read
@@ -10194,7 +10194,9 @@ async fn an_upload_in_in_mode_lands_on_the_service_and_serves_from_it() {
         Some(format!("/?task={task}&tab=files").as_str())
     );
     assert!(
-        fake.calls().iter().any(|call| call == "POST /api/service/files"),
+        fake.calls()
+            .iter()
+            .any(|call| call == "POST /api/service/files"),
         "the push never happened: {:?}",
         fake.calls()
     );
@@ -10284,7 +10286,9 @@ async fn a_down_files_service_refuses_uploads_downloads_and_deletes() {
     );
     assert_eq!(app.store.attachments(&task).await.unwrap().len(), 1);
 
-    let download = app.get(&format!("/files/{stored}"), Some(&admin_cookie)).await;
+    let download = app
+        .get(&format!("/files/{stored}"), Some(&admin_cookie))
+        .await;
     assert_eq!(download.status, StatusCode::SERVICE_UNAVAILABLE);
 
     let delete = app
@@ -10398,13 +10402,8 @@ async fn save_storage_is_admin_only_and_refuses_a_road_that_is_not_there() {
 
     // No `[storage.in]` token: `in` is not a road this deployment can
     // take, no matter what the family says.
-    let keyless = App::build_with(
-        Mail::silent(),
-        Some(family_with_in(&fake.url())),
-        "",
-        None,
-    )
-    .await;
+    let keyless =
+        App::build_with(Mail::silent(), Some(family_with_in(&fake.url())), "", None).await;
     let keyless_admin = admin(&keyless).await;
     let answer = keyless
         .post(
@@ -10436,8 +10435,7 @@ async fn save_storage_is_admin_only_and_refuses_a_road_that_is_not_there() {
     let unlisted = App::build_with(
         Mail::silent(),
         Some(
-            "[{\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}]"
-                .to_string(),
+            "[{\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}]".to_string(),
         ),
         "",
         Some(STORAGE_TOKEN.to_string()),
@@ -10511,8 +10509,7 @@ async fn the_storage_card_shows_the_beats_facts_without_the_key() {
     app.storage_health
         .reachable(Some(1024 * 1024 * 1024), Some(10 * 1024 * 1024 * 1024));
     let html = String::from_utf8_lossy(
-        &app
-            .get("/settings?section=limits", Some(&admin_cookie))
+        &app.get("/settings?section=limits", Some(&admin_cookie))
             .await
             .bytes,
     )
@@ -10535,13 +10532,16 @@ async fn the_storage_card_shows_the_beats_facts_without_the_key() {
     app.storage_health.problem("quota");
     app.storage_health.migrating(2, 5);
     let html = String::from_utf8_lossy(
-        &app
-            .get("/settings?section=limits", Some(&admin_cookie))
+        &app.get("/settings?section=limits", Some(&admin_cookie))
             .await
             .bytes,
     )
     .to_string();
     assert!(html.contains("2 of 5"), "{html}");
+    // The meter under the count: the family's quota bar, at the moved
+    // share, and only while a migration stands.
+    assert!(html.contains("quota-bar\" role=\"progressbar\""), "{html}");
+    assert!(html.contains("width: 40%"), "{html}");
     assert!(html.contains("quota"), "{html}");
     assert!(html.contains("connection-wait"), "{html}");
     assert!(html.contains("Unreachable"), "{html}");
@@ -10589,7 +10589,11 @@ async fn the_storage_beat_drains_local_rows_into_the_service() {
             .all(|row| row.remote == iz_core::store::AttachmentWhere::Stored),
         "not every row drained"
     );
-    assert_eq!(local_file_count(&app), 0, "the local files survived the drain");
+    assert_eq!(
+        local_file_count(&app),
+        0,
+        "the local files survived the drain"
+    );
     assert!(rows.iter().all(|row| fake.holds(&row.id)));
     let snap = app.storage_health.snapshot();
     assert!(snap.connected);
