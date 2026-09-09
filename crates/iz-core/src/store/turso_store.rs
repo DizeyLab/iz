@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use rand::Rng;
 use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 use turso::transaction::{Transaction, TransactionBehavior};
 use turso::{Builder, Connection, Row, Value, params, params_from_iter};
 use ulid::Ulid;
@@ -139,6 +139,7 @@ impl TursoStore {
         store.retire_actor_only_decisions().await?;
         store.retire_viewer_assignments().await?;
         store.encrypt_plaintext_passwords().await?;
+        store.canonicalize_legacy_stamps().await?;
         store.resniff_generic_attachments().await?;
         store.sweep_orphan_files().await?;
         // The file may have been rebuilt from a backup; its permissions and
@@ -185,6 +186,78 @@ impl TursoStore {
             )
             .await
             .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    /// Stamps written before [`stamp`] pinned its format may sit in any TEXT
+    /// stamp column as whole seconds (`…T08:30:00Z`, twenty characters) — and
+    /// because `Z` outranks `.` in a string compare, such a row hid from
+    /// `claim_sends_owed` for the whole of the first second it was due. Like
+    /// the password-sealing pass above, this is a data repair no schema
+    /// migration can express, run once per boot and idempotent by its own
+    /// WHERE clause: a twenty-character stamp of the whole-second shape is
+    /// the only thing it matches, and after one boot none are left to match.
+    /// The inventory is the live schema's stamp columns, table by table out
+    /// of `migrations/0001` through `0006`: `workspace` (created_at,
+    /// smtp_test_at, smtp_check_at), `user` (created_at, last_signed_in_at),
+    /// `workspace_owner` (claimed_at), `board`, `tag`, `comment`,
+    /// `attachment`, `transition`, `freeing`, `activity`, `mail_rule` and
+    /// `mail_decision` (each created_at), `task` (clock_at, created_at,
+    /// updated_at, done_at, deleted_at), `task_dependency` (created_at,
+    /// cleared_at) and `mail_send` (claimed_at, next_attempt_at, sent_at).
+    /// `session`, `signin_link`, `auth_attempt` and `user.feed_seen_at` died
+    /// with migration 0003 and have no rows left to heal; `task.deadline` is
+    /// a day, not a stamp, and the shape below never matches it.
+    async fn canonicalize_legacy_stamps(&self) -> Result<()> {
+        const STAMP_COLUMNS: &[(&str, &str)] = &[
+            ("workspace", "created_at"),
+            ("workspace", "smtp_test_at"),
+            ("workspace", "smtp_check_at"),
+            ("user", "created_at"),
+            ("user", "last_signed_in_at"),
+            ("workspace_owner", "claimed_at"),
+            ("board", "created_at"),
+            ("tag", "created_at"),
+            ("task", "clock_at"),
+            ("task", "created_at"),
+            ("task", "updated_at"),
+            ("task", "done_at"),
+            ("task", "deleted_at"),
+            ("task_dependency", "created_at"),
+            ("task_dependency", "cleared_at"),
+            ("comment", "created_at"),
+            ("attachment", "created_at"),
+            ("transition", "created_at"),
+            ("freeing", "created_at"),
+            ("activity", "created_at"),
+            ("mail_rule", "created_at"),
+            ("mail_send", "claimed_at"),
+            ("mail_send", "next_attempt_at"),
+            ("mail_send", "sent_at"),
+            ("mail_decision", "created_at"),
+        ];
+        let conn = self.conn.lock().await;
+        let mut changed = 0usize;
+        for (table, column) in STAMP_COLUMNS {
+            let n = conn
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET {column} = substr({column}, 1, 19) \
+                         || '.000000000Z' \
+                         WHERE {column} IS NOT NULL AND length({column}) = 20 \
+                         AND {column} LIKE '____-__-__T__:__:__Z'"
+                    ),
+                    (),
+                )
+                .await
+                .map_err(backend)?;
+            changed += n as usize;
+        }
+        // Spoken only when something actually moved: a boot log that
+        // reports every quiet pass trains the reader to skip it.
+        if changed > 0 {
+            println!("iz store  canonicalized {changed} legacy whole-second stamps");
         }
         Ok(())
     }
@@ -1069,8 +1142,24 @@ enum Outcome {
     Held,
 }
 
+/// Every stamp the store writes goes out this one way, and the shape it
+/// writes is the whole point: the queue's clock is TEXT comparison —
+/// `claim_sends_owed` asks SQLite whether `next_attempt_at <= ?` as strings —
+/// and string order only agrees with instant order when every stamp spells
+/// its instant the same way. The `time` crate's own Rfc3339 formatter omits
+/// a zero subsecond, and a stamp written that way (`…T08:30:00Z`) sorts
+/// *after* the same instant carrying a fraction (`…T08:30:00.000000000Z`),
+/// because `Z` outranks `.` — so a row whose due second arrived was
+/// invisible to the claim until the second was over, and the sweep, which
+/// wakes on exactly that second, read an empty ledger and went back to
+/// sleep. Hence the pinned format in [`STAMP`]: always UTC, always nine
+/// fractional digits, zero or not. Parsing stays on [`Rfc3339`], which reads
+/// both widths — rows an older build wrote keep loading, and the boot pass
+/// in [`TursoStore::canonicalize_legacy_stamps`] rewrites them to the
+/// canonical shape.
 fn stamp(at: OffsetDateTime) -> Result<String> {
-    at.format(&Rfc3339)
+    at.to_offset(UtcOffset::UTC)
+        .format(&STAMP)
         .map_err(|e| StoreError::Corrupt(format!("timestamp: {e}")))
 }
 
@@ -1082,6 +1171,14 @@ fn parse_stamp(raw: &str) -> Result<OffsetDateTime> {
 /// Deadlines are days, not instants: a deadline is the same day wherever the
 /// person reading the card is.
 const DAY: &[BorrowedFormatItem] = format_description!("[year]-[month]-[day]");
+
+/// The one shape every stored stamp takes, UTC with nine fractional digits.
+/// Why the width is pinned: see [`stamp`] — the queue compares stamps as
+/// text, and text only compares like time when every stamp is the same
+/// shape. [`parse_stamp`] reads this and the shorter legacy width alike.
+const STAMP: &[BorrowedFormatItem] = format_description!(
+    "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
+);
 
 fn day_text(day: Date) -> Result<String> {
     day.format(&DAY)

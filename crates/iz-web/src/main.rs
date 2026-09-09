@@ -278,15 +278,20 @@ async fn shutdown_signal() {
 ///
 /// Two other things can wake it. A mail being queued announces itself on the
 /// live channel, so an invite goes out as soon as it is asked for instead of
-/// waiting out somebody else's timer. And an hour is the longest it will sleep
-/// regardless, so a clock jump or a row written by something other than this
-/// process is picked up on its own.
+/// waiting out somebody else's timer. And an hour is the longest it will
+/// sleep regardless, so a clock jump or a row written by something other
+/// than this process is picked up on its own; a row that is due but that the
+/// last pass could not take gets a one-minute re-check instead, for the
+/// same reason — see the wait computed below.
 async fn sweep(engine: std::sync::Arc<iz_core::MailEngine>, store: Arc<dyn iz_core::store::Store>) {
     /// Enough that a morning's backlog clears in a few passes, few enough that
     /// one pass cannot sit on the mail server for minutes.
     const PER_PASS: u32 = 50;
     /// The longest this will sleep with nothing due.
     const IDLE: std::time::Duration = std::time::Duration::from_secs(3600);
+    /// How long it re-reads when a row is already due but the pass above
+    /// could not take it.
+    const RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
 
     let mut queued = store.subscribe();
     loop {
@@ -302,17 +307,25 @@ async fn sweep(engine: std::sync::Arc<iz_core::MailEngine>, store: Arc<dyn iz_co
             Err(problem) => eprintln!("iz mail  sweep could not read the ledger: {problem}"),
         }
 
-        // How long until the next mail is owed. A row already due means the
-        // pass above could not take it — it was over its limit, or something
-        // else holds it — so the wait is the idle one rather than zero, which
-        // would spin.
+        // How long until the next mail is owed. A row that is already due
+        // but that the pass above could not take gets a short re-check, not
+        // the idle hour. A row can sit due for reasons the pass cannot fix
+        // on the spot: the pass hit its limit and this row is next in line,
+        // or it fell due inside the breath between reading the ledger and
+        // claiming. None of that asks the pass to hurry — the claim UPDATE
+        // is the arbiter, and a row another pass is composing has already
+        // had its next_attempt_at pushed into the future, so re-reading
+        // cannot send it twice — but none of it justifies an hour either:
+        // the hour is what once turned a one-second blind spot in the stamp
+        // compare into a reminder twenty-five minutes late. It is not zero,
+        // which would spin: the pass above has only just run.
         let wait = match store.next_due_at().await {
             Ok(Some(at)) => {
                 let now = time::OffsetDateTime::now_utc();
                 if at > now {
                     (at - now).try_into().unwrap_or(IDLE).min(IDLE)
                 } else {
-                    IDLE
+                    RECHECK
                 }
             }
             Ok(None) => IDLE,

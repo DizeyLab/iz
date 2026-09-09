@@ -7383,6 +7383,170 @@ async fn reminder_rows_survive_a_reopen() {
     assert_eq!(after[0].next_attempt_at, before[0].next_attempt_at);
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// The boundary that once ate a reminder: a due instant that lands on a
+/// whole second. The store used to write such stamps with no fraction
+/// (`…:00Z`), and text comparison puts `Z` after `.` — the row was
+/// invisible to the claim for the whole of its first due second, and the
+/// sweep, which wakes on exactly the second the queue names, read an empty
+/// ledger and went back to sleep for an hour. Forty milliseconds past the
+/// due instant must therefore be enough: the row is claimable the moment it
+/// is owed, not a second later.
+#[tokio::test]
+async fn a_reminder_due_on_a_whole_second_is_claimable_inside_that_second() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "grace@iz.sh", "Grace").await;
+    // A whole-second meeting: its reminder's due instant is a whole second
+    // too, which is exactly the shape the old formatter wrote bare.
+    let clock = (OffsetDateTime::now_utc() + Duration::hours(2))
+        .replace_nanosecond(0)
+        .unwrap();
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let rows = pending_reminders(&store, &task).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].next_attempt_at.unwrap(),
+        clock - Duration::minutes(15),
+        "the workspace's default lead of fifteen minutes"
+    );
+
+    // Forty milliseconds after the row fell due — inside the second.
+    let now = rows[0].next_attempt_at.unwrap() + Duration::milliseconds(40);
+    let claimed = store
+        .claim_sends_owed(now, now + iz_core::mail::LEASE, 50)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "the due row is claimable: {claimed:?}");
+    assert_eq!(claimed[0].id, rows[0].id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the store writes, the claim compares: nine fractional digits,
+/// always. A zero subsecond goes out as `.000000000`, not as an omission,
+/// so two stamps of the same instant are two copies of the same string and
+/// the queue's TEXT comparisons never disagree with the instants they
+/// compare.
+#[tokio::test]
+async fn a_whole_second_stamp_is_written_with_nine_zero_digits() {
+    let scratch = Scratch::open().await;
+    let (workspace, admin) = claim(&scratch.store).await;
+    let mate = member(&scratch.store, &workspace, "grace@iz.sh", "Grace").await;
+    let clock = (OffsetDateTime::now_utc() + Duration::hours(2))
+        .replace_nanosecond(0)
+        .unwrap();
+    let task = clocked_task(&scratch.store, &workspace, &admin, Some(clock)).await;
+    scratch.store.assign_task(&task, &mate).await.unwrap();
+
+    // The way the stamp actually sits on disk, not the way the API renders
+    // it back: a raw read of the column.
+    let conn = raw_conn(&scratch).await;
+    let mut rows = conn
+        .query(
+            "SELECT next_attempt_at FROM mail_send \
+             WHERE task_id = ?1 AND kind = 'reminder'",
+            turso::params![task],
+        )
+        .await
+        .unwrap();
+    let mut seen = 0;
+    while let Some(row) = rows.next().await.unwrap() {
+        let raw: String = row.get(0).unwrap();
+        assert_eq!(raw.len(), 30, "every stamp is the one pinned shape: {raw}");
+        assert!(
+            raw.ends_with(".000000000Z"),
+            "a zero subsecond is nine zeros, not a missing fraction: {raw}"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 1, "one reminder was minted");
+}
+
+/// A database from the era before the stamp format was pinned carries
+/// whole-second stamps in any of its TEXT stamp columns, and the boot
+/// rewrites every one of them to the canonical shape — so the queue's TEXT
+/// comparisons never again meet a `Z` sorting after a `.`. The row planted
+/// here is the production reminder, verbatim: due on a whole second,
+/// written without a fraction.
+#[tokio::test]
+async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("iz.db").to_string_lossy().into_owned();
+    let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+    let (workspace, admin) = claim(&store).await;
+    let mate = member(&store, &workspace, "grace@iz.sh", "Grace").await;
+    let clock = (OffsetDateTime::now_utc() + Duration::hours(2))
+        .replace_nanosecond(0)
+        .unwrap();
+    let task = clocked_task(&store, &workspace, &admin, Some(clock)).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let due = clock - Duration::minutes(15);
+    drop(store);
+
+    // The old write path, by hand: the same instants, no fraction, in a
+    // handful of the columns the boot pass owns. Everything else in the
+    // file was written by the canonical stamp already.
+    let columns = [
+        ("mail_send", "next_attempt_at"),
+        ("mail_send", "claimed_at"),
+        ("task", "clock_at"),
+        ("task", "created_at"),
+        ("task", "updated_at"),
+    ];
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    for (table, column) in columns {
+        conn.execute(
+            &format!(
+                "UPDATE {table} SET {column} = substr({column}, 1, 19) || 'Z' \
+                 WHERE {column} IS NOT NULL"
+            ),
+            (),
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    drop(db);
+
+    // The boot that finds them rewrites them.
+    let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    for (table, column) in columns {
+        let mut rows = conn
+            .query(
+                &format!("SELECT {column} FROM {table} WHERE {column} IS NOT NULL"),
+                (),
+            )
+            .await
+            .unwrap();
+        let mut seen = 0;
+        while let Some(row) = rows.next().await.unwrap() {
+            let raw: String = row.get(0).unwrap();
+            assert_eq!(
+                raw.len(),
+                30,
+                "{table}.{column} came back canonical: {raw}"
+            );
+            seen += 1;
+        }
+        assert!(seen > 0, "{table}.{column} had rows to rewrite");
+    }
+    drop(conn);
+    drop(db);
+
+    // And the defect the whole exercise serves is gone: the reminder, due
+    // on a whole second, is claimable inside the second it fell due.
+    let now = due + Duration::milliseconds(40);
+    let claimed = reopened
+        .claim_sends_owed(now, now + iz_core::mail::LEASE, 50)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "the canonicalized row is claimable");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn a_reminder_already_sent_is_never_queued_again() {
     let (dir, store, workspace, admin) = shared().await;
