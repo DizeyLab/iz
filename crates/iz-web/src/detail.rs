@@ -1671,7 +1671,16 @@ async fn subtask_row(
     let release_title = t(lang, Key::ReleaseThisPart);
     let mut faces = Vec::new();
     for person in &part.assignees {
-        faces.push(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "").await?);
+        faces.push(
+            crate::layout::avatar(
+                cx,
+                &person.id,
+                &person.display_name,
+                person.photo_version,
+                "",
+            )
+            .await?,
+        );
     }
     view! {
         cx =>
@@ -2138,7 +2147,11 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 </div>
 
 
-                <div class="detail-body">
+                // The Files tab's whole region is the upload box's hit area:
+                // layout.rs's drag listeners catch a file dropped anywhere in
+                // this box — head, list, the empty space below — and land it
+                // on the box inside.
+                <div class=(class!("detail-body", "files-pane" if tab == Tab::Files))>
                     if tab == Tab::Task {
 
 
@@ -2183,9 +2196,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                     }
 
                     if tab == Tab::Files {
-                    // The section is the upload box's hit area: layout.rs's
-                    // drag listeners catch a file dropped anywhere in it.
-                    <section class="detail-block files-pane">
+                    <section class="detail-block">
                         <div class="detail-block-head">
                             <span class="detail-label">(t(lang, Key::Files))</span>
                             <span class="detail-count">(detail.files.len())</span>

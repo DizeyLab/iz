@@ -171,11 +171,11 @@ if (!failures.length) {
 }
 
 // The same hand, dropped on the pane instead of the box: the Files tab's
-// whole section is the box's hit area, so a drag parked over the list or
-// the head marks the box, leaving the pane for the body unmarks it, and a
-// drop on the list rides the same change path. Dispatched on the head and
-// list nodes — children of the pane — to prove the closest() resolution,
-// not a lucky direct hit on the section itself.
+// whole region — the tab body itself, rim included — is the box's hit area,
+// so a drag parked over the list or the head marks the box, leaving for the
+// tab strip unmarks it, and a drop on the list rides the same change path.
+// Dispatched on the head and list nodes — children of the pane — to prove
+// the closest() resolution, not a lucky direct hit on the body itself.
 if (!failures.length) {
     const paneOver = await page.evaluate(() => {
         const head = document.querySelector('.files-pane .detail-block-head');
@@ -194,9 +194,12 @@ if (!failures.length) {
 if (!failures.length) {
     const paneGone = await page.evaluate(() => {
         const head = document.querySelector('.files-pane .detail-block-head');
-        if (!head) return null;
+        const tabs = document.querySelector('.detail-tabs');
+        if (!head || !tabs) return null;
+        // The pane is the tab body itself, rim included, so the body is no
+        // longer "outside" — the tab strip is.
         head.dispatchEvent(new DragEvent('dragleave', {
-            bubbles: true, cancelable: true, relatedTarget: document.body,
+            bubbles: true, cancelable: true, relatedTarget: tabs,
         }));
         const box = document.querySelector('.file-upload-box');
         return box ? box.classList.contains('file-upload-over') : null;
@@ -229,6 +232,58 @@ if (!failures.length) {
         failures.push(`a drop on the pane never landed as a chip — chips: ${chips.join(' | ')}`);
     } else {
         await page.screenshot({ path: `${shots}/drop-pane.png` });
+    }
+}
+
+// Full pane, not its upper half: the section must own the whole tab
+// region, so the bottom of `.detail-body` — empty space below the list —
+// is inside the section and catches the hand. elementFromPoint at the
+// body's bottom edge names the node a real drop there would hit; a pane
+// that stops at its content leaves the body's own box to answer.
+if (!failures.length) {
+    const bottom = await page.evaluate(() => {
+        const body = document.querySelector('.detail-body');
+        if (!body) return null;
+        const r = body.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left + r.width / 2, r.bottom - 12);
+        if (!el) return 'none';
+        return el.closest('.files-pane') ? 'pane' : el.className || el.tagName;
+    });
+    if (bottom !== 'pane') {
+        failures.push(`the bottom of the pane is not the files pane — elementFromPoint says: ${bottom}`);
+    }
+}
+
+// And the hand dropped there is a real drop: a fourth file onto the empty
+// bottom of the pane must ride the same path to a fourth chip.
+if (!failures.length) {
+    await page.evaluate(() => {
+        const body = document.querySelector('.detail-body');
+        if (!body) return;
+        const r = body.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left + r.width / 2, r.bottom - 12);
+        if (!el) return;
+        const dt = new DataTransfer();
+        dt.items.add(new File(['iz four'], 'dropped-d.txt', { type: 'text/plain' }));
+        el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    });
+    const bottomDropped = await page
+        .waitForFunction(
+            () => {
+                const names = [...document.querySelectorAll('.file-chip-name')]
+                    .map((el) => el.textContent.trim()).sort();
+                return names.length === 4 && names[3] === 'dropped-d.txt';
+            },
+            { timeout: 10000 },
+        )
+        .then(() => true)
+        .catch(() => false);
+    if (!bottomDropped) {
+        const chips = await page.evaluate(() =>
+            [...document.querySelectorAll('.file-chip-name')].map((el) => el.textContent.trim()));
+        failures.push(`a drop on the pane's bottom never landed as a chip — chips: ${chips.join(' | ')}`);
+    } else {
+        await page.screenshot({ path: `${shots}/drop-pane-bottom.png` });
     }
 }
 
