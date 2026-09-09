@@ -134,7 +134,10 @@ async fn main() {
     // The shared identity directory: the same issuer and Basic pair the OIDC
     // side holds, pointed at im's roster. One HTTP pool inside, cheap to
     // clone — the avatar route reaches it through the router context below,
-    // and the two mirror tasks carry their own handles.
+    // and the two mirror tasks carry their own handles. The health beside
+    // it is what the Settings Connection card renders: the mirror writes,
+    // the page reads.
+    let health = iz_web::directory::DirectoryHealth::new();
     let directory = im_client::directory::DirectoryClient::new(
         config.oidc.issuer.clone(),
         config.oidc.client_id.clone(),
@@ -167,8 +170,9 @@ async fn main() {
         directory.clone(),
         iz_client::IzClient::new(oidc.clone()),
         config.base_url.clone(),
+        health.clone(),
     ));
-    tokio::spawn(directory_stream(store.clone(), directory.clone()));
+    tokio::spawn(directory_stream(store.clone(), directory.clone(), health.clone()));
     // Told when the process is stopping, so the live streams end instead of
     // being waited out. See `iz_web::live::Shutdown`.
     let (stop, stopping) = tokio::sync::watch::channel(false);
@@ -186,6 +190,7 @@ async fn main() {
     )
     .app_context(store.clone())
     .app_context(directory)
+    .app_context(health)
     .app_context(iz_client::LogoutBack(Arc::new(iz_web::server::logout_back)))
     .app_context(config.clone())
     .app_context(iz_web::live::LiveWindow(std::time::Duration::from_secs(
@@ -347,13 +352,14 @@ async fn directory_sync(
     directory: im_client::directory::DirectoryClient,
     client: iz_client::IzClient,
     configured_url: String,
+    health: iz_web::directory::DirectoryHealth,
 ) {
     // An address that never arrives would otherwise say so every beat,
     // five minutes apart, forever. It is one deployment fact, so it is
     // said once and the mirror goes on without it.
     let mut said_no_address = false;
     loop {
-        mirror_directory(&store, &directory).await;
+        mirror_directory(&store, &directory, &health).await;
         // Before asking for the family, this app files itself in it, so a
         // deployment appears in everyone's switcher without an admin
         // typing its address. Resolved per beat in the order a sign-out
@@ -400,16 +406,19 @@ async fn directory_sync(
 
 /// One full pass of im's roster through the member rows: every entry
 /// through [`iz_core::store::Store::sync_member`], which announces only
-/// the rows that actually changed.
+/// the rows that actually changed. A pass that landed also stamps the
+/// Connection card's "last full pass".
 async fn mirror_directory(
     store: &Arc<dyn iz_core::store::Store>,
     directory: &im_client::directory::DirectoryClient,
+    health: &iz_web::directory::DirectoryHealth,
 ) {
     match directory.directory().await {
         Ok(members) => {
             for member in members {
                 apply_member(store, &member).await;
             }
+            health.pass();
         }
         Err(problem) => {
             eprintln!("directory sync: im did not answer ({problem}); keeping the rows there are")
@@ -441,37 +450,47 @@ async fn apply_member(
 /// closing — wait out a backoff that doubles from one second to thirty,
 /// replay a full pass (the resync that heals whatever the dead stream
 /// carried or dropped), and redial. A stream error inside the body is the
-/// same exit as a clean close: the pass below is what converges.
+/// same exit as a clean close: the pass below is what converges. The
+/// Connection card reads its state from the same marks this loop leaves:
+/// Connected from the open stream and each event, Reconnecting from every
+/// exit in between.
 async fn directory_stream(
     store: Arc<dyn iz_core::store::Store>,
     directory: im_client::directory::DirectoryClient,
+    health: iz_web::directory::DirectoryHealth,
 ) {
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
-        mirror_directory(&store, &directory).await;
+        mirror_directory(&store, &directory, &health).await;
         match directory.open_stream().await {
             Ok(mut stream) => {
+                health.connected();
                 backoff = std::time::Duration::from_secs(1);
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(im_client::directory::DirectoryEvent::Profile(member)) => {
+                            health.event();
                             apply_member(&store, &member).await;
                         }
                         Err(problem) => {
                             eprintln!("directory stream: {problem}; re-listing");
+                            health.reconnecting();
                             break;
                         }
                     }
                 }
+                health.reconnecting();
             }
             Err(problem) => {
                 eprintln!("directory stream: im did not answer ({problem})");
+                health.reconnecting();
             }
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
     }
 }
+
 /// Waits for something to happen to the mail queue specifically.
 ///
 /// The channel carries every topic, and the sweep cares about one. Filtering

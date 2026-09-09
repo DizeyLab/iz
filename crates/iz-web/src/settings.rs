@@ -929,6 +929,48 @@ async fn send_message(
 // Page
 // ---------------------------------------------------------------------------
 
+
+/// The Connection card's body: who im is, as whom iz introduces itself,
+/// and whether the live identity feed is open at this moment. Read from
+/// the config and the mirror's health only — the client secret is not
+/// read here, so no render path can carry it.
+async fn connection_card(cx: &Cx, lang: Lang) -> Result {
+    let oidc = &config(cx).oidc;
+    let snap = crate::directory::health(cx).snapshot();
+    let (state_word, state_class) = if snap.connected {
+        (t(lang, Key::ConnectionConnected), "connection-on")
+    } else {
+        (t(lang, Key::ConnectionReconnecting), "connection-wait")
+    };
+    let event_age = crate::directory::age_text(snap.event_age);
+    let pass_age = crate::directory::age_text(snap.pass_age);
+    let never = t(lang, Key::ConnectionNever).to_string();
+    let event_line = if event_age.is_empty() {
+        never.clone()
+    } else {
+        format!("{event_age} ago")
+    };
+    let pass_line = if pass_age.is_empty() { never } else { format!("{pass_age} ago") };
+    view! {
+        cx =>
+        <dl class="connection-facts">
+            <dt>(t(lang, Key::ConnectionIssuer))</dt>
+            <dd class="connection-fact">(oidc.issuer.clone())</dd>
+            <dt>(t(lang, Key::ConnectionClientId))</dt>
+            <dd class="connection-fact">(oidc.client_id.clone())</dd>
+            <dt>(t(lang, Key::ConnectionStream))</dt>
+            <dd class="connection-fact">
+                <span class=(format!("connection-dot {state_class}"))></span>
+                (state_word)
+            </dd>
+            <dt>(t(lang, Key::ConnectionLastEvent))</dt>
+            <dd class="connection-fact">(event_line)</dd>
+            <dt>(t(lang, Key::ConnectionLastPass))</dt>
+            <dd class="connection-fact">(pass_line)</dd>
+        </dl>
+    }
+}
+
 /// One row of the member list, as an admin may see it. Identity is im's to
 /// vouch — the row carries no password and no link token, only what the
 /// workspace itself decides: the role and whether the account is disabled.
@@ -1323,6 +1365,20 @@ async fn settings_page(cx: &Cx) -> Result {
                             <button class="primary" type="submit">(t(lang, Key::Save))</button>
                         </div>
                     </form>
+                </section>
+
+                // The identity mirror's stand, for every signed-in member:
+                // who iz trusts and as whom, and whether the live feed from
+                // im is open right now. Read-only — the issuer and client id
+                // are public by OIDC design, and the client secret is never
+                // read into this page at all.
+                <section class="panel" id="connection">
+                    <div class="panel-head">
+                        <h2 class="panel-title">(t(lang, Key::Connection))</h2>
+                    </div>
+                    <div class="panel-body">
+                        (connection_card(cx, lang).await?)
+                    </div>
                 </section>
                 }
 

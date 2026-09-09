@@ -273,6 +273,9 @@ struct App {
     store: Arc<dyn Store>,
     client: iz_client::Config,
     fake: FakeIm,
+    /// What the Settings Connection card renders: poked by hand in tests
+    /// the way the mirror task pokes it in the process.
+    health: iz_web::directory::DirectoryHealth,
     /// Stands in for Ctrl+C. Held so a test can stop this router the way the
     /// process stops the real one.
     stop: tokio::sync::watch::Sender<bool>,
@@ -333,6 +336,7 @@ impl App {
             cookie_name: "iz_session".to_string(),
             cookie_key: [7u8; 32],
         };
+        let health = iz_web::directory::DirectoryHealth::new();
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let router = iz_client::mount(
             Router::builder()
@@ -354,6 +358,7 @@ impl App {
             "iz-test",
             "s3cr3t",
         ))
+        .app_context(health.clone())
         .app_context(iz_client::LogoutBack(Arc::new(
             iz_web::server::logout_back,
         )))
@@ -368,6 +373,7 @@ impl App {
             store,
             client,
             fake,
+            health,
             stop,
         }
     }
@@ -421,6 +427,7 @@ impl App {
             cookie_name: "iz_session".to_string(),
             cookie_key: [7u8; 32],
         };
+        let health = iz_web::directory::DirectoryHealth::new();
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let router = iz_client::mount(
             Router::builder()
@@ -442,6 +449,7 @@ impl App {
             "iz-test",
             "s3cr3t",
         ))
+        .app_context(health.clone())
         .app_context(iz_client::LogoutBack(Arc::new(
             iz_web::server::logout_back,
         )))
@@ -456,6 +464,7 @@ impl App {
             store,
             client,
             fake,
+            health,
             stop,
         }
     }
@@ -5323,6 +5332,64 @@ async fn the_board_carries_the_avatar_fallback_script() {
     assert!(
         html.contains("__izAvatar"),
         "avatars without the fallback script show the broken-image box: {html}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Connection card: the identity mirror's stand, on every member's Settings
+// ---------------------------------------------------------------------------
+
+/// The card names the provider and the app's public id, and says Connected
+/// while the mirror's health holds an open stream. The client secret is
+/// nowhere on the page — it must not even be read into the render path.
+#[tokio::test]
+async fn the_connection_card_names_its_provider_without_its_secret() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    app.health.connected();
+    app.health.event();
+    app.health.pass();
+
+    let page = app.get("/settings", Some(&admin)).await;
+    assert_eq!(page.status.as_u16(), 200);
+    let html = String::from_utf8(page.bytes).unwrap();
+    assert!(html.contains("id=\"connection\""), "no Connection card: {html}");
+    assert!(
+        html.contains("iz-test:s3cr3t") == false,
+        "the client secret leaked onto the page: {html}"
+    );
+    assert!(
+        !html.contains("s3cr3t"),
+        "the client secret leaked onto the page: {html}"
+    );
+    assert!(
+        html.contains("iz-test"),
+        "the client id is the card's public fact: {html}"
+    );
+    assert!(
+        html.contains("Connected"),
+        "an open stream says Connected: {html}"
+    );
+}
+
+/// Between passes — before the first stream opens, or after one died —
+/// the card says Reconnecting, and still carries the public facts without
+/// the secret.
+#[tokio::test]
+async fn the_connection_card_says_reconnecting_while_the_stream_is_down() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+
+    let page = app.get("/settings", Some(&admin)).await;
+    assert_eq!(page.status.as_u16(), 200);
+    let html = String::from_utf8(page.bytes).unwrap();
+    assert!(
+        html.contains("Reconnecting"),
+        "a stream that never opened says Reconnecting: {html}"
+    );
+    assert!(
+        html.contains("iz-test") && !html.contains("s3cr3t"),
+        "the card names the client without the secret: {html}"
     );
 }
 /// Polls the store until a `Rule` send for `rule_id` addressed to `recipient`

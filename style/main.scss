@@ -4365,3 +4365,35 @@ input[type="radio"] {
   // their columns stack instead of squeezing into slivers.
   .field-row { flex-wrap: wrap; }
 }
+
+// The Settings Connection card: the identity mirror's stand, as facts and a
+// state dot — green while the /directory/live stream is open, amber while
+// iz waits out a reconnection.
+.connection-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1.5rem;
+  margin: 0;
+
+  dt {
+    font-weight: 600;
+    white-space: nowrap;
+  }
+}
+
+.connection-dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: baseline;
+
+  &.connection-on {
+    background: #2e9e5b;
+  }
+
+  &.connection-wait {
+    background: #d99a26;
+  }
+}

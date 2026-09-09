@@ -6,6 +6,7 @@
 pub mod avatar;
 pub mod board;
 pub mod detail;
+pub mod directory;
 pub mod dropdown;
 pub mod files;
 pub mod i18n;
