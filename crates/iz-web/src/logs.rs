@@ -16,11 +16,11 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::{HeaderName, StatusCode, header, page, route};
-use topcoat::view::view;
+use topcoat::view::{View, ViewExt, view};
 
 use crate::detail::{Me, datepicker_grid, glyph};
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, store, back_to, require_admin};
+use crate::server::{Refusal, back_to, require_admin, store};
 
 /// A query value survives the round trip to a `Location` header only if it
 /// cannot be mistaken for another pair or break the header outright — a
@@ -44,12 +44,13 @@ fn decode_q(raw: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(value) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                out.push(value);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(&raw[i + 1..i + 3], 16)
+        {
+            out.push(value);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -469,10 +470,10 @@ fn far_future() -> OffsetDateTime {
 /// so garbage input narrows nothing rather than 500ing.
 fn parse_day_range(query: &str, zone: time::UtcOffset) -> Option<(OffsetDateTime, OffsetDateTime)> {
     let (from_raw, to_raw) = match (query_value(query, "from"), query_value(query, "to")) {
-        (None, None) => match query_value(query, "on").filter(|v| !v.is_empty()) {
-            Some(on) => (Some(on), Some(on)),
-            None => return None,
-        },
+        (None, None) => {
+            let on = query_value(query, "on").filter(|v| !v.is_empty())?;
+            (Some(on), Some(on))
+        }
         (from, to) => (from.filter(|v| !v.is_empty()), to.filter(|v| !v.is_empty())),
     };
     if from_raw.is_none() && to_raw.is_none() {
@@ -483,10 +484,10 @@ fn parse_day_range(query: &str, zone: time::UtcOffset) -> Option<(OffsetDateTime
     // one shifted 24h later.
     let mut from_start = from_raw.and_then(|raw| parse_day_start(raw, zone));
     let mut to_start = to_raw.and_then(|raw| parse_day_start(raw, zone));
-    if let (Some(f), Some(t)) = (from_start, to_start) {
-        if f > t {
-            std::mem::swap(&mut from_start, &mut to_start);
-        }
+    if let (Some(f), Some(t)) = (from_start, to_start)
+        && f > t
+    {
+        std::mem::swap(&mut from_start, &mut to_start);
     }
     let start = from_start.unwrap_or_else(far_past);
     let end = match to_start {
@@ -890,7 +891,7 @@ fn rail_class(current: Section, target: Section) -> &'static str {
 }
 
 #[page("/logs")]
-async fn logs_page(cx: &Cx) -> Result {
+async fn logs_page(cx: &Cx) -> Result<impl View> {
     let lang = Lang::En;
     let query = topcoat::router::request::uri(cx)
         .query()
@@ -913,22 +914,26 @@ async fn logs_page(cx: &Cx) -> Result {
     let filter = parse_activity_filter(&query, zone);
     let limit = resolve_limit(cx, section);
     match snapshot(cx, section, page, dir, &filter, limit).await {
-        Ok(Ok((snapshot, links))) => logs_screen(cx, snapshot, section, links, &query, limit).await,
+        Ok(Ok((snapshot, links))) => Ok(logs_screen(cx, snapshot, section, links, &query, limit)
+            .await?
+            .boxed()),
         // No `Me` here to read a language off of when the refusal itself is
         // "no session" — English, same as the other admin pages' own gate.
-        Ok(Err(refusal)) => view! {
+        Ok(Err(refusal)) => Ok(view! {
             cx =>
             <main class="scaffold-note">
                 <p>(refusal.message())</p>
                 <p><a href="/">(t(lang, Key::BackToBoard))</a></p>
             </main>
-        },
-        Err(_) => view! {
+        }
+        .boxed()),
+        Err(_) => Ok(view! {
             cx =>
             <main class="scaffold-note">
                 <p>(t(lang, Key::SomethingWentWrong))</p>
             </main>
-        },
+        }
+        .boxed()),
     }
 }
 
@@ -941,14 +946,15 @@ fn section_slug(section: Section) -> &'static str {
     }
 }
 
-async fn logs_screen(
-    cx: &Cx,
+async fn logs_screen<'a>(
+    cx: &'a Cx,
     snapshot: LogsSnapshot,
     section: Section,
     links: PageLinks,
     query: &str,
     limit: u32,
-) -> Result {
+) -> Result<impl View + 'a> {
+    let query = query.to_string();
     let lang = Lang::from_code(&snapshot.me.language);
     let me = snapshot.me;
     let queue = snapshot.queue;
@@ -959,7 +965,7 @@ async fn logs_screen(
     let activity_empty = activity.is_empty();
     let slug = section_slug(section);
     let extra = if section == Section::Activity {
-        activity_query_suffix(query)
+        activity_query_suffix(&query)
     } else {
         String::new()
     };
@@ -976,18 +982,18 @@ async fn logs_screen(
         .map(|(x, y, n)| format!("{x}\u{2013}{y} / {n}"));
 
     let (filter_actor, filter_kind, filter_task, filter_dir) = (
-        query_value(query, "actor").unwrap_or("").to_string(),
-        query_value(query, "kind").unwrap_or("").to_string(),
-        query_value(query, "task").unwrap_or("").to_string(),
-        query_value(query, "dir").unwrap_or("").to_string(),
+        query_value(&query, "actor").unwrap_or("").to_string(),
+        query_value(&query, "kind").unwrap_or("").to_string(),
+        query_value(&query, "task").unwrap_or("").to_string(),
+        query_value(&query, "dir").unwrap_or("").to_string(),
     );
     // `on=` is a shorthand for `from=to=on`; the boxes themselves only ever
     // read/write `from`/`to`, so a link that arrived with only `on=` shows
     // it in both.
     let (filter_from, filter_to) = {
-        let on = query_value(query, "on").unwrap_or("");
-        let from = query_value(query, "from").unwrap_or(on).to_string();
-        let to = query_value(query, "to").unwrap_or(on).to_string();
+        let on = query_value(&query, "on").unwrap_or("");
+        let from = query_value(&query, "from").unwrap_or(on).to_string();
+        let to = query_value(&query, "to").unwrap_or(on).to_string();
         (from, to)
     };
     let members: Vec<(String, String)> = if section == Section::Activity {
@@ -1010,13 +1016,13 @@ async fn logs_screen(
         Vec::new()
     };
 
-    view! {
+    Ok(view! {
         cx =>
         <header class="topbar">
-            (crate::layout::family_mark(cx).await?)
-            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Logs, me.role, lang).await?)
+            (topcoat::view::Child::new(crate::layout::family_mark(cx).await?))
+            (topcoat::view::Child::new(crate::layout::topbar_nav(cx, crate::layout::NavPage::Logs, me.role, lang).await?))
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &me, lang).await?)
+            (topcoat::view::Child::new(crate::layout::user_menu(cx, &me, lang).await?))
         </header>
 
         <div class="settings-shell">
@@ -1163,7 +1169,7 @@ async fn logs_screen(
                                         <option value=(member.0.clone()) selected=(filter_actor == member.0)>(member.1.clone())</option>
                                     }
                                 </select>
-                                (glyph::chevron(cx).await?)
+                                (topcoat::view::Child::new(glyph::chevron(cx).await?))
                             </div>
                             <div class="field-box field-box-sort">
                                 <select class="status-select" name="kind" data-autosubmit="" data-search="">
@@ -1172,7 +1178,7 @@ async fn logs_screen(
                                         <option value=(kind) selected=(filter_kind == *kind)>(crate::i18n::activity_kind_word(lang, kind))</option>
                                     }
                                 </select>
-                                (glyph::chevron(cx).await?)
+                                (topcoat::view::Child::new(glyph::chevron(cx).await?))
                             </div>
                             <div class="field-box field-box-sort">
                                 <select class="status-select" name="task" data-autosubmit="" data-search="">
@@ -1181,29 +1187,29 @@ async fn logs_screen(
                                         <option value=(task.0.clone()) selected=(filter_task == task.0)>(format!("{} {}", task.0, task.1))</option>
                                     }
                                 </select>
-                                (glyph::chevron(cx).await?)
+                                (topcoat::view::Child::new(glyph::chevron(cx).await?))
                             </div>
                             <div class="edit edit-pop datepick-pop">
                                 <input class="edit-toggle" type="checkbox" id="log-from-toggle" aria-label=(t(lang, Key::From))>
                                 <label class="field-box edit-view edit-hit" for="log-from-toggle">
-                                    (glyph::calendar(cx).await?)
+                                    (topcoat::view::Child::new(glyph::calendar(cx).await?))
                                     <span class="field-text datepick-label" data-empty=(t(lang, Key::From))>(if filter_from.is_empty() { t(lang, Key::From).to_string() } else { filter_from.clone() })</span>
-                                    (glyph::chevron(cx).await?)
+                                    (topcoat::view::Child::new(glyph::chevron(cx).await?))
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
-                                    (datepicker_grid(cx, "from", &filter_from, true, lang).await?)
+                                    (topcoat::view::Child::new(datepicker_grid(cx, "from", &filter_from, true, lang).await?))
                                 </div>
                             </div>
                             <span class="log-range-dash">("\u{2013}")</span>
                             <div class="edit edit-pop datepick-pop">
                                 <input class="edit-toggle" type="checkbox" id="log-to-toggle" aria-label=(t(lang, Key::To))>
                                 <label class="field-box edit-view edit-hit" for="log-to-toggle">
-                                    (glyph::calendar(cx).await?)
+                                    (topcoat::view::Child::new(glyph::calendar(cx).await?))
                                     <span class="field-text datepick-label" data-empty=(t(lang, Key::To))>(if filter_to.is_empty() { t(lang, Key::To).to_string() } else { filter_to.clone() })</span>
-                                    (glyph::chevron(cx).await?)
+                                    (topcoat::view::Child::new(glyph::chevron(cx).await?))
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
-                                    (datepicker_grid(cx, "to", &filter_to, true, lang).await?)
+                                    (topcoat::view::Child::new(datepicker_grid(cx, "to", &filter_to, true, lang).await?))
                                 </div>
                             </div>
                             <div class="field-box field-box-sort">
@@ -1211,7 +1217,7 @@ async fn logs_screen(
                                     <option value="" selected=(filter_dir != "oldest")>(t(lang, Key::Newest))</option>
                                     <option value="oldest" selected=(filter_dir == "oldest")>(t(lang, Key::Oldest))</option>
                                 </select>
-                                (glyph::chevron(cx).await?)
+                                (topcoat::view::Child::new(glyph::chevron(cx).await?))
                             </div>
                         </form>
                         <div class="log-list" data-rows=(limit) data-section="activity">
@@ -1256,11 +1262,11 @@ async fn logs_screen(
                 }
             </main>
         </div>
-        (crate::dropdown::dropdown_script(cx).await?)
-        (crate::layout::escape_script(cx).await?)
-        (crate::detail::datepicker_script(cx, lang).await?)
-        (log_fit_script(cx).await?)
-    }
+        (topcoat::view::Child::new(crate::dropdown::dropdown_script(cx).await?))
+        (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))
+        (topcoat::view::Child::new(crate::detail::datepicker_script(cx, lang).await?))
+        (topcoat::view::Child::new(log_fit_script(cx).await?))
+    }.boxed())
 }
 
 /// Fits the active tab's page size to the browser's own viewport: measured
@@ -1281,7 +1287,7 @@ async fn logs_screen(
 /// its height changes, a window resize re-measures for the new viewport.
 /// A container too short to measure (no rows yet, or a stage not yet laid
 /// out) is left alone rather than guessed at.
-async fn log_fit_script(cx: &Cx) -> Result {
+async fn log_fit_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     use topcoat::view::Unescaped;
     let js = "(function() {\
         var waits = 0;\
@@ -1320,5 +1326,5 @@ async fn log_fit_script(cx: &Cx) -> Result {
         window.addEventListener('resize', schedule);\
         schedule();\
     })();";
-    view! { cx => <script>(Unescaped::new_unchecked(js))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(js))</script> }.boxed())
 }

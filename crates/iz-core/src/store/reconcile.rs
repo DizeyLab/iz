@@ -129,8 +129,8 @@ pub async fn reconcile(
         // Best-effort undo so the live file is not gone. If this also fails,
         // the caller has both the backup and the rebuilt file to recover from.
         let _ = std::fs::rename(&backup_path, path);
-        let _ = rename_sibling(&backup_path, path, "-wal");
-        let _ = rename_sibling(&backup_path, path, "-shm");
+        rename_sibling(&backup_path, path, "-wal");
+        rename_sibling(&backup_path, path, "-shm");
         return Err(StoreError::Backend(format!(
             "failed to move rebuilt database into place {}: {}",
             rebuilt_path, e
@@ -242,7 +242,7 @@ async fn seed_general_tags(new_conn: &Connection) -> Result<()> {
         boards.push((board_id, created_at));
     }
     for (board_id, created_at) in boards {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         new_conn
             .execute(
                 "INSERT INTO main.tag (id, board_id, name, position, is_default, created_at) \
@@ -650,7 +650,7 @@ async fn extract_column(
 /// renamed onto the final name, so a reader of the final name never sees a
 /// partial file.
 fn write_blob(dir: &std::path::Path, id: &str, bytes: &[u8]) -> std::io::Result<()> {
-    let temp = dir.join(format!(".{}.tmp-{}", id, Ulid::new()));
+    let temp = dir.join(format!(".{}.tmp-{}", id, Ulid::generate()));
     std::fs::write(&temp, bytes)?;
     match std::fs::rename(&temp, dir.join(id)) {
         Ok(()) => Ok(()),
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_maps_refuses_a_declared_table_without_a_map() {
-        let dir = std::env::temp_dir().join(format!("iz-validate-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-validate-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("iz.db").to_str().unwrap().to_string();
         let db = Builder::new_local(&path).build().await.unwrap();
@@ -1235,7 +1235,7 @@ mod tests {
     /// column any more.
     #[tokio::test]
     async fn an_old_shaped_database_extracts_its_blobs_to_the_storage_dir() {
-        let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("iz.db").to_str().unwrap().to_string();
         let (attachment_bytes, photo_bytes) = old_shape_database(&path).await;
@@ -1322,7 +1322,7 @@ mod tests {
     /// leaves the original file in place with nothing staged beside it.
     #[tokio::test]
     async fn a_rebuild_without_storage_refuses_to_drop_blobs() {
-        let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("iz.db").to_str().unwrap().to_string();
         old_shape_database(&path).await;

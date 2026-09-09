@@ -18,7 +18,7 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::{HeaderMap, HeaderValue, StatusCode, header, page, route};
-use topcoat::view::view;
+use topcoat::view::{View, ViewExt, view};
 
 use iz_core::detail::ActivityKind;
 use iz_core::store::{NewSender, SenderCheck, SenderTest, StorageBackend, Store, StoreError, User};
@@ -955,8 +955,10 @@ async fn send_message(
 /// and whether the live identity feed is open at this moment. Read from
 /// the config and the mirror's health only — the client secret is not
 /// read here, so no render path can carry it.
-async fn connection_card(cx: &Cx, lang: Lang) -> Result {
-    let oidc = &config(cx).oidc;
+async fn connection_card<'a>(cx: &'a Cx, lang: Lang) -> Result<impl View + 'a> {
+    let config = config(cx);
+    let issuer = config.oidc.issuer.clone();
+    let client_id = config.oidc.client_id.clone();
     let snap = crate::directory::health(cx).snapshot();
     let (state_word, state_class) = if snap.connected {
         (t(lang, Key::ConnectionConnected), "connection-on")
@@ -976,13 +978,13 @@ async fn connection_card(cx: &Cx, lang: Lang) -> Result {
     } else {
         format!("{pass_age} ago")
     };
-    view! {
+    Ok(view! {
         cx =>
         <dl class="connection-facts">
             <dt>(t(lang, Key::ConnectionIssuer))</dt>
-            <dd class="connection-fact">(oidc.issuer.clone())</dd>
+            <dd class="connection-fact">(issuer)</dd>
             <dt>(t(lang, Key::ConnectionClientId))</dt>
-            <dd class="connection-fact">(oidc.client_id.clone())</dd>
+            <dd class="connection-fact">(client_id)</dd>
             <dt>(t(lang, Key::ConnectionStream))</dt>
             <dd class="connection-fact">
                 <span class=(format!("connection-dot {state_class}"))></span>
@@ -994,6 +996,7 @@ async fn connection_card(cx: &Cx, lang: Lang) -> Result {
             <dd class="connection-fact">(pass_line)</dd>
         </dl>
     }
+    .boxed())
 }
 
 /// The share of a migration already moved, for the bar's width. An empty
@@ -1011,13 +1014,13 @@ fn migration_percent(moved: u64, total: u64) -> u8 {
 /// stands, and — while rows still move — how far the drain has come.
 /// Read from the mirror and the beat's health only; the key
 /// `[storage.in]` holds is not read here, so no render path can carry it.
-async fn storage_card(
-    cx: &Cx,
+async fn storage_card<'a>(
+    cx: &'a Cx,
     lang: Lang,
     listed: Option<(String, String)>,
     snap: &crate::storage::StorageSnapshot,
     backend: StorageBackend,
-) -> Result {
+) -> Result<impl View + 'a> {
     let service_line = match &listed {
         Some((name, url)) => format!("{name} · {url}"),
         None => t(lang, Key::StorageAbsent).to_string(),
@@ -1043,7 +1046,8 @@ async fn storage_card(
         ),
         None => t(lang, Key::ConnectionNever).to_string(),
     };
-    view! {
+    let migrating = snap.migrating;
+    Ok(view! {
         cx =>
         <dl class="connection-facts">
             <dt>(t(lang, Key::StorageService))</dt>
@@ -1055,7 +1059,7 @@ async fn storage_card(
             </dd>
             <dt>(t(lang, Key::StorageLimit))</dt>
             <dd class="connection-fact">(limit_line)</dd>
-            if backend == StorageBackend::In && let Some((moved, total)) = snap.migrating {
+            if backend == StorageBackend::In && let Some((moved, total)) = migrating {
                 <dt>(t(lang, Key::StorageMigration))</dt>
                 <dd class="connection-fact">
                     (format!("{moved} of {total}"))
@@ -1067,7 +1071,7 @@ async fn storage_card(
             <dt>(t(lang, Key::StorageLastProblem))</dt>
             <dd class="connection-fact">(problem_line)</dd>
         </dl>
-    }
+    }.boxed())
 }
 
 /// One row of the member list, as an admin may see it. Identity is im's to
@@ -1256,7 +1260,7 @@ fn is_origin(value: &str) -> bool {
 
 /// The refusal that landed on this call's redirect, if any, and this call's
 /// own `saved=<call>` flag.
-fn call_state<'q>(query: &'q str, call: &str) -> (Option<Refusal>, bool) {
+fn call_state(query: &str, call: &str) -> (Option<Refusal>, bool) {
     let mut refusal_code = None;
     let mut on = None;
     let mut saved = false;
@@ -1322,17 +1326,18 @@ fn rail_class(current: Section, target: Section) -> &'static str {
 /// The settings screen.
 #[page("/settings")]
 #[allow(unused_variables)]
-async fn settings_page(cx: &Cx) -> Result {
+async fn settings_page(cx: &Cx) -> Result<impl View> {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => {
-            return view! {
+            return Ok(view! {
                 cx =>
                 <main class="scaffold-note">
                     <p>(refusal.message())</p>
                     <p><a href="/">(t(Lang::En, Key::BackToBoard))</a></p>
                 </main>
-            };
+            }
+            .boxed());
         }
     };
     let lang = Lang::from_code(&user.language);
@@ -1407,13 +1412,14 @@ async fn settings_page(cx: &Cx) -> Result {
         None
     };
 
-    view! {
+    let me = crate::detail::Me::from(&user);
+    Ok(view! {
         cx =>
         <header class="topbar">
-            (crate::layout::family_mark(cx).await?)
-            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Settings, user.role, lang).await?)
+            (topcoat::view::Child::new(crate::layout::family_mark(cx).await?))
+            (topcoat::view::Child::new(crate::layout::topbar_nav(cx, crate::layout::NavPage::Settings, user.role, lang).await?))
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)
+            (topcoat::view::Child::new(crate::layout::user_menu(cx, &me, lang).await?))
         </header>
 
         <div class="settings-shell">
@@ -1434,7 +1440,7 @@ async fn settings_page(cx: &Cx) -> Result {
                     </div>
                     <div class="panel-body">
                         <div class="identity-row">
-                            (crate::layout::avatar(cx, &user.id, &user.display_name, user.photo_version, "avatar-lg").await?)
+                            (topcoat::view::Child::new(crate::layout::avatar(cx, &user.id, &user.display_name, user.photo_version, "avatar-lg").await?))
                             <div class="identity-who">
                                 <div class="identity-name">(user.display_name.clone())</div>
                                 <div class="identity-address">(user.email.clone())</div>
@@ -1486,7 +1492,7 @@ async fn settings_page(cx: &Cx) -> Result {
                         <h2 class="panel-title">(t(lang, Key::Connection))</h2>
                     </div>
                     <div class="panel-body">
-                        (connection_card(cx, lang).await?)
+                        (topcoat::view::Child::new(connection_card(cx, lang).await?))
                     </div>
                 </section>
                 }
@@ -1737,7 +1743,7 @@ async fn settings_page(cx: &Cx) -> Result {
                             </div>
                         </form>
                         <div class="panel-body">
-                            (storage_card(cx, lang, listed, &snap, backend).await?)
+                            (topcoat::view::Child::new(storage_card(cx, lang, listed, &snap, backend).await?))
                         </div>
                     </section>
                 }
@@ -1810,7 +1816,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                         <tr class="member-row">
                                             <td class="member-col-name member-name">
                                                 <span class="member-name-row">
-                                                    (crate::layout::avatar(cx, &member.id, &member.display_name, member.photo_version, "avatar-sm").await?)
+                                                    (topcoat::view::Child::new(crate::layout::avatar(cx, &member.id, &member.display_name, member.photo_version, "avatar-sm").await?))
                                                     <a href=(format!("/people/{}", member.id))>(member.display_name.clone())</a>
                                                     if member.is_you {
                                                         <span class="member-you">(t(lang, Key::You))</span>
@@ -1839,7 +1845,7 @@ async fn settings_page(cx: &Cx) -> Result {
                                                             <option value="member" selected=(member.role == iz_core::Role::Member)>(t(lang, Key::RoleMemberOption))</option>
                                                             <option value="viewer" selected=(member.role == iz_core::Role::Viewer)>(t(lang, Key::RoleViewerOption))</option>
                                                         </select>
-                                                            (crate::detail::glyph::chevron(cx).await?)
+                                                            (topcoat::view::Child::new(crate::detail::glyph::chevron(cx).await?))
                                                     </form>
                                                 }
                                             </td>
@@ -1939,8 +1945,8 @@ async fn settings_page(cx: &Cx) -> Result {
                 }
             </main>
         </div>
-        (crate::dropdown::dropdown_script(cx).await?)
-        (crate::layout::escape_script(cx).await?)
-        (crate::detail::escape_closes(cx).await?)
-    }
+        (topcoat::view::Child::new(crate::dropdown::dropdown_script(cx).await?))
+        (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))
+        (topcoat::view::Child::new(crate::detail::escape_closes(cx).await?))
+    }.boxed())
 }

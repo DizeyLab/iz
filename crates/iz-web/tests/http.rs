@@ -32,6 +32,7 @@ use iz_web::server::Mail;
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
 use topcoat::router::{Body, BodyLimit, Router, RouterBuilderDiscoverExt, to_bytes};
+use topcoat::runtime::RouterBuilderRuntimeExt;
 use ulid::Ulid;
 
 /// The session cookie iz-client seals: the tests mint it directly instead of
@@ -58,13 +59,16 @@ fn asset_dir() -> PathBuf {
 const TEST_LIVE_WINDOW: iz_web::live::LiveWindow =
     iz_web::live::LiveWindow(std::time::Duration::from_secs(10));
 
+/// Photos the fake im can serve, keyed by person id.
+type Photos = Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>;
+
 /// A fake im: answers `POST /introspect` from its token map, `{"active":
 /// false}` for anything it does not know. Bare TCP + hand-rolled HTTP/1.1 —
 /// just enough for the client's form post.
 struct FakeIm {
     addr: std::net::SocketAddr,
     tokens: Arc<Mutex<HashMap<String, serde_json::Value>>>,
-    photos: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    photos: Photos,
 }
 
 impl FakeIm {
@@ -73,8 +77,7 @@ impl FakeIm {
         let addr = listener.local_addr().unwrap();
         let tokens: Arc<Mutex<HashMap<String, serde_json::Value>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let photos: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let photos: Photos = Arc::new(Mutex::new(HashMap::new()));
         let map = tokens.clone();
         let pmap = photos.clone();
         tokio::spawn(async move {
@@ -176,7 +179,7 @@ const PHOTO_BASIC: &str = "Basic aXotdGVzdDpzM2NyM3Q=";
 /// or nothing, a missing photo exactly like a missing person. `None` for
 /// anything else, which stays the introspection JSON.
 fn photo_answer(
-    photos: &Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+    photos: &Photos,
     head: &str,
     request_line: &str,
 ) -> Option<(&'static str, String, Vec<u8>)> {
@@ -305,7 +308,7 @@ impl App {
         base_url: &str,
         storage_in: Option<String>,
     ) -> Self {
-        let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("iz.db");
         let storage = dir.join("storage");
@@ -357,6 +360,7 @@ impl App {
         let router = iz_client::mount(
             Router::builder()
                 .discover()
+                .runtime()
                 .layer(
                     BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
                         .at("/files"),
@@ -404,7 +408,7 @@ impl App {
     /// settings, so a transition actually reaches the ledger instead of the
     /// silent no-op `open`'s router hands every crossing.
     async fn open_with_mail() -> Self {
-        let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-http-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("iz.db");
         let storage = dir.join("storage");
@@ -453,6 +457,7 @@ impl App {
         let router = iz_client::mount(
             Router::builder()
                 .discover()
+                .runtime()
                 .layer(
                     BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
                         .at("/files"),
@@ -496,7 +501,7 @@ impl App {
     /// dance. The local row is provisioned on the next request, the way a
     /// real first login provisions it.
     fn mint(&self, sub: &str, email: &str, name: &str, im_admin: bool) -> String {
-        let token = format!("tok-{}", Ulid::new());
+        let token = format!("tok-{}", Ulid::generate());
         let exp = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
         self.fake.tokens.lock().insert(
             token.clone(),
@@ -824,7 +829,6 @@ impl Answer {
 }
 
 /// Form encoding, enough for the addresses these tests send.
-
 fn encode(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
@@ -2658,7 +2662,12 @@ async fn a_sender_field_that_cannot_work_is_refused_by_name() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
 
-    let bad: &[(&str, &[(&str, &str)], &str)] = &[
+    type BadCase = (
+        &'static str,
+        &'static [(&'static str, &'static str)],
+        &'static str,
+    );
+    let bad: &[BadCase] = &[
         ("host", &[("host", "  ")], "Give the SMTP host."),
         (
             "host",
@@ -3155,7 +3164,7 @@ async fn a_rule_may_not_be_hung_off_a_column_that_is_not_on_this_board() {
             Some(&admin_cookie),
             &[
                 ("trigger", "status"),
-                ("column_id", &Ulid::new().to_string()),
+                ("column_id", &Ulid::generate().to_string()),
                 ("subject", "Task completed"),
                 ("audience", "assignees"),
             ],
@@ -3223,7 +3232,7 @@ async fn switching_a_rule_off_leaves_it_listed_and_switched_off() {
 async fn a_rule_id_this_workspace_does_not_own_is_refused() {
     let app = App::open().await;
     let admin_cookie = admin(&app).await;
-    let stranger = Ulid::new().to_string();
+    let stranger = Ulid::generate().to_string();
 
     for path in ["/api/set_rule_enabled", "/api/delete_rule"] {
         let answer = app
@@ -5119,7 +5128,7 @@ async fn add_member_cannot_make_an_admin() {
 #[tokio::test]
 async fn losing_the_im_admin_flag_drops_the_role_to_member() {
     let app = App::open().await;
-    let token = format!("tok-{}", Ulid::new());
+    let token = format!("tok-{}", Ulid::generate());
     let exp = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
     app.fake.tokens.lock().insert(
         token.clone(),
@@ -5329,7 +5338,7 @@ async fn the_avatar_is_not_found_without_a_linked_row() {
     assert_eq!(photo.status, StatusCode::NOT_FOUND);
 
     let stranger = app
-        .get(&format!("/avatar/{}", Ulid::new()), Some(&member))
+        .get(&format!("/avatar/{}", Ulid::generate()), Some(&member))
         .await;
     assert_eq!(stranger.status, StatusCode::NOT_FOUND);
 }
@@ -5379,7 +5388,7 @@ async fn the_connection_card_names_its_provider_without_its_secret() {
         "no Connection card: {html}"
     );
     assert!(
-        html.contains("iz-test:s3cr3t") == false,
+        !html.contains("iz-test:s3cr3t"),
         "the client secret leaked onto the page: {html}"
     );
     assert!(
@@ -9705,7 +9714,7 @@ fn the_stylesheet_guard_refuses_a_foreign_bundle() {
     let bundle = AssetBundle::load_dir(asset_dir()).expect("no bundle: run `topcoat asset bundle`");
     assert!(iz_web::server::stylesheet_guard(&bundle).is_ok());
 
-    let foreign = std::env::temp_dir().join(format!("iz-foreign-{}", Ulid::new()));
+    let foreign = std::env::temp_dir().join(format!("iz-foreign-{}", Ulid::generate()));
     std::fs::create_dir_all(&foreign).unwrap();
     for entry in std::fs::read_dir(asset_dir()).unwrap().flatten() {
         std::fs::copy(entry.path(), foreign.join(entry.file_name())).unwrap();

@@ -245,7 +245,11 @@ pub fn stylesheet_guard(bundle: &AssetBundle) -> Result<String, String> {
             stylesheet.name()
         )
     })?;
-    let actual = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+    let digest = sha2::Sha256::digest(&bytes);
+    let actual = format!(
+        "sha256:{}",
+        digest.as_slice().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
     if actual != expected {
         return Err(format!(
             "the asset bundle at {} is from another build: stylesheet {} is {actual} but this binary was compiled against {expected}; run `topcoat asset bundle` and redeploy",

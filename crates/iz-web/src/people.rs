@@ -9,7 +9,7 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::error::not_found;
 use topcoat::router::{page, path_param};
-use topcoat::view::view;
+use topcoat::view::{View, ViewExt, view};
 
 use iz_core::detail::ActivityKind;
 use iz_core::store::{ActivityFilter, Dir, FeedPage};
@@ -56,7 +56,7 @@ fn kind_word(lang: Lang, kind: &ActivityKind) -> String {
 
 /// A person's page. `/people/{user_id}`.
 #[page("/people/{user_id}")]
-async fn people_page(cx: &Cx) -> Result {
+async fn people_page(cx: &Cx) -> Result<impl View> {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(_) => return Err(not_found().into()),
@@ -105,19 +105,20 @@ async fn people_page(cx: &Cx) -> Result {
         )
         .await?;
 
-    view! {
+    let me = crate::detail::Me::from(&user);
+    Ok(view! {
         cx =>
         <header class="topbar">
-            (crate::layout::family_mark(cx).await?)
-            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Settings, user.role, lang).await?)
+            (topcoat::view::Child::new(crate::layout::family_mark(cx).await?))
+            (topcoat::view::Child::new(crate::layout::topbar_nav(cx, crate::layout::NavPage::Settings, user.role, lang).await?))
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)
+            (topcoat::view::Child::new(crate::layout::user_menu(cx, &me, lang).await?))
         </header>
 
         <main class="people-shell">
             <section class="panel person-card">
                 <div class="person-head">
-                    (crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-xl").await?)
+                    (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-xl").await?))
                     <div class="person-heading">
                         <h2 class="person-name">(person.display_name.clone())</h2>
                         <div class="person-marks">
@@ -196,7 +197,7 @@ async fn people_page(cx: &Cx) -> Result {
             </section>
         </main>
 
-        (crate::layout::escape_script(cx).await?)
-        (crate::detail::escape_closes(cx).await?)
-    }
+        (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))
+        (topcoat::view::Child::new(crate::detail::escape_closes(cx).await?))
+    }.boxed())
 }

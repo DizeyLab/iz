@@ -679,7 +679,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
             dir.join(FILE_NAME),
-            &format!("# mine\ndatabase = \"state/iz.db\"\n{OIDC}"),
+            format!("# mine\ndatabase = \"state/iz.db\"\n{OIDC}"),
         )
         .unwrap();
 
@@ -1059,7 +1059,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
             dir.join(FILE_NAME),
-            &format!("database = \"iz.db\"\n{OIDC}"),
+            format!("database = \"iz.db\"\n{OIDC}"),
         )
         .unwrap();
         Config::load_from(&dir).unwrap();

@@ -24,7 +24,7 @@ struct Scratch {
 
 impl Scratch {
     async fn open() -> Self {
-        let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = dir.join("storage");
         let store = TursoStore::open(dir.join("iz.db").to_str().unwrap(), &storage)
@@ -102,7 +102,7 @@ async fn member_user(
 
 #[tokio::test]
 async fn the_schema_is_created_once_and_survives_reopen() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
 
@@ -971,7 +971,7 @@ async fn members_list_and_count_for_the_admin_screen() {
 
 #[tokio::test]
 async fn display_preferences_default_and_persist_across_reopen() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
 
@@ -1004,7 +1004,7 @@ async fn display_preferences_default_and_persist_across_reopen() {
 #[tokio::test]
 async fn updates_to_a_missing_user_are_not_found() {
     let scratch = Scratch::open().await;
-    let missing = Ulid::new().to_string();
+    let missing = Ulid::generate().to_string();
     assert!(matches!(
         scratch.store.set_role(&missing, Role::Member).await,
         Err(StoreError::NotFound)
@@ -2566,7 +2566,7 @@ async fn an_orphan_row_is_refused() {
         .len();
     assert_eq!(existing, 1, "only the admin");
 
-    let dir = std::env::temp_dir().join(format!("iz-fk-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-fk-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_str().unwrap().to_owned();
     {
@@ -2644,7 +2644,7 @@ async fn a_rule_naming_a_column_it_cannot_act_on_is_refused_by_the_schema() {
     // past it, straight at the table. The check constraint is the guard: a
     // column on a trigger that never reads one is a rule whose author meant
     // something the engine will not do.
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
     let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
@@ -2775,7 +2775,7 @@ async fn a_decision_is_written_once_per_rule_and_event() {
 
 #[tokio::test]
 async fn an_actor_only_decision_is_reworded_at_boot() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
 
@@ -3179,7 +3179,7 @@ async fn shared() -> (PathBuf, Arc<TursoStore>, String, String) {
 
 /// The same, with a quiet window of `minutes` on the workspace.
 async fn waiting(minutes: u32) -> (PathBuf, Arc<TursoStore>, String, String) {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let store = Arc::new(
         TursoStore::open(dir.join("iz.db").to_str().unwrap(), &dir.join("storage"))
@@ -5533,7 +5533,7 @@ async fn a_write_that_failed_announces_nothing() {
     let store = &scratch.store;
     let mut rx = store.subscribe();
 
-    let missing = Ulid::new().to_string();
+    let missing = Ulid::generate().to_string();
     assert!(matches!(
         store
             .record_send_accepted(&missing, OffsetDateTime::now_utc())
@@ -5589,8 +5589,7 @@ fn every_writing_method_announces_or_is_named_here() {
     let impl_block = &source[start..end];
 
     let mut silent = Vec::new();
-    let mut methods = impl_block.split("\n    async fn ").skip(1).peekable();
-    while let Some(chunk) = methods.next() {
+    for chunk in impl_block.split("\n    async fn ").skip(1) {
         let name = chunk
             .split(['(', '<', ' '])
             .next()
@@ -5726,7 +5725,7 @@ async fn a_sender_check_is_recorded_apart_from_a_test_and_cleared_on_edit() {
 /// deployed with, kept verbatim in `tests/fixtures/` — and fills it with the
 /// kinds of row a live workspace holds, blobs included.
 async fn live_shaped_database() -> (PathBuf, String) {
-    let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-reconcile-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_str().unwrap().to_string();
 
@@ -7358,7 +7357,7 @@ async fn each_reminder_tells_the_meeting_in_its_own_recipients_clock() {
 
 #[tokio::test]
 async fn reminder_rows_survive_a_reopen() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
     let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
@@ -7369,7 +7368,6 @@ async fn reminder_rows_survive_a_reopen() {
     store.assign_task(&task, &mate).await.unwrap();
     let before = reminders(&store, &task).await;
     assert_eq!(before.len(), 1);
-    let before = before;
     drop(store);
 
     let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
@@ -7473,7 +7471,7 @@ async fn a_whole_second_stamp_is_written_with_nine_zero_digits() {
 /// one.
 #[tokio::test]
 async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
     let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
@@ -8050,7 +8048,7 @@ struct Planted {
 
 impl Planted {
     async fn plant(rows: &[(&str, &str, Vec<u8>)]) -> Self {
-        let dir = std::env::temp_dir().join(format!("iz-resniff-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-resniff-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("iz.db").to_str().unwrap().to_string();
         drop(TursoStore::open(&path, &dir.join("storage")).await.unwrap());
@@ -8490,7 +8488,7 @@ async fn demoting_a_member_to_viewer_takes_their_assignments_with_them() {
 /// reads agree from the first render after the deploy.
 #[tokio::test]
 async fn a_boot_leaves_no_viewer_still_assigned() {
-    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_string_lossy().into_owned();
     let store = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
@@ -8590,7 +8588,7 @@ async fn set_user_disabled_round_trips() {
     assert!(matches!(
         scratch
             .store
-            .set_user_disabled(&Ulid::new().to_string(), true)
+            .set_user_disabled(&Ulid::generate().to_string(), true)
             .await,
         Err(StoreError::NotFound)
     ));
@@ -8665,7 +8663,7 @@ async fn a_sync_claims_an_unclaimed_row_without_touching_its_sign_in_fact() {
 async fn a_sync_follows_provider_drift_but_not_the_sign_in_fact() {
     let (scratch, _workspace, admin_id) = workspace_with_admin().await;
     let before = scratch.store.user(&admin_id).await.unwrap().unwrap();
-    let seen = before.last_signed_in_at.clone();
+    let seen = before.last_signed_in_at;
     let sync = scratch
         .store
         .sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
@@ -8865,8 +8863,16 @@ async fn app_settings_round_trip_through_one_row_per_key() {
 #[tokio::test]
 async fn a_remote_attachment_is_born_stored_without_a_local_file() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
-    let task = add_task(&scratch.store, &workspace, "Backlog", "Ship it", None, &admin).await;
-    let id = Ulid::new().to_string();
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
+    let id = Ulid::generate().to_string();
     let stored = scratch
         .store
         .add_remote_attachment(NewRemoteAttachment {
@@ -8888,11 +8894,7 @@ async fn a_remote_attachment_is_born_stored_without_a_local_file() {
     assert_eq!(row.file_name, "remote.png");
     assert_eq!(row.size_bytes, 7);
     assert!(
-        !scratch
-            .storage
-            .join("attachments")
-            .join(&id)
-            .exists(),
+        !scratch.storage.join("attachments").join(&id).exists(),
         "a stored row names no file on this machine"
     );
     assert_eq!(
@@ -8964,7 +8966,15 @@ async fn setting_the_storage_backend_announces_settings() {
 #[tokio::test]
 async fn local_attachments_are_the_oldest_local_rows_up_to_the_limit() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
-    let task = add_task(&scratch.store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
     let now = OffsetDateTime::now_utc();
     let mut ids = Vec::new();
     for (n, name) in ["a.png", "b.png", "c.png"].iter().enumerate() {
@@ -8985,12 +8995,7 @@ async fn local_attachments_are_the_oldest_local_rows_up_to_the_limit() {
         );
     }
     // The middle one already moved; it must not appear in the drain's pick.
-    scratch
-        .store
-        .mark_attachment_stored(&ids[1])
-        .await
-        .unwrap()
-        ;
+    scratch.store.mark_attachment_stored(&ids[1]).await.unwrap();
 
     let picked = scratch.store.local_attachments(10).await.unwrap();
     assert_eq!(
@@ -9019,7 +9024,15 @@ async fn local_attachments_are_the_oldest_local_rows_up_to_the_limit() {
 #[tokio::test]
 async fn marking_stored_moves_the_row_and_unlinks_the_file() {
     let (scratch, workspace, admin) = workspace_with_admin().await;
-    let task = add_task(&scratch.store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    let task = add_task(
+        &scratch.store,
+        &workspace,
+        "Backlog",
+        "Ship it",
+        None,
+        &admin,
+    )
+    .await;
     let id = scratch
         .store
         .add_attachment(NewAttachment {
@@ -9038,19 +9051,13 @@ async fn marking_stored_moves_the_row_and_unlinks_the_file() {
 
     assert!(scratch.store.mark_attachment_stored(&id).await.unwrap());
     assert_eq!(
-        scratch
-            .store
-            .attachment(&id)
-            .await
-            .unwrap()
-            .unwrap()
-            .remote,
+        scratch.store.attachment(&id).await.unwrap().unwrap().remote,
         iz_core::store::AttachmentWhere::Stored
     );
     assert!(!file.exists(), "the local bytes left with the row's state");
     assert_eq!(scratch.store.local_attachment_count().await.unwrap(), 0);
 
-    let missing = Ulid::new().to_string();
+    let missing = Ulid::generate().to_string();
     assert!(
         !scratch
             .store
@@ -9068,7 +9075,7 @@ async fn marking_stored_moves_the_row_and_unlinks_the_file() {
 /// planted stored keeps its generic mime across the boot.
 #[tokio::test]
 async fn the_boot_resniff_leaves_stored_rows_alone() {
-    let dir = std::env::temp_dir().join(format!("iz-resniff-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("iz-resniff-{}", Ulid::generate()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("iz.db").to_str().unwrap().to_string();
     drop(TursoStore::open(&path, &dir.join("storage")).await.unwrap());

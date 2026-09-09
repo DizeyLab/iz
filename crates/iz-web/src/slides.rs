@@ -26,6 +26,7 @@ use zip::ZipArchive;
 
 /// One slide: the paragraphs of text it carries, in the order they sit on
 /// the slide.
+#[derive(Clone)]
 pub(crate) struct Slide {
     pub paragraphs: Vec<Paragraph>,
 }
@@ -33,6 +34,7 @@ pub(crate) struct Slide {
 /// One paragraph of a slide. `title` marks a paragraph from a title
 /// placeholder (`type="title"` or `ctrTitle`), which the view sets off as
 /// the slide's heading.
+#[derive(Clone)]
 pub(crate) struct Paragraph {
     pub title: bool,
     pub text: String,
@@ -78,7 +80,7 @@ fn slide_order(archive: &mut ZipArchive<Cursor<Vec<u8>>>) -> Option<Vec<String>>
     let mut reader = Reader::from_str(&presentation);
     loop {
         match &reader.read_event() {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if is(e, b"p:sldId") => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if is(e, "p:sldId") => {
                 if let Some(id) = attribute(e, "r:id") {
                     ids.push(id);
                 }
@@ -96,7 +98,7 @@ fn slide_order(archive: &mut ZipArchive<Cursor<Vec<u8>>>) -> Option<Vec<String>>
     let mut reader = Reader::from_str(&rels);
     loop {
         match &reader.read_event() {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if is(e, b"Relationship") => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if is(e, "Relationship") => {
                 if let (Some(id), Some(target)) = (attribute(e, "Id"), attribute(e, "Target")) {
                     let target = target.trim_start_matches('/');
                     let part = if let Some(part) = target.strip_prefix("ppt/") {
@@ -154,27 +156,25 @@ fn slide(archive: &mut ZipArchive<Cursor<Vec<u8>>>, part: &str) -> Option<Slide>
     loop {
         match &reader.read_event() {
             Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"p:sp" => title_shape = false,
-                b"p:ph" => title_shape |= title_placeholder(e),
-                b"a:p" => current = Some((title_shape, String::new())),
-                b"a:t" => in_run = true,
-                b"a:fld" => in_field = true,
+                "p:sp" => title_shape = false,
+                "p:ph" => title_shape |= title_placeholder(e),
+                "a:p" => current = Some((title_shape, String::new())),
+                "a:t" => in_run = true,
+                "a:fld" => in_field = true,
                 _ => {}
             },
-            // A self-closing placeholder has no body of its own, but its
-            // type still titles the shape's paragraphs.
-            Ok(Event::Empty(e)) if is(e, b"p:ph") => title_shape |= title_placeholder(e),
+            Ok(Event::Empty(e)) if is(e, "p:ph") => title_shape |= title_placeholder(e),
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"a:p" => {
-                    if let Some((title, text)) = current.take() {
-                        if !text.is_empty() {
-                            paragraphs.push(Paragraph { title, text });
-                        }
+                "a:p" => {
+                    if let Some((title, text)) = current.take()
+                        && !text.is_empty()
+                    {
+                        paragraphs.push(Paragraph { title, text });
                     }
                 }
-                b"a:t" => in_run = false,
-                b"a:fld" => in_field = false,
-                b"p:sp" => title_shape = false,
+                "a:t" => in_run = false,
+                "a:fld" => in_field = false,
+                "p:sp" => title_shape = false,
                 _ => {}
             },
             // The reader splits a character reference out of the text, so
@@ -185,31 +185,28 @@ fn slide(archive: &mut ZipArchive<Cursor<Vec<u8>>>, part: &str) -> Option<Slide>
                 if in_run && !in_field {
                     let ch = match r.resolve_char_ref() {
                         Ok(Some(ch)) => Some(ch),
-                        Ok(None) => match std::str::from_utf8(&r) {
-                            Ok("amp") => Some('&'),
-                            Ok("lt") => Some('<'),
-                            Ok("gt") => Some('>'),
-                            Ok("quot") => Some('"'),
-                            Ok("apos") => Some('\''),
-                            // A reference the XML grammar does not define
-                            // is a malformed document; such a deck does not
-                            // open.
+                        Ok(None) => match r.as_ref() {
+                            "amp" => Some('&'),
+                            "lt" => Some('<'),
+                            "gt" => Some('>'),
+                            "quot" => Some('"'),
+                            "apos" => Some('\''),
                             _ => return None,
                         },
                         Err(_) => return None,
                     };
-                    if let Some((_, text_so_far)) = current.as_mut() {
-                        if let Some(ch) = ch {
-                            text_so_far.push(ch);
-                        }
+                    if let Some((_, text_so_far)) = current.as_mut()
+                        && let Some(ch) = ch
+                    {
+                        text_so_far.push(ch);
                     }
                 }
             }
             Ok(Event::Text(t)) => {
                 if in_run && !in_field {
-                    let text = t.decode().ok()?;
+                    let text: &str = t;
                     if let Some((_, text_so_far)) = current.as_mut() {
-                        text_so_far.push_str(&text);
+                        text_so_far.push_str(text);
                     }
                 }
             }
@@ -225,24 +222,18 @@ fn slide(archive: &mut ZipArchive<Cursor<Vec<u8>>>, part: &str) -> Option<Slide>
 /// default body placeholder, and only `title` and `ctrTitle` are titles.
 fn title_placeholder(ph: &BytesStart) -> bool {
     matches!(ph.try_get_attribute("type"), Ok(Some(attr))
-        if std::str::from_utf8(&attr.value).is_ok_and(|decoded| {
-            matches!(unescape(decoded).as_deref(), Ok("title" | "ctrTitle"))
-        }))
+        if matches!(unescape(attr.value.as_ref()).as_deref(), Ok("title" | "ctrTitle")))
 }
 
-/// Whether this element's name is `name`, prefix included. The prefixes are
-/// the format's own (`p:` for presentation parts, `a:` for drawing), fixed
-/// by the schema rather than chosen by the writer.
-fn is(element: &BytesStart, name: &[u8]) -> bool {
+fn is(element: &BytesStart, name: &str) -> bool {
     element.name().as_ref() == name
 }
 
-/// An element attribute's value, unescaped. `None` when absent — an `r:id`
-/// nobody wrote is a slide with no place in the order, not a broken deck.
 fn attribute(element: &BytesStart, name: &str) -> Option<String> {
     let attr = element.try_get_attribute(name).ok().flatten()?;
-    let decoded = std::str::from_utf8(&attr.value).ok()?;
-    unescape(decoded).ok().map(|value| value.into_owned())
+    unescape(attr.value.as_ref())
+        .ok()
+        .map(|value| value.into_owned())
 }
 
 #[cfg(test)]

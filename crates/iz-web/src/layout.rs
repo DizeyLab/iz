@@ -10,7 +10,7 @@ use topcoat::{
         error::{NotFoundError, not_found},
         layout, page,
     },
-    view::{Unescaped, view},
+    view::{BoxView, Unescaped, View, ViewExt, error_boundary, view},
 };
 
 use crate::i18n::{Key, Lang, t};
@@ -39,8 +39,8 @@ const FAVICON: &str = "data:image/svg+xml,\
 /// stutter no amount of space or framing repairs. The mark carries the chrome,
 /// where the name is already known and the room is 44px; the word carries the
 /// front door, where a stranger arrives and nothing else has said it yet.
-pub(crate) async fn mark(cx: &Cx) -> Result {
-    view! {
+pub(crate) async fn mark<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <a class="wordmark" href="/" aria-label="iz">
             <svg class="wordmark-mark" width="24" height="24" viewBox="0 0 24 24"
@@ -54,17 +54,19 @@ pub(crate) async fn mark(cx: &Cx) -> Result {
             </svg>
         </a>
     }
+    .boxed())
 }
 
 /// The wordmark, the monogram's other half: the name alone, in the one face
 /// both skins agree on. The sign-in and setup pages wear it — see `mark`.
-pub(crate) async fn wordmark(cx: &Cx) -> Result {
-    view! {
+pub(crate) async fn wordmark<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <a class="wordmark wordmark-lone" href="/">
             <span class="wordmark-text">"iz"</span>
         </a>
     }
+    .boxed())
 }
 
 /// A person as a circle (or, on the Instrument skin, a square): the initials,
@@ -76,13 +78,13 @@ pub(crate) async fn wordmark(cx: &Cx) -> Result {
 /// renders and hides itself on error (see `avatar_script`), leaving the
 /// initials beneath as the fallback. Shared by the board, the modal and
 /// every topbar user menu.
-pub(crate) async fn avatar(
-    cx: &Cx,
-    id: &str,
-    display_name: &str,
+pub(crate) async fn avatar<'a>(
+    cx: &'a Cx,
+    id: &'a str,
+    display_name: &'a str,
     photo_version: u64,
-    extra: &str,
-) -> Result {
+    extra: &'a str,
+) -> Result<impl View + 'a> {
     let tone = id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
@@ -90,13 +92,13 @@ pub(crate) async fn avatar(
     let class = format!("avatar avatar-tone-{tone} {extra}");
     let initials = initials_of(display_name);
     let src = format!("/avatar/{id}?v={photo_version}");
-    view! {
+    Ok(view! {
         cx =>
         <span class="avatar-stack">
             <span class=(class.clone()) data-name=(display_name.to_string())>(initials)</span>
             <img class=(format!("{class} avatar-photo")) src=(src) alt="" data-name=(display_name.to_string())>
         </span>
-    }
+    }.boxed())
 }
 
 /// The first letters of the first two words, uppercased — "Ada Lovelace"
@@ -121,8 +123,8 @@ fn initials_of(name: &str) -> String {
 /// before it ran; hiding is registered through `__izOwn` so the live morph
 /// — which owns no names, only what the client declares — does not strip it
 /// back off on the next refresh.
-pub(crate) async fn avatar_script(cx: &Cx) -> Result {
-    use topcoat::view::Unescaped;
+pub(crate) async fn avatar_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+    use topcoat::view::{Unescaped, ViewExt};
     const JS: &str = "\
         (function () { \
             if (window.__izAvatar) { return; } \
@@ -139,7 +141,7 @@ pub(crate) async fn avatar_script(cx: &Cx) -> Result {
                 if (img.complete && img.naturalWidth === 0) { hide(img); } \
             }); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// The topbar's signed-in identity: the display name, opening on hover or
@@ -147,17 +149,21 @@ pub(crate) async fn avatar_script(cx: &Cx) -> Result {
 /// signed-in page's topbar — which is why `avatar_script` rides along here:
 /// every page with avatars has this menu, and the script's guard makes the
 /// one emission enough no matter how many avatars the page carries.
-pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
+pub async fn user_menu<'a>(
+    cx: &'a Cx,
+    me: &'a crate::detail::Me,
+    lang: Lang,
+) -> Result<impl View + 'a> {
     let role_key = match me.role {
         iz_core::Role::Admin => Key::RoleAdminOption,
         iz_core::Role::Member => Key::RoleMemberOption,
         iz_core::Role::Viewer => Key::RoleViewerOption,
     };
-    view! {
+    Ok(view! {
         cx =>
         <div class="user-menu">
             <button type="button" class="user-menu-trigger">
-                (avatar(cx, &me.id, &me.display_name, me.photo_version, "").await?)
+                (topcoat::view::Child::new(avatar(cx, &me.id, &me.display_name, me.photo_version, "").await?))
                 <span class="user-menu-trigger-name">(me.display_name.clone())</span>
             </button>
             <div class="user-menu-panel">
@@ -168,8 +174,8 @@ pub async fn user_menu(cx: &Cx, me: &crate::detail::Me, lang: Lang) -> Result {
                 <a class="user-menu-item" href="/settings">(t(lang, Key::NavSettings))</a>
             </div>
         </div>
-        (avatar_script(cx).await?)
-    }
+        (topcoat::view::Child::new(avatar_script(cx).await?))
+    }.boxed())
 }
 
 /// The signed-in pages, as the topbar nav links between them.
@@ -216,8 +222,13 @@ impl NavPage {
 /// current one marked, the admin-only ones (rules, logs, tags) shown only to
 /// roles that can administer. Plain `<a>`s — the soft-nav forwarder swaps them
 /// like any same-origin link, so `data-hard` stays off.
-pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lang) -> Result {
-    view! {
+pub async fn topbar_nav<'a>(
+    cx: &'a Cx,
+    active: NavPage,
+    role: iz_core::Role,
+    lang: Lang,
+) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <nav class="topbar-nav-links">
             for page in NavPage::ALL {
@@ -231,7 +242,7 @@ pub async fn topbar_nav(cx: &Cx, active: NavPage, role: iz_core::Role, lang: Lan
                 }
             }
         </nav>
-    }
+    }.boxed())
 }
 
 /// The family list as the switcher shows it, read from the app's own
@@ -259,7 +270,7 @@ pub(crate) async fn family_of(cx: &Cx) -> Vec<iz_client::FamilyService> {
 /// deployment standing alone, renders the bare mark: nothing to reveal.
 /// The links leave this origin, so they carry `data-hard`, like the issuer
 /// link in the user menu.
-pub(crate) async fn family_mark(cx: &Cx) -> Result {
+pub(crate) async fn family_mark<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     const SELF: &str = "iz";
     let siblings: Vec<_> = family_of(cx)
         .await
@@ -267,12 +278,12 @@ pub(crate) async fn family_mark(cx: &Cx) -> Result {
         .filter(|service| service.key != SELF)
         .collect();
     if siblings.is_empty() {
-        return mark(cx).await;
+        return mark(cx).await.map(|v| v.boxed());
     }
-    view! {
+    Ok(view! {
         cx =>
         <div class="wordmark-family">
-            (mark(cx).await?)
+            (topcoat::view::Child::new(mark(cx).await?))
             <nav class="service-switcher">
                 for (at, service) in siblings.iter().enumerate() {
                     if at > 0 {
@@ -284,7 +295,7 @@ pub(crate) async fn family_mark(cx: &Cx) -> Result {
                 }
             </nav>
         </div>
-    }
+    }.boxed())
 }
 
 /// The page-swap machinery that keeps every mutation on the same document.
@@ -353,7 +364,7 @@ pub(crate) async fn family_mark(cx: &Cx) -> Result {
 /// to top; in-place swaps (form posts, back) keep the scroll position.
 /// `wire()` also pins every `.comment-list` to its bottom, on initial
 /// load (DOMContentLoaded) included.
-pub async fn soft_nav_script(cx: &Cx) -> Result {
+pub async fn soft_nav_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     const JS: &str = "\
         (function () { \
             if (window.__izSoft) { return; } \
@@ -754,7 +765,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
             }); \
             if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', wire); } else { wire(); } \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// The one document-level capture `keydown` listener for `Escape`, emitted
@@ -867,7 +878,7 @@ pub async fn soft_nav_script(cx: &Cx) -> Result {
 /// disagree with it — the tick re-fetches, and the server stays the only thing
 /// that decides what a moment reads as. It runs only on pages carrying a
 /// `data-tick` element, so a page with no clock-driven text is silent.
-pub async fn live_script(cx: &Cx) -> Result {
+pub async fn live_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     const JS: &str = "\
         (function () { \
             if (window.__izLive) { return; } \
@@ -904,11 +915,11 @@ pub async fn live_script(cx: &Cx) -> Result {
             }, 60000); \
         })(); \
     ";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
-pub async fn escape_manager_script(cx: &Cx) -> Result {
-    use topcoat::view::Unescaped;
+pub async fn escape_manager_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+    use topcoat::view::{Unescaped, ViewExt};
     const JS: &str = "\
         (function () { \
         if (window.__izEsc) { return; } \
@@ -930,7 +941,7 @@ pub async fn escape_manager_script(cx: &Cx) -> Result {
             } \
         }, true); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 /// Registers the topbar/rules `Escape` resolvers on `window.__izEsc`
 /// (priority 40 — the table is on `escape_manager_script`): the topbar
@@ -939,7 +950,7 @@ pub async fn escape_manager_script(cx: &Cx) -> Result {
 /// a `.rule-new` composer left open on the rules page, then a rules edit
 /// row (navigating back to `/rules`). Never touches
 /// `details.confirm-details`; that flow stays `detail.rs`'s.
-pub async fn escape_script(cx: &Cx) -> Result {
+pub async fn escape_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     const JS: &str = "\
         (function () { \
         if (window.__izEscTop) { return; } \
@@ -965,14 +976,14 @@ pub async fn escape_script(cx: &Cx) -> Result {
             if (menu) { menu.classList.remove('user-menu-esc'); } \
         }, true); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// Every path that matches no page raises a `NotFoundError`, so it renders
 /// through `root_layout`'s catch below rather than the router's bare default.
 /// `/` itself is served by `landing` above and never reaches this route.
 #[page("/{*path}")]
-async fn missing() -> Result {
+async fn missing() -> Result<BoxView<'static>> {
     Err(not_found().into())
 }
 
@@ -980,7 +991,7 @@ async fn missing() -> Result {
 const STYLE: Asset = asset!("assets/main.css");
 
 #[layout("/")]
-async fn root_layout(cx: &Cx, slot: Result) -> Result {
+async fn root_layout(cx: &Cx, slot: topcoat::view::Child<'_>) -> Result<impl View> {
     // Pages with no session (auth screens) render light and English; both are
     // only set when the request's own user has one to read.
     let asking = match current_user(cx).await {
@@ -991,27 +1002,11 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
     let ui = asking.map_or("instrument", |user| user.ui.as_str());
     let lang = asking.map_or(Lang::En, |user| Lang::from_code(&user.language));
 
-    let content = match slot {
-        Err(error) if error.downcast_ref::<NotFoundError>().is_some() => view! {
-            cx =>
-            (StatusCode::NOT_FOUND)
-            <main class="scaffold-note">
-                <p>(t(lang, Key::NothingAtThisAddress))</p>
-            </main>
-        },
-        content => content,
-    }?;
-
-    // The build stamp rides the html element on every render — page load,
-    // soft navigation and live refresh all answer through this layout, and
-    // the swap path reads it off the fetched document before it touches the
-    // page. A tab left open across a deploy keeps the old stylesheet link
-    // (the morph swaps body children, never the head), so a mismatch is
-    // the client's cue to hard-reload rather than wear the old css.
-    let build = STYLE.id().as_u64().to_string();
-    view! {
+    let nothing = t(lang, Key::NothingAtThisAddress).to_string();
+    Ok(view! {
+        cx =>
         <!DOCTYPE html>
-        <html lang=(lang.code()) data-theme=(dark.then_some("dark")) data-ui=(ui) data-build=(build)>
+        <html lang=(lang.code()) data-theme=(dark.then_some("dark")) data-ui=(ui) data-build=(STYLE.id().as_u64().to_string())>
             <head>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1028,14 +1023,25 @@ async fn root_layout(cx: &Cx, slot: Result) -> Result {
                 topcoat::dev::script()
             </head>
             <body>
-                (escape_manager_script(cx).await?)
-                (soft_nav_script(cx).await?)
-                // Only for a signed-in page: `/api/live` answers 401 to
-                // everybody else, and an auth screen that opened a stream
-                // would just reconnect against that refusal forever.
-                if asking.is_some() { (live_script(cx).await?) }
-                (content)
+                (topcoat::view::Child::new(escape_manager_script(cx).await?))
+                (topcoat::view::Child::new(soft_nav_script(cx).await?))
+                if asking.is_some() { (topcoat::view::Child::new(live_script(cx).await?)) }
+                error_boundary(
+                    fallback: |error| {
+                        if error.downcast_ref::<NotFoundError>().is_none() {
+                            return Err(error);
+                        }
+                        Ok(view! {
+                            cx =>
+                            (StatusCode::NOT_FOUND)
+                            <main class="scaffold-note">
+                                <p>(nothing)</p>
+                            </main>
+                        })
+                    },
+                    (slot)
+                )
             </body>
         </html>
-    }
+    }.boxed())
 }

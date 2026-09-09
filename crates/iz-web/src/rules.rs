@@ -21,13 +21,13 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::{HeaderName, StatusCode, header, page, query_params, route};
-use topcoat::view::view;
+use topcoat::view::{View, ViewExt, view};
 
 use iz_core::board::Column;
 use iz_core::store::{Audience, Store, Trigger, User, Workspace};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, store, back_to, refusal_of, require_admin};
+use crate::server::{Refusal, back_to, refusal_of, require_admin, store};
 
 /// One rule as the screen reads it: a sentence, a switch and a stamp.
 ///
@@ -640,13 +640,13 @@ struct RulesQuery {
 /// server-side, from whichever trigger the form starts on (the existing
 /// rule's, or "status" for a fresh one), since there is no script to flip it
 /// as the admin changes the select.
-async fn rule_form(
-    cx: &Cx,
-    columns: &[ColumnChoice],
-    existing: Option<&RuleLine>,
-    refusal: Option<&Refusal>,
+async fn rule_form<'a>(
+    cx: &'a Cx,
+    columns: &'a [ColumnChoice],
+    existing: Option<&'a RuleLine>,
+    refusal: Option<&'a Refusal>,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let is_edit = existing.is_some();
     let action = if is_edit {
         "/api/update_rule"
@@ -668,7 +668,7 @@ async fn rule_form(
         .unwrap_or("assignees");
     let include_task_details = existing.is_some_and(|rule| rule.include_task_details);
 
-    view! {
+    Ok(view! {
         cx =>
         <form method="post" action=(action) class="rule-new-body">
             if let Some(rule) = existing {
@@ -741,44 +741,45 @@ async fn rule_form(
                 <button class="primary" type="submit">(if is_edit { t(lang, Key::SaveRule) } else { t(lang, Key::AddRule) })</button>
             </div>
         </form>
-    }
+    }.boxed())
 }
 
 /// The "New rule" control and the form inside it. A `<details>` rather than
 /// anything script-driven, so a browser with no script can still open it and
 /// post the form.
-async fn composer(
-    cx: &Cx,
-    columns: &[ColumnChoice],
-    refusal: Option<&Refusal>,
+async fn composer<'a>(
+    cx: &'a Cx,
+    columns: &'a [ColumnChoice],
+    refusal: Option<&'a Refusal>,
     lang: Lang,
-) -> Result {
-    view! {
+) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <details class="rule-new">
             <summary class="rule-new-open">(t(lang, Key::NewRule))</summary>
-            (rule_form(cx, columns, None, refusal, lang).await?)
+            (topcoat::view::Child::new(rule_form(cx, columns, None, refusal, lang).await?))
         </details>
     }
+    .boxed())
 }
 
 /// One rule's row: the form in place of it when `editing`, its display
 /// otherwise.
-async fn rule_row(
-    cx: &Cx,
-    rule: &RuleLine,
-    columns: &[ColumnChoice],
+async fn rule_row<'a>(
+    cx: &'a Cx,
+    rule: &'a RuleLine,
+    columns: &'a [ColumnChoice],
     editing: bool,
-    refusal: Option<&Refusal>,
+    refusal: Option<&'a Refusal>,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     if editing {
-        return view! {
+        return Ok(view! {
             cx =>
             <div class="rule-row">
-                (rule_form(cx, columns, Some(rule), refusal, lang).await?)
+                (topcoat::view::Child::new(rule_form(cx, columns, Some(rule), refusal, lang).await?))
             </div>
-        };
+        }.boxed());
     }
 
     let row_class = if rule.enabled {
@@ -807,7 +808,7 @@ async fn rule_row(
         })
         .unwrap_or_else(|| t(lang, Key::NeverFired).to_string());
 
-    view! {
+    Ok(view! {
         cx =>
         <div class=(row_class)>
             <form method="post" action="/api/set_rule_enabled" class="rule-switch-form">
@@ -841,20 +842,21 @@ async fn rule_row(
                 <button class="quiet quiet-danger" type="submit" title=(t(lang, Key::DeleteThisRule))>(t(lang, Key::Delete))</button>
             </form>
         </div>
-    }
+    }.boxed())
 }
 
 #[page("/rules")]
-async fn rules_page(cx: &Cx) -> Result {
+async fn rules_page(cx: &Cx) -> Result<impl View> {
     let user = match require_admin(cx).await {
         Ok(user) => user,
         Err(refusal) => {
-            return view! {
+            return Ok(view! {
                 <main class="scaffold-note">
                     <p>(refusal.message())</p>
                     <p><a href="/">(t(Lang::En, Key::BackToBoard))</a></p>
                 </main>
-            };
+            }
+            .boxed());
         }
     };
     let lang = Lang::from_code(&user.language);
@@ -862,24 +864,26 @@ async fn rules_page(cx: &Cx) -> Result {
     let snapshot = match snapshot_of(&store, &user).await {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
-            return view! {
+            return Ok(view! {
                 <main class="scaffold-note">
                     <p>(refusal.message_in(lang))</p>
                     <p><a href="/">(t(lang, Key::BackToBoard))</a></p>
                 </main>
-            };
+            }
+            .boxed());
         }
     };
     let edit_id = query_params::<RulesQuery>(cx)?.edit.clone();
     let create_refusal = refusal_of(cx, "create_rule");
     let update_refusal = refusal_of(cx, "update_rule");
 
-    view! {
+    let me = crate::detail::Me::from(&user);
+    Ok(view! {
         <header class="topbar">
-            (crate::layout::family_mark(cx).await?)
-            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Rules, user.role, lang).await?)
+            (topcoat::view::Child::new(crate::layout::family_mark(cx).await?))
+            (topcoat::view::Child::new(crate::layout::topbar_nav(cx, crate::layout::NavPage::Rules, user.role, lang).await?))
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)
+            (topcoat::view::Child::new(crate::layout::user_menu(cx, &me, lang).await?))
         </header>
 
         <div class="settings-shell">
@@ -897,19 +901,19 @@ async fn rules_page(cx: &Cx) -> Result {
                     </p>
                 }
 
-                (composer(cx, &snapshot.columns, create_refusal.as_ref(), lang).await?)
+                (topcoat::view::Child::new(composer(cx, &snapshot.columns, create_refusal.as_ref(), lang).await?))
 
                 <div class="rule-list">
                     for rule in &snapshot.rules {
-                        (rule_row(cx, rule, &snapshot.columns, edit_id.as_deref() == Some(rule.id.as_str()), update_refusal.as_ref(), lang).await?)
+                        (topcoat::view::Child::new(rule_row(cx, rule, &snapshot.columns, edit_id.as_deref() == Some(rule.id.as_str()), update_refusal.as_ref(), lang).await?))
                     }
                     if snapshot.rules.is_empty() {
                         <p class="rules-quiet">(t(lang, Key::NoRulesYet))</p>
                     }
                 </div>
             </main>
-            (crate::dropdown::dropdown_script(cx).await?)
-            (crate::layout::escape_script(cx).await?)
+            (topcoat::view::Child::new(crate::dropdown::dropdown_script(cx).await?))
+            (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))
         </div>
-    }
+    }.boxed())
 }

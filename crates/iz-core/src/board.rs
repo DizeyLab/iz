@@ -315,7 +315,7 @@ impl BoardView {
         for column in &mut self.columns {
             column.cards.retain(|card| match assignee {
                 "none" => card.assignees.is_empty(),
-                id => card.assignees.iter().any(|person| &person.id == id),
+                id => card.assignees.iter().any(|person| person.id == id),
             });
         }
     }

@@ -12,7 +12,7 @@
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::page;
-use topcoat::view::view;
+use topcoat::view::{View, ViewExt, view};
 
 use crate::i18n::{Key, Lang, t};
 use crate::layout::wordmark;
@@ -21,38 +21,35 @@ use crate::server::current_user;
 /// The front door: the board for a signed-in browser, the sign-in card for
 /// everybody else.
 #[page("/")]
-async fn landing(cx: &Cx) -> Result {
+async fn landing(cx: &Cx) -> Result<impl View> {
     match current_user(cx).await {
-        Ok(Some(user)) => crate::board::board_page(cx, &user).await,
-        Ok(None) => sign_in_card(cx).await,
-        Err(_) => view! {
+        Ok(Some(user)) => Ok(crate::board::board_page(cx, user).await?.boxed()),
+        Ok(None) => Ok(sign_in_card(cx).await?.boxed()),
+        Err(_) => Ok(view! {
             cx =>
             <main class="scaffold-note">
                 <p>(t(Lang::En, Key::SomethingWentWrong))</p>
             </main>
-        },
+        }
+        .boxed()),
     }
 }
 
 /// The sign-in card for a browser with nobody in it: the wordmark and one
 /// link, which starts the OIDC round-trip at `/auth/login`. A round-trip
 /// that just failed names nothing but the fact.
-async fn sign_in_card(cx: &Cx) -> Result {
+async fn sign_in_card<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     let language = Lang::En;
     let failed = topcoat::router::request::uri(cx)
         .query()
-        .is_some_and(|query| {
-            query
-                .split('&')
-                .any(|pair| pair.starts_with("auth_error="))
-        });
-    view! {
+        .is_some_and(|query| query.split('&').any(|pair| pair.starts_with("auth_error=")));
+    Ok(view! {
         cx =>
         <main class="auth-stage">
             <div class="auth-column">
                 <div class="auth-card">
                     <div class="auth-head">
-                        <div class="auth-title">(wordmark(cx).await?)</div>
+                        <div class="auth-title">(topcoat::view::Child::new(wordmark(cx).await?))</div>
                         <div class="auth-sub">(t(language, Key::WelcomeBlurb))</div>
                     </div>
                     <a class="auth-submit" href="/auth/login">
@@ -64,5 +61,5 @@ async fn sign_in_card(cx: &Cx) -> Result {
                 </div>
             </div>
         </main>
-    }
+    }.boxed())
 }

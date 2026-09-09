@@ -16,10 +16,10 @@ use topcoat::router::{
 
 use iz_core::store::sniff::sniff;
 use iz_core::store::{
-    NewAttachment, NewRemoteAttachment, AttachmentWhere, StorageBackend, Store, User,
+    AttachmentWhere, NewAttachment, NewRemoteAttachment, StorageBackend, Store, User,
 };
 
-use crate::server::{Refusal, store, require_user};
+use crate::server::{Refusal, require_user, store};
 use ulid::Ulid;
 
 path_param!(id);
@@ -52,7 +52,10 @@ fn redirect_to(location: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
 fn back_to(task_id: &str, refusal: Option<Refusal>) -> (StatusCode, HeaderMap, Vec<u8>) {
     let location = match refusal {
         Some(refusal) => {
-            format!("/?task={task_id}&tab=files&refusal={}&on=upload_file", refusal.code())
+            format!(
+                "/?task={task_id}&tab=files&refusal={}&on=upload_file",
+                refusal.code()
+            )
         }
         None => format!("/?task={task_id}&tab=files"),
     };
@@ -209,7 +212,8 @@ pub(crate) fn viewer_kind(mime_type: &str) -> Option<ViewerKind> {
         Some(ViewerKind::Pdf)
     } else if is_spreadsheet(mime_type) {
         Some(ViewerKind::Sheet)
-    } else if mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    } else if mime_type
+        == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     {
         Some(ViewerKind::Slides)
     } else {
@@ -458,6 +462,7 @@ async fn upload(
 /// after the push landed (the task gone mid-request, say) the push is
 /// taken back best-effort; a leaked remote file is the accepted residual
 /// if that take-back also fails.
+#[allow(clippy::too_many_arguments)]
 async fn push_to_in(
     cx: &Cx,
     store: &dyn Store,
@@ -471,7 +476,7 @@ async fn push_to_in(
     let Some((_, url)) = crate::storage::in_of(store).await else {
         return Err(Refusal::StorageNotListed);
     };
-    let external_id = Ulid::new().to_string();
+    let external_id = Ulid::generate().to_string();
     let size = bytes.len() as u64;
     let client = crate::storage::client(cx);
     if let Err(problem) = client
@@ -726,10 +731,7 @@ mod tests {
         // carries no UTF-16 `Workbook` stream, so it sniffs as the unnamed
         // container — which has no viewer element and never renders inline:
         // a filename's own link is the download.
-        let ppt = [
-            0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1,
-            0, 0, 0, 0,
-        ];
+        let ppt = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0, 0, 0];
         assert_eq!(sniff(&ppt), "application/x-ole-storage");
         assert_eq!(viewer_kind("application/x-ole-storage"), None);
         assert!(!renders_inline("application/x-ole-storage"));
@@ -738,7 +740,9 @@ mod tests {
     #[test]
     fn a_presentation_opens_the_slides_viewer() {
         assert_eq!(
-            viewer_kind("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+            viewer_kind(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            ),
             Some(ViewerKind::Slides)
         );
     }

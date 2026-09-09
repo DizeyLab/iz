@@ -4,6 +4,7 @@ use topcoat::Result;
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
 use topcoat::router::{BodyLimit, Router, RouterBuilderDiscoverExt, route};
+use topcoat::runtime::RouterBuilderRuntimeExt;
 
 #[route(GET "/healthz")]
 async fn healthz() -> Result<&'static str> {
@@ -150,7 +151,10 @@ async fn main() {
     // is what the Settings Storage card renders. The beat below keeps
     // both current.
     let storage_client = iz_web::storage::StorageClient::new(
-        config.storage_in.as_ref().map(|storage| storage.token.clone()),
+        config
+            .storage_in
+            .as_ref()
+            .map(|storage| storage.token.clone()),
     );
     let storage_health = iz_web::storage::StorageHealth::new();
     // The engine is always built, because a sender can appear at any moment:
@@ -182,7 +186,11 @@ async fn main() {
         config.base_url.clone(),
         health.clone(),
     ));
-    tokio::spawn(directory_stream(store.clone(), directory.clone(), health.clone()));
+    tokio::spawn(directory_stream(
+        store.clone(),
+        directory.clone(),
+        health.clone(),
+    ));
     // The storage mirror's watchdog: follows the family to wherever in
     // lives now, keeps the card's facts current, and — while the
     // workspace's attachments live on in — drains the rows still on this
@@ -200,6 +208,7 @@ async fn main() {
     let router = iz_client::mount(
         Router::builder()
             .discover()
+            .runtime()
             .layer(
                 BodyLimit::max(iz_web::settings::WIDEST_ATTACHMENT_MB as usize * 1024 * 1024)
                     .at("/files"),
@@ -264,9 +273,7 @@ fn ensure_storage_tree(storage: &std::path::Path) {
         }
     };
     make(storage);
-    for name in ["attachments"] {
-        make(&storage.join(name));
-    }
+    make(&storage.join("attachments"));
 }
 
 /// Resolves when the process is asked to stop: Ctrl+C, or `SIGTERM` from a
@@ -425,8 +432,7 @@ async fn directory_sync(
         match client.family().await {
             Some(family) => match serde_json::to_string(&family) {
                 Ok(json) => {
-                    if let Err(problem) =
-                        store.set_setting(iz_web::server::FAMILY_KEY, &json).await
+                    if let Err(problem) = store.set_setting(iz_web::server::FAMILY_KEY, &json).await
                     {
                         eprintln!("family sync: {problem}");
                     }

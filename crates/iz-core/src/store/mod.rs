@@ -1046,6 +1046,7 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// saved, and records one activity line per field that actually changed.
     /// Returns the ids of the activity rows it wrote, in write order — empty
     /// when nothing changed — so the caller can hand each to the mail engine.
+    #[allow(clippy::too_many_arguments)]
     async fn save_task(
         &self,
         task_id: &str,

@@ -14,10 +14,10 @@ use topcoat::context::Cx;
 use topcoat::router::content::Form;
 use topcoat::router::request::headers;
 use topcoat::router::{HeaderName, StatusCode, header, query_params, route};
-use topcoat::view::{class, view};
+use topcoat::view::{View, ViewExt, class, view};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, store, mail, require_user, require_writer};
+use crate::server::{Refusal, mail, require_user, require_writer, store};
 
 /// The board a task belongs to, checked against this person's workspace
 /// before anything trusts an id the browser sent.
@@ -84,7 +84,6 @@ async fn create_task_shared(
     clock_hour: Option<&str>,
     clock_minute: Option<&str>,
 ) -> Result<Option<Refusal>> {
-
     let user = match require_writer(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(Some(refusal)),
@@ -261,39 +260,41 @@ fn searched(query: Option<&str>) -> Option<String> {
 fn sort_column_cards(cards: &mut [TaskCard], sort: &str) {
     match sort {
         "created" => cards.sort_by(|a, b| b.id.cmp(&a.id)),
-        "title" => cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        "title" => cards.sort_by_key(|a| a.title.to_lowercase()),
         _ => {}
     }
 }
 
 /// The whole column list.
-async fn board_columns(
-    cx: &Cx,
+async fn board_columns<'a>(
+    cx: &'a Cx,
     sort: String,
     tag_filter: Option<String>,
     assigned: Option<String>,
     search: Option<String>,
-    default_tag_id: Option<&str>,
-) -> Result {
+    default_tag_id: Option<String>,
+) -> Result<impl View + 'a> {
     let user = match require_user(cx).await {
         Ok(user) => user,
         Err(refusal) => {
             // No session to read a language off of — English, same as an
             // auth screen with no user yet.
-            return view! {
+            return Ok(view! {
                 cx =>
                 <div class="scaffold-note"><p>(refusal.message())</p></div>
-            };
+            }
+            .boxed());
         }
     };
     let lang = Lang::from_code(&user.language);
     let store = store(cx).clone();
     let Some(mut view_data) = iz_core::board::load(store.as_ref(), &user.workspace_id).await?
     else {
-        return view! {
+        return Ok(view! {
             cx =>
             <div class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></div>
-        };
+        }
+        .boxed());
     };
     if let Some(needle) = &search {
         view_data.searching(needle);
@@ -315,25 +316,39 @@ async fn board_columns(
         .collect();
     let mut columns = Vec::new();
     for column in view_data.columns {
-        columns.push(render_column(cx, column, today, zone, may_write, &all_columns, default_tag_id, lang).await?);
+        columns.push(topcoat::view::Child::new(
+            render_column(
+                cx,
+                column,
+                today,
+                zone,
+                may_write,
+                &all_columns,
+                default_tag_id.clone(),
+                lang,
+            )
+            .await?,
+        ));
     }
 
-    view! {
+    Ok(view! {
         cx =>
-        for column in columns { (column) }
+        for column in columns { (topcoat::view::Child::new(column)) }
     }
+    .boxed())
 }
 
-async fn render_column(
-    cx: &Cx,
+#[allow(clippy::too_many_arguments)]
+async fn render_column<'a>(
+    cx: &'a Cx,
     column: iz_core::board::ColumnView,
     today: Date,
     zone: time::UtcOffset,
     may_write: bool,
     all_columns: &[(String, String)],
-    default_tag_id: Option<&str>,
+    default_tag_id: Option<String>,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let column_id = column.column.id;
     let name = column.column.name;
     let is_done_column = column.column.is_done;
@@ -351,14 +366,14 @@ async fn render_column(
                 &column_id,
                 may_write,
                 all_columns,
-                default_tag_id,
+                default_tag_id.clone(),
                 lang,
             )
             .await?,
         );
     }
 
-    view! {
+    Ok(view! {
         cx =>
         <section class="column">
             <header class="column-head">
@@ -367,17 +382,19 @@ async fn render_column(
             </header>
             <div class="column-cards" id=(column_id.clone())>
                 if is_empty { <div class="column-empty">(t(lang, Key::NoTasks))</div> }
-                for card in cards { (card) }
+                for card in cards { (topcoat::view::Child::new(card)) }
             </div>
         </section>
     }
+    .boxed())
 }
 
 // Drag and the context menu are delegated document listeners in
 // `card_menu_script`, reading the card's `data-task-id`/`data-from-column`
 // — per-element handlers would die when a soft submit swaps the board in.
-async fn render_card(
-    cx: &Cx,
+#[allow(clippy::too_many_arguments)]
+async fn render_card<'a>(
+    cx: &'a Cx,
     card: TaskCard,
     today: Date,
     done_column: bool,
@@ -385,9 +402,9 @@ async fn render_card(
     column_id: &str,
     may_write: bool,
     all_columns: &[(String, String)],
-    default_tag_id: Option<&str>,
+    default_tag_id: Option<String>,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let blocks = card.blocks.join(", ");
     let blocked_by = card.blocked_by.join(", ");
     let overdue = card.is_overdue(today);
@@ -420,10 +437,6 @@ async fn render_card(
     let comments = card.comment_count;
     let subtasks = card.subtask_label();
     let subtasks_open = card.holds_on_subtasks();
-    let mut assignees = Vec::new();
-    for person in card.assignees.iter() {
-        assignees.push(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "").await?);
-    }
     let has_assignees = !card.assignees.is_empty();
     let task_id = card.id.clone();
     let from_column = column_id.to_string();
@@ -434,7 +447,7 @@ async fn render_card(
         .filter(|(id, _)| id != column_id)
         .cloned()
         .collect();
-    view! {
+    Ok(view! {
         cx =>
         <a class=(class!("card", "card-done" if done_column)) href=(href.clone())
             draggable=(if may_write { "true" } else { "false" })
@@ -457,7 +470,7 @@ async fn render_card(
                     (deadline)
                 </span>
                 if let Some(tag) = &card.tag {
-                    if Some(tag.id.as_str()) != default_tag_id {
+                    if Some(tag.id.as_str()) != default_tag_id.as_deref() {
                         <span class="card-tag">(tag.name.clone())</span>
                     }
                 }
@@ -467,7 +480,9 @@ async fn render_card(
                 if comments > 0 { <span class="card-comments">(format!("{comments} \u{270e}"))</span> }
                 <div class="spacer"></div>
                 <div class="avatars">
-                    for person in assignees { (person) }
+                    for person in &card.assignees {
+                        (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "").await?))
+                    }
                     if !has_assignees {
                         <span class="avatar avatar-none" role="img" aria-label=(t(lang, Key::NobodyAssignedAria)) data-name=(t(lang, Key::NobodyAssignedTitle))></span>
                     }
@@ -499,7 +514,7 @@ async fn render_card(
                 }
             </div>
         </div>
-    }
+    }.boxed())
 }
 
 /// Opens a card's context menu at the cursor — clamped inside the viewport
@@ -521,7 +536,7 @@ async fn render_card(
 /// edit popovers and the modal itself stay `detail::escape_closes`'s at
 /// priority 90; the whole order lives in the table on `layout.rs`'s
 /// `escape_manager_script`.
-async fn card_menu_script(cx: &Cx) -> Result {
+async fn card_menu_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
@@ -596,7 +611,7 @@ async fn card_menu_script(cx: &Cx) -> Result {
             } \
         }); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// Live search: the filter bar's `q` input fetches the board as the user
@@ -605,7 +620,7 @@ async fn card_menu_script(cx: &Cx) -> Result {
 /// orphan it, and the value is deduped against the last one fetched, so an
 /// unchanged box never refetches. Enter still submits through the shared
 /// soft-nav handler.
-async fn search_script(cx: &Cx) -> Result {
+async fn search_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
@@ -627,7 +642,7 @@ async fn search_script(cx: &Cx) -> Result {
             timer = setTimeout(function () { timer = null; fire(); }, 200); \
         }); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// Which task, if any, `/` renders the detail modal open on, and the refusal
@@ -664,17 +679,18 @@ fn sort_label(sort: &str, lang: Lang) -> &'static str {
 /// The signed-in board: the topbar, the filter chips and the shard that owns
 /// every column and card.
 #[allow(unused_variables)]
-pub async fn board_page(cx: &Cx, user: &User) -> Result {
+pub async fn board_page<'a>(cx: &'a Cx, user: &'a User) -> Result<impl View + 'a> {
     let view_data = {
         let store = store(cx).clone();
         iz_core::board::load(store.as_ref(), &user.workspace_id).await?
     };
     let lang = Lang::from_code(&user.language);
     let Some(mut view_data) = view_data else {
-        return view! {
+        return Ok(view! {
             cx =>
             <main class="scaffold-note"><p>(t(lang, Key::SomethingWentWrong))</p></main>
-        };
+        }
+        .boxed());
     };
     // Column names are stored data; the viewer reads them in their own
     // language, and every name this page derives — headers, the card move
@@ -733,19 +749,23 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
     // an open task wins and `new` is ignored.
     let open_new = may_write && query.new.is_some() && open_task.is_none();
     let sort = valid_sort(query.sort.as_deref()).to_string();
-    let default_tag_id = tags.iter().find(|tag| tag.is_default).map(|tag| tag.id.as_str());
+    let default_tag_id = tags
+        .iter()
+        .find(|tag| tag.is_default)
+        .map(|tag| tag.id.clone());
     let refusal = match (query.on.as_deref(), query.refusal.as_deref()) {
         (Some("create_task") | Some("move_card"), Some(code)) => Refusal::from_code(code),
         _ => None,
     };
 
-    view! {
+    let me = crate::detail::Me::from(user);
+    Ok(view! {
         cx =>
         <header class="topbar">
-            (crate::layout::family_mark(cx).await?)
-            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Board, user.role, lang).await?)
+            (topcoat::view::Child::new(crate::layout::family_mark(cx).await?))
+            (topcoat::view::Child::new(crate::layout::topbar_nav(cx, crate::layout::NavPage::Board, user.role, lang).await?))
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &crate::detail::Me::from(user), lang).await?)
+            (topcoat::view::Child::new(crate::layout::user_menu(cx, &me, lang).await?))
         </header>
         <div class="filterbar">
             <div class="topbar-divider"></div>
@@ -822,24 +842,24 @@ pub async fn board_page(cx: &Cx, user: &User) -> Result {
                 <div class="scaffold-note"><p>(t(lang, Key::NoMatches))</p></div>
             } else {
                 <div class="board-columns">
-                (board_columns(cx, sort.clone(), tag_filter.clone(), assigned_filter.clone(), search.clone(), default_tag_id).await?)
+                (topcoat::view::Child::new(board_columns(cx, sort.clone(), tag_filter.clone(), assigned_filter.clone(), search.clone(), default_tag_id).await?))
                 </div>
             }
         </main>
         if let Some(task_id) = &open_task {
-            (crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?)
+            (topcoat::view::Child::new(crate::detail::task_modal(cx, task_id, query.confirm.as_deref() == Some("delete"), open_tab).await?))
             if let Some(file_id) = &query.file {
-                (crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab, open_sheet, open_rows, open_cols).await?)
+                (topcoat::view::Child::new(crate::detail::file_viewer_modal(cx, task_id, file_id, open_tab, open_sheet, open_rows, open_cols).await?))
             }
         }
         if open_new {
-            (crate::detail::new_task_modal(cx, &all_columns, lang).await?)
+            (topcoat::view::Child::new(crate::detail::new_task_modal(cx, &all_columns, lang).await?))
         }
-        (crate::dropdown::dropdown_script(cx).await?)
-        (crate::layout::escape_script(cx).await?)
-        (card_menu_script(cx).await?)
-        (search_script(cx).await?)
-    }
+        (topcoat::view::Child::new(crate::dropdown::dropdown_script(cx).await?))
+        (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))
+        (topcoat::view::Child::new(card_menu_script(cx).await?))
+        (topcoat::view::Child::new(search_script(cx).await?))
+    }.boxed())
 }
 
 #[cfg(test)]

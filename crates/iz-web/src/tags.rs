@@ -23,12 +23,12 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::{HeaderName, StatusCode, header, page, query_params, route};
-use topcoat::view::view;
+use topcoat::view::{View, ViewExt, view};
 
 use iz_core::store::{Store, Tag, User};
 
 use crate::i18n::{Key, Lang, t};
-use crate::server::{Refusal, store, back_to, refusal_of, require_admin};
+use crate::server::{Refusal, back_to, refusal_of, require_admin, store};
 
 /// One tag as the screen reads it: a name, an order and whether it is the
 /// default every task wears when nothing else is chosen.
@@ -261,8 +261,12 @@ struct TagsQuery {
 /// The "New tag" control and the form inside it. A `<details>` rather than
 /// anything script-driven, so a browser with no script can still open it and
 /// post the form.
-async fn composer(cx: &Cx, refusal: Option<&Refusal>, lang: Lang) -> Result {
-    view! {
+async fn composer<'a>(
+    cx: &'a Cx,
+    refusal: Option<&'a Refusal>,
+    lang: Lang,
+) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <details class="tag-new">
             <summary class="tag-new-open">(t(lang, Key::NewTag))</summary>
@@ -280,6 +284,7 @@ async fn composer(cx: &Cx, refusal: Option<&Refusal>, lang: Lang) -> Result {
             </form>
         </details>
     }
+    .boxed())
 }
 
 /// One tag's row: the rename form in place of it when `editing`, its display
@@ -287,9 +292,15 @@ async fn composer(cx: &Cx, refusal: Option<&Refusal>, lang: Lang) -> Result {
 /// with cards on it — the store would refuse both, and a control that cannot
 /// act is not drawn. The card count sits on the row, so a missing delete is
 /// a number the admin can already see rather than a control that vanished.
-async fn tag_row(cx: &Cx, tag: &TagLine, editing: bool, refusal: Option<&Refusal>, lang: Lang) -> Result {
+async fn tag_row<'a>(
+    cx: &'a Cx,
+    tag: &'a TagLine,
+    editing: bool,
+    refusal: Option<&'a Refusal>,
+    lang: Lang,
+) -> Result<impl View + 'a> {
     if editing {
-        return view! {
+        return Ok(view! {
             cx =>
             <div class="tag-row">
                 <form class="tag-form" method="post" action="/api/rename_tag">
@@ -307,10 +318,10 @@ async fn tag_row(cx: &Cx, tag: &TagLine, editing: bool, refusal: Option<&Refusal
                     </div>
                 </form>
             </div>
-        };
+        }.boxed());
     }
 
-    view! {
+    Ok(view! {
         cx =>
         <div class="tag-row">
             <span class="tag-name">(tag.name.clone())</span>
@@ -336,20 +347,21 @@ async fn tag_row(cx: &Cx, tag: &TagLine, editing: bool, refusal: Option<&Refusal
                 </form>
             }
         </div>
-    }
+    }.boxed())
 }
 
 #[page("/tags")]
-async fn tags_page(cx: &Cx) -> Result {
+async fn tags_page(cx: &Cx) -> Result<impl View> {
     let user = match require_admin(cx).await {
         Ok(user) => user,
         Err(refusal) => {
-            return view! {
+            return Ok(view! {
                 <main class="scaffold-note">
                     <p>(refusal.message())</p>
                     <p><a href="/">(t(Lang::En, Key::BackToBoard))</a></p>
                 </main>
-            };
+            }
+            .boxed());
         }
     };
     let lang = Lang::from_code(&user.language);
@@ -357,24 +369,26 @@ async fn tags_page(cx: &Cx) -> Result {
     let tags = match tags_of(&store, &user).await {
         Ok(tags) => tags,
         Err(refusal) => {
-            return view! {
+            return Ok(view! {
                 <main class="scaffold-note">
                     <p>(refusal.message_in(lang))</p>
                     <p><a href="/">(t(lang, Key::BackToBoard))</a></p>
                 </main>
-            };
+            }
+            .boxed());
         }
     };
     let edit_id = query_params::<TagsQuery>(cx)?.edit.clone();
     let create_refusal = refusal_of(cx, "create_tag");
     let rename_refusal = refusal_of(cx, "rename_tag");
 
-    view! {
+    let me = crate::detail::Me::from(&user);
+    Ok(view! {
         <header class="topbar">
-            (crate::layout::family_mark(cx).await?)
-            (crate::layout::topbar_nav(cx, crate::layout::NavPage::Tags, user.role, lang).await?)
+            (topcoat::view::Child::new(crate::layout::family_mark(cx).await?))
+            (topcoat::view::Child::new(crate::layout::topbar_nav(cx, crate::layout::NavPage::Tags, user.role, lang).await?))
             <div class="spacer"></div>
-            (crate::layout::user_menu(cx, &crate::detail::Me::from(&user), lang).await?)
+            (topcoat::view::Child::new(crate::layout::user_menu(cx, &me, lang).await?))
         </header>
 
         <div class="settings-shell">
@@ -384,16 +398,16 @@ async fn tags_page(cx: &Cx) -> Result {
                     <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>
                 </div>
 
-                (composer(cx, create_refusal.as_ref(), lang).await?)
+                (topcoat::view::Child::new(composer(cx, create_refusal.as_ref(), lang).await?))
 
                 <div class="tag-list">
                     for tag in &tags {
-                        (tag_row(cx, tag, edit_id.as_deref() == Some(tag.id.as_str()), rename_refusal.as_ref(), lang).await?)
+                        (topcoat::view::Child::new(tag_row(cx, tag, edit_id.as_deref() == Some(tag.id.as_str()), rename_refusal.as_ref(), lang).await?))
                     }
                 </div>
             </main>
-            (crate::dropdown::dropdown_script(cx).await?)
-            (crate::layout::escape_script(cx).await?)
+            (topcoat::view::Child::new(crate::dropdown::dropdown_script(cx).await?))
+            (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))
         </div>
-    }
+    }.boxed())
 }

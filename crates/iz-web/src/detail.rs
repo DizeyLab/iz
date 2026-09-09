@@ -28,7 +28,7 @@ use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::{Form, Json};
 use topcoat::router::{HeaderName, StatusCode, header, route};
-use topcoat::view::{class, view};
+use topcoat::view::{View, ViewExt, class, view};
 
 use crate::i18n::{Key, Lang, t};
 use crate::server::{Refusal, back_to, mail, refusal_of, require_user, require_writer, store};
@@ -217,21 +217,6 @@ fn redirect(cx: &Cx, refusal: Option<Refusal>) -> Redirect {
 #[derive(Deserialize)]
 struct TaskIdForm {
     task_id: String,
-}
-
-#[derive(Deserialize)]
-struct SaveTaskForm {
-    task_id: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    deadline: Option<String>,
-    #[serde(default)]
-    clock_hour: Option<String>,
-    #[serde(default)]
-    clock_minute: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -560,15 +545,26 @@ pub(crate) fn combine_clock(
 /// with its optional time. Status is not here: the column a task sits in is
 /// changed by moving it, a call `board.rs` owns.
 #[route(POST "/api/save_task")]
-async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
+async fn save_task(cx: &Cx, Form(pairs): Form<Vec<(String, String)>>) -> Redirect {
     use time::OffsetDateTime;
 
-    let (user, facts) = match writer_and_task(cx, &input.task_id).await {
+    // The pairs keep a blank word blank, the way the popover's Clear posts
+    // it: absent keeps, blank clears, a value sets. (`Option` fields would
+    // collapse blank and absent into one None.)
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let task_id = field("task_id").unwrap_or_default();
+
+    let (user, facts) = match writer_and_task(cx, task_id).await {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
 
-    let title = match input.title {
+    let title = match field("title") {
         Some(given) => {
             let trimmed = given.trim().to_string();
             if trimmed.is_empty() {
@@ -578,17 +574,17 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
         }
         None => facts.row.title.clone(),
     };
-    let description = match &input.description {
+    let description = match field("description") {
         Some(given) => given.trim().to_string(),
         None => facts.description.clone(),
     };
     let zone = parse_zone(&user.timezone);
-    let time = match combine_clock(input.clock_hour.as_deref(), input.clock_minute.as_deref()) {
+    let time = match combine_clock(field("clock_hour"), field("clock_minute")) {
         Ok(time) => time,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
     let (deadline, clock_at) = match moment_field(
-        input.deadline.as_deref(),
+        field("deadline"),
         (facts.row.deadline, facts.row.clock_at),
         time.as_deref(),
         zone,
@@ -600,7 +596,7 @@ async fn save_task(cx: &Cx, Form(input): Form<SaveTaskForm>) -> Redirect {
     let store = store(cx).clone();
     let activity_ids = store
         .save_task(
-            &input.task_id,
+            task_id,
             &title,
             &description,
             deadline,
@@ -999,7 +995,10 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
         let Some((_, url)) = crate::storage::in_of(store.as_ref()).await else {
             return redirect(cx, Some(Refusal::StorageUnavailable));
         };
-        if let Err(problem) = crate::storage::client(cx).delete(&url, &attachment.id).await {
+        if let Err(problem) = crate::storage::client(cx)
+            .delete(&url, &attachment.id)
+            .await
+        {
             eprintln!("storage delete: {problem:?}");
             return redirect(cx, Some(Refusal::StorageUnavailable));
         }
@@ -1049,10 +1048,10 @@ async fn delete_file(cx: &Cx, Form(input): Form<FileIdForm>) -> Redirect {
 pub(crate) mod glyph {
     use topcoat::Result;
     use topcoat::context::Cx;
-    use topcoat::view::view;
+    use topcoat::view::{View, ViewExt, view};
 
-    pub async fn chevron(cx: &Cx) -> Result {
-        view! {
+    pub async fn chevron<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
@@ -1060,10 +1059,11 @@ pub(crate) mod glyph {
                 <path d="M4 6l4 4 4-4"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn calendar(cx: &Cx) -> Result {
-        view! {
+    pub async fn calendar<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="13" height="13" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
@@ -1071,20 +1071,22 @@ pub(crate) mod glyph {
                 <path d="M2.5 6.5h11M5.5 2v2.5M10.5 2v2.5"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn plus(cx: &Cx) -> Result {
-        view! {
+    pub async fn plus<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="12" height="12" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
                 <path d="M8 3v10M3 8h10"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn play(cx: &Cx) -> Result {
-        view! {
+    pub async fn play<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph glyph-play" width="14" height="14" viewBox="0 0 16 16"
                 fill="currentColor" stroke="currentColor" stroke-width="1.5"
@@ -1092,43 +1094,47 @@ pub(crate) mod glyph {
                 <path d="M5.5 3.5v9l7.5-4.5z"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn pause(cx: &Cx) -> Result {
-        view! {
+    pub async fn pause<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph glyph-pause" width="14" height="14" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
                 <path d="M5.5 3.5v9M10.5 3.5v9"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn cross(cx: &Cx) -> Result {
-        view! {
+    pub async fn cross<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="13" height="13" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
                 <path d="M4 4l8 8M12 4l-8 8"></path>
             </svg>
         }
+        .boxed())
     }
 
     /// An open part. Deliberately not the padlock: a dependency row's lock
     /// means "something is in front of this", and a subtask that is simply
     /// unfinished is not blocked by anything.
-    pub async fn ring(cx: &Cx) -> Result {
-        view! {
+    pub async fn ring<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="12" height="12" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.6" aria-hidden="true">
                 <circle cx="8" cy="8" r="5"></circle>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn tick(cx: &Cx) -> Result {
-        view! {
+    pub async fn tick<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph dep-tick" width="14" height="14" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
@@ -1136,10 +1142,11 @@ pub(crate) mod glyph {
                 <path d="M3 8.5l3.5 3.5L13 5"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn lock(cx: &Cx) -> Result {
-        view! {
+    pub async fn lock<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
@@ -1148,17 +1155,18 @@ pub(crate) mod glyph {
                 <path d="M5.5 7V5a2.5 2.5 0 015 0v2"></path>
             </svg>
         }
+        .boxed())
     }
 
-    pub async fn bin(cx: &Cx) -> Result {
-        view! {
+    pub async fn bin<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+        Ok(view! {
             cx =>
             <svg class="glyph" width="14" height="14" viewBox="0 0 16 16" fill="none"
                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
                 stroke-linejoin="round" aria-hidden="true">
                 <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l0.7 8.5a1 1 0 001 0.9h3.6a1 1 0 001-0.9l0.7-8.5"></path>
             </svg>
-        }
+        }.boxed())
     }
 }
 
@@ -1177,7 +1185,7 @@ pub(crate) mod glyph {
 /// rendered. Focused native media controls swallow `Escape` before the page
 /// ever sees the key, so focus landing on the viewer's audio/video is moved
 /// straight back to the panel.
-pub(crate) async fn escape_closes(cx: &Cx) -> Result {
+pub(crate) async fn escape_closes<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
@@ -1226,23 +1234,30 @@ pub(crate) async fn escape_closes(cx: &Cx) -> Result {
             }); \
         }, true); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
-async fn refused(cx: &Cx, call: &str, lang: Lang) -> Result {
+async fn refused<'a>(cx: &'a Cx, call: &'a str, lang: Lang) -> Result<impl View + 'a> {
     match refusal_of(cx, call) {
-        Some(refusal) => view! { cx => <p class="modal-problem">(refusal.message_in(lang))</p> },
-        None => view! { cx => },
+        Some(refusal) => {
+            Ok(view! { cx => <p class="modal-problem">(refusal.message_in(lang))</p> }.boxed())
+        }
+        None => Ok(view! { cx => }.boxed()),
     }
 }
 
-async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
+async fn title_control<'a>(
+    cx: &'a Cx,
+    task: &'a TaskDetail,
+    may_write: bool,
+    lang: Lang,
+) -> Result<impl View + 'a> {
     if !may_write {
-        return view! { cx => <h2 class="detail-title">(task.title.clone())</h2> };
+        return Ok(view! { cx => <h2 class="detail-title">(task.title.clone())</h2> }.boxed());
     }
     let toggle = format!("rename-{}", task.id);
     let rename_aria = t(lang, Key::RenameThisTask);
-    view! {
+    Ok(view! {
         cx =>
         <div class="edit">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(rename_aria)>
@@ -1255,12 +1270,17 @@ async fn title_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) 
                 <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
                 <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
             </form>
-            (refused(cx, "save_task", lang).await?)
+            (topcoat::view::Child::new(refused(cx, "save_task", lang).await?))
         </div>
-    }
+    }.boxed())
 }
 
-async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: Lang) -> Result {
+async fn description_control<'a>(
+    cx: &'a Cx,
+    task: &'a TaskDetail,
+    may_write: bool,
+    lang: Lang,
+) -> Result<impl View + 'a> {
     let empty = task.description.trim().is_empty();
     let no_description = t(lang, Key::NoDescription).to_string();
     let prose = if empty {
@@ -1270,11 +1290,11 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
     };
 
     if !may_write {
-        return view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> };
+        return Ok(view! { cx => <p class=(class!("detail-prose", "detail-prose-empty" if empty))>(prose)</p> }.boxed());
     }
     let toggle = format!("describe-{}", task.id);
     let edit_aria = t(lang, Key::EditTheDescription);
-    view! {
+    Ok(view! {
         cx =>
         <div class="edit">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(edit_aria)>
@@ -1289,9 +1309,9 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
                     <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
                 </div>
             </form>
-            (refused(cx, "save_task", lang).await?)
+            (topcoat::view::Child::new(refused(cx, "save_task", lang).await?))
         </div>
-    }
+    }.boxed())
 }
 
 /// The moment field: the deadline's calendar popover, with one optional
@@ -1312,14 +1332,14 @@ async fn description_control(cx: &Cx, task: &TaskDetail, may_write: bool, lang: 
 /// The box speaks the moment when there is one, the day when there is only
 /// a day — the clock's day is always the deadline's, and the label reads in
 /// the viewer's own zone.
-async fn deadline_control(
-    cx: &Cx,
-    task: &TaskDetail,
+async fn deadline_control<'a>(
+    cx: &'a Cx,
+    task: &'a TaskDetail,
     today: Date,
     zone: UtcOffset,
     may_write: bool,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let overdue = task.is_overdue(today);
     let local = task.clock_at.map(|at| at.to_offset(zone));
     let label = match (&local, task.deadline_parts(today)) {
@@ -1346,32 +1366,33 @@ async fn deadline_control(
         (None, None) => t(lang, Key::NoDeadline).to_string(),
     };
     if !may_write {
-        return view! {
+        return Ok(view! {
             cx =>
             <span class=(class!("field-box", "detail-overdue" if overdue))>
-                (glyph::calendar(cx).await?)
+                (topcoat::view::Child::new(glyph::calendar(cx).await?))
                 <span class="field-text">(label)</span>
             </span>
-        };
+        }
+        .boxed());
     }
     let toggle = format!("deadline-{}", task.id);
     let input_value = task.deadline_input();
     let hm = local.map(|at| (at.hour(), at.minute()));
     let change_aria = t(lang, Key::ChangeTheDeadline);
     let no_deadline = t(lang, Key::NoDeadline);
-    view! {
+    Ok(view! {
         cx =>
         <div class="edit edit-pop datepick-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(change_aria)>
             <label class=(class!("field-box", "edit-view", "edit-hit", "detail-overdue" if overdue)) for=(toggle.clone())>
-                (glyph::calendar(cx).await?)
+                (topcoat::view::Child::new(glyph::calendar(cx).await?))
                 <span class="field-text datepick-label" data-empty=(no_deadline)>(label)</span>
-                (glyph::chevron(cx).await?)
+                (topcoat::view::Child::new(glyph::chevron(cx).await?))
             </label>
             <div class="edit-form pop-panel datepick-panel">
                 <form class="pop-form" method="post" action="/api/save_task">
                     <input type="hidden" name="task_id" value=(task.id.clone())>
-                    (datepicker_grid(cx, "deadline", &input_value, true, lang).await?)
+                    (topcoat::view::Child::new(datepicker_grid(cx, "deadline", &input_value, true, lang).await?))
                     <div class="datepick-time">
                         <select class="field-input" name="clock_hour" aria-label=(t(lang, Key::ClockHour)) data-search="">
                             <option value="">("--")</option>
@@ -1388,10 +1409,10 @@ async fn deadline_control(
                         </select>
                     </div>
                 </form>
-                (refused(cx, "save_task", lang).await?)
+                (topcoat::view::Child::new(refused(cx, "save_task", lang).await?))
             </div>
         </div>
-    }
+    }.boxed())
 }
 
 /// The calendar grid's static shell inside a `.datepick-panel`: a hidden
@@ -1399,20 +1420,20 @@ async fn deadline_control(
 /// grid — the grid cells and month title are blank until `datepicker_script`
 /// fills them in on open (see that function's doc comment for why the fill
 /// happens in JS rather than here).
-pub(crate) async fn datepicker_grid(
-    cx: &Cx,
-    name: &str,
-    value: &str,
+pub(crate) async fn datepicker_grid<'a>(
+    cx: &'a Cx,
+    name: &'a str,
+    value: &'a str,
     autosubmit: bool,
     lang: Lang,
-) -> Result {
-    view! {
+) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <input class="datepick-input" type="hidden" name=(name.to_string()) value=(value.to_string()) data-autosubmit=(autosubmit)>
         <div class="datepick-head">
-            <button class="datepick-nav datepick-prev" type="button" aria-label=(t(lang, Key::PreviousMonth))>(glyph::chevron(cx).await?)</button>
+            <button class="datepick-nav datepick-prev" type="button" aria-label=(t(lang, Key::PreviousMonth))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</button>
             <span class="datepick-title"></span>
-            <button class="datepick-nav datepick-next" type="button" aria-label=(t(lang, Key::NextMonth))>(glyph::chevron(cx).await?)</button>
+            <button class="datepick-nav datepick-next" type="button" aria-label=(t(lang, Key::NextMonth))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</button>
         </div>
         <div class="datepick-weekdays"></div>
         <div class="datepick-grid"></div>
@@ -1420,7 +1441,7 @@ pub(crate) async fn datepicker_grid(
             <button class="datepick-action datepick-clear" type="button">(t(lang, Key::Clear))</button>
             <button class="datepick-action datepick-today" type="button">(t(lang, Key::Today))</button>
         </div>
-    }
+    }.boxed())
 }
 
 /// The house calendar's month grid, wholly in JS: this is a plain document
@@ -1447,7 +1468,7 @@ pub(crate) async fn datepicker_grid(
 /// the grid of one standing open. The pass runs on every wire — a repair,
 /// not an install; closed popovers with no unsaved pick are left to the
 /// server's own voice.
-pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
+pub(crate) async fn datepicker_script<'a>(cx: &'a Cx, lang: Lang) -> Result<impl View + 'a> {
     use crate::i18n::datepicker_js_literals;
     use topcoat::view::Unescaped;
     let (months, weekdays) = datepicker_js_literals(lang);
@@ -1557,46 +1578,51 @@ pub(crate) async fn datepicker_script(cx: &Cx, lang: Lang) -> Result {
             }}, true);\
         }})();"
     );
-    view! { cx => <script>(Unescaped::new_unchecked(js))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(js))</script> }.boxed())
 }
 
-async fn assignee_chip(
-    cx: &Cx,
-    task_id: &str,
-    person: &Person,
+async fn assignee_chip<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    person: &'a Person,
     may_write: bool,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let remove_title = crate::i18n::take_off_this_task(lang, &person.display_name);
-    view! {
+    Ok(view! {
         cx =>
         <span class="assignee-chip">
             <a class="person-link" href=(format!("/people/{}", person.id))>
-                (crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?)
+                (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?))
                 <span class="assignee-name">(person.display_name.clone())</span>
             </a>
             if may_write {
                 <form class="assignee-drop" method="post" action="/api/unassign">
                     <input type="hidden" name="task_id" value=(task_id.to_string())>
                     <input type="hidden" name="user_id" value=(person.id.clone())>
-                    <button class="assignee-remove" type="submit" title=(remove_title)>(glyph::cross(cx).await?)</button>
+                    <button class="assignee-remove" type="submit" title=(remove_title)>(topcoat::view::Child::new(glyph::cross(cx).await?))</button>
                 </form>
             }
         </span>
-    }
+    }.boxed())
 }
 
-async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) -> Result {
+async fn assignee_picker<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    people: &'a [Person],
+    lang: Lang,
+) -> Result<impl View + 'a> {
     if people.is_empty() {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     }
     let toggle = format!("assign-{task_id}");
     let put_aria = t(lang, Key::PutSomeoneOnThisTask);
-    view! {
+    Ok(view! {
         cx =>
         <div class="edit edit-pop assignee-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(put_aria)>
-            <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>(glyph::plus(cx).await?)</label>
+            <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>(topcoat::view::Child::new(glyph::plus(cx).await?))</label>
             <div class="edit-form pop-panel">
                 <div class="pop-list pop-list-scroll">
                     for person in people {
@@ -1604,30 +1630,35 @@ async fn assignee_picker(cx: &Cx, task_id: &str, people: &[Person], lang: Lang) 
                             <input type="hidden" name="task_id" value=(task_id.to_string())>
                             <input type="hidden" name="user_id" value=(person.id.clone())>
                             <button class="pop-row" type="submit">
-                                (crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?)
+                                (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?))
                                 <span class="pop-row-name">(person.display_name.clone())</span>
                             </button>
                         </form>
                     }
                 </div>
-                (refused(cx, "assign", lang).await?)
+                (topcoat::view::Child::new(refused(cx, "assign", lang).await?))
             </div>
         </div>
-    }
+    }.boxed())
 }
 
-async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget], lang: Lang) -> Result {
+async fn link_picker<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    linkable: &'a [LinkTarget],
+    lang: Lang,
+) -> Result<impl View + 'a> {
     if linkable.is_empty() {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     }
     let toggle = format!("link-{task_id}");
     let link_aria = t(lang, Key::LinkAnotherTask);
-    view! {
+    Ok(view! {
         cx =>
         <div class="edit edit-pop link-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(link_aria)>
             <label class="dep-chip edit-view edit-hit" for=(toggle.clone())>
-                (glyph::plus(cx).await?)
+                (topcoat::view::Child::new(glyph::plus(cx).await?))
                 <span class="dep-chip-text">(t(lang, Key::LinkATask))</span>
             </label>
             <div class="edit-form pop-panel pop-panel-wide">
@@ -1658,22 +1689,22 @@ async fn link_picker(cx: &Cx, task_id: &str, linkable: &[LinkTarget], lang: Lang
                         <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
                     </div>
                 </form>
-                (refused(cx, "link_tasks", lang).await?)
+                (topcoat::view::Child::new(refused(cx, "link_tasks", lang).await?))
             </div>
         </div>
-    }
+    }.boxed())
 }
 
 /// One part on its parent's page: its key, its title, who holds it, and the
 /// button that lets it out. The status is the column's name, read off the
 /// board's columns the page already has.
-async fn subtask_row(
-    cx: &Cx,
-    part: &iz_core::detail::SubtaskLine,
-    columns: &[iz_core::Column],
+async fn subtask_row<'a>(
+    cx: &'a Cx,
+    part: &'a iz_core::detail::SubtaskLine,
+    columns: &'a [iz_core::Column],
     may_write: bool,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let done = part.is_done();
     let status = columns
         .iter()
@@ -1695,14 +1726,14 @@ async fn subtask_row(
             .await?,
         );
     }
-    view! {
+    Ok(view! {
         cx =>
         <div class=(class!("subtask-row", "subtask-row-done" if done))>
             // One link, not two: the key and the title are the same target,
             // so the whole of the row's text is the way in.
             <a class="subtask-open" href=(href)>
                 <span class="subtask-mark">
-                    if done { (glyph::tick(cx).await?) } else { (glyph::ring(cx).await?) }
+                    if done { (topcoat::view::Child::new(glyph::tick(cx).await?)) } else { (topcoat::view::Child::new(glyph::ring(cx).await?)) }
                 </span>
                 <span class="subtask-key">(part.task_key.clone())</span>
                 <span class="subtask-title">(part.title.clone())</span>
@@ -1710,33 +1741,38 @@ async fn subtask_row(
             <div class="spacer"></div>
             <span class="subtask-status">(status)</span>
             <div class="avatars">
-                for face in faces { (face) }
+                for face in faces { (topcoat::view::Child::new(face)) }
             </div>
             if may_write {
                 <form class="dep-unlink-form" method="post" action="/api/set_parent">
                     <input type="hidden" name="task_id" value=(part.id.clone())>
                     <input type="hidden" name="parent_id" value="">
-                    <button class="dep-unlink" type="submit" title=(release_title)>(glyph::cross(cx).await?)</button>
+                    <button class="dep-unlink" type="submit" title=(release_title)>(topcoat::view::Child::new(glyph::cross(cx).await?))</button>
                 </form>
             }
         </div>
-    }
+    }.boxed())
 }
 
 /// Takes an existing task in as a part. The same shape as `link_picker`, and
 /// absent for the same reason: with nothing to offer it shows nothing.
-async fn adopt_picker(cx: &Cx, task_id: &str, adoptable: &[LinkTarget], lang: Lang) -> Result {
+async fn adopt_picker<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    adoptable: &'a [LinkTarget],
+    lang: Lang,
+) -> Result<impl View + 'a> {
     if adoptable.is_empty() {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     }
     let toggle = format!("adopt-{task_id}");
     let aria = t(lang, Key::MakeAPart);
-    view! {
+    Ok(view! {
         cx =>
         <div class="edit edit-pop link-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(aria)>
             <label class="dep-chip edit-view edit-hit" for=(toggle.clone())>
-                (glyph::plus(cx).await?)
+                (topcoat::view::Child::new(glyph::plus(cx).await?))
                 <span class="dep-chip-text">(t(lang, Key::MakeAPart))</span>
             </label>
             <div class="edit-form pop-panel pop-panel-wide">
@@ -1758,17 +1794,17 @@ async fn adopt_picker(cx: &Cx, task_id: &str, adoptable: &[LinkTarget], lang: La
                 </form>
             </div>
         </div>
-    }
+    }.boxed())
 }
 
-async fn dep_row(
-    cx: &Cx,
-    task_id: &str,
-    edge: &DependencyEdge,
+async fn dep_row<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    edge: &'a DependencyEdge,
     direction: Direction,
     may_write: bool,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let cleared = edge.is_cleared();
     let note = match direction {
         Direction::BlockedBy => edge.blocked_by_label(),
@@ -1785,7 +1821,7 @@ async fn dep_row(
     };
     let remove_title = t(lang, Key::RemoveThisLink);
     let href = format!("/?task={}", edge.task_id);
-    view! {
+    Ok(view! {
         cx =>
         <div class=(class!("dep-row", "dep-row-waiting" if waiting))>
             // One link, not two, the subtask row's own shape: tag, key,
@@ -1793,7 +1829,7 @@ async fn dep_row(
             // between the row's edges and the X is the way in.
             <a class="dep-link" href=(href)>
                 <span class="dep-tag">(tag)</span>
-                if cleared { (glyph::tick(cx).await?) } else { (glyph::lock(cx).await?) }
+                if cleared { (topcoat::view::Child::new(glyph::tick(cx).await?)) } else { (topcoat::view::Child::new(glyph::lock(cx).await?)) }
                 <span class="dep-key">(edge.task_key.clone())</span>
                 <span class="dep-title">(edge.title.clone())</span>
                 <div class="spacer"></div>
@@ -1804,11 +1840,11 @@ async fn dep_row(
                     <input type="hidden" name="task_id" value=(task_id.to_string())>
                     <input type="hidden" name="other_id" value=(edge.task_id.clone())>
                     <input type="hidden" name="direction" value=(wire)>
-                    <button class="dep-unlink" type="submit" title=(remove_title)>(glyph::cross(cx).await?)</button>
+                    <button class="dep-unlink" type="submit" title=(remove_title)>(topcoat::view::Child::new(glyph::cross(cx).await?))</button>
                 </form>
             }
         </div>
-    }
+    }.boxed())
 }
 
 /// The version stamp a `/files/{id}` URL carries: the row's `uploaded_at`.
@@ -1819,14 +1855,14 @@ fn attachment_stamp(attachment: &iz_core::store::Attachment) -> String {
     (attachment.uploaded_at.unix_timestamp_nanos() / 1_000).to_string()
 }
 
-async fn file_chip(
-    cx: &Cx,
-    task_id: &str,
-    file: &iz_core::detail::FileLine,
-    me: &Me,
+async fn file_chip<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    file: &'a iz_core::detail::FileLine,
+    me: &'a Me,
     may_write: bool,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let _ = may_write;
     let may_drop = me.id == file.uploaded_by || me.role.can_administer();
     let on_comment = file.comment_id.is_some();
@@ -1846,7 +1882,7 @@ async fn file_chip(
             _ => format!("/files/{}", file.id),
         }
     };
-    view! {
+    Ok(view! {
         cx =>
         <span class="file-chip">
             <a class="file-chip-name" href=(href)>(file.name.clone())</a>
@@ -1857,19 +1893,23 @@ async fn file_chip(
             if may_drop {
                 <form class="file-chip-drop-form" method="post" action="/api/delete_file">
                     <input type="hidden" name="file_id" value=(file.id.clone())>
-                    <button class="file-chip-drop" type="submit" title=(remove_title)>(glyph::cross(cx).await?)</button>
+                    <button class="file-chip-drop" type="submit" title=(remove_title)>(topcoat::view::Child::new(glyph::cross(cx).await?))</button>
                 </form>
             }
         </span>
-    }
+    }.boxed())
 }
 
-async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
-    view! {
+async fn comment_row<'a>(
+    cx: &'a Cx,
+    comment: &'a Comment,
+    zone: UtcOffset,
+) -> Result<impl View + 'a> {
+    Ok(view! {
         cx =>
         <div class="comment">
             <a class="person-link" href=(format!("/people/{}", comment.author.id))>
-                (crate::layout::avatar(cx, &comment.author.id, &comment.author.display_name, comment.author.photo_version, "avatar-lg").await?)
+                (topcoat::view::Child::new(crate::layout::avatar(cx, &comment.author.id, &comment.author.display_name, comment.author.photo_version, "avatar-lg").await?))
             </a>
             <div class="comment-said">
                 <div class="comment-head">
@@ -1879,7 +1919,7 @@ async fn comment_row(cx: &Cx, comment: &Comment, zone: UtcOffset) -> Result {
                 <div class="comment-body">(comment.body.clone())</div>
             </div>
         </div>
-    }
+    }.boxed())
 }
 
 /// The task modal's markup: title, description, assignees, deadline,
@@ -1934,7 +1974,12 @@ fn tab_class(current: Tab, target: Tab) -> &'static str {
 
 /// artboard draws them. Wiring `?task=<id>` on the board page is a later
 /// integration slice — this only renders the fragment.
-pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) -> Result {
+pub async fn task_modal<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    confirm_delete: bool,
+    tab: Tab,
+) -> Result<impl View + 'a> {
     let snapshot = match load_snapshot(cx, task_id).await? {
         Ok(snapshot) => snapshot,
         Err(refusal) => {
@@ -1946,13 +1991,13 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 .await
                 .map(|user| Lang::from_code(&user.language))
                 .unwrap_or(Lang::En);
-            return view! {
+            return Ok(view! {
                 cx =>
                 <div class="modal-scrim">
                     <div class="modal modal-task"><p class="modal-note">(refusal.message_in(lang))</p></div>
                 </div>
-                (escape_closes(cx).await?)
-            };
+                (topcoat::view::Child::new(escape_closes(cx).await?))
+            }.boxed());
         }
     };
     let DetailSnapshot {
@@ -1997,7 +2042,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
         None
     };
 
-    view! {
+    Ok(view! {
         cx =>
         <div class="modal-scrim">
             <div class="modal modal-task" tabindex="-1">
@@ -2019,7 +2064,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                 }
                                 <span class="detail-key">(detail.task_key.clone())</span>
                             </div>
-                            (title_control(cx, &detail, may_write, lang).await?)
+                            (topcoat::view::Child::new(title_control(cx, &detail, may_write, lang).await?))
                         </div>
                         <span class="detail-state">
                             if may_write {
@@ -2032,7 +2077,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                             <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
                                         }
                                     </select>
-                                    (glyph::chevron(cx).await?)
+                                    (topcoat::view::Child::new(glyph::chevron(cx).await?))
                                 </form>
                             } else {
                                 <span class="field-box">
@@ -2043,7 +2088,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                         </span>
                         <div class="spacer"></div>
                         <span class="detail-esc">(t(lang, Key::Esc))</span>
-                        <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
+                        <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(topcoat::view::Child::new(glyph::cross(cx).await?))</a>
                         <a class="quiet detail-board" href="/">(format!("<- {}", t(lang, Key::NavBoard)))</a>
                     </header>
 
@@ -2087,7 +2132,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                                 <option value=(column.id.clone()) selected=(column.id == detail.column.id)>(column.name.clone())</option>
                                             }
                                         </select>
-                                        (glyph::chevron(cx).await?)
+                                        (topcoat::view::Child::new(glyph::chevron(cx).await?))
                                     </form>
                                 } else {
                                     <span class="field-box">
@@ -2106,7 +2151,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                                 <option value=(tag.id.clone()) selected=(Some(tag.id.as_str()) == detail.tag.as_ref().map(|t| t.id.as_str()))>(tag.name.clone())</option>
                                             }
                                         </select>
-                                        (glyph::chevron(cx).await?)
+                                        (topcoat::view::Child::new(glyph::chevron(cx).await?))
                                     </form>
                                 } else {
                                     <span class="field-box">
@@ -2118,38 +2163,38 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             </div>
                             <div class="detail-field">
                                 <span class="detail-label">(t(lang, Key::Deadline))</span>
-                                (deadline_control(cx, &detail, today, zone, may_write, lang).await?)
+                                (topcoat::view::Child::new(deadline_control(cx, &detail, today, zone, may_write, lang).await?))
                             </div>
                             <div class="detail-field detail-field-people">
                                 <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>
                                 <div class="detail-assignees">
                                     for person in &detail.assignees {
-                                        (assignee_chip(cx, &detail.id, person, may_write, lang).await?)
+                                        (topcoat::view::Child::new(assignee_chip(cx, &detail.id, person, may_write, lang).await?))
                                     }
                                     <div class="spacer"></div>
                                     if may_write {
-                                        (assignee_picker(cx, &detail.id, &unassigned, lang).await?)
+                                        (topcoat::view::Child::new(assignee_picker(cx, &detail.id, &unassigned, lang).await?))
                                     }
                                 </div>
                             </div>
                         </div>
-                        (refused(cx, "move_card", lang).await?)
+                        (topcoat::view::Child::new(refused(cx, "move_card", lang).await?))
 
                         <section class="detail-block">
                             <div class="detail-block-head">
                                 <span class="detail-label">(t(lang, Key::Dependencies))</span>
                                 <div class="spacer"></div>
                                 if may_write {
-                                    (link_picker(cx, &detail.id, &linkable, lang).await?)
+                                    (topcoat::view::Child::new(link_picker(cx, &detail.id, &linkable, lang).await?))
                                 }
                             </div>
                             if has_deps {
                                 <div class="dep-list">
                                     for edge in &detail.blocked_by {
-                                        (dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?)
+                                        (topcoat::view::Child::new(dep_row(cx, &detail.id, edge, Direction::BlockedBy, may_write, lang).await?))
                                     }
                                     for edge in &detail.blocks {
-                                        (dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?)
+                                        (topcoat::view::Child::new(dep_row(cx, &detail.id, edge, Direction::Blocks, may_write, lang).await?))
                                     }
                                 </div>
                             } else {
@@ -2170,7 +2215,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
 
                     <section class="detail-block">
                         <span class="detail-label">(t(lang, Key::Description))</span>
-                        (description_control(cx, &detail, may_write, lang).await?)
+                        (topcoat::view::Child::new(description_control(cx, &detail, may_write, lang).await?))
                     </section>
                     }
 
@@ -2183,7 +2228,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             }
                             <div class="spacer"></div>
                             if may_write {
-                                (adopt_picker(cx, &detail.id, &adoptable, lang).await?)
+                                (topcoat::view::Child::new(adopt_picker(cx, &detail.id, &adoptable, lang).await?))
                             }
                         </div>
                         if may_write {
@@ -2194,14 +2239,14 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                                 <button class="edit-save" type="submit">(t(lang, Key::AddSubtask))</button>
                             </form>
                         }
-                        (refused(cx, "create_subtask", lang).await?)
-                        (refused(cx, "set_parent", lang).await?)
+                        (topcoat::view::Child::new(refused(cx, "create_subtask", lang).await?))
+                        (topcoat::view::Child::new(refused(cx, "set_parent", lang).await?))
                         if detail.subtasks.is_empty() {
                             <p class="detail-prose detail-prose-empty">(t(lang, Key::NoSubtasks))</p>
                         } else {
                             <div class="subtask-list">
                                 for part in &detail.subtasks {
-                                    (subtask_row(cx, part, &detail.columns, may_write, lang).await?)
+                                    (topcoat::view::Child::new(subtask_row(cx, part, &detail.columns, may_write, lang).await?))
                                 }
                             </div>
                         }
@@ -2218,18 +2263,18 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             <form class="file-upload" method="post" action="/files" enctype="multipart/form-data" data-cancel-label=(t(lang, Key::Cancel)) data-empty-label=(t(lang, Key::File))>
                                 <input type="hidden" name="task_id" value=(detail.id.clone())>
                                 <label class="field-box file-upload-box">
-                                    (glyph::plus(cx).await?)
+                                    (topcoat::view::Child::new(glyph::plus(cx).await?))
                                     <span class="field-text file-upload-name">(t(lang, Key::File))</span>
                                     <input class="file-upload-input" type="file" name="file" accept=(accept) multiple="" required="">
                                 </label>
                             </form>
-                            (refused(cx, "upload_file", lang).await?)
+                            (topcoat::view::Child::new(refused(cx, "upload_file", lang).await?))
                         }
-                        (refused(cx, "delete_file", lang).await?)
+                        (topcoat::view::Child::new(refused(cx, "delete_file", lang).await?))
                         if !detail.files.is_empty() {
                             <div class="file-list">
                                 for file in &detail.files {
-                                    (file_chip(cx, &detail.id, file, &me, may_write, lang).await?)
+                                    (topcoat::view::Child::new(file_chip(cx, &detail.id, file, &me, may_write, lang).await?))
                                 }
                             </div>
                         }
@@ -2244,7 +2289,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                         </div>
                         <div class="comment-list">
                             for entry in &detail.comments {
-                                (comment_row(cx, entry, zone).await?)
+                                (topcoat::view::Child::new(comment_row(cx, entry, zone).await?))
                             }
                         </div>
                     </section>
@@ -2313,7 +2358,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                 </div>
 
                 if tab == Tab::Task {
-                (refused(cx, "delete_task", lang).await?)
+                (topcoat::view::Child::new(refused(cx, "delete_task", lang).await?))
 
                 <footer class="detail-foot">
                     if may_delete {
@@ -2321,7 +2366,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             Some(cost) => {
                                 let freed = cost.frees.join(", ");
                                 <details class="confirm-details" open=(confirm_delete)>
-                                    <summary class="detail-delete">(glyph::bin(cx).await?)<span>(t(lang, Key::DeleteTask))</span></summary>
+                                    <summary class="detail-delete">(topcoat::view::Child::new(glyph::bin(cx).await?))<span>(t(lang, Key::DeleteTask))</span></summary>
                                     <div class="confirm">
                                         <div class="confirm-title">(format!("{} — {}?", cost.task_key, cost.title))</div>
                                         <ul class="confirm-list">
@@ -2362,13 +2407,13 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
                             <button class="comment-post" type="submit">(t(lang, Key::Comment))</button>
                         </div>
                     </form>
-                    (refused(cx, "post_comment", lang).await?)
+                    (topcoat::view::Child::new(refused(cx, "post_comment", lang).await?))
                 }
             </div>
         </div>
-        (datepicker_script(cx, lang).await?)
-        (escape_closes(cx).await?)
-    }
+        (topcoat::view::Child::new(datepicker_script(cx, lang).await?))
+        (topcoat::view::Child::new(escape_closes(cx).await?))
+    }.boxed())
 }
 
 /// The house audio player: play toggle, clock, seek bar over a hidden
@@ -2377,7 +2422,7 @@ pub async fn task_modal(cx: &Cx, task_id: &str, confirm_delete: bool, tab: Tab) 
 /// Wiring is per-player and idempotent (`data-wired`), re-run on
 /// `iz:wire` so a player arriving in a soft page swap — where inline
 /// scripts never execute — still gets its controls.
-async fn audio_player_script(cx: &Cx) -> Result {
+async fn audio_player_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
@@ -2422,7 +2467,7 @@ async fn audio_player_script(cx: &Cx) -> Result {
             wireAll(); \
             document.addEventListener('iz:wire', wireAll); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// The in-app file viewer: `<img>`/`<video>`/`<audio>`/`<object>` per
@@ -2433,31 +2478,31 @@ async fn audio_player_script(cx: &Cx) -> Result {
 /// mime type with no viewer element: a filename's own link only ever points
 /// here when [`crate::files::viewer_kind`] already said yes, but a hand-edited
 /// query string gets the same silent no as a stale or foreign id.
-pub async fn file_viewer_modal(
-    cx: &Cx,
-    task_id: &str,
-    file_id: &str,
+pub async fn file_viewer_modal<'a>(
+    cx: &'a Cx,
+    task_id: &'a str,
+    file_id: &'a str,
     tab: Tab,
     sheet_index: usize,
     row_page: usize,
     column_page: usize,
-) -> Result {
+) -> Result<impl View + 'a> {
     let user = match require_user(cx).await {
         Ok(user) => user,
-        Err(_) => return view! { cx => },
+        Err(_) => return Ok(view! { cx => }.boxed()),
     };
     let store = store(cx).clone();
     if task_of(store.as_ref(), &user, task_id).await.is_err() {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     }
     let Ok(Some(attachment)) = store.attachment(file_id).await else {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     };
     if attachment.task_id != task_id {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     }
     let Some(kind) = crate::files::viewer_kind(&attachment.mime_type) else {
-        return view! { cx => };
+        return Ok(view! { cx => }.boxed());
     };
     let lang = Lang::from_code(&user.language);
     // Closing a file returns to the panel exactly as it stood, tab and all:
@@ -2503,7 +2548,7 @@ pub async fn file_viewer_modal(
     } else {
         None
     };
-    view! {
+    Ok(view! {
         cx =>
         <div class="modal-scrim viewer-scrim">
             <a class="viewer-close" href=(close_href.clone()) aria-label=(t(lang, Key::CloseTheFile))></a>
@@ -2515,7 +2560,7 @@ pub async fn file_viewer_modal(
                     }
                     <a class="quiet" href=(download_href)>(t(lang, Key::Download))</a>
                     <span class="detail-esc">(t(lang, Key::Esc))</span>
-                    <a class="detail-close" href=(close_href) aria-label=(t(lang, Key::CloseTheFile))>(glyph::cross(cx).await?)</a>
+                    <a class="detail-close" href=(close_href) aria-label=(t(lang, Key::CloseTheFile))>(topcoat::view::Child::new(glyph::cross(cx).await?))</a>
                 </header>
                 <div class="viewer-body">
                     match kind {
@@ -2524,28 +2569,28 @@ pub async fn file_viewer_modal(
                         crate::files::ViewerKind::Audio => <div class="audio-player">
                             <button type="button" class="audio-play" aria-label=(t(lang, Key::Play))
                                 data-play=(t(lang, Key::Play)) data-pause=(t(lang, Key::Pause))>
-                                (glyph::play(cx).await?)
-                                (glyph::pause(cx).await?)
+                                (topcoat::view::Child::new(glyph::play(cx).await?))
+                                (topcoat::view::Child::new(glyph::pause(cx).await?))
                             </button>
                             <span class="audio-time audio-now">"0:00"</span>
                             <input class="audio-seek" type="range" min="0" max="1000" value="0" aria-label=(name.clone())>
                             <span class="audio-time audio-dur">"0:00"</span>
                             <audio class="audio-el" src=(src) preload="metadata"></audio>
-                            (audio_player_script(cx).await?)
+                            (topcoat::view::Child::new(audio_player_script(cx).await?))
                         </div>,
                         crate::files::ViewerKind::Pdf => <object class="viewer-media viewer-pdf" data=(src) type="application/pdf"></object>,
-                        crate::files::ViewerKind::Sheet => (sheet_view(cx, sheet, task_id, file_id, tab, lang).await?),
+                        crate::files::ViewerKind::Sheet => (topcoat::view::Child::new(sheet_view(cx, sheet, task_id, file_id, tab, lang).await?)),
                         crate::files::ViewerKind::Slides => {
-                            (slides_view(cx, deck, task_id, file_id, tab, lang).await?)
+                            (topcoat::view::Child::new(slides_view(cx, deck, task_id, file_id, tab, lang).await?))
                         }
                     }
                 </div>
             </div>
             if kind == crate::files::ViewerKind::Pdf {
-                (pdf_present_script(cx).await?)
+                (topcoat::view::Child::new(pdf_present_script(cx).await?))
             }
         </div>
-    }
+    }.boxed())
 }
 
 /// The PDF reader's presentation mode: the browser's own plugin fills the
@@ -2556,7 +2601,7 @@ pub async fn file_viewer_modal(
 /// click lands is the one that presents. `Escape` in fullscreen is the
 /// browser's own exit gesture and never reaches the page; the guard in
 /// [`escape_closes`] covers the ones that do.
-async fn pdf_present_script(cx: &Cx) -> Result {
+async fn pdf_present_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     use topcoat::view::Unescaped;
     const JS: &str = "\
         (function () { \
@@ -2570,25 +2615,27 @@ async fn pdf_present_script(cx: &Cx) -> Result {
                 if (document.fullscreenElement) { document.exitFullscreen(); } else { panel.requestFullscreen(); } \
             }); \
         })();";
-    view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
 }
 
 /// One window of one sheet as a table: the tab strip when the book has more
 /// than one sheet, the grid with its column letters and row numbers, and the
 /// two pagers that move the window. A workbook no reader here understands
 /// says so in one line — the header's download link is still the whole file.
-async fn sheet_view(
-    cx: &Cx,
+async fn sheet_view<'a>(
+    cx: &'a Cx,
     sheet: Option<crate::sheet::Sheet>,
-    task_id: &str,
-    file_id: &str,
+    task_id: &'a str,
+    file_id: &'a str,
     tab: Tab,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     use crate::sheet::{COLUMNS_PER_PAGE, ROWS_PER_PAGE, column_name};
 
     let Some(sheet) = sheet else {
-        return view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> };
+        return Ok(
+            view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> }.boxed(),
+        );
     };
     let width = sheet.rows.iter().map(Vec::len).max().unwrap_or(0);
     let columns: Vec<String> = (0..width)
@@ -2645,7 +2692,7 @@ async fn sheet_view(
         Some(total) => format!("{first_letter}–{last_letter} / {total}"),
         None => format!("{first_letter}–{last_letter}"),
     };
-    view! {
+    Ok(view! {
         cx =>
         <div class="viewer-sheet">
             if tabs.len() > 1 {
@@ -2681,32 +2728,32 @@ async fn sheet_view(
                 <div class="sheet-pager">
                     <span class="sheet-range">(row_range)</span>
                     if let Some(href) = rows_back {
-                        <a class="sheet-step sheet-step-up" href=(href) aria-label=(t(lang, Key::Previous))>(glyph::chevron(cx).await?)</a>
+                        <a class="sheet-step sheet-step-up" href=(href) aria-label=(t(lang, Key::Previous))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</a>
                     } else {
-                        <span class="sheet-step sheet-step-up sheet-step-off">(glyph::chevron(cx).await?)</span>
+                        <span class="sheet-step sheet-step-up sheet-step-off">(topcoat::view::Child::new(glyph::chevron(cx).await?))</span>
                     }
                     if let Some(href) = rows_on {
-                        <a class="sheet-step" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
+                        <a class="sheet-step" href=(href) aria-label=(t(lang, Key::Next))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</a>
                     } else {
-                        <span class="sheet-step sheet-step-off">(glyph::chevron(cx).await?)</span>
+                        <span class="sheet-step sheet-step-off">(topcoat::view::Child::new(glyph::chevron(cx).await?))</span>
                     }
                 </div>
                 <div class="sheet-pager">
                     <span class="sheet-range">(column_range)</span>
                     if let Some(href) = columns_back {
-                        <a class="sheet-step sheet-step-left" href=(href) aria-label=(t(lang, Key::Previous))>(glyph::chevron(cx).await?)</a>
+                        <a class="sheet-step sheet-step-left" href=(href) aria-label=(t(lang, Key::Previous))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</a>
                     } else {
-                        <span class="sheet-step sheet-step-left sheet-step-off">(glyph::chevron(cx).await?)</span>
+                        <span class="sheet-step sheet-step-left sheet-step-off">(topcoat::view::Child::new(glyph::chevron(cx).await?))</span>
                     }
                     if let Some(href) = columns_on {
-                        <a class="sheet-step sheet-step-right" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
+                        <a class="sheet-step sheet-step-right" href=(href) aria-label=(t(lang, Key::Next))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</a>
                     } else {
-                        <span class="sheet-step sheet-step-right sheet-step-off">(glyph::chevron(cx).await?)</span>
+                        <span class="sheet-step sheet-step-right sheet-step-off">(topcoat::view::Child::new(glyph::chevron(cx).await?))</span>
                     }
                 </div>
             </div>
         </div>
-    }
+    }.boxed())
 }
 
 /// One slide of a deck as an outline: the strip of slide numbers when the
@@ -2714,16 +2761,18 @@ async fn sheet_view(
 /// paragraph as the heading, the rest as lines — and the pager that moves
 /// between slides. A deck no reader here understands says so in one line;
 /// the header's download link is still the whole file.
-async fn slides_view(
-    cx: &Cx,
+async fn slides_view<'a>(
+    cx: &'a Cx,
     deck: Option<crate::slides::Deck>,
-    task_id: &str,
-    file_id: &str,
+    task_id: &'a str,
+    file_id: &'a str,
     tab: Tab,
     lang: Lang,
-) -> Result {
+) -> Result<impl View + 'a> {
     let Some(deck) = deck else {
-        return view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> };
+        return Ok(
+            view! { cx => <p class="sheet-note">(t(lang, Key::ThisFileWillNotOpen))</p> }.boxed(),
+        );
     };
     // Every link out of here is the same page with one number moved: the
     // slide index rides the query param a sheet's tabs use, so the two
@@ -2734,7 +2783,7 @@ async fn slides_view(
             tab.slug()
         )
     };
-    let slide = &deck.slides[deck.index];
+    let slide = deck.slides[deck.index].clone();
     let steps: Vec<(String, String, &'static str)> = (0..deck.slides.len())
         .map(|index| {
             (
@@ -2750,7 +2799,7 @@ async fn slides_view(
         .collect();
     let back = (deck.index > 0).then(|| at(deck.index - 1));
     let on = (deck.index + 1 < deck.slides.len()).then(|| at(deck.index + 1));
-    view! {
+    Ok(view! {
         cx =>
         <div class="viewer-slides">
             if steps.len() > 1 {
@@ -2775,33 +2824,38 @@ async fn slides_view(
                         (format!("{} / {}", deck.index + 1, deck.slides.len()))
                     </span>
                     if let Some(href) = back {
-                        <a class="slides-step slides-step-left" href=(href) aria-label=(t(lang, Key::Previous))>(glyph::chevron(cx).await?)</a>
+                        <a class="slides-step slides-step-left" href=(href) aria-label=(t(lang, Key::Previous))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</a>
                     } else {
-                        <span class="slides-step slides-step-left slides-step-off">(glyph::chevron(cx).await?)</span>
+                        <span class="slides-step slides-step-left slides-step-off">(topcoat::view::Child::new(glyph::chevron(cx).await?))</span>
                     }
                     if let Some(href) = on {
-                        <a class="slides-step slides-step-right" href=(href) aria-label=(t(lang, Key::Next))>(glyph::chevron(cx).await?)</a>
+                        <a class="slides-step slides-step-right" href=(href) aria-label=(t(lang, Key::Next))>(topcoat::view::Child::new(glyph::chevron(cx).await?))</a>
                     } else {
-                        <span class="slides-step slides-step-right slides-step-off">(glyph::chevron(cx).await?)</span>
+                        <span class="slides-step slides-step-right slides-step-off">(topcoat::view::Child::new(glyph::chevron(cx).await?))</span>
                     }
                 </div>
             </div>
         </div>
-    }
+    }.boxed())
 }
 
 /// The "New task" popup: a house modal wearing the same scrim/panel chrome
 /// as [`task_modal`], with a form posting straight to `/api/create_task`.
 /// Wired off the board top bar's "New task" button as `/?new=1`.
-pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -> Result {
-    view! {
+pub async fn new_task_modal<'a>(
+    cx: &'a Cx,
+    columns: &[(String, String)],
+    lang: Lang,
+) -> Result<impl View + 'a> {
+    let columns = columns.to_vec();
+    Ok(view! {
         cx =>
         <div class="modal-scrim">
             <div class="modal modal-new-task" tabindex="-1">
                 <header class="detail-head">
                     <span class="detail-headline">(t(lang, Key::NewTask))</span>
                     <span class="detail-esc">(t(lang, Key::Esc))</span>
-                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(glyph::cross(cx).await?)</a>
+                    <a class="detail-close" href="/" aria-label=(t(lang, Key::CloseThisTask))>(topcoat::view::Child::new(glyph::cross(cx).await?))</a>
                 </header>
                 <form class="new-task-form" method="post" action="/api/create_task">
                     <label class="field">
@@ -2813,11 +2867,11 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                             <span class="field-label">(t(lang, Key::Status))</span>
                             <span class="field-box">
                                 <select class="status-select" name="column_id">
-                                    for column in columns {
+                                    for column in &columns {
                                         <option value=(column.0.clone())>(column.1.clone())</option>
                                     }
                                 </select>
-                                (glyph::chevron(cx).await?)
+                                (topcoat::view::Child::new(glyph::chevron(cx).await?))
                             </span>
                         </label>
                         <div class="field">
@@ -2825,11 +2879,11 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                             <div class="edit edit-pop datepick-pop">
                                 <input class="edit-toggle" type="checkbox" id="new-task-deadline">
                                 <label class="field-box edit-view edit-hit" for="new-task-deadline">
-                                    (glyph::calendar(cx).await?)
+                                    (topcoat::view::Child::new(glyph::calendar(cx).await?))
                                     <span class="field-text datepick-label" data-empty=(t(lang, Key::NoDeadline))>(t(lang, Key::NoDeadline))</span>
                                 </label>
                                 <div class="edit-form pop-panel datepick-panel">
-                                    (datepicker_grid(cx, "deadline", "", false, lang).await?)
+                                    (topcoat::view::Child::new(datepicker_grid(cx, "deadline", "", false, lang).await?))
                                     <div class="datepick-time">
                                         <select class="field-input" name="clock_hour" aria-label=(t(lang, Key::ClockHour)) data-search="">
                                             <option value="">("--")</option>
@@ -2853,7 +2907,7 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                         <span class="field-label">(t(lang, Key::Description))</span>
                         <textarea class="detail-textarea" name="description" rows="4"></textarea>
                     </label>
-                    (refused(cx, "create_task", lang).await?)
+                    (topcoat::view::Child::new(refused(cx, "create_task", lang).await?))
                     <div class="new-task-foot">
                         <div class="spacer"></div>
                         <a class="quiet" href="/">(t(lang, Key::Cancel))</a>
@@ -2862,7 +2916,7 @@ pub async fn new_task_modal(cx: &Cx, columns: &[(String, String)], lang: Lang) -
                 </form>
             </div>
         </div>
-        (datepicker_script(cx, lang).await?)
-        (escape_closes(cx).await?)
-    }
+        (topcoat::view::Child::new(datepicker_script(cx, lang).await?))
+        (topcoat::view::Child::new(escape_closes(cx).await?))
+    }.boxed())
 }

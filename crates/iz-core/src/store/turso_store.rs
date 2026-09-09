@@ -818,7 +818,7 @@ impl TursoStore {
                   subject, body) \
                  VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?5, 'reminder', ?6, ?7)",
                 params![
-                    Ulid::new().to_string(),
+                    Ulid::generate().to_string(),
                     task_id,
                     email,
                     stamp(now)?,
@@ -1067,7 +1067,7 @@ fn ensure_storage_dirs(storage: &std::path::Path) -> Result<()> {
 /// is exactly what the boot sweep deletes.
 fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let tmp = path.with_extension(format!("{}.tmp", Ulid::new()));
+    let tmp = path.with_extension(format!("{}.tmp", Ulid::generate()));
     let mut file = std::fs::File::create(&tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -1500,8 +1500,8 @@ impl Store for TursoStore {
                         // The first sign-in is the whole setup: the workspace
                         // and the board it is never without, the way the old
                         // claim screen built them with the first account.
-                        let workspace_id = Ulid::new().to_string();
-                        let board_id = Ulid::new().to_string();
+                        let workspace_id = Ulid::generate().to_string();
+                        let board_id = Ulid::generate().to_string();
                         tx.execute(
                             "INSERT INTO workspace (id, name, created_at) VALUES (?1, 'iz', ?2)",
                             params![workspace_id.clone(), now.clone()],
@@ -1525,7 +1525,7 @@ impl Store for TursoStore {
                                 "INSERT INTO board_column (id, board_id, name, position, is_done) \
                                  VALUES (?1, ?2, ?3, ?4, ?5)",
                                 params![
-                                    Ulid::new().to_string(),
+                                    Ulid::generate().to_string(),
                                     board_id.clone(),
                                     *name,
                                     position as i64,
@@ -1538,14 +1538,14 @@ impl Store for TursoStore {
                         tx.execute(
                             "INSERT INTO tag (id, board_id, name, position, is_default, created_at) \
                              VALUES (?1, ?2, 'General', 0, 1, ?3)",
-                            params![Ulid::new().to_string(), board_id.clone(), now.clone()],
+                            params![Ulid::generate().to_string(), board_id.clone(), now.clone()],
                         )
                         .await
                         .map_err(backend)?;
                         workspace_id
                     }
                 };
-                let id = Ulid::new().to_string();
+                let id = Ulid::generate().to_string();
                 tx.execute(
                     "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, role, \
                      disabled, created_at, last_signed_in_at) \
@@ -1700,7 +1700,7 @@ impl Store for TursoStore {
                         // Born linked: the directory vouches the subject, so
                         // the row never waits unclaimed — assignment, mail
                         // and the avatar proxy work before the first visit.
-                        let id = Ulid::new().to_string();
+                        let id = Ulid::generate().to_string();
                         let role = if im_admin { Role::Admin } else { Role::Member };
                         tx.execute(
                             "INSERT INTO user (id, workspace_id, oidc_sub, email, display_name, \
@@ -1790,7 +1790,7 @@ impl Store for TursoStore {
         if seen.is_some() {
             return Err(StoreError::Conflict("member"));
         }
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let now = now_text()?;
         let conn = self.conn.lock().await;
         // Unclaimed: no sub, never signed in. The guards read such a row
@@ -2196,7 +2196,7 @@ impl Store for TursoStore {
         is_done: bool,
     ) -> Result<Column> {
         let conn = self.conn.lock().await;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         conn.execute(
             "INSERT INTO board_column (id, board_id, name, position, is_done) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2215,9 +2215,9 @@ impl Store for TursoStore {
     }
 
     async fn create_task(&self, new: NewTask<'_>) -> Result<TaskCreated> {
-        let id = Ulid::new().to_string();
-        let activity_id = Ulid::new().to_string();
-        let transition_id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
+        let activity_id = Ulid::generate().to_string();
+        let transition_id = Ulid::generate().to_string();
         let at = OffsetDateTime::now_utc();
         let now = stamp(at)?;
         let deadline = new.deadline.map(day_text).transpose()?;
@@ -2772,8 +2772,8 @@ impl Store for TursoStore {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<CommentWritten> {
-        let comment_id = Ulid::new().to_string();
-        let activity_id = Ulid::new().to_string();
+        let comment_id = Ulid::generate().to_string();
+        let activity_id = Ulid::generate().to_string();
         let when = stamp(at)?;
 
         let mut conn = self.tx_conn().await?;
@@ -2824,7 +2824,7 @@ impl Store for TursoStore {
         // deletes, never a row pointing at nothing. If the row write fails,
         // the file is unlinked best-effort — the row was never born, so the
         // bytes must not outlive it under a name nothing points at.
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let size = new.bytes.len() as i64;
         let path = attachment_file(&self.storage, &id);
         write_file_atomic(&path, &new.bytes).map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -3136,7 +3136,7 @@ impl Store for TursoStore {
             }
             let mut ids = Vec::with_capacity(lines.len());
             for (kind, detail) in lines {
-                let id = Ulid::new().to_string();
+                let id = Ulid::generate().to_string();
                 tx.execute(
                     "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
                      VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
@@ -3194,7 +3194,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<Moved> {
         let stamp = stamp(at)?;
-        let transition_id = Ulid::new().to_string();
+        let transition_id = Ulid::generate().to_string();
 
         // Dropping a card back where it came from is not a move. Answer before
         // opening a transaction: there is nothing to serialise.
@@ -3335,7 +3335,7 @@ impl Store for TursoStore {
                 "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6)",
                 params![
-                    Ulid::new().to_string(),
+                    Ulid::generate().to_string(),
                     task_id,
                     actor_id,
                     ActivityKind::Moved.as_str(),
@@ -3469,7 +3469,7 @@ impl Store for TursoStore {
                 params![task_id, stamp.clone()],
             )
             .await?;
-            let deleted_activity_id = Ulid::new().to_string();
+            let deleted_activity_id = Ulid::generate().to_string();
             tx.execute(
                 "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, NULL, ?4, '', ?5)",
@@ -3507,7 +3507,7 @@ impl Store for TursoStore {
                     "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
                      VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5)",
                     params![
-                        Ulid::new().to_string(),
+                        Ulid::generate().to_string(),
                         blocked.clone(),
                         ActivityKind::Unblocked.as_str(),
                         format!("{task_key} was deleted"),
@@ -3526,7 +3526,7 @@ impl Store for TursoStore {
                 None
             } else {
                 let event = Freeing {
-                    id: Ulid::new().to_string(),
+                    id: Ulid::generate().to_string(),
                     board_id,
                     cause_key: task_key.clone(),
                     cause_title: title,
@@ -3676,7 +3676,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<String> {
         let conn = self.conn.lock().await;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         conn.execute(
             "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -3706,7 +3706,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<String> {
         let conn = self.conn.lock().await;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         conn.execute(
             "INSERT INTO activity (id, task_id, actor_id, subject_id, kind, detail, created_at) \
                  VALUES (?1, NULL, ?2, NULL, ?3, ?4, ?5)",
@@ -3731,7 +3731,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
         include_task_details: bool,
     ) -> Result<MailRule> {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let (kind, column) = trigger_parts(trigger);
         self.conn
             .lock()
@@ -3844,7 +3844,7 @@ impl Store for TursoStore {
                 at: parse_stamp(&text(&row, 5)?)?,
             })));
         }
-        match self
+        if let Some(row) = self
             .one_row(
                 "SELECT id, board_id, cause_key, cause_title, actor_id, created_at \
                  FROM freeing WHERE id = ?1",
@@ -3852,17 +3852,14 @@ impl Store for TursoStore {
             )
             .await?
         {
-            Some(row) => {
-                return Ok(Some(Event::Freed(Freeing {
-                    id: text(&row, 0)?,
-                    board_id: text(&row, 1)?,
-                    cause_key: text(&row, 2)?,
-                    cause_title: text(&row, 3)?,
-                    actor_id: text(&row, 4)?,
-                    at: parse_stamp(&text(&row, 5)?)?,
-                })));
-            }
-            None => {}
+            return Ok(Some(Event::Freed(Freeing {
+                id: text(&row, 0)?,
+                board_id: text(&row, 1)?,
+                cause_key: text(&row, 2)?,
+                cause_title: text(&row, 3)?,
+                actor_id: text(&row, 4)?,
+                at: parse_stamp(&text(&row, 5)?)?,
+            })));
         }
         match self
             .one_row(
@@ -3952,7 +3949,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
         until: OffsetDateTime,
     ) -> Result<Option<ClaimedSend>> {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         // The index is the decision. `DO NOTHING` turns the second engine run
         // into zero rows affected rather than an error to interpret, and the
         // caller that gets `None` sends nothing.
@@ -3997,7 +3994,7 @@ impl Store for TursoStore {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<MailSend> {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         self.conn
             .lock()
             .await
@@ -4027,7 +4024,7 @@ impl Store for TursoStore {
         body: &str,
         at: OffsetDateTime,
     ) -> Result<MailSend> {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         self.conn
             .lock()
             .await
@@ -4280,7 +4277,7 @@ impl Store for TursoStore {
         at: OffsetDateTime,
     ) -> Result<()> {
         let conn = self.conn.lock().await;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         conn.execute(
             "INSERT INTO mail_decision (id, rule_id, event_id, task_id, outcome, detail, \
                  created_at) \
@@ -4798,7 +4795,7 @@ impl Store for TursoStore {
     }
 
     async fn create_tag(&self, board_id: &str, name: &str, at: OffsetDateTime) -> Result<Tag> {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let now = stamp(at)?;
         let mut conn = self.tx_conn().await?;
         let tx = conn
@@ -5479,7 +5476,7 @@ mod probe {
 
     #[tokio::test]
     async fn durability_defaults_are_recorded() {
-        let dir = std::env::temp_dir().join(format!("iz-probe-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-probe-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.db");
         let db = Builder::new_local(path.to_str().unwrap())
@@ -5497,7 +5494,7 @@ mod probe {
 
     #[tokio::test]
     async fn concurrent_writers_on_one_database() {
-        let dir = std::env::temp_dir().join(format!("iz-probe-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-probe-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.db");
         let db = Builder::new_local(path.to_str().unwrap())
@@ -5540,7 +5537,7 @@ mod probe {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_database_handles_on_one_file() {
         // Two handles on the same file is the shape a second process takes.
-        let dir = std::env::temp_dir().join(format!("iz-probe-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-probe-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("probe.db");
         let p = path.to_str().unwrap().to_string();
@@ -5613,7 +5610,7 @@ mod probe {
     /// is asserted against the real query rather than against a comment.
     #[tokio::test]
     async fn the_workspace_read_path_cannot_carry_the_password() {
-        let dir = std::env::temp_dir().join(format!("iz-sender-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("iz-sender-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = TursoStore::open(dir.join("iz.db").to_str().unwrap(), &dir.join("storage"))
             .await
