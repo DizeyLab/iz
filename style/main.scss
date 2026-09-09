@@ -4398,20 +4398,47 @@ input[type="radio"] {
   }
 }
 
-// The migration meter on the Storage card's Migration fact: a sunken track
-// with an accent fill, the same meter in's settings panel draws for quota —
-// the family renders a level one way. Read-only: the level rides the fill's
-// inline width.
+// The migration meter on the Storage card's Migration fact: a tinted pill
+// of track under an accent fill that carries a travelling highlight — a
+// quota is a level, but a migration is activity, so the light moves the
+// way the rows do, and the fill holds full accent against the 9% track so
+// the meter reads at a glance from across the room. The level rides the
+// fill's inline width; the highlight rides a background sweep that stands
+// still for anyone who asked motion to stop.
 .quota-bar {
-  height: 8px;
+  height: 6px;
   margin-top: 0.45rem;
-  background: var(--panel-sunken);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-radius: 999px;
   overflow: hidden;
 }
 
 .quota-fill {
   height: 100%;
-  background: var(--accent);
+  border-radius: 999px;
+  background: linear-gradient(
+    100deg,
+    var(--accent) 0%,
+    var(--accent) 38%,
+    color-mix(in srgb, var(--accent) 35%, white) 50%,
+    var(--accent) 62%,
+    var(--accent) 100%
+  );
+  background-size: 200% 100%;
+  animation: quota-sweep 1.4s linear infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    background: var(--accent);
+  }
+}
+
+@keyframes quota-sweep {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: 0 0;
+  }
 }
