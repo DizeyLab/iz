@@ -191,13 +191,15 @@ impl TursoStore {
     }
 
     /// Stamps written before [`stamp`] pinned its format may sit in any TEXT
-    /// stamp column as whole seconds (`…T08:30:00Z`, twenty characters) — and
-    /// because `Z` outranks `.` in a string compare, such a row hid from
-    /// `claim_sends_owed` for the whole of the first second it was due. Like
-    /// the password-sealing pass above, this is a data repair no schema
-    /// migration can express, run once per boot and idempotent by its own
-    /// WHERE clause: a twenty-character stamp of the whole-second shape is
-    /// the only thing it matches, and after one boot none are left to match.
+    /// stamp column in either of the old formatter's two short spellings —
+    /// whole seconds (`…T08:30:00Z`, twenty characters) or a subsecond with
+    /// its trailing zeros trimmed (`…T18:21:00.34746478Z`, twenty-nine) —
+    /// and because `Z` outranks `.` and every digit in a string compare,
+    /// both hid from `claim_sends_owed` for the whole of the instant they
+    /// name. Like the password-sealing pass above, this is a data repair no
+    /// schema migration can express, run once per boot and idempotent by its
+    /// own WHERE clauses: they match only the two short shapes, and after
+    /// one boot neither is left to match.
     /// The inventory is the live schema's stamp columns, table by table out
     /// of `migrations/0001` through `0006`: `workspace` (created_at,
     /// smtp_test_at, smtp_check_at), `user` (created_at, last_signed_in_at),
@@ -240,13 +242,41 @@ impl TursoStore {
         let conn = self.conn.lock().await;
         let mut changed = 0usize;
         for (table, column) in STAMP_COLUMNS {
+            // Two legacy shapes, both from the `time` crate's Rfc3339
+            // formatter, which spells an instant as short as it can: a zero
+            // subsecond is left out entirely (twenty characters), and a
+            // nonzero one has its trailing zeros trimmed — a nanosecond
+            // ending in zero loses a digit, so the same formatter wrote
+            // eight digits where the pinned shape writes nine. Both spell
+            // the instant faithfully, and both still compare wrong as text
+            // against the pinned shape: `Z` outranks every digit, so a
+            // shorter fraction sorts after the same instant written in
+            // full. The repair is padding, never re-derivation — trailing
+            // zeros carry no information, so growing `.34746478` to
+            // `.347464780` moves no instant and breaks no reader.
             let n = conn
                 .execute(
                     &format!(
-                        "UPDATE {table} SET {column} = substr({column}, 1, 19) \
-                         || '.000000000Z' \
+                        "UPDATE {table} \
+                         SET {column} = substr({column}, 1, 19) || '.000000000Z' \
                          WHERE {column} IS NOT NULL AND length({column}) = 20 \
-                         AND {column} LIKE '____-__-__T__:__:__Z'"
+                           AND {column} LIKE '____-__-__T__:__:__Z'",
+                    ),
+                    (),
+                )
+                .await
+                .map_err(backend)?;
+            changed += n as usize;
+            let n = conn
+                .execute(
+                    &format!(
+                        "UPDATE {table} \
+                         SET {column} = substr({column}, 1, 20) \
+                         || substr(replace(substr({column}, 21), 'Z', '') || '000000000', 1, 9) \
+                         || 'Z' \
+                         WHERE {column} IS NOT NULL AND length({column}) BETWEEN 21 AND 29 \
+                           AND {column} LIKE '____-__-__T__:__:__.%' \
+                           AND {column} LIKE '%Z'",
                     ),
                     (),
                 )
@@ -257,7 +287,7 @@ impl TursoStore {
         // Spoken only when something actually moved: a boot log that
         // reports every quiet pass trains the reader to skip it.
         if changed > 0 {
-            println!("iz store  canonicalized {changed} legacy whole-second stamps");
+            println!("iz store  canonicalized {changed} legacy stamps to the pinned shape");
         }
         Ok(())
     }
@@ -1176,9 +1206,8 @@ const DAY: &[BorrowedFormatItem] = format_description!("[year]-[month]-[day]");
 /// Why the width is pinned: see [`stamp`] — the queue compares stamps as
 /// text, and text only compares like time when every stamp is the same
 /// shape. [`parse_stamp`] reads this and the shorter legacy width alike.
-const STAMP: &[BorrowedFormatItem] = format_description!(
-    "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
-);
+const STAMP: &[BorrowedFormatItem] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z");
 
 fn day_text(day: Date) -> Result<String> {
     day.format(&DAY)

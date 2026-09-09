@@ -7466,7 +7466,11 @@ async fn a_whole_second_stamp_is_written_with_nine_zero_digits() {
 /// rewrites every one of them to the canonical shape — so the queue's TEXT
 /// comparisons never again meet a `Z` sorting after a `.`. The row planted
 /// here is the production reminder, verbatim: due on a whole second,
-/// written without a fraction.
+/// written without a fraction. The old formatter's other short spelling —
+/// a subsecond with its trailing zero trimmed, one digit short — is
+/// planted beside it, because `Z` outranks the digits too and a
+/// twenty-nine-character stamp compares no better than a twenty-character
+/// one.
 #[tokio::test]
 async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
     let dir = std::env::temp_dir().join(format!("iz-test-{}", Ulid::new()));
@@ -7483,19 +7487,20 @@ async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
     let due = clock - Duration::minutes(15);
     drop(store);
 
-    // The old write path, by hand: the same instants, no fraction, in a
-    // handful of the columns the boot pass owns. Everything else in the
-    // file was written by the canonical stamp already.
-    let columns = [
+    // The old write paths, by hand: the same instants, no fraction, in a
+    // handful of the columns the boot pass owns — and one column carrying
+    // the trimmed-fraction spelling an eight-digit nanosecond used to get.
+    // Everything else in the file was written by the canonical stamp
+    // already. The reminder's own due keeps its instant: only the spelling
+    // is legacy, never the time it names.
+    let db = turso::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    for (table, column) in [
         ("mail_send", "next_attempt_at"),
         ("mail_send", "claimed_at"),
         ("task", "clock_at"),
         ("task", "created_at"),
-        ("task", "updated_at"),
-    ];
-    let db = turso::Builder::new_local(&path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    for (table, column) in columns {
+    ] {
         conn.execute(
             &format!(
                 "UPDATE {table} SET {column} = substr({column}, 1, 19) || 'Z' \
@@ -7506,6 +7511,14 @@ async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
         .await
         .unwrap();
     }
+    // A subsecond whose last digit the old formatter would have trimmed
+    // away: `.123456780` written as `.12345678`.
+    conn.execute(
+        "UPDATE task SET updated_at = substr(updated_at, 1, 20) || '12345678Z'",
+        (),
+    )
+    .await
+    .unwrap();
     drop(conn);
     drop(db);
 
@@ -7513,7 +7526,13 @@ async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
     let reopened = TursoStore::open(&path, &dir.join("storage")).await.unwrap();
     let db = turso::Builder::new_local(&path).build().await.unwrap();
     let conn = db.connect().unwrap();
-    for (table, column) in columns {
+    for (table, column) in [
+        ("mail_send", "next_attempt_at"),
+        ("mail_send", "claimed_at"),
+        ("task", "clock_at"),
+        ("task", "created_at"),
+        ("task", "updated_at"),
+    ] {
         let mut rows = conn
             .query(
                 &format!("SELECT {column} FROM {table} WHERE {column} IS NOT NULL"),
@@ -7524,15 +7543,22 @@ async fn a_boot_canonicalizes_the_legacy_whole_second_stamps() {
         let mut seen = 0;
         while let Some(row) = rows.next().await.unwrap() {
             let raw: String = row.get(0).unwrap();
-            assert_eq!(
-                raw.len(),
-                30,
-                "{table}.{column} came back canonical: {raw}"
-            );
+            assert_eq!(raw.len(), 30, "{table}.{column} came back canonical: {raw}");
             seen += 1;
         }
         assert!(seen > 0, "{table}.{column} had rows to rewrite");
     }
+    // The trimmed fraction came back padded, not re-derived: the digits it
+    // named are the digits it kept.
+    let mut rows = conn.query("SELECT updated_at FROM task", ()).await.unwrap();
+    let raw: String = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("one task row")
+        .get(0)
+        .unwrap();
+    assert!(raw.ends_with(".123456780Z"), "padded with a zero: {raw}");
     drop(conn);
     drop(db);
 
@@ -8442,7 +8468,10 @@ async fn demoting_a_member_to_viewer_takes_their_assignments_with_them() {
     for task in [&first, &second] {
         let chips = store.assignees_for_task(task).await.unwrap();
         assert_eq!(
-            chips.iter().map(|p| p.display_name.as_str()).collect::<Vec<_>>(),
+            chips
+                .iter()
+                .map(|p| p.display_name.as_str())
+                .collect::<Vec<_>>(),
             ["Emre"],
             "the demoted person is still a chip on {task}"
         );
@@ -8571,7 +8600,8 @@ async fn set_user_disabled_round_trips() {
 async fn a_synced_member_is_born_linked_and_never_signed_in() {
     let (scratch, workspace, _admin) = workspace_with_admin().await;
     let sync = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -8586,7 +8616,8 @@ async fn a_synced_member_is_born_linked_and_never_signed_in() {
     assert!(row.last_signed_in_at.is_none());
     // An im admin the workspace has never met is Admin from the first beat.
     scratch
-        .store.sync_member("sub-boss", "boss@iz.sh", "Boss", true, 0, "UTC+03:00")
+        .store
+        .sync_member("sub-boss", "boss@iz.sh", "Boss", true, 0, "UTC+03:00")
         .await
         .unwrap();
     let boss = scratch
@@ -8607,7 +8638,15 @@ async fn a_sync_claims_an_unclaimed_row_without_touching_its_sign_in_fact() {
         .await
         .unwrap();
     let sync = scratch
-        .store.sync_member("sub-mert", "MERT@iz.sh", "Mert Yılmaz", false, 0, "UTC+03:00")
+        .store
+        .sync_member(
+            "sub-mert",
+            "MERT@iz.sh",
+            "Mert Yılmaz",
+            false,
+            0,
+            "UTC+03:00",
+        )
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Claimed);
@@ -8628,7 +8667,8 @@ async fn a_sync_follows_provider_drift_but_not_the_sign_in_fact() {
     let before = scratch.store.user(&admin_id).await.unwrap().unwrap();
     let seen = before.last_signed_in_at.clone();
     let sync = scratch
-        .store.sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
+        .store
+        .sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Refreshed);
@@ -8637,7 +8677,15 @@ async fn a_sync_follows_provider_drift_but_not_the_sign_in_fact() {
     assert_eq!(after.last_signed_in_at, seen);
     // Losing the flag in the directory drops an Admin to Member.
     scratch
-        .store.sync_member("sub-ada", "ada@iz.sh", "Ada Lovelace", false, 0, "UTC+03:00")
+        .store
+        .sync_member(
+            "sub-ada",
+            "ada@iz.sh",
+            "Ada Lovelace",
+            false,
+            0,
+            "UTC+03:00",
+        )
         .await
         .unwrap();
     let demoted = scratch.store.user(&admin_id).await.unwrap().unwrap();
@@ -8649,7 +8697,8 @@ async fn an_agreeing_sync_is_untouched_and_silent() {
     let (scratch, _, _) = workspace_with_admin().await;
     let mut rx = scratch.store.subscribe();
     let sync = scratch
-        .store.sync_member("sub-ada", "ada@iz.sh", "Ada", true, 0, "UTC")
+        .store
+        .sync_member("sub-ada", "ada@iz.sh", "Ada", true, 0, "UTC")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Untouched);
@@ -8660,7 +8709,8 @@ async fn an_agreeing_sync_is_untouched_and_silent() {
 async fn a_sync_without_a_workspace_skips_and_writes_nothing() {
     let scratch = Scratch::open().await;
     let sync = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 0, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Skipped);
@@ -8676,7 +8726,8 @@ async fn a_photo_version_bump_refreshes_and_announces() {
     let (scratch, workspace, _admin) = workspace_with_admin().await;
     let mut rx = scratch.store.subscribe();
     let sync = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2, "UTC+03:00")
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(sync, iz_core::store::MemberSync::Inserted);
@@ -8691,7 +8742,8 @@ async fn a_photo_version_bump_refreshes_and_announces() {
 
     // The same version again: the row agrees, and silence is the answer.
     let again = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2, "UTC+03:00")
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 2, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(again, iz_core::store::MemberSync::Untouched);
@@ -8699,7 +8751,8 @@ async fn a_photo_version_bump_refreshes_and_announces() {
 
     // im counted another upload: the stamp moves and the move is news.
     let bumped = scratch
-        .store.sync_member("sub-mert", "mert@iz.sh", "Mert", false, 3, "UTC+03:00")
+        .store
+        .sync_member("sub-mert", "mert@iz.sh", "Mert", false, 3, "UTC+03:00")
         .await
         .unwrap();
     assert_eq!(bumped, iz_core::store::MemberSync::Refreshed);
