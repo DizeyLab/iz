@@ -13,6 +13,7 @@ use topcoat::{
     view::{BoxView, Unescaped, View, ViewExt, error_boundary, view},
 };
 
+use crate::health::{Probe, probe_healthz, switcher_marks};
 use crate::i18n::{Key, Lang, t};
 use crate::server::{FAMILY_KEY, current_user, store};
 
@@ -262,12 +263,15 @@ pub(crate) async fn family_of(cx: &Cx) -> Vec<iz_client::FamilyService> {
 /// hang in a flyout that opens under it on hover and on keyboard focus (the
 /// mark is an `<a href="/">`, so it is already focusable and `:focus-within`
 /// carries it), middots between, each titled with the human name im's admin
-/// panel gives it. No script: the flyout is CSS, and it stays in the DOM at
-/// opacity zero so Tab reaches its links. The list is the app's own mirror
-/// of im's `/family` ([`family_of`]), minus this app's own row — a door back
-/// into the room one is standing in is no door — so the panel decides the
-/// family without a deploy here, and a mirror that has not arrived yet, or a
-/// deployment standing alone, renders the bare mark: nothing to reveal.
+/// panel gives it and wearing its `/healthz` reading as a dot — green while
+/// the sibling answers `ok`, muted while it does not ([`crate::health`]).
+/// No script: the flyout is CSS, and it stays in the DOM at opacity zero so
+/// Tab reaches its links. The list is the app's own mirror of im's
+/// `/family` ([`family_of`]), minus this app's own row — a door back into
+/// the room one is standing in is no door — so the panel decides the
+/// family without a deploy here, and a mirror that has not arrived yet, or
+/// a deployment standing alone, renders the bare mark: nothing to reveal,
+/// nothing to probe.
 /// The links leave this origin, so they carry `data-hard`, like the issuer
 /// link in the user menu.
 pub(crate) async fn family_mark<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
@@ -280,20 +284,31 @@ pub(crate) async fn family_mark<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     if siblings.is_empty() {
         return mark(cx).await.map(|v| v.boxed());
     }
+    // Every probe at once: a family member that is down costs its two
+    // seconds, not two seconds each.
+    let http = reqwest::Client::new();
+    let mut probes = Vec::new();
+    for service in &siblings {
+        let http = http.clone();
+        let url = format!("{}/healthz", service.url.trim_end_matches('/'));
+        probes.push(tokio::spawn(async move { probe_healthz(&http, &url).await }));
+    }
+    let mut rows = Vec::new();
+    for (service, probe) in siblings.iter().zip(probes) {
+        let probe = probe.await.unwrap_or(Probe::Down);
+        rows.push((
+            service.key.as_str(),
+            service.name.as_str(),
+            service.url.as_str(),
+            probe,
+        ));
+    }
+    let marks = switcher_marks(rows);
     Ok(view! {
         cx =>
         <div class="wordmark-family">
             (topcoat::view::Child::new(mark(cx).await?))
-            <nav class="service-switcher">
-                for (at, service) in siblings.iter().enumerate() {
-                    if at > 0 {
-                        <span class="service-sep">"·"</span>
-                    }
-                    <a class="service-mark" href=(service.url.clone()) title=(service.name.clone()) data-hard="">
-                        (service.key.clone())
-                    </a>
-                }
-            </nav>
+            <nav class="service-switcher">(topcoat::view::Unescaped::new_unchecked(marks))</nav>
         </div>
     }.boxed())
 }

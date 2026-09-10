@@ -9789,8 +9789,9 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
 
 /// The flyout under the monogram renders the family list the app mirrors
 /// from im — the stored JSON, in stored order, minus this app's own row,
-/// each sibling a plain link out. A list that is absent, empty, will not
-/// parse, or holds this app alone shows the bare mark and no flyout.
+/// each sibling a plain link out wearing its health dot. A list that is
+/// absent, empty, will not parse, or holds this app alone shows the bare
+/// mark and no flyout.
 #[tokio::test]
 async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_configured() {
     let family = "\
@@ -9810,6 +9811,11 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
     let im_at = html.find("href=\"http://127.0.0.1:7650\"").unwrap();
     assert!(in_at < im_at, "marks out of order: {html}");
 
+    // The dots ride along: the fixture's ports answer nobody, so the
+    // siblings read down — the flyout still renders, dots and all.
+    assert!(html.contains("health-dot"), "{html}");
+    assert!(html.contains("health-dot health-off"), "{html}");
+
     // A list that will not parse hides the flyout rather than rendering
     // half of it — and so do an empty one, a list holding this app alone,
     // and a mirror that never arrived.
@@ -9820,6 +9826,7 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
         let html =
             String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
         assert!(!html.contains("service-switcher"), "{html}");
+        assert!(!html.contains("health-dot"), "{html}");
     }
     let plain = App::open().await;
     let alone_admin = admin(&plain).await;
@@ -9828,6 +9835,98 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
     assert!(
         !plain.contains("service-switcher"),
         "no mirror, no switcher: {plain}"
+    );
+}
+
+/// The flyout's dots are the probe's reading, live: a sibling answering
+/// the deploy body renders `health-on`, a port nobody listens on renders
+/// `health-off` — dots only, the body and the latency never leave the probe.
+#[tokio::test]
+async fn the_switcher_marks_a_live_sibling_on_and_a_dark_one_off() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // A stand-in sibling answering the deploy body.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let talker = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nok dev")
+            .await
+            .unwrap();
+    });
+
+    // And a port nobody listens on: refused the moment the probe dials.
+    let dark = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dark_addr = dark.local_addr().unwrap();
+    drop(dark);
+
+    let family = format!(
+        "[{{\"key\":\"in\",\"name\":\"Files\",\"url\":\"http://{addr}\"}},\
+        {{\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://{dark_addr}\"}}]"
+    );
+    let app = App::build_with(Mail::silent(), Some(family), "", None).await;
+    let board_admin = admin(&app).await;
+    let html = String::from_utf8_lossy(&app.get("/", Some(&board_admin)).await.bytes).to_string();
+    assert!(
+        html.contains("health-dot health-on"),
+        "the ok sibling reads on: {html}"
+    );
+    assert!(html.contains(">in</a>"), "the live sibling renders: {html}");
+    assert!(
+        html.contains("health-dot health-off"),
+        "the dark sibling reads off: {html}"
+    );
+    assert!(html.contains(">im</a>"), "the dark sibling renders: {html}");
+    assert!(!html.contains("ok dev"), "the flyout carries dots only: {html}");
+}
+
+/// The marks are pinned without a router, a bundle or a live sibling: a
+/// probe's `Up` reads `health-on` and its `Down` reads `health-off`, the
+/// keys stay titled links out carrying `data-hard`, iz's own row is no door
+/// back, the middots separate, and the probe's body and latency never render.
+#[test]
+fn the_switcher_marks_render_from_resolved_probes_alone() {
+    use iz_web::health::{Probe, switcher_marks};
+
+    let marks = switcher_marks([
+        (
+            "in",
+            "Files",
+            "http://127.0.0.1:7655",
+            Probe::Up {
+                body: "ok dev".to_string(),
+                ms: 3,
+            },
+        ),
+        ("iz", "Board", "http://127.0.0.1:7654", Probe::Down),
+        ("im", "Account", "http://127.0.0.1:7650", Probe::Down),
+    ]);
+    assert!(
+        marks.contains("health-dot health-on"),
+        "the ok sibling reads on: {marks}"
+    );
+    assert!(marks.contains(">in</a>"), "the live sibling renders: {marks}");
+    assert!(
+        marks.contains("health-dot health-off"),
+        "the dark sibling reads off: {marks}"
+    );
+    assert!(marks.contains(">im</a>"), "the dark sibling renders: {marks}");
+    assert!(!marks.contains(">iz</a>"), "iz's own row stays out: {marks}");
+    assert!(
+        marks.contains("title=\"Files\""),
+        "the mark keeps its human name: {marks}"
+    );
+    assert!(marks.contains("data-hard"), "the links leave this origin: {marks}");
+    assert!(
+        marks.contains(r#"<span class="service-sep">·</span>"#),
+        "middots between: {marks}"
+    );
+    assert!(
+        !marks.contains("ok dev") && !marks.contains(" ms"),
+        "the flyout carries dots only: {marks}"
     );
 }
 

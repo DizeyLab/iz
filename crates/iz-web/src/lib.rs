@@ -9,6 +9,7 @@ pub mod detail;
 pub mod directory;
 pub mod dropdown;
 pub mod files;
+pub mod health;
 pub mod i18n;
 pub mod layout;
 pub mod live;
