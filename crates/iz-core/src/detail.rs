@@ -521,6 +521,13 @@ mod reads {
         /// The task and the board it belongs to, or `None` if it is gone.
         async fn task(&self, task_id: &str) -> Result<Option<TaskFacts>>;
 
+        /// A deleted task's facts, read through the soft delete. Every other
+        /// read here stops at `deleted_at` — the board and the detail page
+        /// have no use for a row that is gone — but the mail a delete itself
+        /// owes still names the card: its key, its title, the board whose
+        /// rules fire on it. `None` for a task that was never there.
+        async fn deleted_task(&self, task_id: &str) -> Result<Option<TaskFacts>>;
+
         async fn columns_for_board(&self, board_id: &str) -> Result<Vec<Column>>;
 
         async fn assignees_for_task(&self, task_id: &str) -> Result<Vec<Person>>;

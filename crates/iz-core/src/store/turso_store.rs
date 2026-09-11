@@ -5098,6 +5098,48 @@ impl DetailReads for TursoStore {
         }))
     }
 
+    /// The same query with no `deleted_at` guard: the one read in the store
+    /// that answers for a soft-deleted row, because the mail a delete itself
+    /// owes is about the card as it stood the moment it left. The row keeps
+    /// every fact the mail names.
+    async fn deleted_task(&self, task_id: &str) -> Result<Option<TaskFacts>> {
+        let row = self
+            .one_row(
+                "SELECT t.id, t.task_key, t.title, t.column_id, t.deadline, t.clock_at, \
+                 t.position, t.done_at, t.description, t.board_id, b.workspace_id, \
+                 t.parent_id, t.tag_id, g.name \
+                 FROM task t LEFT JOIN tag g ON g.id = t.tag_id \
+                 JOIN board b ON b.id = t.board_id \
+                 WHERE t.id = ?1",
+                params![task_id],
+            )
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(TaskFacts {
+            row: TaskRow {
+                id: text(&row, 0)?,
+                task_key: text(&row, 1)?,
+                title: text(&row, 2)?,
+                column_id: text(&row, 3)?,
+                deadline: opt_day(&row, 4)?,
+                clock_at: opt_stamp(&row, 5)?,
+                position: row.get::<f64>(6).map_err(backend)?,
+                done_at: opt_stamp(&row, 7)?,
+                parent_id: opt_text(&row, 11)?,
+                tag: match opt_text(&row, 12)? {
+                    Some(id) => Some(TagChip {
+                        id,
+                        name: text(&row, 13)?,
+                    }),
+                    None => None,
+                },
+            },
+            description: text(&row, 8)?,
+            board_id: text(&row, 9)?,
+            workspace_id: text(&row, 10)?,
+        }))
+    }
+
     async fn columns_for_board(&self, board_id: &str) -> Result<Vec<Column>> {
         BoardReads::columns(self, board_id).await
     }

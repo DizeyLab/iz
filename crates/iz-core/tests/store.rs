@@ -1848,6 +1848,11 @@ impl DetailReads for CountingDetail<'_> {
         self.inner.task(task_id).await
     }
 
+    async fn deleted_task(&self, task_id: &str) -> Result<Option<TaskFacts>, StoreError> {
+        self.tick();
+        self.inner.deleted_task(task_id).await
+    }
+
     async fn columns_for_board(&self, board_id: &str) -> Result<Vec<iz_core::Column>, StoreError> {
         self.tick();
         self.inner.columns_for_board(board_id).await
@@ -4870,6 +4875,103 @@ async fn assigning_one_person_mails_that_person_not_every_assignee() {
     let sent = mailer.sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].to, "yusuf@iz.sh");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A "when a task is deleted" rule has to fire on the delete itself. The
+/// activity and the soft delete ride the same write, so by the time the
+/// engine reads the event there is no live row to read facts from — the
+/// facts come through the delete, and the mail names the card that left.
+#[tokio::test]
+async fn a_delete_fires_the_rule_that_watched_for_it() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Mistaken card", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Deleted,
+            "A card was deleted",
+            Audience::Assignees,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
+    let deletion = store
+        .delete_task(&task, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let event = activity_event(&store, &deletion.activity_id).await;
+
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 1, "the delete owes its own mail");
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "emre@iz.sh");
+    assert_eq!(sent[0].subject, "A card was deleted");
+    assert!(
+        sent[0].body.contains("deleted it."),
+        "the compose line names what happened: {}",
+        sent[0].body
+    );
+    assert!(
+        sent[0].body.contains("Mistaken card"),
+        "the mail names the card it outlives: {}",
+        sent[0].body
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The gate is the delete itself, not the missing row: an older activity a
+/// delete raced — written first, read after — is news about a card that is
+/// gone, and stands down the way it always did.
+#[tokio::test]
+async fn an_activity_a_delete_raced_still_stands_down() {
+    let (dir, store, workspace, admin) = shared().await;
+    let mate = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &mate).await.unwrap();
+    let board = store.board(&workspace).await.unwrap().unwrap();
+    store
+        .create_mail_rule(
+            &board.id,
+            &Trigger::Commented,
+            "New comment",
+            Audience::Board,
+            OffsetDateTime::now_utc(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let commented = store
+        .record_activity(
+            &task,
+            Some(&mate),
+            None,
+            &ActivityKind::Commented,
+            "",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    store
+        .delete_task(&task, &admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
+    let event = activity_event(&store, &commented).await;
+    let report = engine.on_activity(&event).await.unwrap();
+    assert_eq!(report.sent, 0);
+    assert!(mailer.sent().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -425,11 +425,23 @@ impl Engine {
     /// Called after the write has committed, never inside it.
     pub async fn on_activity(&self, event: &ActivityEvent) -> crate::store::Result<Report> {
         let mut report = Report::default();
-        let Some(facts) = self.store.task(&event.task_id).await? else {
-            // A task deleted between the write and this run has no facts left
-            // to read a board from `store.task`, but its rules still get a
-            // `task_gone` row each — `board_of_task` reads through the soft
-            // delete to find them.
+        // A delete is its own activity, written in the same transaction as
+        // the soft delete, so by the time this runs `store.task` has no row
+        // to give. The facts a delete's mail needs are read through the
+        // delete instead, and the rules fire on the card as it stood the
+        // moment it left — the same carry-the-snapshot shape the freeing
+        // uses. Any other kind whose task has no row left is news about
+        // something already gone: no facts to speak about, so its rules
+        // still get a `task_gone` row each — `board_of_task` reads through
+        // the soft delete to find them.
+        let facts = match self.store.task(&event.task_id).await? {
+            Some(facts) => Some(facts),
+            None if event.kind == ActivityKind::Deleted => {
+                self.store.deleted_task(&event.task_id).await?
+            }
+            None => None,
+        };
+        let Some(facts) = facts else {
             let Some(board_id) = self.store.board_of_task(&event.task_id).await? else {
                 return Ok(report);
             };
@@ -835,8 +847,16 @@ impl Engine {
         let Some(task_id) = send.task_id.as_deref() else {
             return Ok(None);
         };
-        let Some(facts) = self.store.task(task_id).await? else {
-            return Ok(None);
+        // The task a mail speaks about may have been deleted by the very
+        // event the mail is about — a Deleted rule's whole point — so the
+        // facts are read through the soft delete, exactly as the rules
+        // engine read them when it owed the mail.
+        let facts = match self.store.task(task_id).await? {
+            Some(facts) => facts,
+            None => match self.store.deleted_task(task_id).await? {
+                Some(facts) => facts,
+                None => return Ok(None),
+            },
         };
         let actor = self
             .store
@@ -987,8 +1007,15 @@ impl Engine {
         let Some(task_id) = send.task_id.as_deref() else {
             return Ok(None);
         };
-        let Some(facts) = self.store.task(task_id).await? else {
-            return Ok(None);
+        // A batch whose card was deleted inside the window — maybe by the
+        // newest event itself — still goes out: where the task stands now is
+        // its final row, read through the soft delete.
+        let facts = match self.store.task(task_id).await? {
+            Some(facts) => facts,
+            None => match self.store.deleted_task(task_id).await? {
+                Some(facts) => facts,
+                None => return Ok(None),
+            },
         };
         let columns = self.store.columns_for_board(&facts.board_id).await?;
         let column = columns
