@@ -121,9 +121,24 @@ fn zip_mime(bytes: &[u8]) -> &'static str {
 /// Whether `haystack` holds `needle` anywhere in it. Used on zip bytes, where
 /// the entry names sit in the clear even when the entries themselves do not.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    // Skip to the needle's first byte before comparing the rest — a
+    // window-per-position compare over a half-gigabyte upload stalls the
+    // runtime; the byte scan vectorizes, the full compare runs on hits only.
+    let Some((&first, _)) = needle.split_first() else {
+        return true;
+    };
+    let mut offset = 0usize;
+    while let Some(at) = haystack[offset..].iter().position(|&b| b == first) {
+        let start = offset + at;
+        if haystack.len() - start < needle.len() {
+            return false;
+        }
+        if &haystack[start..start + needle.len()] == needle {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
 }
 
 /// The office mime declared by the zip entry names in `bytes` — the central

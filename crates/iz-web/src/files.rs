@@ -407,7 +407,23 @@ async fn upload(
     let mut added: Result<(), Refusal> = Ok(());
     for (file_name, bytes) in files {
         let label = label_of(&file_name);
-        let mime_type = sniff(&bytes);
+        // Sniffing's slow paths scan the whole payload; past a size where a
+        // worker-thread second is every other request waiting, the scan runs
+        // on the blocking pool (same door detail.rs parses sheets through).
+        let (bytes, mime_type) = if bytes.len() <= 8 * 1024 * 1024 {
+            let mime_type = sniff(&bytes);
+            (bytes, mime_type)
+        } else {
+            match tokio::task::spawn_blocking(move || {
+                let mime_type = sniff(&bytes);
+                (bytes, mime_type)
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(_) => return Ok(back_to(&task_id, Some(Refusal::Unavailable))),
+            }
+        };
 
         let this = match backend {
             StorageBackend::Local => store
