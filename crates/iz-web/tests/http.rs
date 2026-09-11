@@ -6501,7 +6501,7 @@ async fn a_task_with_no_mail_shows_the_quiet_notifications_line() {
         .get(&format!("/?task={task}&tab=mail"), Some(&admin_cookie))
         .await;
     let html = String::from_utf8_lossy(&page.bytes);
-    assert!(html.contains("NOTIFICATIONS"), "{html}");
+    assert!(html.contains("Notifications"), "{html}");
     assert!(html.contains("Nothing yet."), "{html}");
 }
 
@@ -6941,7 +6941,7 @@ async fn each_tab_renders_only_its_own_region() {
         .await;
     let mail_html = String::from_utf8_lossy(&mail.bytes);
     assert!(
-        mail_html.contains("NOTIFICATIONS"),
+        mail_html.contains("Notifications"),
         "no notifications heading: {mail_html}"
     );
 }
@@ -8188,7 +8188,7 @@ async fn a_profile_names_its_fields() {
         .await;
     assert_eq!(page.status.as_u16(), 200);
     let html = String::from_utf8(page.bytes).unwrap();
-    for label in ["EMAIL", "JOINED", "LAST SEEN"] {
+    for label in ["Email", "Joined", "Last seen"] {
         assert!(
             html.contains(label),
             "the {label} field is not on the page: {html}"
@@ -9795,9 +9795,9 @@ async fn a_sign_out_hands_the_browser_to_the_providers_logout_pointed_home() {
 #[tokio::test]
 async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_configured() {
     let family = "\
-        [{\"key\":\"in\",\"name\":\"Files\",\"url\":\"http://127.0.0.1:7655\"},\
-        {\"key\":\"iz\",\"name\":\"Board\",\"url\":\"http://127.0.0.1:7654\"},\
-        {\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:7650\"}]"
+        [{\"key\":\"in\",\"name\":\"Files\",\"url\":\"http://127.0.0.1:9655\"},\
+        {\"key\":\"iz\",\"name\":\"Board\",\"url\":\"http://127.0.0.1:9654\"},\
+        {\"key\":\"im\",\"name\":\"Account\",\"url\":\"http://127.0.0.1:9650\"}]"
         .to_string();
     let app = App::build_with(Mail::silent(), Some(family), "", None).await;
     let board_admin = admin(&app).await;
@@ -9806,9 +9806,9 @@ async fn the_topbar_shows_the_family_switcher_and_marks_this_app_only_when_confi
     assert!(html.contains("service-switcher"), "{html}");
     // This app has no door back into itself: only the siblings hang there,
     // in the order im served them.
-    assert!(!html.contains("href=\"http://127.0.0.1:7654\""), "{html}");
-    let in_at = html.find("href=\"http://127.0.0.1:7655\"").unwrap();
-    let im_at = html.find("href=\"http://127.0.0.1:7650\"").unwrap();
+    assert!(!html.contains("href=\"http://127.0.0.1:9654\""), "{html}");
+    let in_at = html.find("href=\"http://127.0.0.1:9655\"").unwrap();
+    let im_at = html.find("href=\"http://127.0.0.1:9650\"").unwrap();
     assert!(in_at < im_at, "marks out of order: {html}");
 
     // The dots ride along: the fixture's ports answer nobody, so the

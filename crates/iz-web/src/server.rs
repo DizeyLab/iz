@@ -482,10 +482,11 @@ impl Refusal {
         }
     }
 
-    /// `message()`, in a user's language, for the handful of refusals
-    /// `board.rs`/`detail.rs` render — those two pages' only refusal variants.
-    /// Everything else falls back to the English `message()`: the rest of the
-    /// app's pages have not been translated yet.
+    /// `message()`, in a user's language. English is the canonical
+    /// sentence; the Turkish match arms every variant — the compiler holds
+    /// it exhaustive, so a refusal cannot land untranslated — and
+    /// `BadSender` falls back to English because its sentence is built
+    /// where the complaint is decided, already in the caller's language.
     pub fn message_in(&self, lang: crate::i18n::Lang) -> String {
         use crate::i18n::Lang::Tr;
         if lang != Tr {

@@ -590,14 +590,16 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
             let slice = bytes[start as usize..=end as usize].to_vec();
             headers.insert(
                 header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).unwrap(),
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{total}"))
+                    .unwrap_or(HeaderValue::from_static("bytes */0")),
             );
             Ok((StatusCode::PARTIAL_CONTENT, headers, slice))
         }
         Some(Err(())) => {
             headers.insert(
                 header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes */{total}")).unwrap(),
+                HeaderValue::from_str(&format!("bytes */{total}"))
+                    .unwrap_or(HeaderValue::from_static("bytes */0")),
             );
             Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers, Vec::new()))
         }

@@ -710,7 +710,7 @@ async fn rule_form<'a>(
                     class="field-input"
                     type="text"
                     name="subject"
-                    placeholder="Task completed"
+                    placeholder=(t(lang, Key::SubjectPlaceholder))
                     maxlength="120"
                     required=""
                     value=(subject)

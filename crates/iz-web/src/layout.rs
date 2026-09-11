@@ -13,7 +13,7 @@ use topcoat::{
     view::{BoxView, Unescaped, View, ViewExt, error_boundary, view},
 };
 
-use crate::health::{Probe, probe_healthz, switcher_marks};
+use crate::health::{probe_family, switcher_marks};
 use crate::i18n::{Key, Lang, t};
 use crate::server::{FAMILY_KEY, current_user, store};
 
@@ -284,25 +284,26 @@ pub(crate) async fn family_mark<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     if siblings.is_empty() {
         return mark(cx).await.map(|v| v.boxed());
     }
-    // Every probe at once: a family member that is down costs its two
-    // seconds, not two seconds each.
-    let http = reqwest::Client::new();
-    let mut probes = Vec::new();
-    for service in &siblings {
-        let http = http.clone();
-        let url = format!("{}/healthz", service.url.trim_end_matches('/'));
-        probes.push(tokio::spawn(async move { probe_healthz(&http, &url).await }));
-    }
-    let mut rows = Vec::new();
-    for (service, probe) in siblings.iter().zip(probes) {
-        let probe = probe.await.unwrap_or(Probe::Down);
-        rows.push((
-            service.key.as_str(),
-            service.name.as_str(),
-            service.url.as_str(),
-            probe,
-        ));
-    }
+    // Every probe at once, at most one family-wide round per TTL
+    // ([`crate::health::probe_family`]): a sibling that is down costs its
+    // two seconds once, not once per page render.
+    let urls: Vec<String> = siblings
+        .iter()
+        .map(|service| format!("{}/healthz", service.url.trim_end_matches('/')))
+        .collect();
+    let probes = probe_family(urls).await;
+    let rows: Vec<_> = siblings
+        .iter()
+        .zip(probes)
+        .map(|(service, probe)| {
+            (
+                service.key.as_str(),
+                service.name.as_str(),
+                service.url.as_str(),
+                probe,
+            )
+        })
+        .collect();
     let marks = switcher_marks(rows);
     Ok(view! {
         cx =>
@@ -543,6 +544,8 @@ pub async fn soft_nav_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
                 else { document.documentElement.removeAttribute('data-theme'); } \
                 if (root.hasAttribute('data-ui')) { document.documentElement.setAttribute('data-ui', root.getAttribute('data-ui')); } \
                 else { document.documentElement.removeAttribute('data-ui'); } \
+                var freshTitle = doc.querySelector('title'); \
+                if (freshTitle && freshTitle.textContent) { document.title = freshTitle.textContent; } \
                 if (url) { history[push ? 'pushState' : 'replaceState'](null, '', url); } \
                 if (morphing) { \
                     morph(document.body, doc.body); \
@@ -1018,6 +1021,22 @@ async fn root_layout(cx: &Cx, slot: topcoat::view::Child<'_>) -> Result<impl Vie
     let lang = asking.map_or(Lang::En, |user| Lang::from_code(&user.language));
 
     let nothing = t(lang, Key::NothingAtThisAddress).to_string();
+    // The tab title a page wears, read off its address: the shell is
+    // paired around pages by path prefix, so a page cannot hand its name
+    // up — the router's own address decides. The signed-out front door is
+    // the sign-in card, not the board. Anything unmatched — the catch-all
+    // 404 among it — reads as the app's bare name.
+    let path = topcoat::router::request::uri(cx).path();
+    let title = match path {
+        "/" if asking.is_none() => t(lang, Key::SignIn).to_string(),
+        "/" => t(lang, Key::NavBoard).to_string(),
+        p if p.starts_with("/rules") => t(lang, Key::NavMailRules).to_string(),
+        p if p.starts_with("/logs") => t(lang, Key::NavLogs).to_string(),
+        p if p.starts_with("/tags") => t(lang, Key::NavTags).to_string(),
+        p if p.starts_with("/settings") => t(lang, Key::NavSettings).to_string(),
+        p if p.starts_with("/people") => t(lang, Key::Members).to_string(),
+        _ => "iz".to_string(),
+    };
     Ok(view! {
         cx =>
         <!DOCTYPE html>
@@ -1031,7 +1050,7 @@ async fn root_layout(cx: &Cx, slot: topcoat::view::Child<'_>) -> Result<impl Vie
                     rel="stylesheet"
                     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,600;1,400;1,600&display=swap"
                 >
-                <title>"iz"</title>
+                <title>(title)</title>
                 <link rel="icon" href=(FAVICON)>
                 <link rel="stylesheet" href=(STYLE)>
                 topcoat::runtime::script()

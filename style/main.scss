@@ -2064,6 +2064,7 @@ img.avatar {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--muted-soft);
 }
 
@@ -3028,8 +3029,6 @@ img.avatar {
   scrollbar-width: none;
   &::-webkit-scrollbar { display: none; }
 
-  &.stage-wide { max-width: 1200px; }
-
   // A panel's own `overflow: hidden` (the corner clip) zeroes its flex
   // min-height, so the column would compress it to the viewport and clip the
   // rows invisibly. Panels keep natural height; the stage is what pans.
@@ -3157,6 +3156,7 @@ img.avatar {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--muted-soft);
 }
 
@@ -3412,6 +3412,7 @@ input[type="radio"] {
     font-family: var(--font-mono);
     font-size: 10px;
     letter-spacing: 0.08em;
+    text-transform: uppercase;
     font-weight: 400;
     color: var(--muted-soft);
     border-bottom: 1px solid var(--border);
@@ -4046,6 +4047,7 @@ input[type="radio"] {
   dt {
     font-size: 10px;
     letter-spacing: 0.09em;
+    text-transform: uppercase;
     color: var(--muted);
   }
 

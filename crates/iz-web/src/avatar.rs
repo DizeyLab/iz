@@ -68,7 +68,12 @@ async fn avatar(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> {
     // means a stale row, never a lie about freshness.
     let etag = format!("\"p{}\"", row.photo_version);
     let mut headers = HeaderMap::new();
-    headers.insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+    // A u64 version formats to ASCII, so the fallback never fires; an
+    // unreadable etag means revalidation, never a wrong face.
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("\"p0\"")),
+    );
     // A `?v` that agrees with the row means this exact face is pinned to a
     // URL that changes the day the face does, so the browser may keep it
     // for a year. Every other spelling — including no stamp at all —

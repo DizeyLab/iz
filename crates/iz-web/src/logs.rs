@@ -1031,7 +1031,7 @@ async fn logs_screen<'a>(
                 <a class=(rail_class(section, Section::Decisions)) href="/logs?section=decisions">(t(lang, Key::MailDecisions))</a>
                 <a class=(rail_class(section, Section::Activity)) href="/logs?section=activity">(t(lang, Key::WorkspaceActivity))</a>
             </nav>
-            <main class="settings-stage stage-wide">
+            <main class="settings-stage">
                 <div class="settings-head">
                     <h1 class="settings-title">(t(lang, Key::Logs))</h1>
                     <span class="chip chip-admin">(t(lang, Key::AdminOnly))</span>

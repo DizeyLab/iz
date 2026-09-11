@@ -367,9 +367,20 @@ async fn load_snapshot(
     let sends = store.sends_for_task(&detail.id, 50).await?;
     let mut columns_cache: std::collections::HashMap<String, Vec<iz_core::board::Column>> =
         std::collections::HashMap::new();
+    let mut rules_cache: std::collections::HashMap<String, Option<iz_core::store::MailRule>> =
+        std::collections::HashMap::new();
     let mut notifications = Vec::with_capacity(decisions.len());
     for decision in decisions {
-        let rule = store.mail_rule(&decision.rule_id).await?;
+        // One read per rule, not per decision: a rule that decided ten
+        // mails is ten decisions naming the same sentence.
+        let rule = match rules_cache.get(decision.rule_id.as_str()) {
+            Some(rule) => rule,
+            None => {
+                let rule = store.mail_rule(&decision.rule_id).await?;
+                rules_cache.insert(decision.rule_id.clone(), rule);
+                rules_cache.get(decision.rule_id.as_str()).expect("just inserted")
+            }
+        };
         let rule_name = may_administer.then(|| {
             rule.as_ref()
                 .map(|rule| rule.subject.clone())
