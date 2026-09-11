@@ -1028,13 +1028,13 @@ async fn root_layout(cx: &Cx, slot: topcoat::view::Child<'_>) -> Result<impl Vie
     // 404 among it — reads as the app's bare name.
     let path = topcoat::router::request::uri(cx).path();
     let title = match path {
-        "/" if asking.is_none() => t(lang, Key::SignIn).to_string(),
-        "/" => t(lang, Key::NavBoard).to_string(),
-        p if p.starts_with("/rules") => t(lang, Key::NavMailRules).to_string(),
-        p if p.starts_with("/logs") => t(lang, Key::NavLogs).to_string(),
-        p if p.starts_with("/tags") => t(lang, Key::NavTags).to_string(),
-        p if p.starts_with("/settings") => t(lang, Key::NavSettings).to_string(),
-        p if p.starts_with("/people") => t(lang, Key::Members).to_string(),
+        "/" if asking.is_none() => format!("{} · iz", t(lang, Key::SignIn)),
+        "/" => format!("{} · iz", t(lang, Key::NavBoard)),
+        p if p.starts_with("/rules") => format!("{} · iz", t(lang, Key::NavMailRules)),
+        p if p.starts_with("/logs") => format!("{} · iz", t(lang, Key::NavLogs)),
+        p if p.starts_with("/tags") => format!("{} · iz", t(lang, Key::NavTags)),
+        p if p.starts_with("/settings") => format!("{} · iz", t(lang, Key::NavSettings)),
+        p if p.starts_with("/people") => format!("{} · iz", t(lang, Key::Members)),
         _ => "iz".to_string(),
     };
     Ok(view! {
