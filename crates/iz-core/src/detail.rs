@@ -41,24 +41,6 @@ impl DependencyEdge {
         self.cleared_at.is_some() || self.done_at.is_some()
     }
 
-    /// The right-hand note on a `BLOCKED BY` row: `cleared Aug 16`, or what is
-    /// still in the way.
-    pub fn blocked_by_label(&self) -> String {
-        match (self.cleared_at, self.done_at) {
-            (Some(at), _) => format!("cleared {}", day_label(at.date())),
-            (None, Some(at)) => format!("done {}", day_label(at.date())),
-            (None, None) => "blocking this task".to_string(),
-        }
-    }
-
-    /// The same note on a `BLOCKS` row.
-    pub fn blocks_label(&self) -> String {
-        if self.is_cleared() {
-            "no longer waiting".to_string()
-        } else {
-            "waiting on this task".to_string()
-        }
-    }
 }
 
 /// One file hung off a task, as the detail screen prints it.

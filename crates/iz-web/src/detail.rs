@@ -1818,8 +1818,19 @@ async fn dep_row<'a>(
 ) -> Result<impl View + 'a> {
     let cleared = edge.is_cleared();
     let note = match direction {
-        Direction::BlockedBy => edge.blocked_by_label(),
-        Direction::Blocks => edge.blocks_label(),
+        Direction::BlockedBy => match (edge.cleared_at, edge.done_at) {
+            (Some(at), _) => crate::i18n::cleared_dep_label(
+                lang,
+                &iz_core::board::day_label(at.date()),
+            ),
+            (None, Some(at)) => crate::i18n::done_dep_label(
+                lang,
+                &iz_core::board::day_label(at.date()),
+            ),
+            (None, None) => t(lang, Key::BlocksThisTask).to_string(),
+        },
+        Direction::Blocks if cleared => t(lang, Key::NoLongerWaiting).to_string(),
+        Direction::Blocks => t(lang, Key::WaitsOnThisTask).to_string(),
     };
     let waiting = matches!(direction, Direction::BlockedBy) && !cleared;
     let wire = match direction {

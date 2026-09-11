@@ -1926,11 +1926,6 @@ async fn a_task_detail_carries_both_directions_of_its_dependencies() {
     assert_eq!(blocked_by, ["before"]);
     assert_eq!(blocks, ["after"]);
     assert!(detail.is_blocked());
-    assert_eq!(
-        detail.blocked_by[0].blocked_by_label(),
-        "blocking this task"
-    );
-    assert_eq!(detail.blocks[0].blocks_label(), "waiting on this task");
 }
 
 #[tokio::test]

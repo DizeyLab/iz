@@ -99,6 +99,7 @@ pub enum Key {
     BlockedBy,
     Overdue,
     Blocked,
+    NoLongerWaiting,
 
     // Topbar nav / chrome shared by board.rs, rules.rs, logs.rs, settings.rs.
     NavBoard,
@@ -208,6 +209,9 @@ pub enum Key {
     PublicAddressLabel,
     PublicAddressNote,
     SenderNotConfiguredYet,
+    ProblemUnreachable,
+    ProblemQuota,
+    Ago,
 
     // pages.rs
 
@@ -522,6 +526,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Overdue, Tr) => "gecikmiş",
         (Blocked, En) => "blocked",
         (Blocked, Tr) => "engelli",
+        (NoLongerWaiting, En) => "no longer waiting",
+        (NoLongerWaiting, Tr) => "artık beklemiyor",
 
         (NavBoard, En) => "Board",
         (NavBoard, Tr) => "Pano",
@@ -738,6 +744,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         }
         (SenderNotConfiguredYet, En) => "No sender to test.",
         (SenderNotConfiguredYet, Tr) => "Test edilecek gönderen yok.",
+        (Ago, En) => "ago",
+        (Ago, Tr) => "önce",
+        (ProblemUnreachable, En) => "unreachable",
+        (ProblemUnreachable, Tr) => "erişilemiyor",
+        (ProblemQuota, En) => "quota",
+        (ProblemQuota, Tr) => "kota",
 
         (MailRules, En) => "Mail rules",
         (MailRules, Tr) => "Posta kuralları",
@@ -1214,6 +1226,31 @@ pub fn unblocked_label(lang: Lang, detail: &str) -> String {
     match lang {
         Lang::En => format!("unblocked this task — {detail}"),
         Lang::Tr => format!("bu görevin engelini kaldırdı — {detail}"),
+    }
+}
+
+/// A dependency's note once it no longer holds: the day it went away.
+pub fn cleared_dep_label(lang: Lang, day: &str) -> String {
+    match lang {
+        Lang::En => format!("cleared {day}"),
+        Lang::Tr => format!("{day} kalktı"),
+    }
+}
+
+/// A dependency's note when the task in front of this one finished.
+pub fn done_dep_label(lang: Lang, day: &str) -> String {
+    match lang {
+        Lang::En => format!("done {day}"),
+        Lang::Tr => format!("{day} tamamlandı"),
+    }
+}
+
+/// A used amount against its total — a storage limit, a migration's
+/// progress. Turkish writes the pair with a slash, not a word.
+pub fn share_of_total(lang: Lang, used: &str, total: &str) -> String {
+    match lang {
+        Lang::En => format!("{used} of {total}"),
+        Lang::Tr => format!("{used} / {total}"),
     }
 }
 

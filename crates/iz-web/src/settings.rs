@@ -971,12 +971,12 @@ async fn connection_card<'a>(cx: &'a Cx, lang: Lang) -> Result<impl View + 'a> {
     let event_line = if event_age.is_empty() {
         never.clone()
     } else {
-        format!("{event_age} ago")
+        format!("{} {}", event_age, t(lang, Key::Ago))
     };
     let pass_line = if pass_age.is_empty() {
         never
     } else {
-        format!("{pass_age} ago")
+        format!("{} {}", pass_age, t(lang, Key::Ago))
     };
     Ok(view! {
         cx =>
@@ -1031,20 +1031,28 @@ async fn storage_card<'a>(
         (t(lang, Key::StorageUnreachable), "connection-wait")
     };
     let limit_line = match (snap.used, snap.quota) {
-        (Some(used), Some(quota)) => format!(
-            "{} of {}",
-            crate::storage::human_bytes(used),
-            crate::storage::human_bytes(quota)
+        (Some(used), Some(quota)) => crate::i18n::share_of_total(
+            lang,
+            &crate::storage::human_bytes(used),
+            &crate::storage::human_bytes(quota),
         ),
         _ => "—".to_string(),
     };
-    let problem_line = match &snap.problem_word {
-        Some(word) => format!(
-            "{} ago · {}",
+    let problem_word = match snap.problem_word.as_deref() {
+        Some("unreachable") => t(lang, Key::ProblemUnreachable).to_string(),
+        Some("quota") => t(lang, Key::ProblemQuota).to_string(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    let problem_line = if problem_word.is_empty() {
+        t(lang, Key::ConnectionNever).to_string()
+    } else {
+        format!(
+            "{} {} · {}",
             crate::directory::age_text(snap.problem_age),
-            word
-        ),
-        None => t(lang, Key::ConnectionNever).to_string(),
+            t(lang, Key::Ago),
+            problem_word
+        )
     };
     let migrating = snap.migrating;
     Ok(view! {
@@ -1062,7 +1070,7 @@ async fn storage_card<'a>(
             if backend == StorageBackend::In && let Some((moved, total)) = migrating {
                 <dt>(t(lang, Key::StorageMigration))</dt>
                 <dd class="connection-fact">
-                    (format!("{moved} of {total}"))
+                    (crate::i18n::share_of_total(lang, &moved.to_string(), &total.to_string()))
                     <div class="quota-bar" role="progressbar" aria-valuenow=(migration_percent(moved, total).to_string()) aria-valuemin="0" aria-valuemax="100">
                         <div class="quota-fill" style=(format!("width: {}%", migration_percent(moved, total)))></div>
                     </div>

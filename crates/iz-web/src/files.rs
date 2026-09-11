@@ -226,12 +226,13 @@ fn not_found() -> (StatusCode, HeaderMap, Vec<u8>) {
 }
 
 /// The 503 a stored attachment serves when the Files service cannot be
-/// reached — one plain line, and never the 404, because the row exists.
-fn service_unavailable() -> (StatusCode, HeaderMap, Vec<u8>) {
+/// reached — one plain line in the reader's language, and never the 404,
+/// because the row exists.
+fn service_unavailable(lang: crate::i18n::Lang) -> (StatusCode, HeaderMap, Vec<u8>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         HeaderMap::new(),
-        b"the Files service is unreachable\n".to_vec(),
+        format!("{}\n", Refusal::StorageUnavailable.message_in(lang)).into_bytes(),
     )
 }
 
@@ -539,13 +540,13 @@ async fn download(cx: &Cx) -> topcoat::Result<(StatusCode, HeaderMap, Vec<u8>)> 
         },
         AttachmentWhere::Stored => {
             let Some((_, url)) = crate::storage::in_of(store.as_ref()).await else {
-                return Ok(service_unavailable());
+                return Ok(service_unavailable(crate::i18n::Lang::from_code(&user.language)));
             };
             match crate::storage::client(cx).fetch(&url, id).await {
                 Ok(bytes) => bytes,
                 Err(problem) => {
                     eprintln!("storage fetch: {problem:?}");
-                    return Ok(service_unavailable());
+                    return Ok(service_unavailable(crate::i18n::Lang::from_code(&user.language)));
                 }
             }
         }
