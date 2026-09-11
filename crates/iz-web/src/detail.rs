@@ -2704,15 +2704,27 @@ async fn sheet_view<'a>(
     // window's own edges in the same vocabulary the grid labels its gutters
     // with, counted against the whole sheet where the file's own size can be
     // trusted and left uncounted where it cannot.
-    let row_range = match sheet.total_rows {
-        Some(total) => format!("{}–{} / {total}", sheet.first_row + 1, sheet.last_row()),
-        None => format!("{}–{}", sheet.first_row + 1, sheet.last_row()),
+    // A window paged past the sheet's own cells has no edges to name:
+    // first_row would count up past last_row. Say so instead of printing an
+    // inverted range.
+    let window_empty = sheet.rows.is_empty() && (sheet.first_row > 0 || sheet.first_column > 0);
+    let row_range = if window_empty {
+        t(lang, Key::SheetWindowEmpty).to_string()
+    } else {
+        match sheet.total_rows {
+            Some(total) => format!("{}–{} / {total}", sheet.first_row + 1, sheet.last_row()),
+            None => format!("{}–{}", sheet.first_row + 1, sheet.last_row()),
+        }
     };
     let first_letter = column_name(sheet.first_column);
     let last_letter = column_name(sheet.last_column().saturating_sub(1));
-    let column_range = match sheet.total_columns {
-        Some(total) => format!("{first_letter}–{last_letter} / {total}"),
-        None => format!("{first_letter}–{last_letter}"),
+    let column_range = if window_empty {
+        String::new()
+    } else {
+        match sheet.total_columns {
+            Some(total) => format!("{first_letter}–{last_letter} / {total}"),
+            None => format!("{first_letter}–{last_letter}"),
+        }
     };
     Ok(view! {
         cx =>
