@@ -402,12 +402,14 @@ async fn upload(
         Ok(backend) => backend,
         Err(_) => return Ok(back_to(&task_id, Some(Refusal::Unavailable))),
     };
+    // Every file is attempted; the redirect answers the FIRST failure, not
+    // the last file's luck — an early loss must never read as success.
     let mut added: Result<(), Refusal> = Ok(());
     for (file_name, bytes) in files {
         let label = label_of(&file_name);
         let mime_type = sniff(&bytes);
 
-        added = match backend {
+        let this = match backend {
             StorageBackend::Local => store
                 .add_attachment(NewAttachment {
                     task_id: &task_id,
@@ -436,7 +438,7 @@ async fn upload(
             }
         };
 
-        if added.is_ok() && comment_id.is_none() {
+        if this.is_ok() && comment_id.is_none() {
             let _ = store
                 .record_activity(
                     &task_id,
@@ -447,6 +449,9 @@ async fn upload(
                     OffsetDateTime::now_utc(),
                 )
                 .await;
+        }
+        if added.is_ok() {
+            added = this;
         }
     }
 
