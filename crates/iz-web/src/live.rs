@@ -47,18 +47,24 @@ impl Default for LiveWindow {
 #[derive(Clone)]
 pub struct Shutdown(pub tokio::sync::watch::Receiver<bool>);
 
-/// Whether a reader of this role may be told that this surface moved.
+/// Whether a reader may be told that this surface moved.
 ///
 /// The board, a task and the member list are what every signed-in person
 /// already sees. The queue, the rules, the settings and the activity log are
 /// admin screens, and CLAUDE.md's rule — a role that cannot act on a surface
 /// does not see it — reaches the channel too: a member is not told the queue
 /// moved, because being told is itself knowing something about the queue.
-fn may_hear(topic: &Topic, admin: bool) -> bool {
+///
+/// The one topic that is neither surface nor role is [`Topic::Revoked`]: the
+/// account it names was killed at the provider, and the only reader it may be
+/// named to is the reader it names — hearing it says nothing about anybody
+/// else.
+fn may_hear(topic: &Topic, reader_id: &str, admin: bool) -> bool {
     match topic {
         // Tags ride with the board: every member sees a card's tag, so being
         // told the tags moved tells them nothing they cannot already read.
         Topic::Board | Topic::Task(_) | Topic::Members | Topic::Tags => true,
+        Topic::Revoked(id) => id == reader_id,
         Topic::Queue | Topic::Rules | Topic::Settings | Topic::Activity => admin,
     }
 }
@@ -92,9 +98,15 @@ async fn live(cx: &Cx) -> topcoat::Result<Response> {
     let deadline = Instant::now() + try_app_context::<LiveWindow>(cx).copied().unwrap_or_default().0;
 
     let events = futures_util::stream::unfold(
-        (rx, admin, deadline, stopping),
-        |(mut rx, admin, deadline, mut stopping)| async move {
+        (rx, admin, deadline, stopping, user.id.clone(), false),
+        |(mut rx, admin, deadline, mut stopping, reader_id, mut done)| async move {
             loop {
+                // The goodbye frame went out with the last pass: the account
+                // this reader signed in as was named killed, and there is
+                // nothing left to say.
+                if done {
+                    return None;
+                }
                 // Already going down: say nothing and end, so this connection
                 // is not one the shutdown has to sit and wait out.
                 if stopping.as_ref().is_some_and(|watch| *watch.borrow()) {
@@ -130,21 +142,31 @@ async fn live(cx: &Cx) -> topcoat::Result<Response> {
                     // after. The stream stays open — a slow moment is not a fault.
                     Ok(Some(Err(RecvError::Lagged(_)))) => Event::new().data(RESYNC),
                     Ok(Some(Ok(Change { topic, seq }))) => {
-                        if !may_hear(&topic, admin) {
+                        if !may_hear(&topic, &reader_id, admin) {
                             // Not merely unsent: never named. A member's
                             // connection carries no evidence the queue exists.
                             continue;
+                        }
+                        // The reader's own account was named: this frame is
+                        // the goodbye, and the stream ends right behind it —
+                        // the tab leaves for the front door rather than
+                        // morphing a workspace it can no longer read.
+                        if matches!(topic, Topic::Revoked(_)) {
+                            done = true;
                         }
                         let frame = Frame { topic: topic.kind(), id: topic.id(), seq };
                         match Event::new().json_data(&frame) {
                             Ok(event) => event,
                             Err(problem) => {
-                                return Some((Err(problem), (rx, admin, deadline, stopping)));
+                                return Some((
+                                    Err(problem),
+                                    (rx, admin, deadline, stopping, reader_id, done),
+                                ));
                             }
                         }
                     }
                 };
-                return Some((Ok(frame), (rx, admin, deadline, stopping)));
+                return Some((Ok(frame), (rx, admin, deadline, stopping, reader_id, done)));
             }
         },
     );

@@ -24,6 +24,12 @@ pub enum Topic {
     Task(String),
     /// Users, roles, invites, sessions, photos, profile.
     Members,
+    /// One account was killed at the provider — disabled, or gone. The id
+    /// is the local row's, and the frame names it to exactly one reader:
+    /// the connection whose own id it is. A session revocation does not
+    /// ride here — which session died is the provider's knowledge, and a
+    /// tab whose other session survived must not be sent away.
+    Revoked(String),
     /// The mail queue: `mail_send` rows.
     Queue,
     /// Mail rules and the decisions they made.
@@ -45,6 +51,7 @@ impl Topic {
             Topic::Board => "board",
             Topic::Task(_) => "task",
             Topic::Members => "members",
+            Topic::Revoked(_) => "revoked",
             Topic::Queue => "queue",
             Topic::Rules => "rules",
             Topic::Tags => "tags",
@@ -57,6 +64,7 @@ impl Topic {
     pub fn id(&self) -> Option<&str> {
         match self {
             Topic::Task(id) => Some(id),
+            Topic::Revoked(id) => Some(id),
             _ => None,
         }
     }

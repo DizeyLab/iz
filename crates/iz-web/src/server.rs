@@ -20,7 +20,10 @@ use topcoat::asset::AssetBundle;
 use topcoat::context::{Cx, app_context, memoize, try_app_context};
 use topcoat::cookie::{Cookies, cookies};
 use topcoat::router::request::headers;
-use topcoat::router::{Body, HeaderValue, Next, StatusCode, header, response::Response, to_bytes};
+use topcoat::router::{
+    route, Body, HeaderValue, Next, StatusCode, header, response::IntoResponse, response::Response,
+    to_bytes,
+};
 
 /// The workspace store, put into context by the router.
 pub fn store(cx: &Cx) -> Arc<dyn Store> {
@@ -325,6 +328,20 @@ pub async fn require_writer(cx: &Cx) -> Result<User, Refusal> {
         Ok(user)
     } else {
         Err(Refusal::Forbidden)
+    }
+}
+
+/// The lightweight am-I-signed-in probe the live script's error path asks:
+/// `204` with no body when the caller carries a live session, `401` when
+/// anything about the caller — no cookie, a revoked or disabled one, a
+/// store that cannot answer — says otherwise. It exists so a dropped live
+/// stream can tell "the server restarted" from "I was signed out" without
+/// fetching a page of HTML to learn it.
+#[route(GET "/api/me")]
+async fn me(cx: &Cx) -> topcoat::Result<Response> {
+    match current_user(cx).await {
+        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(cx),
+        _ => (StatusCode::UNAUTHORIZED, "").into_response(cx),
     }
 }
 

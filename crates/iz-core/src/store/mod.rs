@@ -756,6 +756,13 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// role-gated route. Sending to zero subscribers is normal and silent,
     /// and a slow subscriber's overflow is the client's cue to resync.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::live::Change>;
+
+    /// Announces topics with no write behind them — the door for facts that
+    /// arrive from outside this database, such as a revoked session heard on
+    /// im's directory stream. This only wakes the subscribers, exactly as a
+    /// committed write would; which connection is told remains the live
+    /// channel's own role decision.
+    fn announce(&self, topics: &[crate::live::Topic]);
     // -- workspace ---------------------------------------------------------
 
     /// The account that claimed the workspace, if it has been claimed.
@@ -887,6 +894,11 @@ pub trait Store: BoardReads + DetailReads + 'static {
     /// public response than a `Some`: the sign-in surface never reveals whether
     /// an address has an account.
     async fn user_by_email(&self, workspace_id: &str, email: &str) -> Result<Option<User>>;
+
+    /// Lookup by provider subject — the key im's directory stream names when
+    /// it announces a revoked or disabled member. `None` is a subject this
+    /// workspace has never provisioned.
+    async fn user_by_sub(&self, sub: &str) -> Result<Option<User>>;
 
     async fn users(&self, workspace_id: &str) -> Result<Vec<User>>;
 

@@ -74,7 +74,7 @@ impl TursoStore {
     /// of a server nobody is looking at. It is dropped on purpose: an
     /// announcement nobody is waiting for is not a problem, and logging it
     /// would fill the log with the sound of an idle app.
-    fn announce(&self, topics: impl IntoIterator<Item = Topic>) {
+    fn publish(&self, topics: impl IntoIterator<Item = Topic>) {
         for topic in topics {
             let _ = self.live.send(Change {
                 topic,
@@ -1403,6 +1403,10 @@ impl Store for TursoStore {
         self.live.subscribe()
     }
 
+    fn announce(&self, topics: &[crate::live::Topic]) {
+        self.publish(topics.iter().cloned())
+    }
+
     async fn provision_user(
         &self,
         sub: &str,
@@ -1592,7 +1596,7 @@ impl Store for TursoStore {
         // provider-side rename or role flip, an owner claim. Anything louder
         // would re-render every members-watching tab on every request.
         if changed {
-            self.announce([Topic::Members]);
+            self.publish([Topic::Members]);
         }
         self.user(&id).await?.ok_or(StoreError::NotFound)
     }
@@ -1752,7 +1756,7 @@ impl Store for TursoStore {
         tx.commit().await.map_err(backend)?;
         drop(conn);
         if sync != MemberSync::Untouched {
-            self.announce([Topic::Members]);
+            self.publish([Topic::Members]);
         }
         Ok(sync)
     }
@@ -1820,7 +1824,7 @@ impl Store for TursoStore {
             Err(e) => return Err(backend(e)),
         }
         drop(conn);
-        self.announce([Topic::Members]);
+        self.publish([Topic::Members]);
         self.user(&id).await?.ok_or(StoreError::NotFound)
     }
 
@@ -1879,7 +1883,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -1898,7 +1902,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -1917,7 +1921,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -1951,7 +1955,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -2003,7 +2007,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -2021,6 +2025,14 @@ impl Store for TursoStore {
             .one_row(&sql, params![workspace_id, fold_email(email)])
             .await?
         {
+            Some(row) => Ok(Some(user_from(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn user_by_sub(&self, sub: &str) -> Result<Option<User>> {
+        let sql = format!("SELECT {USER_COLUMNS} FROM user WHERE oidc_sub = ?1");
+        match self.one_row(&sql, params![sub]).await? {
             Some(row) => Ok(Some(user_from(&row)?)),
             None => Ok(None),
         }
@@ -2115,7 +2127,7 @@ impl Store for TursoStore {
             Err(StoreError::NotFound)
         } else {
             drop(conn);
-            self.announce([Topic::Members]);
+            self.publish([Topic::Members]);
             Ok(())
         }
     }
@@ -2164,7 +2176,7 @@ impl Store for TursoStore {
         }
         tx.commit().await.map_err(backend)?;
         drop(conn);
-        self.announce(topics);
+        self.publish(topics);
         Ok(())
     }
 
@@ -2181,7 +2193,16 @@ impl Store for TursoStore {
             Err(StoreError::NotFound)
         } else {
             drop(conn);
-            self.announce([Topic::Members]);
+            // The member list moves either way. The kill naming is one
+            // directional: only a disable names the account's own open tabs
+            // so they can leave — an enable is a homecoming, and a frame
+            // saying "you were revoked" as the door reopens would send
+            // somebody away at the wrong moment.
+            if disabled {
+                self.publish([Topic::Members, Topic::Revoked(user_id.to_string())]);
+            } else {
+                self.publish([Topic::Members]);
+            }
             Ok(())
         }
     }
@@ -2205,7 +2226,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Board]);
+        self.publish([Topic::Board]);
         Ok(Column {
             id,
             name: name.to_string(),
@@ -2393,7 +2414,7 @@ impl Store for TursoStore {
         if reminded {
             topics.push(Topic::Queue);
         }
-        self.announce(topics);
+        self.publish(topics);
         let (task_key, position) = written;
         Ok(TaskCreated {
             row: TaskRow {
@@ -2495,7 +2516,7 @@ impl Store for TursoStore {
         match outcome {
             Ok(Ok(())) => {
                 tx.commit().await.map_err(backend)?;
-                self.announce([Topic::Board, Topic::Task(task_id.to_string())]);
+                self.publish([Topic::Board, Topic::Task(task_id.to_string())]);
                 Ok(())
             }
             Ok(Err(refused)) => {
@@ -2575,7 +2596,7 @@ impl Store for TursoStore {
             if reminded {
                 topics.push(Topic::Queue);
             }
-            self.announce(topics);
+            self.publish(topics);
         }
         Ok(())
     }
@@ -2615,7 +2636,7 @@ impl Store for TursoStore {
             if reminded {
                 topics.push(Topic::Queue);
             }
-            self.announce(topics);
+            self.publish(topics);
         }
         Ok(())
     }
@@ -2721,7 +2742,7 @@ impl Store for TursoStore {
             Ok(true) => {
                 tx.commit().await.map_err(backend)?;
                 // An edge is visible from both endpoints and on the board.
-                self.announce([
+                self.publish([
                     Topic::Board,
                     Topic::Task(blocked_task_id.to_string()),
                     Topic::Task(blocking_task_id.to_string()),
@@ -2756,7 +2777,7 @@ impl Store for TursoStore {
             .map_err(backend)?;
         drop(conn);
         if n > 0 {
-            self.announce([
+            self.publish([
                 Topic::Board,
                 Topic::Task(blocked_task_id.to_string()),
                 Topic::Task(blocking_task_id.to_string()),
@@ -2811,7 +2832,7 @@ impl Store for TursoStore {
         }
         tx.commit().await.map_err(backend)?;
 
-        self.announce([Topic::Task(task_id.to_string()), Topic::Activity]);
+        self.publish([Topic::Task(task_id.to_string()), Topic::Activity]);
         Ok(CommentWritten {
             comment_id,
             activity_id,
@@ -2852,7 +2873,7 @@ impl Store for TursoStore {
             return Err(backend(e));
         }
         drop(conn);
-        self.announce([Topic::Task(new.task_id.to_string())]);
+        self.publish([Topic::Task(new.task_id.to_string())]);
         Ok(id)
     }
 
@@ -2932,7 +2953,7 @@ impl Store for TursoStore {
             // the boot sweep collects.
             let _ = std::fs::remove_file(attachment_file(&self.storage, id));
             if let Some(task_id) = owner {
-                self.announce([Topic::Task(task_id)]);
+                self.publish([Topic::Task(task_id)]);
             }
         }
         Ok(gone > 0)
@@ -2951,7 +2972,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -2986,7 +3007,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Task(new.task_id.to_string())]);
+        self.publish([Topic::Task(new.task_id.to_string())]);
         Ok(new.id)
     }
 
@@ -3033,7 +3054,7 @@ impl Store for TursoStore {
             // orphaned bytes the boot sweep collects.
             let _ = std::fs::remove_file(attachment_file(&self.storage, id));
             if let Some(task_id) = owner {
-                self.announce([Topic::Task(task_id)]);
+                self.publish([Topic::Task(task_id)]);
             }
         }
         Ok(moved > 0)
@@ -3055,7 +3076,7 @@ impl Store for TursoStore {
     }
 
     async fn announce_storage(&self) -> Result<()> {
-        self.announce([Topic::Settings]);
+        self.publish([Topic::Settings]);
         Ok(())
     }
 
@@ -3171,7 +3192,7 @@ impl Store for TursoStore {
                 if reminded {
                     topics.push(Topic::Queue);
                 }
-                self.announce(topics);
+                self.publish(topics);
                 Ok(ids)
             }
             Ok(None) => {
@@ -3374,7 +3395,7 @@ impl Store for TursoStore {
                 if reminded {
                     topics.push(Topic::Queue);
                 }
-                self.announce(topics);
+                self.publish(topics);
                 Ok(Moved::Recorded(Transition {
                     id: transition_id,
                     task_id: task_id.to_string(),
@@ -3578,7 +3599,7 @@ impl Store for TursoStore {
                 if reminded {
                     topics.push(Topic::Queue);
                 }
-                self.announce(topics);
+                self.publish(topics);
                 Ok(deletion)
             }
             Ok(None) => {
@@ -3694,7 +3715,7 @@ impl Store for TursoStore {
         .map_err(backend)?;
         drop(conn);
         // Task-scoped: the task's own trail and the workspace feed both grew.
-        self.announce([Topic::Activity, Topic::Task(task_id.to_string())]);
+        self.publish([Topic::Activity, Topic::Task(task_id.to_string())]);
         Ok(id)
     }
 
@@ -3716,7 +3737,7 @@ impl Store for TursoStore {
         .map_err(backend)?;
         drop(conn);
         // Workspace-wide, belonging to no task — the feed only.
-        self.announce([Topic::Activity]);
+        self.publish([Topic::Activity]);
         Ok(id)
     }
 
@@ -3754,7 +3775,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        self.announce([Topic::Rules]);
+        self.publish([Topic::Rules]);
         let sql = format!("SELECT {RULE_COLUMNS} FROM mail_rule WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => rule_from(&row),
@@ -3804,7 +3825,7 @@ impl Store for TursoStore {
             return Err(StoreError::NotFound);
         }
         drop(conn);
-        self.announce([Topic::Rules]);
+        self.publish([Topic::Rules]);
         Ok(())
     }
 
@@ -3898,7 +3919,7 @@ impl Store for TursoStore {
             return Err(StoreError::NotFound);
         }
         drop(conn);
-        self.announce([Topic::Rules]);
+        self.publish([Topic::Rules]);
         Ok(())
     }
 
@@ -3915,7 +3936,7 @@ impl Store for TursoStore {
         }
         drop(conn);
         // The rule's queued mail cascaded away with it, so the queue moved too.
-        self.announce([Topic::Rules, Topic::Queue]);
+        self.publish([Topic::Rules, Topic::Queue]);
         Ok(())
     }
 
@@ -3979,7 +4000,7 @@ impl Store for TursoStore {
             return Ok(None);
         }
         // A mail joined the queue, so the queue panel is out of date.
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row).map(ClaimedSend::taken).map(Some),
@@ -4009,7 +4030,7 @@ impl Store for TursoStore {
             .map_err(backend)?;
         // Two surfaces at once: the invite is a queued mail, and an invited
         // person shows up in the members list before they ever sign in.
-        self.announce([Topic::Queue, Topic::Members]);
+        self.publish([Topic::Queue, Topic::Members]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row),
@@ -4037,7 +4058,7 @@ impl Store for TursoStore {
             )
             .await
             .map_err(backend)?;
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         let sql = format!("SELECT {SEND_COLUMNS} FROM mail_send WHERE id = ?1");
         match self.one_row(&sql, params![id]).await? {
             Some(row) => send_from(&row),
@@ -4064,7 +4085,7 @@ impl Store for TursoStore {
         // whose subscribers may turn round and read this store, and holding
         // the single connection while they do is how that deadlocks.
         drop(conn);
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         Ok(())
     }
 
@@ -4103,7 +4124,7 @@ impl Store for TursoStore {
         drop(conn);
         // The attempt counter and the next-try time both just moved, and the
         // queue panel renders both.
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         Ok(())
     }
 
@@ -4131,7 +4152,7 @@ impl Store for TursoStore {
             return Err(StoreError::NotFound);
         }
         drop(conn);
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         Ok(())
     }
 
@@ -4261,7 +4282,7 @@ impl Store for TursoStore {
         .await
         .map_err(backend)?;
         drop(conn);
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         Ok(())
     }
 
@@ -4297,7 +4318,7 @@ impl Store for TursoStore {
         .map_err(backend)?;
         drop(conn);
         // A decision is what the rules page's decisions tab renders.
-        self.announce([Topic::Rules]);
+        self.publish([Topic::Rules]);
         Ok(())
     }
 
@@ -4721,7 +4742,7 @@ impl Store for TursoStore {
             .map_err(backend)?;
         }
         drop(conn);
-        self.announce([Topic::Queue]);
+        self.publish([Topic::Queue]);
         Ok(())
     }
 
@@ -4840,7 +4861,7 @@ impl Store for TursoStore {
         };
         tx.commit().await.map_err(backend)?;
 
-        self.announce([Topic::Board, Topic::Tags]);
+        self.publish([Topic::Board, Topic::Tags]);
         Ok(Tag {
             id,
             board_id: board_id.to_string(),
@@ -4869,7 +4890,7 @@ impl Store for TursoStore {
             return Err(StoreError::NotFound);
         }
         drop(conn);
-        self.announce([Topic::Board, Topic::Tags]);
+        self.publish([Topic::Board, Topic::Tags]);
         Ok(())
     }
 
@@ -4941,7 +4962,7 @@ impl Store for TursoStore {
             }
         }
         tx.commit().await.map_err(backend)?;
-        self.announce([Topic::Board, Topic::Tags]);
+        self.publish([Topic::Board, Topic::Tags]);
         Ok(())
     }
 
@@ -5003,7 +5024,7 @@ impl Store for TursoStore {
             }
         }
         tx.commit().await.map_err(backend)?;
-        self.announce([Topic::Board, Topic::Tags]);
+        self.publish([Topic::Board, Topic::Tags]);
         Ok(())
     }
 
@@ -5032,7 +5053,7 @@ impl Store for TursoStore {
             return Err(StoreError::NotFound);
         }
         drop(conn);
-        self.announce([Topic::Board, Topic::Task(task_id.to_string()), Topic::Tags]);
+        self.publish([Topic::Board, Topic::Task(task_id.to_string()), Topic::Tags]);
         Ok(())
     }
 }

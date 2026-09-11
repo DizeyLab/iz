@@ -28,6 +28,7 @@ use http::{HeaderValue, Request, StatusCode, header};
 use iz_core::Role;
 use iz_core::board::Moved;
 use iz_core::store::{Audience, MailOutcome, SendKind, SendState, Store, Trigger, TursoStore};
+use iz_web::directory::{StreamFrame, StreamMember, apply_frame};
 use iz_web::server::Mail;
 use topcoat::asset::{AssetBundle, RouterBuilderAssetExt};
 use topcoat::cookie::RouterBuilderCookieExt;
@@ -7530,6 +7531,180 @@ async fn a_queued_mails_next_try_is_marked_for_the_tick() {
         html.contains("data-tick"),
         "the queue's next-try stamp is not marked for the tick"
     );
+}
+
+/// The lightweight probe the live script's error path asks. A live session
+/// gets a bodyless yes; no cookie, or a session im no longer vouches for,
+/// gets a plain 401 — so a dropped stream can be told apart from a signed-
+/// out tab without fetching a page of HTML to learn it.
+#[tokio::test]
+async fn the_me_probe_answers_yes_only_to_a_live_session() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+
+    let live = app.get("/api/me", Some(&boss)).await;
+    assert_eq!(live.status, StatusCode::NO_CONTENT);
+    assert!(live.bytes.is_empty(), "the probe answered a body");
+
+    let stranger = app.get("/api/me", None).await;
+    assert_eq!(stranger.status, StatusCode::UNAUTHORIZED);
+
+    // The session revoked in im: once the fake stops vouching for the
+    // token, the probe refuses with no page to fetch first.
+    app.fake.tokens.lock().clear();
+    let revoked = app.get("/api/me", Some(&boss)).await;
+    assert_eq!(revoked.status, StatusCode::UNAUTHORIZED);
+}
+
+/// A session revocation heard off the directory stream is told to the whole
+/// workspace — which session died is im's knowledge alone, so no connection
+/// is named and no tab is sent away; every tab's own refetch, which
+/// re-introspects per request, is what sorts out who is still signed in.
+/// A tab whose other session survived therefore keeps its place.
+#[tokio::test]
+async fn a_session_revocation_announces_the_member_surface_to_everyone() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let bo = invited(&app, &boss, "bo@iz.sh", "Bo", Role::Member).await;
+
+    let member_feed = app.live_open(Some(&bo)).await;
+    let admin_feed = app.live_open(Some(&boss)).await;
+
+    apply_frame(
+        &app.store,
+        StreamFrame::Revoked {
+            sub: "im-bo@iz.sh".into(),
+        },
+    )
+    .await;
+
+    let heard_by_admin =
+        live_until(admin_feed, "members", std::time::Duration::from_secs(10)).await;
+    assert!(
+        heard_by_admin.contains("members"),
+        "no members announcement: {heard_by_admin}"
+    );
+    let heard_by_member = live_until(
+        member_feed,
+        "members",
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+    assert!(
+        heard_by_member.contains("members"),
+        "the member was not told the member surface moved: {heard_by_member}"
+    );
+    assert!(
+        !heard_by_admin.contains("revoked") && !heard_by_member.contains("revoked"),
+        "a session revocation named a connection: {heard_by_admin} / {heard_by_member}"
+    );
+}
+
+/// A profile arriving `disabled` is a user-level kill: the local row is
+/// disabled through the same store path an admin's hand uses, the
+/// account's own tab is named with the `revoked` topic — and only that
+/// tab — and the row's next probe reads as signed out, exactly as any
+/// refetch would find it.
+#[tokio::test]
+async fn a_disabled_member_is_named_once_and_signed_out_everywhere() {
+    let app = App::open().await;
+    let boss = admin(&app).await;
+    let bo = invited(&app, &boss, "bo@iz.sh", "Bo", Role::Member).await;
+
+    let member_feed = app.live_open(Some(&bo)).await;
+    let admin_feed = app.live_open(Some(&boss)).await;
+
+    apply_frame(
+        &app.store,
+        StreamFrame::Profile(StreamMember {
+            sub: "im-bo@iz.sh".into(),
+            email: "bo@iz.sh".into(),
+            name: "Bo".into(),
+            admin: false,
+            photo_version: 0,
+            timezone: "UTC+03:00".into(),
+            disabled: true,
+        }),
+    )
+    .await;
+
+    // The account's own connection is named — the goodbye frame the client
+    // answers with a hard redirect.
+    let goodbye = live_until(member_feed, "revoked", std::time::Duration::from_secs(10)).await;
+    assert!(
+        goodbye.contains("revoked"),
+        "the disabled member's tab was not named: {goodbye}"
+    );
+
+    // The workspace heard the member surface move; nobody else was named.
+    let heard_by_admin =
+        live_until(admin_feed, "members", std::time::Duration::from_secs(10)).await;
+    assert!(
+        heard_by_admin.contains("members"),
+        "no members announcement: {heard_by_admin}"
+    );
+    assert!(
+        !heard_by_admin.contains("revoked"),
+        "an uninvolved tab was named: {heard_by_admin}"
+    );
+
+    // The row itself, and the seam every refetch would hit.
+    let user = app
+        .store
+        .user_by_sub("im-bo@iz.sh")
+        .await
+        .unwrap()
+        .expect("the disabled member had no local row");
+    assert!(user.disabled);
+    assert_eq!(
+        app.get("/api/me", Some(&bo)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// im owns the account's life both ways: the same stream that kills the
+/// row brings it back. A disable lands, then a re-enable — the local flag
+/// follows each, and the member's own probe reads signed-in again, with
+/// no revoked naming on the way back in.
+#[tokio::test]
+async fn a_reenabled_member_is_signed_back_in() {
+    let app = App::open().await;
+    let _boss = admin(&app).await;
+    let bo = member(&app, "bo@iz.sh", "Bo").await;
+
+    let disabled = StreamMember {
+        sub: "im-bo@iz.sh".into(),
+        email: "bo@iz.sh".into(),
+        name: "Bo".into(),
+        admin: false,
+        photo_version: 0,
+        timezone: "UTC+03:00".into(),
+        disabled: true,
+    };
+    apply_frame(&app.store, StreamFrame::Profile(disabled.clone())).await;
+    assert!(
+        app.store
+            .user_by_sub("im-bo@iz.sh")
+            .await
+            .unwrap()
+            .expect("no local row")
+            .disabled,
+        "the stream did not disable the row"
+    );
+
+    let enabled = StreamMember { disabled: false, ..disabled };
+    apply_frame(&app.store, StreamFrame::Profile(enabled)).await;
+    assert!(
+        !app
+            .store
+            .user_by_sub("im-bo@iz.sh")
+            .await
+            .unwrap()
+            .expect("no local row")
+            .disabled,
+        "the stream did not re-enable the row"
+    );
+    assert_eq!(app.get("/api/me", Some(&bo)).await.status, StatusCode::NO_CONTENT);
 }
 
 /// A live update changes only what actually changed. It morphs the fetched

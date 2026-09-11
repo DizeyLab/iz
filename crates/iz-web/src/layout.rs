@@ -896,6 +896,14 @@ pub async fn soft_nav_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
 /// disagree with it — the tick re-fetches, and the server stays the only thing
 /// that decides what a moment reads as. It runs only on pages carrying a
 /// `data-tick` element, so a page with no clock-driven text is silent.
+/// The channel also carries one goodbye: a `revoked` frame means this
+/// tab's account was killed at the provider, and the answer is a hard
+/// redirect to the front door, not a morph. A dropped stream is the other
+/// way a tab learns it may be alone: the error path asks `/api/me`, and a
+/// `401` there is the same redirect. A merely restarting server answers
+/// 204, so a signed-in tab loses nothing — the `EventSource` reconnects
+/// on its own.
+///
 pub async fn live_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
     const JS: &str = "\
         (function () { \
@@ -925,7 +933,13 @@ pub async fn live_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
                 src.onmessage = function (e) { \
                     var frame; \
                     try { frame = JSON.parse(e.data); } catch (err) { return; } \
+                    if (frame && frame.topic === 'revoked') { window.location.href = '/'; return; } \
                     if (frame && wanted(frame.topic)) { schedule(); } \
+                }; \
+                src.onerror = function () { \
+                    fetch('/api/me', { cache: 'no-store' }).then(function (r) { \
+                        if (r.status === 401) { window.location.href = '/'; } \
+                    }).catch(function () { }); \
                 }; \
             } catch (err) { } \
             setInterval(function () { \

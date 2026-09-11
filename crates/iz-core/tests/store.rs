@@ -5593,7 +5593,11 @@ fn every_writing_method_announces_or_is_named_here() {
             || chunk.contains("INSERT OR ")
             || chunk.contains("UPDATE ")
             || chunk.contains("DELETE FROM");
-        if writes && !chunk.contains("announce(") && !SILENT_ON_PURPOSE.contains(&name) {
+        if writes
+            && !chunk.contains("publish(")
+            && !chunk.contains("announce(")
+            && !SILENT_ON_PURPOSE.contains(&name)
+        {
             silent.push(name.to_string());
         }
     }
@@ -5602,8 +5606,8 @@ fn every_writing_method_announces_or_is_named_here() {
         silent.is_empty(),
         "these methods change rows without announcing it, so the screens \
          showing those rows will go stale until someone reloads by hand: {silent:?}. \
-         Either call `self.announce(..)` after the write commits, or add the \
-         method to SILENT_ON_PURPOSE with the reason."
+         Either call `self.publish(..)` (or the trait's `self.announce(..)`) after \
+         the write commits, or add the method to SILENT_ON_PURPOSE with the reason."
     );
 }
 

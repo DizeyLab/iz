@@ -189,6 +189,11 @@ async fn main() {
     tokio::spawn(directory_stream(
         store.clone(),
         directory.clone(),
+        iz_web::directory::StreamSource::new(
+            config.oidc.issuer.clone(),
+            config.oidc.client_id.clone(),
+            config.oidc.client_secret.clone(),
+        ),
         health.clone(),
     ));
     // The storage mirror's watchdog: follows the family to wherever in
@@ -487,7 +492,10 @@ async fn apply_member(
 }
 
 /// The live half of the mirror: im's `/directory/live`, one event per
-/// changed member. Forever, in this shape: a full pass, then the stream;
+/// changed member — plus the `revoked` kind the pinned client's parser
+/// drops, which is why the connection and its frames are
+/// [`iz_web::directory`]'s and only the roster pass still rides the
+/// pinned client. Forever, in this shape: a full pass, then the stream;
 /// whenever the stream ends — im restarting, or its fifty-minute window
 /// closing — wait out a backoff that doubles from one second to thirty,
 /// replay a full pass (the resync that heals whatever the dead stream
@@ -499,20 +507,21 @@ async fn apply_member(
 async fn directory_stream(
     store: Arc<dyn iz_core::store::Store>,
     directory: im_client::directory::DirectoryClient,
+    source: iz_web::directory::StreamSource,
     health: iz_web::directory::DirectoryHealth,
 ) {
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
         mirror_directory(&store, &directory, &health).await;
-        match directory.open_stream().await {
+        match source.open_stream().await {
             Ok(mut stream) => {
                 health.connected();
                 backoff = std::time::Duration::from_secs(1);
-                while let Some(event) = stream.next().await {
-                    match event {
-                        Ok(im_client::directory::DirectoryEvent::Profile(member)) => {
+                while let Some(frame) = stream.next().await {
+                    match frame {
+                        Ok(frame) => {
                             health.event();
-                            apply_member(&store, &member).await;
+                            iz_web::directory::apply_frame(&store, frame).await;
                         }
                         Err(problem) => {
                             eprintln!("directory stream: {problem}; re-listing");
