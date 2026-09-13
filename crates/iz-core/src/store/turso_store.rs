@@ -771,7 +771,12 @@ impl TursoStore {
         // The mail falls due this many minutes before the clock; a meeting
         // already inside the window warns the moment the write commits.
         let due = (clock_at - Duration::minutes(i64::from(reminder_minutes))).max(now);
-        let minutes_left = (clock_at - now).whole_minutes();
+        // Remaining is what the reader has when the mail is due, not when
+        // the row is minted. A meeting two days out with a fifteen-minute
+        // lead must say "in 15 minutes", not the two days that sat on the
+        // queue. A meeting already inside the window is due now, so this
+        // is the minutes actually left.
+        let minutes_left = (clock_at - due).whole_minutes().max(0);
 
         let mut rows = tx
             .query(

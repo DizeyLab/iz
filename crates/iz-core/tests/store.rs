@@ -7112,17 +7112,12 @@ async fn a_clocked_task_owes_each_assignee_one_reminder_before_the_meeting() {
         let body = row.body.as_deref().unwrap();
         assert!(body.contains("The quarterly review"), "body was: {body}");
         assert!(body.contains("Meets at"), "body was: {body}");
-        // The countdown is whole minutes at mint time, and a few ticks pass
-        // between picking the clock and creating the task.
-        let minutes: u32 = body
-            .split("in ")
-            .nth(1)
-            .and_then(|rest| rest.split(' ').next())
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0);
+        // Remaining is counted from when the mail falls due, not from mint:
+        // a meeting two hours out with a fifteen-minute lead warns of fifteen
+        // minutes, which is what the reader has when the mail actually lands.
         assert!(
-            (117..=120).contains(&minutes),
-            "the countdown names the meeting two hours out: {body}"
+            body.contains("in 15 minutes"),
+            "the countdown names the lead, not the mint distance: {body}"
         );
     }
     assert_eq!(rows[0].recipient, "emre@iz.sh");
@@ -7159,6 +7154,11 @@ async fn the_reminder_falls_due_at_the_workspaces_own_lead() {
         rows[0].next_attempt_at.unwrap(),
         clock - Duration::minutes(60),
         "an hour before the meeting, not the default quarter"
+    );
+    let body = rows[0].body.as_deref().unwrap();
+    assert!(
+        body.contains("in 60 minutes"),
+        "the countdown follows the lead, not how far mint sat from the clock: {body}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
