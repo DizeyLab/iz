@@ -666,40 +666,58 @@ async fn set_task_tag(cx: &Cx, Form(input): Form<SetTaskTagForm>) -> Redirect {
     redirect(cx, None)
 }
 
-/// Puts someone on a task. A Viewer can neither do this nor be the target.
+/// Puts people on a task. A Viewer can neither do this nor be a target.
+/// Repeated `user_id` pairs assign several people in one post — the create
+/// picker and the task picker's multi-select both land here.
 #[route(POST "/api/assign")]
-async fn assign(cx: &Cx, Form(input): Form<PersonForm>) -> Redirect {
+async fn assign(cx: &Cx, Form(pairs): Form<Vec<(String, String)>>) -> Redirect {
     use iz_core::detail::ActivityKind;
     use time::OffsetDateTime;
 
-    let (actor, _) = match writer_and_task(cx, &input.task_id).await {
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let task_id = field("task_id").unwrap_or_default();
+    let (actor, _) = match writer_and_task(cx, task_id).await {
         Ok(pair) => pair,
         Err(refusal) => return redirect(cx, Some(refusal)),
     };
     let store = store(cx).clone();
-
-    let Some(person) = store.user(&input.user_id).await? else {
-        return redirect(cx, Some(Refusal::NotFound));
-    };
-    if person.workspace_id != actor.workspace_id {
-        return redirect(cx, Some(Refusal::NotFound));
+    let mut seen: Vec<&str> = Vec::new();
+    for user_id in pairs
+        .iter()
+        .filter(|(key, _)| key == "user_id")
+        .map(|(_, value)| value.as_str())
+    {
+        if user_id.is_empty() || seen.iter().any(|id| *id == user_id) {
+            continue;
+        }
+        seen.push(user_id);
+        let Some(person) = store.user(user_id).await? else {
+            return redirect(cx, Some(Refusal::NotFound));
+        };
+        if person.workspace_id != actor.workspace_id {
+            return redirect(cx, Some(Refusal::NotFound));
+        }
+        if !person.role.can_be_assigned() {
+            return redirect(cx, Some(Refusal::Forbidden));
+        }
+        store.assign_task(task_id, &person.id).await?;
+        let activity_id = store
+            .record_activity(
+                task_id,
+                Some(&actor.id),
+                Some(&person.id),
+                &ActivityKind::Assigned,
+                &person.display_name,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+        mail(cx).after_activity(store.clone(), activity_id);
     }
-    if !person.role.can_be_assigned() {
-        return redirect(cx, Some(Refusal::Forbidden));
-    }
-
-    store.assign_task(&input.task_id, &person.id).await?;
-    let activity_id = store
-        .record_activity(
-            &input.task_id,
-            Some(&actor.id),
-            Some(&person.id),
-            &ActivityKind::Assigned,
-            &person.display_name,
-            OffsetDateTime::now_utc(),
-        )
-        .await?;
-    mail(cx).after_activity(store, activity_id);
     redirect(cx, None)
 }
 
@@ -1598,6 +1616,49 @@ pub(crate) async fn datepicker_script<'a>(cx: &'a Cx, lang: Lang) -> Result<impl
     Ok(view! { cx => <script>(Unescaped::new_unchecked(js))</script> }.boxed())
 }
 
+/// Type-to-filter inside an assignee popover. Reuses `.dd-search` and the
+/// dropdown's `tr`+`en` match, as a repair on `iz:wire` so a morph does not
+/// leave a typed query sitting over unfiltered rows. Enter does not submit
+/// the wrapping create form.
+async fn assignee_search_script<'a>(cx: &'a Cx) -> Result<impl View + 'a> {
+    use topcoat::view::Unescaped;
+    const JS: &str = "\
+        (function () {\
+            if (window.__izAssigneeSearch) { return; }\
+            window.__izAssigneeSearch = true;\
+            function filterPanel(panel) {\
+                var search = panel.querySelector('.dd-search');\
+                if (!search) { return; }\
+                var q = search.value;\
+                var qTr = q.toLocaleLowerCase('tr');\
+                var qEn = q.toLowerCase();\
+                panel.querySelectorAll('.pop-row').forEach(function (r) {\
+                    var t = r.textContent;\
+                    var miss = t.toLocaleLowerCase('tr').indexOf(qTr) === -1 && t.toLowerCase().indexOf(qEn) === -1;\
+                    r.classList.toggle('dd-option-hidden', qEn !== '' && miss);\
+                });\
+            }\
+            function wire() {\
+                document.querySelectorAll('.assignee-pop .pop-panel').forEach(filterPanel);\
+            }\
+            document.addEventListener('input', function (e) {\
+                var search = e.target && e.target.closest && e.target.closest('.assignee-pop .dd-search');\
+                if (!search) { return; }\
+                window.__izOwn(search, [], ['value']);\
+                var panel = search.closest('.pop-panel');\
+                if (panel) { filterPanel(panel); }\
+            });\
+            document.addEventListener('keydown', function (e) {\
+                if (e.key !== 'Enter') { return; }\
+                if (!e.target || !e.target.closest || !e.target.closest('.assignee-pop .dd-search')) { return; }\
+                e.preventDefault();\
+            });\
+            document.addEventListener('iz:wire', wire);\
+            wire();\
+        })();";
+    Ok(view! { cx => <script>(Unescaped::new_unchecked(JS))</script> }.boxed())
+}
+
 async fn assignee_chip<'a>(
     cx: &'a Cx,
     task_id: &'a str,
@@ -1635,24 +1696,30 @@ async fn assignee_picker<'a>(
     }
     let toggle = format!("assign-{task_id}");
     let put_aria = t(lang, Key::PutSomeoneOnThisTask);
+    let search_aria = t(lang, Key::Search);
     Ok(view! {
         cx =>
         <div class="edit edit-pop assignee-pop">
             <input class="edit-toggle" type="checkbox" id=(toggle.clone()) aria-label=(put_aria)>
             <label class="assignee-add edit-view edit-hit" for=(toggle.clone())>(topcoat::view::Child::new(glyph::plus(cx).await?))</label>
             <div class="edit-form pop-panel">
-                <div class="pop-list pop-list-scroll">
-                    for person in people {
-                        <form class="pop-row-form" method="post" action="/api/assign">
-                            <input type="hidden" name="task_id" value=(task_id.to_string())>
-                            <input type="hidden" name="user_id" value=(person.id.clone())>
-                            <button class="pop-row" type="submit">
+                <form class="pop-form" method="post" action="/api/assign">
+                    <input type="hidden" name="task_id" value=(task_id.to_string())>
+                    <input class="dd-search" type="text" aria-label=(search_aria) autocomplete="off">
+                    <div class="pop-list pop-list-scroll">
+                        for person in people {
+                            <label class="pop-row">
+                                <input class="visually-hidden" type="checkbox" name="user_id" value=(person.id.clone())>
                                 (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?))
                                 <span class="pop-row-name">(person.display_name.clone())</span>
-                            </button>
-                        </form>
-                    }
-                </div>
+                            </label>
+                        }
+                    </div>
+                    <div class="edit-row">
+                        <button class="edit-save" type="submit">(t(lang, Key::Save))</button>
+                        <label class="edit-cancel" for=(toggle)>(t(lang, Key::Cancel))</label>
+                    </div>
+                </form>
                 (topcoat::view::Child::new(refused(cx, "assign", lang).await?))
             </div>
         </div>
@@ -2438,6 +2505,7 @@ pub async fn task_modal<'a>(
             </div>
         </div>
         (topcoat::view::Child::new(datepicker_script(cx, lang).await?))
+        (topcoat::view::Child::new(assignee_search_script(cx).await?))
         (topcoat::view::Child::new(escape_closes(cx).await?))
     }.boxed())
 }
@@ -2890,6 +2958,7 @@ pub async fn new_task_modal<'a>(
 ) -> Result<impl View + 'a> {
     let columns = columns.to_vec();
     let put_on_aria = t(lang, Key::PutSomeoneOnThisTask);
+    let search_aria = t(lang, Key::Search);
     let link_aria = t(lang, Key::LinkAnotherTask);
     Ok(view! {
         cx =>
@@ -2964,6 +3033,7 @@ pub async fn new_task_modal<'a>(
                                 <input class="edit-toggle" type="checkbox" id="new-task-assign" aria-label=(put_on_aria)>
                                 <label class="assignee-add edit-view edit-hit" for="new-task-assign">(topcoat::view::Child::new(glyph::plus(cx).await?))</label>
                                 <div class="edit-form pop-panel">
+                                    <input class="dd-search" type="text" aria-label=(search_aria) autocomplete="off">
                                     <div class="pop-list pop-list-scroll">
                                         for person in people {
                                             <label class="pop-row">
@@ -3025,6 +3095,7 @@ pub async fn new_task_modal<'a>(
             </div>
         </div>
         (topcoat::view::Child::new(datepicker_script(cx, lang).await?))
+        (topcoat::view::Child::new(assignee_search_script(cx).await?))
         (topcoat::view::Child::new(escape_closes(cx).await?))
     }.boxed())
 }

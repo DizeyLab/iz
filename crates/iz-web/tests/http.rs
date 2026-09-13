@@ -5723,16 +5723,18 @@ async fn the_new_task_modal_carries_the_task_tab_fields() {
     // Anchor at the modal div itself — the page's scripts quote `modal-scrim`
     // too — and stop at the first script after it: what sits between is the
     // modal's own markup.
-    let start = html
-        .find("modal modal-new-task")
-        .expect("no modal scrim");
+    let start = html.find("modal modal-new-task").expect("no modal scrim");
     let modal = &html[start..];
     let modal = &modal[..modal.find("<script").unwrap_or(modal.len())];
-    assert!(modal.contains("name=\"tag_id\""), "no project field: {modal}");
+    assert!(
+        modal.contains("name=\"tag_id\""),
+        "no project field: {modal}"
+    );
     assert!(
         modal.contains("name=\"assignee_id\""),
         "no assignee field: {modal}"
     );
+    assert!(modal.contains("dd-search"), "no assignee search: {modal}");
     assert!(
         modal.contains("name=\"other_id\""),
         "no dependency field: {modal}"
@@ -5811,6 +5813,61 @@ async fn creating_a_task_can_set_project_assignees_and_a_dependency() {
         card.blocks.iter().any(|key| *key == older_key),
         "the new card does not block the older one: {:?}",
         card.blocks
+    );
+}
+
+/// The assign call takes several people in one post: the task picker's
+/// multi-select lands as repeated `user_id` pairs, same as a single assign.
+#[tokio::test]
+async fn assigning_two_people_at_once_puts_both_on_the_card() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    invited(&app, &admin, "ayse@iz.sh", "Ayse", Role::Member).await;
+    invited(&app, &admin, "berk@iz.sh", "Berk", Role::Member).await;
+    let column = first_column(&app).await;
+    let task = a_task(&app, &admin, &column, "Two at once").await;
+    let ayse = user_id(&app, "ayse@iz.sh").await;
+    let berk = user_id(&app, "berk@iz.sh").await;
+
+    let html =
+        String::from_utf8_lossy(&app.get(&format!("/?task={task}"), Some(&admin)).await.bytes)
+            .into_owned();
+    assert!(
+        html.contains("assignee-pop")
+            && html.contains("dd-search")
+            && html.contains("name=\"user_id\""),
+        "the task picker is not a searchable multi-select: {html}"
+    );
+
+    let answer = app
+        .post(
+            "/api/assign",
+            Some(&admin),
+            &[("task_id", &task), ("user_id", &ayse), ("user_id", &berk)],
+        )
+        .await;
+    assert_eq!(
+        answer.body, "null",
+        "the assign was refused: {}",
+        answer.body
+    );
+
+    let workspace_id = app.workspace_id().await;
+    let board = iz_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let card = board
+        .columns
+        .iter()
+        .flat_map(|c| &c.cards)
+        .find(|card| card.id == task)
+        .expect("the task is not on the board");
+    assert!(
+        card.assignees.iter().any(|person| person.id == ayse)
+            && card.assignees.iter().any(|person| person.id == berk),
+        "both people did not land: {:?}",
+        card.assignees
     );
 }
 
@@ -7849,11 +7906,13 @@ async fn a_reenabled_member_is_signed_back_in() {
         "the stream did not disable the row"
     );
 
-    let enabled = StreamMember { disabled: false, ..disabled };
+    let enabled = StreamMember {
+        disabled: false,
+        ..disabled
+    };
     apply_frame(&app.store, StreamFrame::Profile(enabled)).await;
     assert!(
-        !app
-            .store
+        !app.store
             .user_by_sub("im-bo@iz.sh")
             .await
             .unwrap()
@@ -7861,7 +7920,10 @@ async fn a_reenabled_member_is_signed_back_in() {
             .disabled,
         "the stream did not re-enable the row"
     );
-    assert_eq!(app.get("/api/me", Some(&bo)).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        app.get("/api/me", Some(&bo)).await.status,
+        StatusCode::NO_CONTENT
+    );
 }
 
 /// A live update changes only what actually changed. It morphs the fetched
@@ -10212,7 +10274,10 @@ async fn the_switcher_marks_a_live_sibling_on_and_a_dark_one_off() {
         "the dark sibling reads off: {html}"
     );
     assert!(html.contains(">im</a>"), "the dark sibling renders: {html}");
-    assert!(!html.contains("ok dev"), "the flyout carries dots only: {html}");
+    assert!(
+        !html.contains("ok dev"),
+        "the flyout carries dots only: {html}"
+    );
 }
 
 /// The marks are pinned without a router, a bundle or a live sibling: a
@@ -10240,18 +10305,30 @@ fn the_switcher_marks_render_from_resolved_probes_alone() {
         marks.contains("health-dot health-on"),
         "the ok sibling reads on: {marks}"
     );
-    assert!(marks.contains(">in</a>"), "the live sibling renders: {marks}");
+    assert!(
+        marks.contains(">in</a>"),
+        "the live sibling renders: {marks}"
+    );
     assert!(
         marks.contains("health-dot health-off"),
         "the dark sibling reads off: {marks}"
     );
-    assert!(marks.contains(">im</a>"), "the dark sibling renders: {marks}");
-    assert!(!marks.contains(">iz</a>"), "iz's own row stays out: {marks}");
+    assert!(
+        marks.contains(">im</a>"),
+        "the dark sibling renders: {marks}"
+    );
+    assert!(
+        !marks.contains(">iz</a>"),
+        "iz's own row stays out: {marks}"
+    );
     assert!(
         marks.contains("title=\"Files\""),
         "the mark keeps its human name: {marks}"
     );
-    assert!(marks.contains("data-hard"), "the links leave this origin: {marks}");
+    assert!(
+        marks.contains("data-hard"),
+        "the links leave this origin: {marks}"
+    );
     assert!(
         marks.contains(r#"<span class="service-sep">·</span>"#),
         "middots between: {marks}"

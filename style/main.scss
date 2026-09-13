@@ -1817,7 +1817,13 @@ img.avatar {
   transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
-  &:has(:checked) { background: var(--row-hover); }
+  &:has(:checked) {
+    background: color-mix(in srgb, var(--accent) 32%, var(--surface));
+    color: var(--accent-ink);
+  }
+  &:has(:checked):hover {
+    background: color-mix(in srgb, var(--accent) 32%, var(--surface));
+  }
 }
 
 .pop-row-name { font-size: 12px; }
