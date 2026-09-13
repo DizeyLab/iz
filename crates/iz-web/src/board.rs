@@ -74,31 +74,42 @@ async fn move_card_shared(
     }
 }
 
-/// Adds a card to a column. A Viewer is refused here, in the handler.
-async fn create_task_shared(
-    cx: &Cx,
-    title: &str,
-    column_id: &str,
-    description: &str,
-    deadline_raw: &str,
-    clock_hour: Option<&str>,
-    clock_minute: Option<&str>,
-) -> Result<Option<Refusal>> {
+/// Adds a card to a column, wearing whatever the new-task modal posted with
+/// it: the project, the assignees, one dependency. A Viewer is refused here,
+/// in the handler; every extra is checked before the insert, so a bad one
+/// refuses without leaving a half-written card. The pairs speak for absent
+/// and blank the way `save_task`'s do.
+async fn create_task_shared(cx: &Cx, pairs: &[(String, String)]) -> Result<Option<Refusal>> {
+    use iz_core::detail::ActivityKind;
+
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let fields = |name: &str| -> Vec<&str> {
+        pairs
+            .iter()
+            .filter(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
+    };
     let user = match require_writer(cx).await {
         Ok(user) => user,
         Err(refusal) => return Ok(Some(refusal)),
     };
-    let title = title.trim();
+    let title = field("title").unwrap_or_default().trim();
     if title.is_empty() {
         return Ok(Some(Refusal::EmptyTitle));
     }
     let zone = iz_core::detail::parse_zone(&user.timezone);
-    let time = match crate::detail::combine_clock(clock_hour, clock_minute) {
+    let time = match crate::detail::combine_clock(field("clock_hour"), field("clock_minute")) {
         Ok(time) => time,
         Err(refusal) => return Ok(Some(refusal)),
     };
     let (deadline, clock_at) = match crate::detail::moment_field(
-        Some(deadline_raw),
+        field("deadline"),
         (None, None),
         time.as_deref(),
         zone,
@@ -110,24 +121,118 @@ async fn create_task_shared(
     let Some(board) = store.board(&user.workspace_id).await? else {
         return Ok(Some(Refusal::Unavailable));
     };
+    let column_id = field("column_id").unwrap_or_default();
     let columns = store.columns(&board.id).await?;
     if !columns.iter().any(|column| column.id == column_id) {
         return Ok(Some(Refusal::Forbidden));
     }
+
+    // The project: a posted tag has to be this board's own. Absent or blank
+    // leaves the default on — and the select never posts blank, so blank is
+    // a hand-crafted form, not a state the modal can reach.
+    let tag_id = field("tag_id").filter(|tag_id| !tag_id.is_empty());
+    if let Some(tag_id) = tag_id {
+        let tags = store.tags(&board.id).await?;
+        if !tags.iter().any(|tag| tag.id == tag_id) {
+            return Ok(Some(Refusal::NotFound));
+        }
+    }
+
+    // The assignees: every id has to be a person of this workspace a task
+    // can sit on, the same checks the assign call makes. A repeated id is
+    // one assignment.
+    let mut assignees: Vec<User> = Vec::new();
+    for person_id in fields("assignee_id") {
+        if person_id.is_empty() || assignees.iter().any(|person| person.id == person_id) {
+            continue;
+        }
+        let Some(person) = store.user(person_id).await? else {
+            return Ok(Some(Refusal::NotFound));
+        };
+        if person.workspace_id != user.workspace_id {
+            return Ok(Some(Refusal::NotFound));
+        }
+        if !person.role.can_be_assigned() {
+            return Ok(Some(Refusal::Forbidden));
+        }
+        assignees.push(person);
+    }
+
+    // One dependency, if the picker named one. The card does not exist yet,
+    // so it cannot close a circle — but the store still gets the last word
+    // after the insert.
+    let direction = match field("direction") {
+        Some("blocks") => crate::detail::Direction::Blocks,
+        // Missing, blank, or anything else: the modal's first radio arrives
+        // pre-checked, so a form that says nothing meant that one.
+        _ => crate::detail::Direction::BlockedBy,
+    };
+    let linked = match field("other_id").filter(|other_id| !other_id.is_empty()) {
+        Some(other_id) => match crate::detail::task_of(store.as_ref(), &user, other_id).await {
+            Ok(facts) => Some((other_id, facts)),
+            Err(refusal) => return Ok(Some(refusal)),
+        },
+        None => None,
+    };
+
     let created = store
         .create_task(NewTask {
             board_id: &board.id,
             column_id,
             parent_id: None,
             title,
-            description: description.trim(),
+            description: field("description").unwrap_or_default().trim(),
             deadline,
             clock_at,
             created_by: &user.id,
         })
         .await?;
-    mail(cx).after_activity(store, created.activity_id);
+    mail(cx).after_activity(store.clone(), created.activity_id);
     mail(cx).after(created.transition);
+
+    let task_id = &created.row.id;
+
+    // The card was born wearing this tag, so no `tagged` line on its trail —
+    // that one is for a later relabel.
+    if let Some(tag_id) = tag_id {
+        if created.row.tag.as_ref().map(|tag| tag.id.as_str()) != Some(tag_id) {
+            store.set_task_tag(task_id, tag_id).await?;
+        }
+    }
+    for person in &assignees {
+        store.assign_task(task_id, &person.id).await?;
+        let activity_id = store
+            .record_activity(
+                task_id,
+                Some(&user.id),
+                Some(&person.id),
+                &ActivityKind::Assigned,
+                &person.display_name,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+        mail(cx).after_activity(store.clone(), activity_id);
+    }
+    if let Some((other_id, other)) = &linked {
+        let (blocked, blocking) = crate::detail::resolve_direction(task_id, other_id, direction);
+        let now = OffsetDateTime::now_utc();
+        match store.add_dependency(&blocked, &blocking, now).await {
+            Ok(()) => {}
+            Err(iz_core::store::StoreError::Cycle) => return Ok(Some(Refusal::Cycle)),
+            Err(error) => return Err(error.into()),
+        }
+        let activity_id = store
+            .record_activity(
+                task_id,
+                Some(&user.id),
+                None,
+                &ActivityKind::Linked,
+                &other.row.task_key,
+                now,
+            )
+            .await?;
+        mail(cx).after_activity(store, activity_id);
+    }
     Ok(None)
 }
 
@@ -156,35 +261,12 @@ fn redirect_refused(cx: &Cx, call: &str, refusal: Refusal) -> Redirect {
     Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]))
 }
 
-#[derive(serde::Deserialize)]
-struct CreateTaskForm {
-    title: String,
-    column_id: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    deadline: String,
-    #[serde(default)]
-    clock_hour: Option<String>,
-    #[serde(default)]
-    clock_minute: Option<String>,
-}
-
-/// A browser without script's way onto the board: a real form post, same
-/// fields the procedure below trades over the wire.
+/// A browser without script's way onto the board: a real form post, the same
+/// fields the procedure above trades over the wire — including the new-task
+/// modal's extras, which arrive as repeated pairs.
 #[route(POST "/api/create_task")]
-async fn create_task(cx: &Cx, Form(input): Form<CreateTaskForm>) -> Redirect {
-    match create_task_shared(
-        cx,
-        &input.title,
-        &input.column_id,
-        &input.description,
-        &input.deadline,
-        input.clock_hour.as_deref(),
-        input.clock_minute.as_deref(),
-    )
-    .await?
-    {
+async fn create_task(cx: &Cx, Form(pairs): Form<Vec<(String, String)>>) -> Redirect {
+    match create_task_shared(cx, &pairs).await? {
         Some(refusal) => redirect_refused(cx, "create_task", refusal),
         // Created; the referring `/?new=1` would reopen a blank new-task
         // modal, so land on the board itself instead.
@@ -759,6 +841,33 @@ pub async fn board_page<'a>(cx: &'a Cx, user: &'a User) -> Result<impl View + 'a
     };
 
     let me = crate::detail::Me::from(user);
+    // The new-task modal's extra choices are only read when it is opening:
+    // the people a task can sit on, and every task a birth link could name,
+    // sorted by id, not `task_key` — the key's tail is a random ULID suffix
+    // now, so only the id still orders these by creation time (the same
+    // reason `load_snapshot` sorts there).
+    let (new_task_people, new_task_linkable) = if open_new {
+        let people: Vec<User> = members
+            .iter()
+            .filter(|member| member.role.can_be_assigned())
+            .cloned()
+            .collect();
+        let store = store(cx).clone();
+        let mut linkable: Vec<crate::detail::LinkTarget> = store
+            .tasks_for_board(&view_data.board.id)
+            .await?
+            .into_iter()
+            .map(|task| crate::detail::LinkTarget {
+                id: task.id,
+                task_key: task.task_key,
+                title: task.title,
+            })
+            .collect();
+        linkable.sort_by(|a, b| a.id.cmp(&b.id));
+        (people, linkable)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(view! {
         cx =>
         <header class="topbar">
@@ -853,7 +962,17 @@ pub async fn board_page<'a>(cx: &'a Cx, user: &'a User) -> Result<impl View + 'a
             }
         }
         if open_new {
-            (topcoat::view::Child::new(crate::detail::new_task_modal(cx, &all_columns, lang).await?))
+            (topcoat::view::Child::new(
+                crate::detail::new_task_modal(
+                    cx,
+                    &all_columns,
+                    &tags,
+                    &new_task_people,
+                    &new_task_linkable,
+                    lang,
+                )
+                .await?,
+            ))
         }
         (topcoat::view::Child::new(crate::dropdown::dropdown_script(cx).await?))
         (topcoat::view::Child::new(crate::layout::escape_script(cx).await?))

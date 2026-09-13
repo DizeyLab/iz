@@ -140,7 +140,7 @@ pub enum Direction {
 /// Which task is `blocked` and which is `blocking`, from the task the modal
 /// is open on, the other task it names, and which way the form said the link
 /// runs.
-fn resolve_direction(task_id: &str, other_id: &str, direction: Direction) -> (String, String) {
+pub(crate) fn resolve_direction(task_id: &str, other_id: &str, direction: Direction) -> (String, String) {
     match direction {
         Direction::BlockedBy => (task_id.to_string(), other_id.to_string()),
         Direction::Blocks => (other_id.to_string(), task_id.to_string()),
@@ -173,7 +173,7 @@ mod resolve_direction_tests {
 /// The task, if this person's workspace is the one holding it. A task in
 /// another workspace is not found rather than forbidden: the answer says
 /// nothing about whether the id is real.
-async fn task_of(
+pub(crate) async fn task_of(
     store: &dyn Store,
     user: &User,
     task_id: &str,
@@ -2879,9 +2879,14 @@ async fn slides_view<'a>(
 pub async fn new_task_modal<'a>(
     cx: &'a Cx,
     columns: &[(String, String)],
+    tags: &'a [iz_core::store::Tag],
+    people: &'a [iz_core::store::User],
+    linkable: &'a [LinkTarget],
     lang: Lang,
 ) -> Result<impl View + 'a> {
     let columns = columns.to_vec();
+    let put_on_aria = t(lang, Key::PutSomeoneOnThisTask);
+    let link_aria = t(lang, Key::LinkAnotherTask);
     Ok(view! {
         cx =>
         <div class="modal-scrim">
@@ -2937,6 +2942,71 @@ pub async fn new_task_modal<'a>(
                     </div>
                         </div>
                     </div>
+                    <label class="field">
+                        <span class="field-label">(t(lang, Key::Project))</span>
+                        <span class="field-box">
+                            <select class="status-select" name="tag_id" data-search="">
+                                for tag in tags {
+                                    <option value=(tag.id.clone()) selected=(tag.is_default)>(tag.name.clone())</option>
+                                }
+                            </select>
+                            (topcoat::view::Child::new(glyph::chevron(cx).await?))
+                        </span>
+                    </label>
+                    <div class="field">
+                        <span class="field-label">(t(lang, Key::Assignees))</span>
+                        if !people.is_empty() {
+                            <div class="edit edit-pop assignee-pop">
+                                <input class="edit-toggle" type="checkbox" id="new-task-assign" aria-label=(put_on_aria)>
+                                <label class="assignee-add edit-view edit-hit" for="new-task-assign">(topcoat::view::Child::new(glyph::plus(cx).await?))</label>
+                                <div class="edit-form pop-panel">
+                                    <div class="pop-list pop-list-scroll">
+                                        for person in people {
+                                            <label class="pick-row">
+                                                <input type="checkbox" name="assignee_id" value=(person.id.clone())>
+                                                (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?))
+                                                <span class="pop-row-name">(person.display_name.clone())</span>
+                                            </label>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                    if !linkable.is_empty() {
+                        <div class="field">
+                            <span class="field-label">(t(lang, Key::Dependencies))</span>
+                            <div class="edit edit-pop link-pop">
+                                <input class="edit-toggle" type="checkbox" id="new-task-link" aria-label=(link_aria)>
+                                <label class="dep-chip edit-view edit-hit" for="new-task-link">
+                                    (topcoat::view::Child::new(glyph::plus(cx).await?))
+                                    <span class="dep-chip-text">(t(lang, Key::LinkATask))</span>
+                                </label>
+                                <div class="edit-form pop-panel pop-panel-wide">
+                                    <div class="pop-list pop-list-scroll">
+                                        for target in linkable {
+                                            <label class="pick-row">
+                                                <input type="radio" name="other_id" value=(target.id.clone())>
+                                                <span class="dep-key">(target.task_key.clone())</span>
+                                                <span class="pick-title">(target.title.clone())</span>
+                                            </label>
+                                        }
+                                    </div>
+                                    <fieldset class="pick-direction">
+                                        <legend class="detail-label">(t(lang, Key::Direction))</legend>
+                                        <label class="pick-row">
+                                            <input type="radio" name="direction" value="blocked_by" checked="">
+                                            <span class="pick-title">(t(lang, Key::BlocksThisTask))</span>
+                                        </label>
+                                        <label class="pick-row">
+                                            <input type="radio" name="direction" value="blocks">
+                                            <span class="pick-title">(t(lang, Key::WaitsOnThisTask))</span>
+                                        </label>
+                                    </fieldset>
+                                </div>
+                            </div>
+                        </div>
+                    }
                     <label class="field">
                         <span class="field-label">(t(lang, Key::Description))</span>
                         <textarea class="detail-textarea" name="description" rows="4"></textarea>

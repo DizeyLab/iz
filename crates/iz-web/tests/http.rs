@@ -5700,6 +5700,163 @@ async fn the_new_task_modal_opens_from_the_board_and_creates_into_the_chosen_col
         .expect("the created task did not land in the chosen column");
     assert_eq!(card.title, "Ship the new-task modal");
 }
+
+/// The new-task modal carries the Task-tab settings at birth: the project
+/// select, the assignee checkboxes and — once something exists to link —
+/// the dependency radios. The create form is still one form: no picker may
+/// smuggle in a post of its own, and no control may create the card before
+/// the footer's submit.
+#[tokio::test]
+async fn the_new_task_modal_carries_the_task_tab_fields() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+    a_tag(&app, &admin, "Atlas").await;
+    a_task(&app, &admin, &column, "Something to link").await;
+
+    let raw = app.get("/?new=1", Some(&admin)).await;
+    let html = String::from_utf8_lossy(&raw.bytes).into_owned();
+    assert!(
+        html.contains("modal-new-task"),
+        "the new-task modal did not render: {html}"
+    );
+    // Anchor at the modal div itself — the page's scripts quote `modal-scrim`
+    // too — and stop at the first script after it: what sits between is the
+    // modal's own markup.
+    let start = html
+        .find("modal modal-new-task")
+        .expect("no modal scrim");
+    let modal = &html[start..];
+    let modal = &modal[..modal.find("<script").unwrap_or(modal.len())];
+    assert!(modal.contains("name=\"tag_id\""), "no project field: {modal}");
+    assert!(
+        modal.contains("name=\"assignee_id\""),
+        "no assignee field: {modal}"
+    );
+    assert!(
+        modal.contains("name=\"other_id\""),
+        "no dependency field: {modal}"
+    );
+    assert!(
+        !modal.contains("action=\"/api/assign\"")
+            && !modal.contains("action=\"/api/link_tasks\"")
+            && !modal.contains("action=\"/api/set_task_tag\""),
+        "the modal nests a form of its own: {modal}"
+    );
+    assert!(
+        !modal.contains("data-autosubmit"),
+        "a create-modal control posts the card by itself: {modal}"
+    );
+}
+
+/// Project, assignees and one dependency can all be set on the create post
+/// itself: the card is born wearing the tag, carrying the person and blocking
+/// the older task.
+#[tokio::test]
+async fn creating_a_task_can_set_project_assignees_and_a_dependency() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    invited(&app, &admin, "derya@iz.sh", "Derya", Role::Member).await;
+    let column = first_column(&app).await;
+    let other = a_task(&app, &admin, &column, "The older card").await;
+    let atlas = a_tag(&app, &admin, "Atlas").await;
+    let assignee = user_id(&app, "derya@iz.sh").await;
+
+    let answer = app
+        .post(
+            "/api/create_task",
+            Some(&admin),
+            &[
+                ("title", "Born dressed"),
+                ("column_id", &column),
+                ("tag_id", &atlas.id),
+                ("assignee_id", &assignee),
+                ("other_id", &other),
+                ("direction", "blocks"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "", "the create was refused: {}", answer.body);
+
+    let workspace_id = app.workspace_id().await;
+    let board = iz_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let older_key = board
+        .columns
+        .iter()
+        .flat_map(|c| &c.cards)
+        .find(|card| card.id == other)
+        .map(|card| card.task_key.clone())
+        .expect("the older card is not on the board");
+    let card = board
+        .columns
+        .iter()
+        .flat_map(|c| &c.cards)
+        .find(|card| card.title == "Born dressed")
+        .expect("the created task is not on the board");
+    assert_eq!(
+        card.tag.as_ref().map(|tag| tag.name.as_str()),
+        Some("Atlas"),
+        "the card did not wear the chosen tag: {:?}",
+        card.tag
+    );
+    assert!(
+        card.assignees.iter().any(|person| person.id == assignee),
+        "the assignee did not land: {:?}",
+        card.assignees
+    );
+    assert!(
+        card.blocks.iter().any(|key| *key == older_key),
+        "the new card does not block the older one: {:?}",
+        card.blocks
+    );
+}
+
+/// A tag from nowhere refuses the whole create: nothing is written, the same
+/// shape as a create into another workspace's column.
+#[tokio::test]
+async fn a_create_with_a_foreign_tag_is_refused_and_writes_nothing() {
+    let app = App::open().await;
+    let admin = admin(&app).await;
+    let column = first_column(&app).await;
+
+    let answer = app
+        .post(
+            "/api/create_task",
+            Some(&admin),
+            &[
+                ("title", "Wearing a tag from nowhere"),
+                ("column_id", &column),
+                ("tag_id", "00000000-0000-0000-0000-000000000000"),
+            ],
+        )
+        .await;
+    assert_eq!(answer.body, "");
+    assert!(
+        answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal=not-found&on=create_task"),
+        "{:?}",
+        answer.location
+    );
+    let workspace_id = app.workspace_id().await;
+    let board = iz_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        board
+            .columns
+            .iter()
+            .flat_map(|c| &c.cards)
+            .all(|card| card.title != "Wearing a tag from nowhere"),
+        "the refused task was written anyway"
+    );
+}
 /// A 1×1 transparent PNG: 67 real bytes, header to checksum, so it sniffs as
 /// `image/png` and survives a byte-for-byte round trip.
 const PNG: [u8; 67] = [

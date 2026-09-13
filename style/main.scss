@@ -1186,7 +1186,14 @@ img.avatar {
   color: var(--danger);
 }
 
-.modal-new-task { width: 480px; }
+.modal-new-task {
+  width: 480px;
+  // The Task-tab fields can push this past a short viewport; it pans inside
+  // itself, but it never shows a scrollbar.
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+}
 
 // The task-detail modal shares `.modal` with the new-task modal and the
 // viewer, which stay centered. The base only fixes the frame — a header on
