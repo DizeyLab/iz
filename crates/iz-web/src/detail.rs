@@ -140,7 +140,11 @@ pub enum Direction {
 /// Which task is `blocked` and which is `blocking`, from the task the modal
 /// is open on, the other task it names, and which way the form said the link
 /// runs.
-pub(crate) fn resolve_direction(task_id: &str, other_id: &str, direction: Direction) -> (String, String) {
+pub(crate) fn resolve_direction(
+    task_id: &str,
+    other_id: &str,
+    direction: Direction,
+) -> (String, String) {
     match direction {
         Direction::BlockedBy => (task_id.to_string(), other_id.to_string()),
         Direction::Blocks => (other_id.to_string(), task_id.to_string()),
@@ -378,7 +382,9 @@ async fn load_snapshot(
             None => {
                 let rule = store.mail_rule(&decision.rule_id).await?;
                 rules_cache.insert(decision.rule_id.clone(), rule);
-                rules_cache.get(decision.rule_id.as_str()).expect("just inserted")
+                rules_cache
+                    .get(decision.rule_id.as_str())
+                    .expect("just inserted")
             }
         };
         let rule_name = may_administer.then(|| {
@@ -1819,14 +1825,12 @@ async fn dep_row<'a>(
     let cleared = edge.is_cleared();
     let note = match direction {
         Direction::BlockedBy => match (edge.cleared_at, edge.done_at) {
-            (Some(at), _) => crate::i18n::cleared_dep_label(
-                lang,
-                &iz_core::board::day_label(at.date()),
-            ),
-            (None, Some(at)) => crate::i18n::done_dep_label(
-                lang,
-                &iz_core::board::day_label(at.date()),
-            ),
+            (Some(at), _) => {
+                crate::i18n::cleared_dep_label(lang, &iz_core::board::day_label(at.date()))
+            }
+            (None, Some(at)) => {
+                crate::i18n::done_dep_label(lang, &iz_core::board::day_label(at.date()))
+            }
             (None, None) => t(lang, Key::BlocksThisTask).to_string(),
         },
         Direction::Blocks if cleared => t(lang, Key::NoLongerWaiting).to_string(),
@@ -2962,8 +2966,8 @@ pub async fn new_task_modal<'a>(
                                 <div class="edit-form pop-panel">
                                     <div class="pop-list pop-list-scroll">
                                         for person in people {
-                                            <label class="pick-row">
-                                                <input type="checkbox" name="assignee_id" value=(person.id.clone())>
+                                            <label class="pop-row">
+                                                <input class="visually-hidden" type="checkbox" name="assignee_id" value=(person.id.clone())>
                                                 (topcoat::view::Child::new(crate::layout::avatar(cx, &person.id, &person.display_name, person.photo_version, "avatar-sm").await?))
                                                 <span class="pop-row-name">(person.display_name.clone())</span>
                                             </label>

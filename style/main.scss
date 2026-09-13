@@ -1799,6 +1799,7 @@ img.avatar {
 .pop-row-form { display: block; }
 
 .pop-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1816,6 +1817,7 @@ img.avatar {
   transition: background-color var(--dur-fast) var(--ease);
 
   &:hover { background: var(--row-hover); }
+  &:has(:checked) { background: var(--row-hover); }
 }
 
 .pop-row-name { font-size: 12px; }
