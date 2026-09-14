@@ -25,10 +25,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::board::Transition;
-use crate::detail::ActivityKind;
+use crate::detail::{ActivityKind, moment_label_in, parse_zone};
 use crate::store::{
     ActivityEvent, Audience, ClaimedSend, Event, Freeing, MailOutcome, MailRule, MailSend,
     SendKind, Store, Trigger,
@@ -837,6 +837,20 @@ impl Engine {
         Ok(())
     }
 
+    /// The recipient's stored display offset. No account, or no workspace
+    /// yet, reads as UTC — the same fallback `parse_zone` uses on junk.
+    async fn zone_for(&self, email: &str) -> crate::store::Result<UtcOffset> {
+        let Some(workspace) = self.store.workspace().await? else {
+            return Ok(UtcOffset::UTC);
+        };
+        Ok(
+            match self.store.user_by_email(&workspace.id, email).await? {
+                Some(user) => parse_zone(&user.timezone),
+                None => UtcOffset::UTC,
+            },
+        )
+    }
+
     /// The mail itself, built from the facts as they were committed.
     async fn compose(
         &self,
@@ -955,7 +969,7 @@ impl Engine {
             "{key} — {title}\n\n{happened}\n\n{when}\n\n{base}/?task={id}\n",
             key = facts.row.task_key,
             title = facts.row.title,
-            when = day_and_time(event.at()),
+            when = moment_label_in(event.at(), self.zone_for(&send.recipient).await?),
             id = facts.row.id,
         );
         if rule.include_task_details {
@@ -1048,7 +1062,7 @@ impl Engine {
             "{key} — {title}\n\nColumn: {column}\nDeadline: {deadline}\nAssignees: {assignees}\n\n{when}\n\n{base}/?task={id}\n",
             key = facts.row.task_key,
             title = facts.row.title,
-            when = day_and_time(newest_event.at()),
+            when = moment_label_in(newest_event.at(), self.zone_for(&send.recipient).await?,),
             id = facts.row.id,
         );
         if details {
@@ -1098,35 +1112,6 @@ fn activity_kind_for(trigger: &Trigger) -> Option<ActivityKind> {
         Trigger::Unlinked => Some(ActivityKind::Unlinked),
         Trigger::Deleted => Some(ActivityKind::Deleted),
         Trigger::StatusBecomes(_) | Trigger::Unblocked => None,
-    }
-}
-
-/// `Aug 26 at 11:04 UTC` — the crossing's own clock, not the sender's.
-fn day_and_time(at: OffsetDateTime) -> String {
-    format!(
-        "{} {} at {:02}:{:02} UTC",
-        month_name(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute()
-    )
-}
-
-fn month_name(month: time::Month) -> &'static str {
-    use time::Month::*;
-    match month {
-        January => "Jan",
-        February => "Feb",
-        March => "Mar",
-        April => "Apr",
-        May => "May",
-        June => "Jun",
-        July => "Jul",
-        August => "Aug",
-        September => "Sep",
-        October => "Oct",
-        November => "Nov",
-        December => "Dec",
     }
 }
 

@@ -3414,11 +3414,55 @@ async fn a_mail_says_when_the_card_moved_not_when_it_was_sent() {
     let delivered = engine.deliver_owed(later, 10).await.unwrap();
     assert_eq!(delivered.sent, 1);
     let body = mailer.sent()[0].body.clone();
-    let moved_day = transition.at.day();
+    let when = iz_core::detail::moment_label(transition.at);
     assert!(
-        body.contains(&format!("{moved_day} at")),
+        body.contains(&when),
         "the mail says when the card moved: {body}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rule_mail_tells_the_crossing_in_its_own_recipients_clock() {
+    let (dir, store, workspace, admin) = shared().await;
+    let grace = member(&store, &workspace, "grace@iz.sh", "Grace").await;
+    let emre = member(&store, &workspace, "emre@iz.sh", "Emre").await;
+    store
+        .set_preferences(&emre, "UTC+03:00", "dark", "en", "default")
+        .await
+        .unwrap();
+    let task = add_task(&store, &workspace, "Backlog", "Ship it", None, &admin).await;
+    store.assign_task(&task, &grace).await.unwrap();
+    store.assign_task(&task, &emre).await.unwrap();
+    a_rule(&store, &workspace, "Done", "Task completed").await;
+
+    let mailer = Remembering::taking_everything();
+    let engine = Engine::new(store.clone(), mailer.clone(), "https://iz.sh");
+    let moved = moved_to(&store, &workspace, &task, "Backlog", "Done", &admin).await;
+    engine.on_transition(&moved).await.unwrap();
+
+    let sent = mailer.sent();
+    let grace_body = sent
+        .iter()
+        .find(|mail| mail.to == "grace@iz.sh")
+        .expect("grace was mailed")
+        .body
+        .clone();
+    let emre_body = sent
+        .iter()
+        .find(|mail| mail.to == "emre@iz.sh")
+        .expect("emre was mailed")
+        .body
+        .clone();
+    let grace_when = iz_core::detail::moment_label_in(moved.at, iz_core::detail::parse_zone("UTC"));
+    let emre_when =
+        iz_core::detail::moment_label_in(moved.at, iz_core::detail::parse_zone("UTC+03:00"));
+    assert_ne!(
+        grace_when, emre_when,
+        "the two clocks must disagree so the pin is not the same string twice"
+    );
+    assert!(grace_body.contains(&grace_when), "grace: {grace_body}");
+    assert!(emre_body.contains(&emre_when), "emre: {emre_body}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3802,7 +3846,7 @@ async fn a_mail_owed_by_a_delete_is_rebuilt_from_the_delete_on_a_retry() {
         "the retry still names the task that was deleted: {body}"
     );
     assert!(
-        body.contains(&format!("{} at", freeing.at.day())),
+        body.contains(&iz_core::detail::moment_label(freeing.at)),
         "and says when the delete happened, not when the mail went: {body}"
     );
     let _ = std::fs::remove_dir_all(&dir);
