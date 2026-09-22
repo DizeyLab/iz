@@ -7,6 +7,6 @@
 .env
 iz.key
 /config/iz.toml
-CLAUDE.md
+AGENTS.md
 /crates/iz-web/assets
 *.db.backup-*
