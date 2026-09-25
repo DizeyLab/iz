@@ -370,7 +370,8 @@ impl App {
                 .assets(
                     AssetBundle::load_dir(asset_dir())
                         .expect("run `topcoat asset bundle` before the http suite"),
-                ),
+                )
+                .trusted_proxies(iz_web::server::trusted_proxies()),
             client.clone(),
         )
         .app_context(store.clone())
@@ -467,7 +468,8 @@ impl App {
                 .assets(
                     AssetBundle::load_dir(asset_dir())
                         .expect("run `topcoat asset bundle` before the http suite"),
-                ),
+                )
+                .trusted_proxies(iz_web::server::trusted_proxies()),
             client.clone(),
         )
         .app_context(store.clone())

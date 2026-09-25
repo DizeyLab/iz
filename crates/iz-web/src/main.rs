@@ -219,7 +219,8 @@ async fn main() {
                     .at("/files"),
             )
             .cookies()
-            .assets(bundle),
+            .assets(bundle)
+            .trusted_proxies(iz_web::server::trusted_proxies()),
         oidc,
     )
     .app_context(store.clone())
