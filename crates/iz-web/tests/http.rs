@@ -9132,6 +9132,110 @@ async fn a_card_wears_the_clock_chip_in_the_viewers_zone_instead_of_the_deadline
     );
 }
 
+/// A clock that has passed makes the card overdue the same way the detail
+/// already is: the chip carries ` · overdue` and the overdue class, the
+/// filter count counts it, and the detail field keeps its own
+/// `day time · overdue` shape. A future clock on the same board stays clean.
+#[tokio::test]
+async fn a_past_clock_reads_overdue_on_the_card_like_the_detail() {
+    let app = App::open().await;
+    let admin_cookie = admin(&app).await;
+
+    // The viewer is pinned to UTC, so the typed 18:00 is the stored instant.
+    app.store
+        .sync_member("im-ada", "ada@iz.sh", "Ada Lovelace", true, 0, "UTC")
+        .await
+        .unwrap();
+
+    let column = first_column(&app).await;
+    let yesterday = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+    let ymd = format!(
+        "{:04}-{:02}-{:02}",
+        yesterday.year(),
+        yesterday.month() as u8,
+        yesterday.day()
+    );
+    let answer = app
+        .post(
+            "/api/create_task",
+            Some(&admin_cookie),
+            &[
+                ("title", "Standup"),
+                ("column_id", &column),
+                ("deadline", &ymd),
+                ("clock_hour", "18"),
+                ("clock_minute", "00"),
+            ],
+        )
+        .await;
+    assert!(
+        !answer
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        answer.location
+    );
+
+    // A same-request control: a clock still ahead of now never reads overdue.
+    let later = app
+        .post(
+            "/api/create_task",
+            Some(&admin_cookie),
+            &[
+                ("title", "Kickoff later"),
+                ("column_id", &column),
+                ("deadline", "2027-09-02"),
+                ("clock_hour", "18"),
+                ("clock_minute", "00"),
+            ],
+        )
+        .await;
+    assert!(
+        !later
+            .location
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusal="),
+        "{:?}",
+        later.location
+    );
+
+    let workspace_id = app.workspace_id().await;
+    let board = iz_core::board::load(app.store.as_ref(), &workspace_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let task = board
+        .cards()
+        .find(|card| card.title == "Standup")
+        .expect("the overdue task is not on the board")
+        .id
+        .clone();
+
+    let day = iz_core::board::day_label(yesterday.date());
+    let page = app.get("/", Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(
+        html.contains(&format!(
+            r#"data-tick="" class="card-deadline card-deadline-overdue">{day} · 18:00 · overdue<"#
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"data-tick="" class="card-deadline">Sep 02 · 18:00<"#),
+        "the future clock picked up an overdue mark: {html}"
+    );
+
+    // The detail keeps its own shape: `day time · overdue`, no middle dot
+    // between day and time.
+    let page = app.get(&format!("/?task={task}"), Some(&admin_cookie)).await;
+    let html = String::from_utf8_lossy(&page.bytes);
+    assert!(html.contains("detail-overdue"), "{html}");
+    assert!(html.contains(&format!("{day} 18:00 · overdue")), "{html}");
+}
+
 #[tokio::test]
 async fn a_time_set_on_an_existing_day_writes_both_columns() {
     let app = App::open().await;

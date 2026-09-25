@@ -1342,10 +1342,10 @@ async fn a_card_carries_its_assignees_comments_and_dependency_keys() {
     assert_eq!(waiting.comment_count, 0);
     assert!(waiting.assignees.is_empty());
 
-    let today = date!(2026 - 08 - 26);
-    assert_eq!(card.deadline_label(today), "Aug 21 · overdue");
-    assert_eq!(waiting.deadline_label(today), "Oct 06");
-    assert_eq!(board.overdue_count(today), 1);
+    let now = date!(2026 - 08 - 26).midnight().assume_utc();
+    assert_eq!(card.deadline_label(now), "Aug 21 · overdue");
+    assert_eq!(waiting.deadline_label(now), "Oct 06");
+    assert_eq!(board.overdue_count(now), 1);
     assert_eq!(board.blocked_count(), 1);
 }
 

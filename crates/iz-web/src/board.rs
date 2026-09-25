@@ -8,7 +8,7 @@
 
 use iz_core::board::{DeadlineState, Moved, TaskCard, day_label};
 use iz_core::store::{NewTask, User};
-use time::{Date, OffsetDateTime};
+use time::OffsetDateTime;
 use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::content::Form;
@@ -350,6 +350,7 @@ fn sort_column_cards(cards: &mut [TaskCard], sort: &str) {
 /// The whole column list.
 async fn board_columns<'a>(
     cx: &'a Cx,
+    now: OffsetDateTime,
     sort: String,
     tag_filter: Option<String>,
     assigned: Option<String>,
@@ -387,7 +388,6 @@ async fn board_columns<'a>(
         column.column.name = crate::i18n::column_name(lang, &column.column.name);
         sort_column_cards(&mut column.cards, &sort);
     }
-    let today = OffsetDateTime::now_utc().date();
     let may_write = user.role.can_write_tasks();
     let zone = iz_core::detail::parse_zone(&user.timezone);
 
@@ -402,7 +402,7 @@ async fn board_columns<'a>(
             render_column(
                 cx,
                 column,
-                today,
+                now,
                 zone,
                 may_write,
                 &all_columns,
@@ -424,7 +424,7 @@ async fn board_columns<'a>(
 async fn render_column<'a>(
     cx: &'a Cx,
     column: iz_core::board::ColumnView,
-    today: Date,
+    now: OffsetDateTime,
     zone: time::UtcOffset,
     may_write: bool,
     all_columns: &[(String, String)],
@@ -442,7 +442,7 @@ async fn render_column<'a>(
             render_card(
                 cx,
                 card,
-                today,
+                now,
                 is_done_column,
                 zone,
                 &column_id,
@@ -478,7 +478,7 @@ async fn render_column<'a>(
 async fn render_card<'a>(
     cx: &'a Cx,
     card: TaskCard,
-    today: Date,
+    now: OffsetDateTime,
     done_column: bool,
     zone: time::UtcOffset,
     column_id: &str,
@@ -489,11 +489,9 @@ async fn render_card<'a>(
 ) -> Result<impl View + 'a> {
     let blocks = card.blocks.join(", ");
     let blocked_by = card.blocked_by.join(", ");
-    let overdue = card.is_overdue(today);
-    let deadline_parts = card.deadline_parts(today);
-    // A clock is the meeting's exact instant, read in the viewer's own zone;
-    // when it exists it is the whole chip — the day-grain deadline keeps its
-    // own state machinery out of the way rather than standing next to it.
+    let overdue = card.is_overdue(now);
+    let deadline_parts = card.deadline_parts(now);
+    // Overdue is `is_overdue`; the clock only changes the label text.
     let clock = card.clock_at.map(|at| {
         let at = at.to_offset(zone);
         format!(
@@ -506,6 +504,7 @@ async fn render_card<'a>(
     let has_clock = clock.is_some();
     let dated = deadline_parts.is_some() || has_clock;
     let deadline = match clock {
+        Some(label) if overdue => format!("{label} · {}", t(lang, Key::Overdue)),
         Some(label) => label,
         None => match deadline_parts {
             Some(parts) => match parts.state {
@@ -548,7 +547,7 @@ async fn render_card<'a>(
             <div class="card-foot">
                 // Overdue is a comparison against today, so a tab left open
                 // over midnight is wrong until something re-renders it.
-                <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue && !has_clock, "card-deadline-none" if !dated))>
+                <span data-tick=(dated.then_some("")) class=(class!("card-deadline", "card-deadline-overdue" if overdue, "card-deadline-none" if !dated))>
                     (deadline)
                 </span>
                 if let Some(tag) = &card.tag {
@@ -800,8 +799,8 @@ pub async fn board_page<'a>(cx: &'a Cx, user: &'a User) -> Result<impl View + 'a
     }
     view_data.tagged(tag_filter.as_deref());
     view_data.assigned(assigned_filter.as_deref());
-    let today = OffsetDateTime::now_utc().date();
-    let overdue = view_data.overdue_count(today);
+    let now = OffsetDateTime::now_utc();
+    let overdue = view_data.overdue_count(now);
     let blocked = view_data.blocked_count();
     let may_write = user.role.can_write_tasks();
     let all_columns: Vec<(String, String)> = view_data
@@ -951,7 +950,7 @@ pub async fn board_page<'a>(cx: &'a Cx, user: &'a User) -> Result<impl View + 'a
                 <div class="scaffold-note"><p>(t(lang, Key::NoMatches))</p></div>
             } else {
                 <div class="board-columns">
-                (topcoat::view::Child::new(board_columns(cx, sort.clone(), tag_filter.clone(), assigned_filter.clone(), search.clone(), default_tag_id).await?))
+                (topcoat::view::Child::new(board_columns(cx, now, sort.clone(), tag_filter.clone(), assigned_filter.clone(), search.clone(), default_tag_id).await?))
                 </div>
             }
         </main>

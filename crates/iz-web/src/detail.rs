@@ -1370,14 +1370,14 @@ async fn description_control<'a>(
 async fn deadline_control<'a>(
     cx: &'a Cx,
     task: &'a TaskDetail,
-    today: Date,
+    now: time::OffsetDateTime,
     zone: UtcOffset,
     may_write: bool,
     lang: Lang,
 ) -> Result<impl View + 'a> {
-    let overdue = task.is_overdue(today);
+    let overdue = task.is_overdue(now);
     let local = task.clock_at.map(|at| at.to_offset(zone));
-    let label = match (&local, task.deadline_parts(today)) {
+    let label = match (&local, task.deadline_parts(now)) {
         (Some(at), Some(parts)) if parts.state == DeadlineState::Overdue => {
             format!(
                 "{} {:02}:{:02} · {}",
@@ -2096,7 +2096,7 @@ pub async fn task_modal<'a>(
     let DetailSnapshot {
         detail,
         me,
-        today,
+        today: _,
         zone,
         linkable,
         adoptable,
@@ -2256,7 +2256,7 @@ pub async fn task_modal<'a>(
                             </div>
                             <div class="detail-field">
                                 <span class="detail-label">(t(lang, Key::Deadline))</span>
-                                (topcoat::view::Child::new(deadline_control(cx, &detail, today, zone, may_write, lang).await?))
+                                (topcoat::view::Child::new(deadline_control(cx, &detail, time::OffsetDateTime::now_utc(), zone, may_write, lang).await?))
                             </div>
                             <div class="detail-field detail-field-people">
                                 <span class="detail-label">(format!("{} — {}", t(lang, Key::Assignees), detail.assignees.len()))</span>

@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use time::{Date, OffsetDateTime, UtcOffset};
 
-use crate::board::{Column, DeadlineParts, DeadlineState, Person, TagChip, day_label};
+use crate::board::{
+    Column, DeadlineParts, DeadlineState, Person, TagChip, day_label, deadline_is_overdue,
+};
 
 /// The stored task, plus the two ids the reader needs to know it is allowed to
 /// see it. The description lives here rather than on
@@ -442,19 +444,18 @@ impl TaskDetail {
         !self.is_done() && self.blocked_by.iter().any(|edge| !edge.is_cleared())
     }
 
-    pub fn is_overdue(&self, today: Date) -> bool {
-        match self.deadline {
-            Some(day) => !self.is_done() && day < today,
-            None => false,
-        }
+    /// The same [`crate::board::deadline_is_overdue`] decision the card
+    /// makes, so a passed clock is overdue here and there alike.
+    pub fn is_overdue(&self, now: OffsetDateTime) -> bool {
+        crate::board::deadline_is_overdue(self.is_done(), self.deadline, self.clock_at, now)
     }
 
     /// The DEADLINE field's text: `Aug 21 · overdue`, `Sep 12`, `no deadline`.
     /// English-only — kept for non-UI callers; UI rendering should use
     /// [`TaskDetail::deadline_parts`] and translate.
-    pub fn deadline_label(&self, today: Date) -> String {
+    pub fn deadline_label(&self, now: OffsetDateTime) -> String {
         match self.deadline {
-            Some(day) if !self.is_done() && day < today => {
+            Some(day) if deadline_is_overdue(self.is_done(), Some(day), self.clock_at, now) => {
                 format!("{} · overdue", day_label(day))
             }
             Some(day) => day_label(day),
@@ -465,10 +466,10 @@ impl TaskDetail {
     /// The same field as [`TaskDetail::deadline_label`], split into a
     /// language-free date string and a state the caller translates. `None`
     /// when there's no deadline set.
-    pub fn deadline_parts(&self, today: Date) -> Option<DeadlineParts> {
+    pub fn deadline_parts(&self, now: OffsetDateTime) -> Option<DeadlineParts> {
         self.deadline.map(|day| DeadlineParts {
             date: day_label(day),
-            state: if !self.is_done() && day < today {
+            state: if deadline_is_overdue(self.is_done(), Some(day), self.clock_at, now) {
                 DeadlineState::Overdue
             } else {
                 DeadlineState::OnTime

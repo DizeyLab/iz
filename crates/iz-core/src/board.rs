@@ -178,12 +178,11 @@ impl TaskCard {
         !self.is_done() && !self.blocked_by.is_empty()
     }
 
-    /// Past its deadline and not finished. A deadline of today is not overdue.
-    pub fn is_overdue(&self, today: Date) -> bool {
-        match self.deadline {
-            Some(day) => !self.is_done() && day < today,
-            None => false,
-        }
+    /// Past its deadline and not finished — the shared
+    /// [`deadline_is_overdue`] decision, so a passed clock counts here even
+    /// though the card shows the clock rather than the day.
+    pub fn is_overdue(&self, now: OffsetDateTime) -> bool {
+        deadline_is_overdue(self.is_done(), self.deadline, self.clock_at, now)
     }
 
     pub fn is_assigned_to(&self, user_id: &str) -> bool {
@@ -194,12 +193,14 @@ impl TaskCard {
     /// `Aug 21 · overdue`, `done Aug 14` or `no deadline`. English-only —
     /// kept for callers (mail, tests) that want the baked sentence; UI
     /// rendering should use [`TaskCard::deadline_parts`] and translate.
-    pub fn deadline_label(&self, today: Date) -> String {
+    pub fn deadline_label(&self, now: OffsetDateTime) -> String {
         if let Some(done) = self.done_at {
             return format!("done {}", day_label(done.date()));
         }
         match self.deadline {
-            Some(day) if day < today => format!("{} · overdue", day_label(day)),
+            Some(day) if deadline_is_overdue(false, Some(day), self.clock_at, now) => {
+                format!("{} · overdue", day_label(day))
+            }
             Some(day) => day_label(day),
             None => "no deadline".to_string(),
         }
@@ -208,7 +209,7 @@ impl TaskCard {
     /// The same chip as [`TaskCard::deadline_label`], split into a
     /// language-free date string and a state the caller translates.
     /// `None` when there's nothing to show (no deadline, not done).
-    pub fn deadline_parts(&self, today: Date) -> Option<DeadlineParts> {
+    pub fn deadline_parts(&self, now: OffsetDateTime) -> Option<DeadlineParts> {
         if let Some(done) = self.done_at {
             return Some(DeadlineParts {
                 date: day_label(done.date()),
@@ -217,7 +218,7 @@ impl TaskCard {
         }
         self.deadline.map(|day| DeadlineParts {
             date: day_label(day),
-            state: if day < today {
+            state: if deadline_is_overdue(false, Some(day), self.clock_at, now) {
                 DeadlineState::Overdue
             } else {
                 DeadlineState::OnTime
@@ -239,6 +240,25 @@ pub enum DeadlineState {
     OnTime,
     Overdue,
     Done,
+}
+
+/// The one overdue decision behind the card, the filter count and the task
+/// detail. Done is never overdue. A clock beats the day: the instant itself
+/// has to be reached — including a past day whose clock is still ahead. With
+/// only a day, the day has to be strictly past; today is not overdue yet.
+pub fn deadline_is_overdue(
+    done: bool,
+    deadline: Option<Date>,
+    clock_at: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> bool {
+    if done {
+        return false;
+    }
+    match clock_at {
+        Some(at) => at <= now,
+        None => deadline.is_some_and(|day| day < now.date()),
+    }
 }
 
 /// A column with its cards already in it.
@@ -269,8 +289,8 @@ impl BoardView {
     }
 
     /// The `1 overdue` chip in the filter bar.
-    pub fn overdue_count(&self, today: Date) -> usize {
-        self.cards().filter(|card| card.is_overdue(today)).count()
+    pub fn overdue_count(&self, now: OffsetDateTime) -> usize {
+        self.cards().filter(|card| card.is_overdue(now)).count()
     }
 
     /// The `2 blocked` chip beside it.
@@ -553,5 +573,271 @@ mod reads {
             comment_counts,
             dependencies,
         )))
+    }
+}
+
+#[cfg(test)]
+mod deadline_is_overdue_tests {
+    use super::*;
+    use crate::detail::TaskDetail;
+    use time::macros::{date, datetime};
+
+    /// The board's "now": mid-afternoon on the 15th.
+    fn now() -> OffsetDateTime {
+        datetime!(2026-09-15 15:00 UTC)
+    }
+
+    fn at(day: Date, hour: u8) -> OffsetDateTime {
+        day.with_time(time::Time::from_hms(hour, 0, 0).unwrap())
+            .assume_utc()
+    }
+
+    fn card(
+        deadline: Option<Date>,
+        clock_at: Option<OffsetDateTime>,
+        done_at: Option<OffsetDateTime>,
+    ) -> TaskCard {
+        TaskCard {
+            id: String::new(),
+            task_key: String::new(),
+            title: String::new(),
+            column_id: String::new(),
+            deadline,
+            clock_at,
+            done_at,
+            position: 0.0,
+            assignees: Vec::new(),
+            comment_count: 0,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            subtask_total: 0,
+            subtask_done: 0,
+            tag: None,
+        }
+    }
+
+    fn detail(
+        deadline: Option<Date>,
+        clock_at: Option<OffsetDateTime>,
+        done_at: Option<OffsetDateTime>,
+    ) -> TaskDetail {
+        TaskDetail {
+            id: String::new(),
+            task_key: String::new(),
+            title: String::new(),
+            description: String::new(),
+            column: Column {
+                id: String::new(),
+                name: String::new(),
+                position: 0,
+                is_done: false,
+            },
+            columns: Vec::new(),
+            tag: None,
+            deadline,
+            clock_at,
+            done_at,
+            assignees: Vec::new(),
+            assignable: Vec::new(),
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            comments: Vec::new(),
+            files: Vec::new(),
+            activity: Vec::new(),
+            parent: None,
+            subtasks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn day_only_deadlines_follow_the_day() {
+        let now = now();
+        // Yesterday is overdue, today is not yet, tomorrow is not.
+        assert!(deadline_is_overdue(false, Some(date!(2026 - 09 - 14)), None, now));
+        assert!(!deadline_is_overdue(false, Some(date!(2026 - 09 - 15)), None, now));
+        assert!(!deadline_is_overdue(false, Some(date!(2026 - 09 - 16)), None, now));
+        // No deadline is never overdue.
+        assert!(!deadline_is_overdue(false, None, None, now));
+    }
+
+    #[test]
+    fn the_clock_wins_and_the_instant_decides() {
+        let now = now();
+        // Earlier today: the instant has passed.
+        assert!(deadline_is_overdue(
+            false,
+            Some(date!(2026 - 09 - 15)),
+            Some(at(date!(2026 - 09 - 15), 9)),
+            now
+        ));
+        // Later today: it has not.
+        assert!(!deadline_is_overdue(
+            false,
+            Some(date!(2026 - 09 - 15)),
+            Some(at(date!(2026 - 09 - 15), 18)),
+            now
+        ));
+        // The exact instant counts as reached.
+        assert!(deadline_is_overdue(
+            false,
+            Some(date!(2026 - 09 - 15)),
+            Some(now),
+            now
+        ));
+        // A past day whose clock is still ahead waits for the clock.
+        assert!(!deadline_is_overdue(
+            false,
+            Some(date!(2026 - 09 - 13)),
+            Some(at(date!(2026 - 09 - 16), 9)),
+            now
+        ));
+        // A past day with a past clock is overdue.
+        assert!(deadline_is_overdue(
+            false,
+            Some(date!(2026 - 09 - 13)),
+            Some(at(date!(2026 - 09 - 13), 18)),
+            now
+        ));
+        // A future day is not, whatever the clock says.
+        assert!(!deadline_is_overdue(
+            false,
+            Some(date!(2026 - 09 - 16)),
+            Some(at(date!(2026 - 09 - 16), 18)),
+            now
+        ));
+    }
+
+    #[test]
+    fn done_is_never_overdue() {
+        let now = now();
+        let done_at = Some(at(date!(2026 - 09 - 14), 12));
+        assert!(!deadline_is_overdue(
+            true,
+            Some(date!(2026 - 09 - 13)),
+            Some(at(date!(2026 - 09 - 13), 18)),
+            now
+        ));
+        let finished = card(Some(date!(2026 - 09 - 13)), Some(at(date!(2026 - 09 - 13), 18)), done_at);
+        assert!(!finished.is_overdue(now));
+        // The card's Done arm: the chip says done, not overdue.
+        assert_eq!(
+            finished.deadline_parts(now).map(|parts| parts.state),
+            Some(DeadlineState::Done)
+        );
+    }
+
+    #[test]
+    fn card_and_detail_agree_on_the_same_facts() {
+        let now = now();
+        let facts = [
+            (Some(date!(2026 - 09 - 14)), None),
+            (Some(date!(2026 - 09 - 15)), None),
+            (Some(date!(2026 - 09 - 15)), Some(at(date!(2026 - 09 - 15), 9))),
+            (Some(date!(2026 - 09 - 15)), Some(at(date!(2026 - 09 - 15), 18))),
+            (Some(date!(2026 - 09 - 13)), Some(at(date!(2026 - 09 - 13), 18))),
+            (None, None),
+        ];
+        for (deadline, clock_at) in facts {
+            assert_eq!(
+                card(deadline, clock_at, None).is_overdue(now),
+                detail(deadline, clock_at, None).is_overdue(now),
+                "{deadline:?} at {clock_at:?}"
+            );
+            let overdue = detail(deadline, clock_at, None).is_overdue(now);
+            assert_eq!(
+                detail(deadline, clock_at, None)
+                    .deadline_parts(now)
+                    .map(|parts| parts.state == DeadlineState::Overdue),
+                deadline.map(|_| overdue),
+                "{deadline:?} at {clock_at:?}"
+            );
+            let card_parts = card(deadline, clock_at, None).deadline_parts(now);
+            assert_eq!(
+                card_parts.map(|parts| parts.state == DeadlineState::Overdue),
+                deadline.map(|_| overdue),
+                "{deadline:?} at {clock_at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_stay_day_grain_but_borrow_the_boolean() {
+        let now = now();
+        // A passed clock prints the day, not the time; only `overdue` is new.
+        let clocked = card(
+            Some(date!(2026 - 09 - 15)),
+            Some(at(date!(2026 - 09 - 15), 9)),
+            None,
+        );
+        assert_eq!(clocked.deadline_label(now), "Sep 15 · overdue");
+        // A clock still ahead prints the bare day.
+        let waiting = card(
+            Some(date!(2026 - 09 - 15)),
+            Some(at(date!(2026 - 09 - 15), 18)),
+            None,
+        );
+        assert_eq!(waiting.deadline_label(now), "Sep 15");
+        // The detail agrees, and a finished task never wears the word.
+        assert_eq!(
+            detail(
+                Some(date!(2026 - 09 - 15)),
+                Some(at(date!(2026 - 09 - 15), 9)),
+                None
+            )
+            .deadline_label(now),
+            "Sep 15 · overdue"
+        );
+        assert_eq!(
+            detail(
+                Some(date!(2026 - 09 - 13)),
+                Some(at(date!(2026 - 09 - 13), 18)),
+                Some(at(date!(2026 - 09 - 14), 12))
+            )
+            .deadline_label(now),
+            "Sep 13"
+        );
+    }
+
+    #[test]
+    fn the_filter_chip_counts_the_same_decision() {
+        let now = now();
+        let view = BoardView {
+            board: BoardMeta {
+                id: String::new(),
+                name: String::new(),
+                task_prefix: String::new(),
+            },
+            columns: vec![ColumnView {
+                column: Column {
+                    id: String::new(),
+                    name: String::new(),
+                    position: 0,
+                    is_done: false,
+                },
+                cards: vec![
+                    // Overdue: yesterday.
+                    card(Some(date!(2026 - 09 - 14)), None, None),
+                    // Overdue: the clock passed earlier today.
+                    card(
+                        Some(date!(2026 - 09 - 15)),
+                        Some(at(date!(2026 - 09 - 15), 9)),
+                        None,
+                    ),
+                    // Not overdue: the clock is still ahead.
+                    card(
+                        Some(date!(2026 - 09 - 15)),
+                        Some(at(date!(2026 - 09 - 15), 18)),
+                        None,
+                    ),
+                    // Not overdue: done.
+                    card(
+                        Some(date!(2026 - 09 - 13)),
+                        Some(at(date!(2026 - 09 - 13), 18)),
+                        Some(at(date!(2026 - 09 - 14), 12)),
+                    ),
+                ],
+            }],
+        };
+        assert_eq!(view.overdue_count(now), 2);
     }
 }
